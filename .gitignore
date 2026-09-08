@@ -26,6 +26,9 @@ coverage*.json
 coverage*.xml
 coverage*.info
 
+## Approval tests — the generated side of the diff, never the checked-in baseline
+*.received.txt
+
 ## NuGet
 *.nupkg
 *.snupkg
