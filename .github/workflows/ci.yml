@@ -94,6 +94,19 @@ jobs:
           --collect:"XPlat Code Coverage"
           --results-directory artifacts/test-results
 
+      # An approval test that has no baseline yet writes what it saw; printing it means the
+      # baseline can be reviewed and committed straight from the log, without downloading an
+      # artifact first.
+      - name: Show generated API approvals
+        if: failure() && runner.os == 'Linux'
+        run: |
+          shopt -s nullglob
+          for f in tests/CanKit.Pro.Tests/ApiApprovals/*.received.txt; do
+            echo "----- BEGIN $f"
+            cat "$f"
+            echo "----- END $f"
+          done
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
