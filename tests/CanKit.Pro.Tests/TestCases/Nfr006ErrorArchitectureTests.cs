@@ -1,6 +1,7 @@
 using System;
 using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.J1939;
@@ -43,36 +44,36 @@ public class Nfr006ErrorArchitectureTests
     public void Protocol_Exceptions_Map_To_The_Documented_ErrorCodes()
     {
         ((CanKitException)new IsoTpTimeoutException(IsoTpTimer.NBs, "x"))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolTimeout);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolTimeout);
         ((CanKitException)new IsoTpOverflowException("x"))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolPeerAbort);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
         ((CanKitException)new IsoTpWaitFrameLimitExceededException(received: 3, limit: 2))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolPeerAbort);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
         ((CanKitException)new IsoTpSendRejectedException("x"))
             .ErrorCode.Should().Be(CanKitErrorCode.TransportOperationFailed);
 
         ((CanKitException)new J1939TpAbortException(J1939TpAbortReason.Timeout, 0xEE00, "x"))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolTimeout);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolTimeout);
         ((CanKitException)new J1939TpAbortException(J1939TpAbortReason.UnexpectedCtsNumPackets, 0xEE00, "x"))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolPeerAbort);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
         ((CanKitException)new J1939TpSendRejectedException("x"))
             .ErrorCode.Should().Be(CanKitErrorCode.TransportOperationFailed);
 
         ((CanKitException)new UdsTimeoutException(UdsServiceId.ReadDataByIdentifier,
                 UdsTimeoutTimer.P2Star, TimeSpan.FromMilliseconds(1)))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolTimeout);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolTimeout);
         ((CanKitException)new UdsNegativeResponseException(UdsServiceId.ReadDataByIdentifier, 0x31))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolNegativeResponse);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolNegativeResponse);
         ((CanKitException)new UdsProtocolException("x"))
             .ErrorCode.Should().Be(CanKitErrorCode.TransportOperationFailed);
 
         ((CanKitException)new J1939NoAddressException())
-            .ErrorCode.Should().Be(CanKitErrorCode.AddressClaimFailed);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.AddressClaimFailed);
         ((CanKitException)new J1939CannotClaimException(0x42))
-            .ErrorCode.Should().Be(CanKitErrorCode.AddressClaimFailed);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.AddressClaimFailed);
 
         ((CanKitException)new SdoAbortException(0x1000, 0x01, SdoAbortCode.General))
-            .ErrorCode.Should().Be(CanKitErrorCode.ProtocolPeerAbort);
+            .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
         ((CanKitException)new CanOpenTransportException("x"))
             .ErrorCode.Should().Be(CanKitErrorCode.TransportOperationFailed);
     }

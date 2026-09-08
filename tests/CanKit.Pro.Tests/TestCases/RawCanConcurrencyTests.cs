@@ -1,17 +1,13 @@
 using System;
-using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
-using CanKit.Abstractions.SPI.Registry.Core.Endpoints;
 using CanKit.Core;
-using CanKit.Core.Registry;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
@@ -20,10 +16,13 @@ using Xunit;
 namespace CanKit.Pro.Tests.TestCases;
 
 /// <summary>
-/// NFR-008 concurrency stress: the L2 components shared by many protocol instances at once —
-/// the endpoint registry and the RawCan demultiplex service — must be race-free under
-/// parallel registration / subscription churn while readers and traffic keep flowing.
+/// NFR-008 concurrency stress: the RawCan demultiplex service, shared by many protocol instances
+/// at once, must be race-free under parallel subscription churn while traffic keeps flowing.
 /// Repeated enough times to give races a chance, bounded enough for CI (~a few seconds).
+///
+/// The companion registry stress test stayed in CanKit.Pro.legacy: it exercises CanKit's own
+/// CanRegistry through internals the published package does not expose, so it is a test of
+/// CanKit, not of anything here. See docs/upstream-candidates.md.
 /// </summary>
 public class RawCanConcurrencyTests : IClassFixture<VirtualAdapterFixture>
 {
@@ -34,89 +33,6 @@ public class RawCanConcurrencyTests : IClassFixture<VirtualAdapterFixture>
     private static ICanBus Open(string session, int channel) => CanBus.Open(
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
-
-    // NFR-008 (registry): parallel RegisterEndPoint calls (the internal late-registration
-    // surface used by the SPI pipeline) plus concurrent public readers (TryOpenEndPoint /
-    // EnumerateEndPoints) on the shared singleton must not corrupt state or throw
-    // InvalidOperationException from racing dictionary enumeration. The internal Register*
-    // methods are reachable directly because CanKit.Core exposes InternalsVisibleTo to this
-    // test assembly; the singleton (not a private instance) is used deliberately, since the
-    // internal ctor mutates CanRegistry.Instance and would race the lazy singleton build of
-    // other tests running in parallel.
-    [Fact]
-    public void CanRegistry_Parallel_Registration_And_Readers_Do_Not_Race()
-    {
-        var registry = CanRegistry.Registry;
-        const int schemeCount = 16;
-        var schemes = Enumerable.Range(0, schemeCount).Select(i => $"stress-{i}").ToArray();
-        var exceptions = new ConcurrentQueue<Exception>();
-
-        var stop = new ManualResetEventSlim();
-        var readers = Enumerable.Range(0, 4).Select(_unused => Task.Run(() =>
-        {
-            try
-            {
-                while (!stop.IsSet)
-                {
-                    _ = registry.TryOpenEndPoint("stress-7://x", null, out _);
-                    _ = registry.EnumerateEndPoints(null).Count();
-                    _ = registry.EnumerateEndPoints(new[] { "stress-3" }).Count();
-                }
-            }
-            catch (Exception ex) { exceptions.Enqueue(ex); }
-        })).ToArray();
-
-        var writers = schemes.Select(scheme => Task.Run(() =>
-        {
-            try
-            {
-                registry.RegisterEndPoint(new RawEndpointRegistration(
-                    scheme,
-                    open: (ep, cfg) => null!,   // never invoked by this test's readers' assertion
-                    prepare: (ep, cfg) => null!)
-                {
-                    Enumerate = () => Array.Empty<BusEndpointInfo>(),
-                });
-            }
-            catch (Exception ex) { exceptions.Enqueue(ex); }
-        })).ToArray();
-
-        try
-        {
-            Task.WaitAll(writers);
-            stop.Set();
-            Task.WaitAll(readers);
-        }
-        finally
-        {
-            // Remove the stress schemes under the registry's private lock so no residue is
-            // visible to other tests sharing the singleton (and no unlocked mutation races
-            // a concurrent snapshotting reader).
-            WithRegistryLock(registry, () =>
-            {
-                foreach (var scheme in schemes)
-                {
-                    RemoveFromRegistryDictionaries(registry, scheme);
-                }
-            });
-        }
-
-        exceptions.Should().BeEmpty("parallel registration and reads must be race-free (NFR-008)");
-
-        // Spot-check consistency: re-register one scheme and resolve it through the public API.
-        var probe = "stress-probe";
-        try
-        {
-            registry.RegisterEndPoint(new RawEndpointRegistration(
-                probe, open: (ep, cfg) => null!, prepare: (ep, cfg) => null!));
-            registry.TryOpenEndPoint($"{probe}://x", null, out _).Should().BeTrue(
-                "a scheme registered under concurrency must remain resolvable afterwards");
-        }
-        finally
-        {
-            WithRegistryLock(registry, () => RemoveFromRegistryDictionaries(registry, probe));
-        }
-    }
 
     // NFR-008 (demux): N parallel Subscribe/Dispose cycles against continuous RX traffic must
     // not throw, must not starve a long-lived subscription, and must only ever deliver frames
@@ -191,26 +107,5 @@ public class RawCanConcurrencyTests : IClassFixture<VirtualAdapterFixture>
             "parallel Subscribe/Dispose churn under traffic must be race-free (NFR-008)");
         controlCount.Should().BeGreaterThan(0,
             "the long-lived subscription must keep receiving frames throughout the churn (no starvation)");
-    }
-
-    private static void WithRegistryLock(CanRegistry registry, Action action)
-    {
-        var syncField = typeof(CanRegistry).GetField("_sync", BindingFlags.NonPublic | BindingFlags.Instance)
-            ?? throw new InvalidOperationException("CanRegistry._sync field not found.");
-        lock (syncField.GetValue(registry)!)
-        {
-            action();
-        }
-    }
-
-    private static void RemoveFromRegistryDictionaries(CanRegistry registry, string scheme)
-    {
-        var type = typeof(CanRegistry);
-        foreach (var fieldName in new[] { "_handlers", "_prepareHandlers", "_enumerators", "_enumeratorAlias" })
-        {
-            var field = type.GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance)
-                ?? throw new InvalidOperationException($"CanRegistry.{fieldName} field not found.");
-            ((IDictionary)field.GetValue(registry)!).Remove(scheme);
-        }
     }
 }

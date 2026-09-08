@@ -25,13 +25,34 @@ Depending on CanKit as a package inverts all four: upstream releases are a versi
 packages are publishable, users add CanKit.Pro to the CanKit they already have, and CanKit.Pro is
 MIT.
 
+## Which branch this came from
+
+`develop`, not `main`. The legacy repository keeps `main` as its release branch and `develop` as
+its integration branch, and CanKit.Pro's development lives on `develop` — 486 commits ahead of
+`main` at the time of the migration, and the difference is most of the product: `main` had only the
+four L2 packages, while the entire transport and application stack is on `develop`.
+
 ## What moved
 
 | | |
 | --- | --- |
 | `src/core/CanKit.Pro.{Actor,Addressing,RawCan,Reliability}/` | → `src/CanKit.Pro.*/` — **source unchanged** apart from comments referring to fork-internal files |
-| The seven Pro test classes in `tests/CanKit.Tests/TestCases/` | → `tests/CanKit.Pro.Tests/TestCases/`, adapted (below) |
+| `src/transports/CanKit.Pro.{IsoTp,J1939Tp}/` | → `src/CanKit.Pro.*/` |
+| `src/protocols/CanKit.Pro.{CANopen,J1939,Uds,Hawe}/` | → `src/CanKit.Pro.*/` |
+| The Pro test suites in `tests/CanKit.Tests/TestCases/` | → `tests/CanKit.Pro.Tests/TestCases/`, adapted (below) |
+| The five Pro quickstart samples | → `samples/CanKit.Pro.Sample.*/` |
 | `docs/architecture/`, `docs/requirements/`, `docs/reviews/` | → `docs/`, with headers that mark CanKit as external context |
+
+The flat `src/CanKit.Pro.<Name>/` layout replaces the legacy `core/transports/protocols` split: in
+a repository whose every project is a `CanKit.Pro.*` package, the extra directory level encoded a
+layer that the package name already states.
+
+### Publishing
+
+Only the four L2 packages publish. `CanKit.Pro.{IsoTp,J1939Tp,CANopen,J1939,Uds,Hawe}` keep
+`IsPackable=false`, which is the legacy repository's own assessment (`publish: false` in its
+`eng/packages.json`) — they are pre-release, and this migration is not the moment to overrule
+that. They are still built and tested on every CI run, so they cannot rot silently.
 
 ## What did not move
 
@@ -45,6 +66,10 @@ improvements to them:
 - `IsEcho` flagging on the Virtual adapter's self-echo, and declaring `CanFeature.Echo` in its
   `StaticFeatures` (every vendor adapter declares it; the loopback adapter has the capability via
   `ChannelWorkMode.Echo` but never said so),
+- four `CanKitErrorCode` members for protocol failures (see below),
+- `IPeriodicTx.Faulted`, `AsyncFramePipe`, `SoftwarePeriodicTx`, `PreciseDelay`, `CanRegistry` and
+  `CanEndpoint` improvements, and a series of adapter fixes (SocketCAN `ctrlmode`, ZLG and
+  ControlCAN periodic-TX index handling),
 - assorted `PreciseDelay` and `QueuedTxCanBus` fixes.
 
 Those are genuine improvements, and the right home for them is an upstream pull request. Until
@@ -83,6 +108,29 @@ Per-package `<CanKitProActorVersion>` properties in `eng/package-versions.props`
 four packages share one version, derived from the commit history — see
 [release-process.md](release-process.md).
 
+### The four protocol error codes
+
+`CanKitErrorCode` reserves the 6000 range for transport and protocol errors, and published CanKit
+defines exactly one of them: `TransportOperationFailed = 6001`. The fork added four more —
+`ProtocolTimeout`, `ProtocolPeerAbort`, `ProtocolNegativeResponse`, `AddressClaimFailed` — and five
+packages report them. This is the only place where the whole 18k-line stack needed something from
+CanKit that nuget.org does not have.
+
+It could not simply be dropped: NFR-006 (arc42 ADR-12) requires every L3/L4 failure to be a
+`CanKitException` whose `ErrorCode` says which kind of protocol failure it was, and there is a test
+asserting the exact mapping for all five packages. Collapsing the four onto
+`TransportOperationFailed` would have deleted a documented requirement, not a nicety.
+
+`ProtocolErrorCodes` in `CanKit.Pro.RawCan` declares them as constants of the enum type carrying
+the fork's own numeric values (6002-6005). The numbers a caller sees are byte-for-byte what the
+fork produced, so nothing downstream changes; and if CanKit adopts these codes upstream,
+`ErrorCode == CanKitErrorCode.ProtocolTimeout` starts being true for already-compiled callers and
+this file just goes away. The cost until then is that `ErrorCode.ToString()` renders the number
+instead of a name — the exception type is more specific than the code anyway.
+
+Upstreaming those four members is the clean fix and is tracked in
+[upstream-candidates.md](upstream-candidates.md).
+
 ### Tests: adapter internals → in-repo doubles
 
 Three test classes depended on the fork's private changes to `CanKit.Adapter.Virtual`. Against the
@@ -93,6 +141,7 @@ Three test classes depended on the fork's private changes to `CanKit.Adapter.Vir
 | `TxConfirmTests` (echo paths) | Two fork changes to the Virtual adapter: `IsEcho = true` on its self-echo (upstream echoes the frame but does not flag it, so no echo would ever have matched) and `CanFeature.Echo` in its declared `StaticFeatures` (without it `SendConfirmed` takes the approximated path and the echo assertions fail). | `ControllableBus` — the test states which echo arrives, and "no echo ever arrives" is a setting rather than a never-matching software filter. `EchoCapableOptions` supplies the declared capability, since whether an adapter declares one is the adapter's business, not ours. |
 | `BusStateMonitorTests` | Reflection into `VirtualBusHub._hubs` to reach `SetBusState`. | `ControllableBus.BusState` is settable. No reflection, no dependency on another package's private statics. |
 | `RawCanSubscriptionTests.Buffered_Frame_Survives_…` | The fork's per-recipient `Duplicate` in `Broadcast`, which made RX frames allocator-owned so the poisoning allocator could prove aliasing. Upstream RX frames are not owned, so the test would have passed without exercising anything. | The test hands out an owned, pooled frame through `ControllableBus` and disposes it at an exact point. |
+| `IsoTpBusOffTests`, `TxConfirmTests` bus-off case | A `VirtualBusControl` reflection helper reaching into `VirtualBusHub._hubs`, `_hubsGate` (a field the fork added) and `VirtualBus._exceptions`. | `ControllableBus.BusState` and `RaiseFault`. The helper is gone. |
 
 The rest — `AddressingTests`, `ProtocolActorTests`, `DeadlineTests`, `CanIdFilterOverlapTests`,
 and the non-echo half of `TxConfirmTests` — moved essentially as they were, with

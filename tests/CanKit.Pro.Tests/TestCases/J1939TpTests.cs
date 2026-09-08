@@ -13,6 +13,9 @@ using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
+// The factory class and its namespace share a name, and this test now lives under CanKit.Pro,
+// so plain `J1939Tp` binds to the namespace. Aliasing is what the ISO-TP tests already do.
+using J1939TpFactory = CanKit.Pro.J1939Tp.J1939Tp;
 
 namespace CanKit.Pro.Tests.TestCases;
 
@@ -55,8 +58,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // Shorten Th so the test runs in <1s while still exercising the timer.
         var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
 
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x11, options: opts);
-        using var receiver = J1939Tp.Open(busB, sourceAddress: 0x22, options: opts);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x11, options: opts);
+        using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x22, options: opts);
 
         var payload = RandomPayload(100, seed: 42);
         var pgn = 0xFECAu; // arbitrary PDU2 broadcast PGN
@@ -82,8 +85,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x01);
-        using var receiver = J1939Tp.Open(busB, sourceAddress: 0x02);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x01);
+        using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x02);
 
         var payload = RandomPayload(300, seed: 7);
         var pgn = 0xEF00u; // arbitrary PDU1 destination-addressed PGN
@@ -108,8 +111,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x03);
-        using var receiver = J1939Tp.Open(busB, sourceAddress: 0x04);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x03);
+        using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x04);
 
         // 7 * 16 = 112 bytes -- one full CTS block at default MaxPacketsPerCts=16.
         var payload = RandomPayload(112, seed: 99);
@@ -131,9 +134,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
         using var busC = Open(session, 2);
 
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x10);
-        using var receiverB = J1939Tp.Open(busB, sourceAddress: 0xB0);
-        using var receiverC = J1939Tp.Open(busC, sourceAddress: 0xC0);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x10);
+        using var receiverB = J1939TpFactory.Open(busB, sourceAddress: 0xB0);
+        using var receiverC = J1939TpFactory.Open(busC, sourceAddress: 0xC0);
 
         var payloadBam = RandomPayload(200, seed: 1);
         var payloadCmB = RandomPayload(400, seed: 2);
@@ -188,7 +191,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             t2: TimeSpan.FromMilliseconds(150),
             t3: TimeSpan.FromMilliseconds(150));
 
-        using var sender = J1939Tp.Open(bus, sourceAddress: 0x30, options: opts);
+        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x30, options: opts);
 
         var send = sender.SendCmAsync(0xEE30, destinationAddress: 0x99,
             RandomPayload(50, seed: 5));
@@ -209,8 +212,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x40, options: opts);
-        using var receiver = J1939Tp.Open(busB, sourceAddress: 0x41, options: opts);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x40, options: opts);
+        using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x41, options: opts);
 
         var payload = RandomPayload(9, seed: 11);
         var receiveTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
@@ -232,8 +235,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // Th=1ms so 255 hold-offs together take ~0.25s rather than dominating test time; the
         // Virtual hub delivers synchronously so timing is not what we're checking here.
         var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(1));
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x50, options: opts);
-        using var receiver = J1939Tp.Open(busB, sourceAddress: 0x51, options: opts);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x50, options: opts);
+        using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x51, options: opts);
 
         var payload = RandomPayload(1785, seed: 13);
         var receiveTask = receiver.ReceiveAsync().AsTaskWithTimeout(TimeSpan.FromSeconds(10));
@@ -269,7 +272,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // expire on a slow Windows/net48 runner and emit Abort(Timeout) for the active PGN, which
         // is correct protocol behavior but unrelated to the intruder-RTS rejection under test.
         var opts = new J1939TpOptions().With(tr: TimeSpan.FromSeconds(5));
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         // Observe every TP.CM frame the receiver emits so we can inspect CTS / EOM / Abort.
         var observed = new List<(uint canId, byte[] data)>();
@@ -389,7 +392,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var payloadA = RandomPayload(14, seed: 1);
         var payloadB = RandomPayload(14, seed: 2);
 
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa);
 
         // Interleave DTs from the two peers to force the (SA, kind) routing to demux correctly.
         async Task DriveAsync(ICanBus bus, byte peerSa, uint pgn, byte[] pdu)
@@ -434,7 +437,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var inner = new CanBusService(busA);
         using var rejecting = new RejectTpCmBusService(inner);
         var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
-        using var sender = J1939Tp.Open(rejecting, sourceAddress: 0x51, options: opts, leaveOpen: true);
+        using var sender = J1939TpFactory.Open(rejecting, sourceAddress: 0x51, options: opts, leaveOpen: true);
 
         var dtSeen = 0;
         busB.FrameObserved += (_, e) =>
@@ -466,8 +469,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var sender = J1939Tp.Open(busA, sourceAddress: 0x61);
-        using var _ = J1939Tp.Open(busB, sourceAddress: 0x62);
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x61);
+        using var _ = J1939TpFactory.Open(busB, sourceAddress: 0x62);
 
         var seen = 0;
         busB.FrameObserved += (_, e) =>
@@ -503,7 +506,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x72;
         const uint pgn = 0xEE71u;
 
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
 
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -540,7 +543,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var bus = Open(session, 0);
         var opts = new J1939TpOptions { MaxPacketsPerCts = 0 };
 
-        Action act = () => J1939Tp.Open(bus, sourceAddress: 0x81, options: opts);
+        Action act = () => J1939TpFactory.Open(bus, sourceAddress: 0x81, options: opts);
         act.Should().Throw<ArgumentOutOfRangeException>()
             .Which.ParamName.Should().Be(nameof(J1939TpOptions.MaxPacketsPerCts));
     }
@@ -570,7 +573,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             tr: TimeSpan.FromMilliseconds(80),
             t1: TimeSpan.FromSeconds(5)); // T1 must not fire first
 
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var bgAbort = new TaskCompletionSource<J1939TpAbortException>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -623,7 +626,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xEE84u;
         var payload = RandomPayload(14, seed: 99);
 
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa);
 
         var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -671,7 +674,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // Channel remains usable for a subsequent BAM after the abort (fault consumed once).
         var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
         using var senderBus = Open(session, 2);
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: 0x11, options: opts);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0x11, options: opts);
         var okPayload = RandomPayload(14, seed: 123);
         var recv2 = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
         await sender.SendBamAsync(0xFECAu, okPayload).WithTimeout(ShortTimeout);
@@ -710,7 +713,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             tr: TimeSpan.FromMilliseconds(80),
             t1: TimeSpan.FromSeconds(5));
 
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -754,7 +757,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         // Long T1 so a hang would outlive the test timeout if we failed to notify.
         var opts = new J1939TpOptions().With(t1: TimeSpan.FromSeconds(30));
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var bgAbort = new TaskCompletionSource<J1939TpAbortException>(TaskCreationOptions.RunContinuationsAsynchronously);
         receiver.BackgroundExceptionOccurred += (_, ex) =>
@@ -800,7 +803,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         // Long T3 so a missed abort would hang well past ShortTimeout.
         var opts = new J1939TpOptions().With(t3: TimeSpan.FromSeconds(30));
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa, options: opts);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -841,7 +844,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xEE91u;
         var payload = RandomPayload(14, seed: 91);
 
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -888,7 +891,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xEE93u;
         var payload = RandomPayload(14, seed: 93); // 2 packets
 
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var lastDtSeen = new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -943,7 +946,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var payload = RandomPayload(14, seed: 95);
 
         var opts = new J1939TpOptions().With(t1: TimeSpan.FromSeconds(5));
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var recvTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
 
@@ -1003,7 +1006,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xFE90u;
 
         var opts = new J1939TpOptions().With(t1: TimeSpan.FromMilliseconds(120));
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var bgAbort = new TaskCompletionSource<J1939TpAbortException>(TaskCreationOptions.RunContinuationsAsynchronously);
         receiver.BackgroundExceptionOccurred += (_, ex) =>
@@ -1050,7 +1053,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var opts = new J1939TpOptions().With(
             t1: TimeSpan.FromMilliseconds(120),
             tr: TimeSpan.FromSeconds(5)); // keep Tr out of the way so T1 is the timer under test
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var ctsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1107,7 +1110,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             t2: TimeSpan.FromMilliseconds(150),
             t3: TimeSpan.FromSeconds(5),
             t4: TimeSpan.FromSeconds(5));
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa, options: opts);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -1154,7 +1157,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             t2: TimeSpan.FromSeconds(5),
             t3: TimeSpan.FromMilliseconds(150),
             t4: TimeSpan.FromSeconds(5));
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa, options: opts);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -1201,7 +1204,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             t2: TimeSpan.FromSeconds(5),
             t3: TimeSpan.FromSeconds(5),
             t4: TimeSpan.FromMilliseconds(150));
-        using var sender = J1939Tp.Open(senderBus, sourceAddress: senderSa, options: opts);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -1252,7 +1255,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x97;
         const uint pgn = 0xEE96u;
 
-        using var receiver = J1939Tp.Open(receiverBus, sourceAddress: receiverSa); // cap 16 by default
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa); // cap 16 by default
 
         var grants = new List<byte>();
         var firstGrantSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
