@@ -31,9 +31,14 @@ You need the **.NET 8 SDK or newer**; `global.json` rolls forward to whatever ma
 installed. No CAN hardware is needed — the whole suite runs on CanKit's `virtual://` loopback
 adapter and on in-repo test doubles.
 
-The one non-obvious build dependency is git: `GitVersion.MsBuild` derives the version from tags
-and branch history, so building from a *shallow* clone or an exported tarball behaves differently
-(a source tree with no `.git` at all falls back to `0.0.0`, deliberately).
+A local build produces version `0.0.0`, deliberately: nothing in the build computes a version, it
+only receives one from the pipeline or from semantic-release. To see what GitVersion makes of your
+working copy, ask it directly:
+
+```bash
+dotnet tool restore
+dotnet gitversion
+```
 
 Optional but useful before pushing:
 
