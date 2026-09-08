@@ -21,14 +21,29 @@ needs and that people otherwise rebuild, slightly differently and slightly wrong
 
 ## Packages
 
+**L2 — the raw-CAN service layer.** Published to nuget.org, versioned and released together.
+
 | Package | What it gives you | Depends on |
 | --- | --- | --- |
-| [`CanKit.Pro.RawCan`](src/CanKit.Pro.RawCan) | Multi-protocol demultiplexing: N independent, filtered, read-only views of one `ICanBus`. Plus `SendConfirmed`, a uniform TX-confirmation over hardware echo. | `CanKit.Abstractions` |
+| [`CanKit.Pro.RawCan`](src/CanKit.Pro.RawCan) | Multi-protocol demultiplexing: N independent, filtered, read-only views of one `ICanBus`, reconfigurable at runtime. Plus `SendConfirmed`, a uniform TX-confirmation over hardware echo. | `CanKit.Abstractions` |
 | [`CanKit.Pro.Actor`](src/CanKit.Pro.Actor) | `ProtocolActor`: single-mailbox, single-writer execution with an event-driven timer queue and one background-exception channel. | — |
-| [`CanKit.Pro.Addressing`](src/CanKit.Pro.Addressing) | Validated 11/29-bit CAN IDs, J1939 PGN/priority/PDU/source-address composition and decomposition. | — |
+| [`CanKit.Pro.Addressing`](src/CanKit.Pro.Addressing) | Validated 11/29-bit CAN IDs, J1939 PGN/priority/PDU/source-address composition, J1939 NAME and PGN catalogues. | — |
 | [`CanKit.Pro.Reliability`](src/CanKit.Pro.Reliability) | Deadlines whose expiry is guaranteed to be checked, and a `BusStateMonitor` that pushes `ErrWarning`/`ErrPassive`/`BusOff` transitions and recovery. | `CanKit.Abstractions`, `CanKit.Pro.Actor` |
 
-All four target `netstandard2.0` and `net8.0`, and are versioned and released together.
+**L3/L4 — transports and application protocols.** Built and tested on every CI run, **not yet
+published**: the APIs are still settling, and shipping them now would freeze decisions that
+should stay open. Reference the projects from a clone until they are ready.
+
+| Package | What it gives you |
+| --- | --- |
+| [`CanKit.Pro.IsoTp`](src/CanKit.Pro.IsoTp) | ISO 15765-2: SF/FF/CF/FC codec, bounds-checked PCI parsing, STmin handling, and an actor-driven `IIsoTpChannel` over CAN and CAN FD. |
+| [`CanKit.Pro.J1939Tp`](src/CanKit.Pro.J1939Tp) | SAE J1939-21 transport: TP.BAM broadcast and TP.CM connection mode (RTS/CTS/EndOfMsgAck), multi-session. |
+| [`CanKit.Pro.CANopen`](src/CanKit.Pro.CANopen) | CiA 301: SDO client/server incl. block transfer, static and dynamic PDO mapping, NMT, heartbeat and node guarding, EMCY, object dictionary. |
+| [`CanKit.Pro.J1939`](src/CanKit.Pro.J1939) | J1939 node: address claim with arbitrary-address fallback, fixed-rate periodic send, SPN catalogue over J1939-71. |
+| [`CanKit.Pro.Uds`](src/CanKit.Pro.Uds) | ISO 14229-1 client over ISO-TP: session control, security access, read/write by identifier, routine control, upload/download, P2/P2\* timing and 0x78 response-pending. |
+| [`CanKit.Pro.Vendor`](src/CanKit.Pro.Vendor) | Framework for the VENDOR private protocol: codec registry and typed message dispatch. |
+
+Everything targets `netstandard2.0` and `net8.0`.
 
 ## Install
 
@@ -100,13 +115,14 @@ dotnet run --project samples/CanKit.Pro.Sample.Demux
 The layer model these packages implement (L2, "Raw-CAN service layer") exists to carry the layers
 above it. In rough order:
 
-- **L3 Transport** — ISO-TP (ISO 15765-2) on top of `CanKit.Pro.RawCan` + `.Actor` + `.Reliability`;
-  J1939 TP (BAM/CM).
-- **L4 Application** — UDS (ISO 14229), CANopen (CiA 301), J1939 application layer.
-- Source generators for object dictionaries / PGN definitions; DBC and EDS import.
+- **Publish the L3/L4 packages.** They are implemented and tested; what remains is settling their
+  public APIs and, for several of them, validating against real hardware rather than only the
+  loopback adapter.
+- Source generators for object dictionaries and PGN definitions; DBC and EDS import.
+- XCP, DeviceNet, CANopen Safety.
 
-Architecture and requirements for all of these are already written up in
-[docs/](docs/architecture/arc42-CanKit.Pro.md) — the design work is ahead of the code on purpose.
+Architecture and requirements for all of these are in
+[docs/](docs/architecture/arc42-CanKit.Pro.md).
 
 ## Versioning
 
