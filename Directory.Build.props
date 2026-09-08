@@ -39,6 +39,8 @@
     -->
     <VersionPrefix>0.0.0</VersionPrefix>
     <GitVersion_NoFetchEnabled>true</GitVersion_NoFetchEnabled>
+    <!-- A `git clone --depth 1` should still build, even if the version it derives is approximate. -->
+    <GitVersion_AllowShallowEnabled>true</GitVersion_AllowShallowEnabled>
     <DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND !Exists('$(RepositoryRoot).git')">true</DisableGitVersionTask>
     <DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND '$(Version)' != ''">true</DisableGitVersionTask>
   </PropertyGroup>
