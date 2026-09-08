@@ -430,9 +430,15 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, 0x7E8, 0x7EF,
             FastOptions());
 
-        // Collect with a short window and no ECU reply during it.
-        var collectTask = client.CollectResponsesAsync(TimeSpan.FromMilliseconds(40));
-        await Task.Delay(80);
+        // Collect with a bounded window and no ECU reply during it. The window has to be
+        // long enough that the delay below is unambiguously past its end: CollectResponsesAsync
+        // arms the window on a continuation, so on a loaded runner the window can start tens of
+        // milliseconds after the call — with a 40 ms window and an 80 ms wait, that alone was
+        // enough to inject the frame while the window was still open and fail this test on
+        // macOS. The property under test is unchanged; only the margin is.
+        var window = TimeSpan.FromMilliseconds(200);
+        var collectTask = client.CollectResponsesAsync(window);
+        await Task.Delay(TimeSpan.FromMilliseconds(window.TotalMilliseconds * 2));
 
         // Inject a late SF after the window has expired — must not appear in the result.
         var ep = IsoTpEndpoint.Normal(EcuResponseId, 0);
@@ -440,7 +446,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busB.Transmit(CanFrame.Classic(
             unchecked((int)EcuResponseId),
             IsoTpFrameCodec.BuildSingleFrame(ep, latePdu, isCanFd: false, padding: true)));
-        await Task.Delay(30);
+        await Task.Delay(60);
 
         var responses = await collectTask.WaitAsync(ShortTimeout);
         responses.Should().BeEmpty(

@@ -5,6 +5,18 @@
     <RootNamespace>CanKit.Pro.Tests</RootNamespace>
   </PropertyGroup>
 
+  <!--
+    This suite measures protocol timing: ISO-TP N_As/N_Bs/N_Cr, J1939 fixed-rate periodic send,
+    DeadlineScheduler expiry. xUnit runs test classes in parallel by default, which puts a dozen
+    actor loops and timer queues on a three-core CI runner at once and makes every one of those
+    measurements a measurement of runner contention instead. xunit.runner.json turns collection
+    parallelism off; it costs about a minute of wall clock and buys the same numbers on Linux,
+    Windows and macOS.
+  -->
+  <ItemGroup>
+    <None Update="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup Label="System under test">
     <ProjectReference Include="../../src/CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
     <ProjectReference Include="../../src/CanKit.Pro.Addressing/CanKit.Pro.Addressing.csproj" />

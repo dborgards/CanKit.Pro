@@ -683,9 +683,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             // care about is that ClaimState never remains at Claiming after settle.
 
             // Give the actor loop time to fully unwind both callbacks (Fire and cancel
-            // post). The deadline is short, but ThreadPool + actor scheduling means the
-            // teardown can trail the awaited task by a few tens of ms.
-            await Task.Delay(50);
+            // post). The invariant is that the state *settles* out of Claiming, not that it
+            // does so inside any particular number of milliseconds, so poll for it: on a
+            // loaded runner the teardown can trail the awaited task by far more than the
+            // deadline itself. A test that fails only because a shared runner was busy tests
+            // the runner.
+            var settleDeadline = DateTime.UtcNow + ShortTimeout;
+            while (node.ClaimState == J1939ClaimState.Claiming && DateTime.UtcNow < settleDeadline)
+                await Task.Delay(10);
 
             node.ClaimState.Should().NotBe(J1939ClaimState.Claiming,
                 $"iteration {iter}: cancelling at the arbitration deadline must never leave the node stuck in Claiming");
@@ -930,8 +935,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // node's SendAsync / actor loop (L2 scheduling) — the previous dual `IPeriodicTx` path
     // was collapsed to a single implementation (PR #33) so error handling and claim-gate
     // semantics are uniform across payload sizes. The test collects a run of frames on a
-    // spectator bus and asserts the mean inter-arrival matches the caller's configured
-    // period.
+    // spectator bus and asserts the median inter-arrival matches the caller's configured
+    // period. Median, not mean: one runner stall of a few hundred milliseconds pulls a mean
+    // over ten samples out of any honest tolerance while saying nothing about the rate the
+    // scheduler actually keeps.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod()
@@ -958,9 +965,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             lock (stampsLock) stamps.Add(DateTime.UtcNow);
         };
 
-        // 80 ms period is comfortably above the ~1 ms virtual-loopback latency but short
-        // enough to gather ≥8 samples in a couple of seconds without making the test flaky.
-        var period = TimeSpan.FromMilliseconds(80);
+        // 120 ms period is comfortably above both the ~1 ms virtual-loopback latency and the
+        // ~15.6 ms default timer granularity on Windows, and short enough to gather the
+        // samples in under two seconds.
+        var period = TimeSpan.FromMilliseconds(120);
+        const int requiredSamples = 10;
         var payload = new byte[] { 0x11, 0x22, 0x33, 0x44 };
         var message = new J1939Message(targetPgn, payload, priority: 6, destinationAddress: 0xFF);
 
@@ -975,10 +984,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             {
                 int count;
                 lock (stampsLock) count = stamps.Count;
-                if (count >= 8) break;
+                if (count >= requiredSamples) break;
                 if (DateTime.UtcNow >= deadline)
                     throw new TimeoutException(
-                        $"Expected at least 8 periodic emissions within {ShortTimeout.TotalSeconds}s; observed {count}.");
+                        $"Expected at least {requiredSamples} periodic emissions within " +
+                        $"{ShortTimeout.TotalSeconds}s; observed {count}.");
                 await Task.Delay(20);
             }
         }
@@ -994,36 +1004,46 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "disposing the handle must stop the periodic loop so at most an already-in-flight " +
             "SendAsync may still land after Dispose returns");
 
-        // Inter-arrival timing. Compute the mean over the collected samples and assert it
-        // matches the requested period to within a generous tolerance to survive CI jitter
-        // (Virtual bus is fast but scheduling on shared runners can slip by tens of ms per
-        // sample).
+        // Inter-arrival timing: the median delta over the collected samples must match the
+        // requested period. A single stalled sample shifts the median by nothing and the mean
+        // by (stall / n), which is why this reads the median.
         List<DateTime> snapshot;
         lock (stampsLock) snapshot = new List<DateTime>(stamps);
-        snapshot.Count.Should().BeGreaterOrEqualTo(8);
+        snapshot.Count.Should().BeGreaterOrEqualTo(requiredSamples);
 
         var deltas = new List<double>(snapshot.Count - 1);
         for (int i = 1; i < snapshot.Count; i++)
             deltas.Add((snapshot[i] - snapshot[i - 1]).TotalMilliseconds);
-
-        double mean = 0;
-        foreach (var d in deltas) mean += d;
-        mean /= deltas.Count;
+        deltas.Sort();
+        var median = deltas.Count % 2 == 1
+            ? deltas[deltas.Count / 2]
+            : (deltas[(deltas.Count / 2) - 1] + deltas[deltas.Count / 2]) / 2d;
 
         double targetMs = period.TotalMilliseconds;
-        // Fixed-rate anchoring: mean inter-arrival approximates the configured period, with
-        // generous CI-jitter tolerance in both directions.
-        mean.Should().BeInRange(targetMs * 0.7, targetMs * 1.6,
-            $"mean inter-arrival ({mean:F1} ms) should approximate the configured period ({targetMs:F0} ms)");
+        // Fixed-rate anchoring: the typical inter-arrival is the configured period, with
+        // enough tolerance in both directions for timer granularity and CI jitter.
+        median.Should().BeInRange(targetMs * 0.7, targetMs * 1.6,
+            $"median inter-arrival ({median:F1} ms) should approximate the configured period ({targetMs:F0} ms)");
     }
 
     // ---------------------------------------------------------------------------------------
     // FR-J1939-007 (fixed-rate): emissions are anchored on the DeadlineScheduler grid
     // (t0 + n × period), so the long-run rate does not drift by the per-emission send time
     // the way a send-then-delay loop would. A 60-byte multi-frame (TP.BAM) PGN makes the
-    // per-send cost measurable (~9 Th-paced DTs); the span between the first and the eighth
-    // emission must stay near the 7 × 200 ms grid despite scheduler jitter, where the old
-    // loop would have accumulated 7 × ~90 ms of send-time drift.
+    // per-send cost measurable (~9 Th-paced DTs), which is what a drifting implementation
+    // would leak into the rate.
+    //
+    // The observable this asserts is grid alignment, not total elapsed time: every gap
+    // between consecutive announces is a whole number of periods. PeriodicSchedule drops a
+    // tick whose previous emission is still in flight rather than queueing it, so a slow
+    // runner turns some gaps into 2 × period — which is still on the grid. A send-then-delay
+    // loop instead produces gaps of period + sendTime, which is on no grid at all.
+    //
+    // The period is derived from a measured emission rather than hard-coded: sendTime is what
+    // separates the two hypotheses, and it is ~90 ms on Linux but ~140 ms on Windows, where
+    // the 15.6 ms default timer granularity stretches every Th pause. Anchoring the period at
+    // twice the measured sendTime puts the drift hypothesis exactly half a period off the
+    // grid — the furthest from it the two can ever be — on whichever runner this is.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task StartPeriodicSend_MultiFrame_KeepsFixedRate_Without_SendTime_Drift()
@@ -1056,13 +1076,38 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             lock (stampsLock) stamps.Add(Stopwatch.GetTimestamp());
         };
 
-        var period = TimeSpan.FromMilliseconds(200);
         var payload = Enumerable.Range(0, 60).Select(i => (byte)(i & 0xFF)).ToArray();
         var message = new J1939Message(targetPgn, payload, priority: 6, destinationAddress: 0xFF);
 
+        // Calibration: one one-shot emission, timed, to learn what a BAM send costs here.
+        var calibration = Stopwatch.StartNew();
+        await sender.SendAsync(message).WithTimeout(ShortTimeout);
+        calibration.Stop();
+        var sendMilliseconds = calibration.Elapsed.TotalMilliseconds;
+        sendMilliseconds.Should().BeGreaterThan(0);
+
+        // Two send times per period, bounded so neither a suspiciously fast nor a stalled
+        // calibration can turn this into a different test.
+        const double toleranceFraction = 0.3;
+        var periodMs = Math.Min(Math.Max(2d * sendMilliseconds, 120d), 600d);
+        var period = TimeSpan.FromMilliseconds(periodMs);
+
+        // Guard the premise: if a clamp pulled the period so far from twice the send time that
+        // period + sendTime would land inside the grid tolerance, this test could no longer
+        // tell the two implementations apart and would pass for the wrong reason.
+        sendMilliseconds.Should().BeGreaterThan(periodMs * toleranceFraction * 1.2,
+            $"a {sendMilliseconds:F0} ms send against a {periodMs:F0} ms period leaves the " +
+            "send-then-delay hypothesis inside the grid tolerance, so the assertion below " +
+            "would prove nothing");
+
+        lock (stampsLock) stamps.Clear();
+
+        // Room for the required emissions plus a few dropped ticks before giving up.
+        var collectTimeout = TimeSpan.FromMilliseconds(periodMs * (requiredEmissions + 6));
+
         using (var handle = sender.StartPeriodicSend(message, period))
         {
-            var deadline = Stopwatch.GetTimestamp() + (long)(ShortTimeout.TotalSeconds * Stopwatch.Frequency);
+            var deadline = Stopwatch.GetTimestamp() + (long)(collectTimeout.TotalSeconds * Stopwatch.Frequency);
             while (true)
             {
                 int count;
@@ -1071,7 +1116,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 if (Stopwatch.GetTimestamp() >= deadline)
                     throw new TimeoutException(
                         $"Expected at least {requiredEmissions} periodic BAM emissions within " +
-                        $"{ShortTimeout.TotalSeconds}s; observed {count}.");
+                        $"{collectTimeout.TotalSeconds:F1}s (period {periodMs:F0} ms, " +
+                        $"measured send {sendMilliseconds:F0} ms); observed {count}.");
                 await Task.Delay(20);
             }
         }
@@ -1080,14 +1126,23 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         lock (stampsLock) snapshot = new List<long>(stamps);
         snapshot.Count.Should().BeGreaterOrEqualTo(requiredEmissions);
 
-        var spanMilliseconds =
-            (snapshot[snapshot.Count - 1] - snapshot[0]) * 1000d / Stopwatch.Frequency;
-        var gridSlots = (snapshot.Count - 1) * period.TotalMilliseconds;
-        spanMilliseconds.Should().BeLessOrEqualTo(gridSlots * 1.3,
-            $"fixed-rate anchoring must keep emissions on the grid ({gridSlots:F0} ms); " +
-            $"a send-then-delay loop would drift by the ~90 ms per-BAM send time each period");
-        spanMilliseconds.Should().BeGreaterOrEqualTo(gridSlots * 0.5,
-            "sanity bound: emissions must not burst (anchor coalescing)");
+        // Every gap sits on the grid: a whole number of periods, within jitter. The drift
+        // hypothesis lands at half a period from the nearest slot, so the tolerance can stay
+        // well below that and still leave room for a slow runner.
+        for (var i = 1; i < snapshot.Count; i++)
+        {
+            var gapMs = (snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency;
+            var slots = Math.Round(gapMs / periodMs, MidpointRounding.AwayFromZero);
+            slots.Should().BeGreaterOrEqualTo(1,
+                $"gap {i} ({gapMs:F0} ms) must be at least one period ({periodMs:F0} ms): " +
+                "emissions must not burst (anchor coalescing)");
+            var offGridMs = Math.Abs(gapMs - (slots * periodMs));
+            offGridMs.Should().BeLessOrEqualTo(periodMs * toleranceFraction,
+                $"gap {i} ({gapMs:F0} ms) must sit on the fixed-rate grid — {slots:F0} × " +
+                $"{periodMs:F0} ms, off by {offGridMs:F0} ms. A send-then-delay loop would " +
+                $"land at period + sendTime ({periodMs + sendMilliseconds:F0} ms), half a " +
+                "period off the grid");
+        }
     }
 
     // The single-frame periodic path MUST refuse to start before ClaimAddressAsync completes,
