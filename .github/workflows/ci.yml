@@ -19,9 +19,51 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
 jobs:
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      semver: ${{ steps.pick.outputs.semver }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # GitVersion derives the version from tags and branch history; a shallow clone has
+          # neither.
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # Deliberately allowed to fail. GitVersion cannot version every git shape — a branch with no
+      # merge base against a release branch, for one — and "we could not name this build" is not a
+      # reason to refuse to compile it.
+      - name: Run GitVersion
+        id: gitversion
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          dotnet tool restore
+          semver=$(dotnet gitversion /showvariable FullSemVer)
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+
+      - name: Pick the version for this run
+        id: pick
+        run: |
+          semver='${{ steps.gitversion.outputs.semver }}'
+          if [ -z "$semver" ]; then
+            semver="0.0.0-unversioned.${{ github.run_number }}"
+            echo "::warning title=GitVersion::Could not derive a version for this ref; building as $semver. Release versions come from semantic-release and are unaffected."
+          fi
+          echo "semver=$semver" >> "$GITHUB_OUTPUT"
+          echo "Building as $semver"
+
   build-test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +72,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # GitVersion derives the build version from tags and branch history; a shallow clone
-          # has neither.
-          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -44,13 +82,14 @@ jobs:
         run: dotnet restore CanKit.Pro.sln
 
       - name: Build
-        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
+        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore -p:Version=${{ needs.version.outputs.semver }}
 
       - name: Test
         run: >
           dotnet test CanKit.Pro.sln
           --configuration Release
           --no-build
+          -p:Version=${{ needs.version.outputs.semver }}
           --logger "trx;LogFileName=test-results.trx"
           --collect:"XPlat Code Coverage"
           --results-directory artifacts/test-results
@@ -66,12 +105,10 @@ jobs:
   pack:
     name: pack (dry run)
     runs-on: ubuntu-latest
-    needs: build-test
+    needs: [version, build-test]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -81,7 +118,7 @@ jobs:
       # Proves the release job's `dotnet pack` will work, and that every package still carries a
       # README, a license expression and symbols — before a tag exists to fix it in.
       - name: Pack
-        run: dotnet pack CanKit.Pro.sln --configuration Release --output artifacts/nuget
+        run: dotnet pack CanKit.Pro.sln --configuration Release -p:Version=${{ needs.version.outputs.semver }} --output artifacts/nuget
 
       - name: List produced packages
         run: ls -l artifacts/nuget

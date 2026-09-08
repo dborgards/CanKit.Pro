@@ -24,9 +24,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # GitVersion runs as part of the build and needs real history, not a shallow clone.
-          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4

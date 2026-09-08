@@ -113,9 +113,9 @@ Architecture and requirements for all of these are already written up in
 Every package shares one version, derived from the commit history:
 [Conventional Commits](https://www.conventionalcommits.org/) on `main` drive
 [semantic-release](https://semantic-release.gitbook.io/), which decides the number, writes the
-changelog, tags, and publishes to nuget.org. Builds that are not releases get an ordered
-prerelease version from [GitVersion](https://gitversion.net/). See
-[docs/release-process.md](docs/release-process.md).
+changelog, tags, and publishes to nuget.org. Builds that are not releases are stamped by a
+[GitVersion](https://gitversion.net/) step in the pipeline, so a CI artifact is identifiable
+without being a release. See [docs/release-process.md](docs/release-process.md).
 
 ## License
 

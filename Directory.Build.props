@@ -28,21 +28,23 @@
 
   <PropertyGroup Label="Versioning">
     <!--
-      Versions come from git:
+      Nothing in the build computes a version. The build only ever *receives* one:
 
-        * every ordinary build  -> GitVersion.MsBuild derives a SemVer from tags + branch,
-        * every release build   -> the release pipeline passes -p:Version=X.Y.Z, the number
-                                   semantic-release computed from the conventional commits.
+        * release  -> semantic-release passes -p:Version=X.Y.Z, the number it derived from the
+                      conventional commits;
+        * CI       -> the pipeline's `version` job runs GitVersion once and passes the SemVer it
+                      derived from tags and branch history to every other job;
+        * anything else (a plain `dotnet build`, an IDE, a source archive) -> VersionPrefix below.
 
-      A build with no git history at all (source archive, `dotnet pack` inside a container that
-      only copied the sources) falls back to VersionPrefix so it still produces something valid.
+      GitVersion deliberately does not run as an MSBuild task. It would run once per project and
+      target framework, needs git history the build has no business requiring, and — as this
+      repository found out on its first CI run — turns "I cannot determine a version" into a hard
+      build failure. Versioning is a pipeline concern; compiling is not.
+
+      To see the version GitVersion would give your working copy:  dotnet tool restore
+                                                                   dotnet gitversion
     -->
     <VersionPrefix>0.0.0</VersionPrefix>
-    <GitVersion_NoFetchEnabled>true</GitVersion_NoFetchEnabled>
-    <!-- A shallow clone (git clone with a depth limit) should still build, even if the version it derives is approximate. -->
-    <GitVersion_AllowShallowEnabled>true</GitVersion_AllowShallowEnabled>
-    <DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND !Exists('$(RepositoryRoot).git')">true</DisableGitVersionTask>
-    <DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND '$(Version)' != ''">true</DisableGitVersionTask>
   </PropertyGroup>
 
   <PropertyGroup Label="Package identity">

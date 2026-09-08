@@ -27,27 +27,50 @@ Conventional Commits since the last tag: a `fix` bumps the patch, a `feat` the m
 `BREAKING CHANGE:` footer the major. It then writes the changelog, creates the tag, publishes the
 GitHub Release and pushes the packages. It only runs on `main`.
 
-**GitVersion** answers *"what version is this commit?"* — for every build that is not a release.
-A pull-request build, a local `dotnet pack`, a CI artifact from `main` between releases: each gets
-a real, ordered SemVer derived from the tags semantic-release already wrote, instead of `0.0.0` or
-a hand-maintained placeholder. It is wired in as `GitVersion.MsBuild`, a
-`GlobalPackageReference` in `Directory.Packages.props`, so it applies to every project without
-per-project setup.
+**GitVersion** answers *"what version is this commit?"* — for builds that are not releases. A
+pull-request build or a CI artifact from `main` between releases gets a real, ordered SemVer
+derived from the tags semantic-release already wrote, instead of `0.0.0` or a hand-maintained
+placeholder.
 
 They meet at the tag: semantic-release writes `vX.Y.Z`, GitVersion reads it back.
 
-During a release, `Directory.Build.props` switches GitVersion off entirely — the version passed by
-semantic-release is authoritative and must not be second-guessed:
+### GitVersion runs in the pipeline, not in the build
 
-```xml
-<DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND '$(Version)' != ''">true</DisableGitVersionTask>
+The obvious wiring — `GitVersion.MsBuild` as a `GlobalPackageReference`, so every project is
+versioned automatically — was tried first and removed. It runs the tool once per project *and*
+target framework, it makes `dotnet build` depend on git history it has no reason to need, and,
+decisively, it turns "I cannot determine a version" into a failed compile. This repository hit
+exactly that on its first CI run: with a single branch, no `main` and no tags, GitVersion
+classified the branch as orphaned and aborted every project with
+`No base versions determined on the current branch`. Neither `next-version` nor the `Fallback`
+strategy changes that.
+
+So the `version` job runs GitVersion once, and every other job is handed the result:
+
+```yaml
+- run: dotnet build CanKit.Pro.sln -c Release -p:Version=${{ needs.version.outputs.semver }}
+```
+
+That job is allowed to fail. If GitVersion cannot name the build, CI logs a warning and falls back
+to `0.0.0-unversioned.<run number>` — an unnameable build is still worth compiling and testing.
+Release versions never travel this path: semantic-release computes those itself.
+
+Nothing in the build computes a version. `Directory.Build.props` only sets `VersionPrefix` as the
+last-resort fallback for a plain `dotnet build` with no `-p:Version=`.
+
+To see what GitVersion makes of your working copy:
+
+```bash
+dotnet tool restore
+dotnet gitversion
 ```
 
 ## What a release run does
 
 `.github/workflows/release.yml` runs on every push to `main`:
 
-1. Checkout with `fetch-depth: 0` — both tools need real history.
+1. Checkout with `fetch-depth: 0` — semantic-release needs the full history to find the last
+   tag and the commits since it.
 2. Build, then **test**. This is the gate: nothing is tagged or published if the tests fail on
    this exact commit.
 3. `npx semantic-release`, which:

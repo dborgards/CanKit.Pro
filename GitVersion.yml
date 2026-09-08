@@ -1,40 +1,29 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/GitTools/GitVersion/main/schemas/6.0/GitVersion.configuration.json
 #
-# GitVersion answers "what version is *this* commit?" for every build that is not a release: CI
-# artifacts, pull-request builds and local `dotnet pack` runs all get a real, ordered SemVer
-# instead of 0.0.0. It never decides what the next release is — semantic-release does that from
-# the conventional commits and writes the `vX.Y.Z` tag, which GitVersion then reads back.
+# GitVersion answers "what version is *this* commit?" for builds that are not releases: CI
+# artifacts and pull-request builds get a real, ordered SemVer instead of 0.0.0. It never decides
+# what the next release is — semantic-release does that from the conventional commits and writes
+# the `vX.Y.Z` tag, which GitVersion then reads back.
 #
-# During a release build `Directory.Build.props` disables GitVersion entirely, because
-# semantic-release passes the authoritative version via -p:Version=X.Y.Z.
+# It runs once per pipeline run (the `version` job in .github/workflows/ci.yml), not as an MSBuild
+# task, and that job is allowed to fail: see the Versioning block in Directory.Build.props for why.
+# Locally: `dotnet tool restore && dotnet gitversion`.
 #
 # Trunk-based: `main` is the only long-lived branch (see CONTRIBUTING.md), so the GitHubFlow
-# preset fits; everything not matched below falls through to its catch-all branch configuration.
+# preset fits; anything not matched below falls through to its catch-all branch configuration.
 workflow: GitHubFlow/v1
 
 mode: ContinuousDelivery
 tag-prefix: '[vV]?'
 
-# The floor GitVersion starts from while no `vX.Y.Z` tag exists yet. Without it, a repository
-# whose history contains neither a tag nor a merge base with `main` — a brand-new repository, or
-# a freshly branched fork — gives GitVersion nothing to count from and it fails the build with
-# "No base versions determined on the current branch". Once the first tag exists it outranks this
-# value and this line becomes inert; it is not a way to steer releases, which semantic-release
-# decides from the commits.
+# Where versioning starts while no `vX.Y.Z` tag exists. The first tag outranks this, after which
+# the line is inert. It is not a way to steer releases — semantic-release decides those.
+#
+# Note that this does not rescue every git shape: GitVersion treats a branch with no merge base
+# against a release branch as orphaned and refuses to version it at all, `next-version`
+# notwithstanding. That is why the pipeline tolerates GitVersion failing rather than relying on
+# configuration to make it impossible.
 next-version: 0.1.0
-
-# The GitHubFlow preset's strategies, plus `Fallback`. Without Fallback, a branch GitVersion
-# classifies as orphaned — one with no merge base against a release branch, which is exactly what
-# every branch in a repository is before `main` exists — yields no base version at all and
-# GitVersion aborts the build with "No base versions determined on the current branch". Fallback
-# supplies 0.0.0 from the repository's first commit in that case; it never wins over a real tag.
-strategies:
-  - ConfiguredNextVersion
-  - MergeMessage
-  - TaggedCommit
-  - TrackReleaseBranches
-  - VersionInBranchName
-  - Fallback
 
 # AssemblyVersion stays at major.minor.patch so a patch release does not force a binding redirect
 # on .NET Framework consumers. The exact build lands in FileVersion / InformationalVersion, which
