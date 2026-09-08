@@ -42,7 +42,9 @@ improvements to them:
 - the frame-ownership / lifetime contract (`CanFrame.Duplicate`, `Dispose` honouring `OwnMemory`,
   per-recipient copies in `VirtualBusHub.Broadcast`),
 - `VirtualBusHub`'s registry rework (atomic `Join`, hubs removed when the last member leaves),
-- `IsEcho` flagging on the Virtual adapter's self-echo,
+- `IsEcho` flagging on the Virtual adapter's self-echo, and declaring `CanFeature.Echo` in its
+  `StaticFeatures` (every vendor adapter declares it; the loopback adapter has the capability via
+  `ChannelWorkMode.Echo` but never said so),
 - assorted `PreciseDelay` and `QueuedTxCanBus` fixes.
 
 Those are genuine improvements, and the right home for them is an upstream pull request. Until
@@ -88,7 +90,7 @@ Three test classes depended on the fork's private changes to `CanKit.Adapter.Vir
 
 | Test | Depended on | Now |
 | --- | --- | --- |
-| `TxConfirmTests` (echo paths) | The fork's `IsEcho = true` on the Virtual adapter's self-echo. Upstream echoes the frame but does not flag it, so no echo would ever have matched. | `ControllableBus` — the test states which echo arrives, and "no echo ever arrives" is a setting rather than a never-matching software filter. |
+| `TxConfirmTests` (echo paths) | Two fork changes to the Virtual adapter: `IsEcho = true` on its self-echo (upstream echoes the frame but does not flag it, so no echo would ever have matched) and `CanFeature.Echo` in its declared `StaticFeatures` (without it `SendConfirmed` takes the approximated path and the echo assertions fail). | `ControllableBus` — the test states which echo arrives, and "no echo ever arrives" is a setting rather than a never-matching software filter. `EchoCapableOptions` supplies the declared capability, since whether an adapter declares one is the adapter's business, not ours. |
 | `BusStateMonitorTests` | Reflection into `VirtualBusHub._hubs` to reach `SetBusState`. | `ControllableBus.BusState` is settable. No reflection, no dependency on another package's private statics. |
 | `RawCanSubscriptionTests.Buffered_Frame_Survives_…` | The fork's per-recipient `Duplicate` in `Broadcast`, which made RX frames allocator-owned so the poisoning allocator could prove aliasing. Upstream RX frames are not owned, so the test would have passed without exercising anything. | The test hands out an owned, pooled frame through `ControllableBus` and disposes it at an exact point. |
 

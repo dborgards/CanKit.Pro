@@ -25,20 +25,25 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// </para>
 ///
 /// <para>
-/// Everything that is pure configuration — <see cref="Options"/>, and with it
-/// <c>Features</c>/<c>WorkMode</c>, the two properties <c>SendConfirmed</c> actually branches on —
-/// is delegated to a genuine CanKit bus, so the double never has to fake a configurator and can
-/// never drift from what a real configurator reports.
+/// Configuration is delegated to a genuine CanKit bus, so the double never has to invent a whole
+/// configurator and cannot drift from what a real one reports. The two exceptions are the two
+/// properties <c>SendConfirmed</c> branches on: <see cref="EchoCapableOptions"/> forces
+/// <c>Features</c> to include <c>CanFeature.Echo</c> and <c>WorkMode</c> to <c>Echo</c>, because
+/// whether an adapter declares that static capability is the adapter's business — the loopback
+/// adapter does not declare it, which would silently route every echo test down the approximated
+/// path instead of failing.
 /// </para>
 /// </summary>
 public sealed class ControllableBus : ICanBus
 {
     private readonly ICanBus _configurationSource;
+    private readonly IBusRTOptionsConfigurator _options;
     private int _disposed;
 
     private ControllableBus(ICanBus configurationSource)
     {
         _configurationSource = configurationSource;
+        _options = new EchoCapableOptions(configurationSource.Options);
         // What a healthy CAN controller reports; tests move it from here.
         BusState = BusState.ErrActive;
     }
@@ -50,6 +55,8 @@ public sealed class ControllableBus : ICanBus
     /// </summary>
     public static ControllableBus EchoCapable(string session)
         => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo));
+
+
 
     /// <summary>Whether <see cref="Transmit(in CanFrame)"/> reports the frame as accepted.</summary>
     public bool AcceptTransmit { get; set; } = true;
@@ -72,7 +79,7 @@ public sealed class ControllableBus : ICanBus
 
     // --- ICanBus: configuration, delegated to a real bus -------------------------------------
 
-    public IBusRTOptionsConfigurator Options => _configurationSource.Options;
+    public IBusRTOptionsConfigurator Options => _options;
 
     public BusState BusState { get; set; }
 
