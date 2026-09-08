@@ -151,6 +151,30 @@ This is a strict improvement independent of the fork question: a test that reach
 package's internals is testing that package, and a test whose premise silently evaporates when a
 dependency changes is worse than no test.
 
+### Timing tests: one runner → three
+
+The legacy pipeline built on Linux. This one builds on Linux, Windows and macOS, and the first
+three-OS run failed five assertions that had never been wrong before — all of them wall-clock
+measurements of protocol timing.
+
+The shared cause was xUnit's default: test classes run in parallel, so roughly thirty of them —
+each with its own actor loop and timer queue — competed for three cores while measuring
+milliseconds. `tests/CanKit.Pro.Tests/xunit.runner.json` turns collection parallelism off. It
+costs about a minute of wall clock per run and makes every timing assertion mean what it says.
+
+Four tests needed more than that:
+
+| Test | Was | Now |
+| --- | --- | --- |
+| `StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod` | Mean inter-arrival over 8 samples against an 80 ms period. One 500 ms stall on macOS moved the mean to 232 ms. | Median over 10 samples against a 120 ms period — above the 15.6 ms Windows timer granularity, and a single stall no longer decides the result. |
+| `StartPeriodicSend_MultiFrame_KeepsFixedRate_Without_SendTime_Drift` | Total span of 8 emissions ≤ 1.3 × the 7 × 200 ms grid. | Every gap between announces must be a whole number of periods. `PeriodicSchedule` *drops* a tick whose previous emission is still in flight rather than queueing it, so a slow runner legitimately produces 2 × period gaps — on the grid, but far outside a total-span bound. The period is now derived from a measured BAM emission (twice its cost), which puts the send-then-delay hypothesis exactly half a period off the grid on whatever runner this is; on Windows the measured cost is ~140 ms rather than Linux's ~90 ms, because the timer granularity stretches every Th pause. |
+| `ClaimAddressAsync_CancelAtArbitrationDeadline_NeverLeavesStateStuckInClaiming` | `Task.Delay(50)`, then assert the state is no longer `Claiming`. | Poll until it settles, bounded by the test timeout. The invariant is that the state leaves `Claiming`, not that it does so within fifty milliseconds. |
+| `Functional_Collect_Does_Not_Accept_Frames_After_Window_Expiry` | 40 ms collection window, inject the late frame at 80 ms. | 200 ms window, inject at 400 ms. `CollectResponsesAsync` arms its window on a continuation, so under load the window could still be open at 80 ms and admit the frame the test says must be rejected. |
+
+None of these weakened an assertion: three restate the same property in a way that does not depend
+on how busy the runner is, and the fourth replaces a threshold that could not distinguish a
+dropped tick from the drift it was written to catch.
+
 ## For consumers of the legacy packages
 
 There are none: the `CanKit.Pro.*` package IDs were never published from the legacy repository —
