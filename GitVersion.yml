@@ -23,6 +23,19 @@ tag-prefix: '[vV]?'
 # decides from the commits.
 next-version: 0.1.0
 
+# The GitHubFlow preset's strategies, plus `Fallback`. Without Fallback, a branch GitVersion
+# classifies as orphaned — one with no merge base against a release branch, which is exactly what
+# every branch in a repository is before `main` exists — yields no base version at all and
+# GitVersion aborts the build with "No base versions determined on the current branch". Fallback
+# supplies 0.0.0 from the repository's first commit in that case; it never wins over a real tag.
+strategies:
+  - ConfiguredNextVersion
+  - MergeMessage
+  - TaggedCommit
+  - TrackReleaseBranches
+  - VersionInBranchName
+  - Fallback
+
 # AssemblyVersion stays at major.minor.patch so a patch release does not force a binding redirect
 # on .NET Framework consumers. The exact build lands in FileVersion / InformationalVersion, which
 # is where a diagnostic tool looks anyway.
