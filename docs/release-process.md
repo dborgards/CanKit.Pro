@@ -1,6 +1,6 @@
 # Release process
 
-One version for all four packages, computed from the commit history. Nobody edits a version
+One version for every package the repository publishes, computed from the commit history. Nobody edits a version
 number, and nobody decides by hand what the next one is.
 
 ```
@@ -64,6 +64,35 @@ To see what GitVersion makes of your working copy:
 dotnet tool restore
 dotnet gitversion
 ```
+
+## Which packages the release publishes
+
+Ten projects build; four of them ship. The split is expressed once, in the project files, and
+everything else follows from it:
+
+| Package | Layer | Ships |
+| --- | --- | --- |
+| `CanKit.Pro.Actor` | L2 — single-threaded protocol actor | yes |
+| `CanKit.Pro.Addressing` | L2 — CAN-ID addressing and filters | yes |
+| `CanKit.Pro.RawCan` | L2 — raw-CAN demultiplex and TX confirmation | yes |
+| `CanKit.Pro.Reliability` | L2 — deadlines, retries, bus-state monitoring | yes |
+| `CanKit.Pro.IsoTp` | L3 — ISO 15765-2 | not yet |
+| `CanKit.Pro.J1939Tp` | L3 — SAE J1939-21 transport | not yet |
+| `CanKit.Pro.CANopen` | L4 — CiA 301 | not yet |
+| `CanKit.Pro.J1939` | L4 — J1939 node and address claim | not yet |
+| `CanKit.Pro.Uds` | L4 — ISO 14229-1 | not yet |
+| `CanKit.Pro.Hawe` | L4 — HAWE private protocol framework | not yet |
+
+The six L3/L4 projects carry `<IsPackable>false</IsPackable>`. `dotnet pack CanKit.Pro.sln`
+therefore skips them without needing a list of project names anywhere, which means the CI pack job
+and the `@semantic-release/exec` `prepareCmd` cannot drift apart — they run the same command over
+the same solution. The CI `pack` job prints `ls -l artifacts/nuget`, so a project that silently
+becomes packable shows up as a new file in that listing on the pull request that did it.
+
+They still build and test on every run, so the unshipped layers cannot rot; they are held back
+only until their public API has settled. Publishing one is a one-line change: drop its
+`IsPackable` property, and add it to `PublicApiSurfaceTests.Tracked` so its surface is tracked
+from the first release like the four L2 packages are.
 
 ## What a release run does
 
