@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <AssemblyName>CanKit.Pro.Tests</AssemblyName>
+    <RootNamespace>CanKit.Pro.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup Label="System under test">
+    <ProjectReference Include="../../src/CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.Addressing/CanKit.Pro.Addressing.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.Reliability/CanKit.Pro.Reliability.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Label="Upstream CanKit, exactly as a consumer gets it from nuget.org">
+    <PackageReference Include="CanKit.Core" />
+    <PackageReference Include="CanKit.Adapter.Virtual" />
+  </ItemGroup>
+
+</Project>

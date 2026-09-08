@@ -1,0 +1,92 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.11.35222.181
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{5368F703-B5EE-5524-8E24-C0CAA76683E4}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{AA341A8E-EEE9-5677-8244-A59B5ACF2897}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "samples", "samples", "{39893626-281F-585E-8992-C978453455F2}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{6860D07C-1825-5F54-8ABD-254CA0021DBD}"
+	ProjectSection(SolutionItems) = preProject
+		.editorconfig = .editorconfig
+		.gitattributes = .gitattributes
+		.gitignore = .gitignore
+		.releaserc.json = .releaserc.json
+		CHANGELOG.md = CHANGELOG.md
+		CODE_OF_CONDUCT.md = CODE_OF_CONDUCT.md
+		CONTRIBUTING.md = CONTRIBUTING.md
+		Directory.Build.props = Directory.Build.props
+		Directory.Build.targets = Directory.Build.targets
+		Directory.Packages.props = Directory.Packages.props
+		GitVersion.yml = GitVersion.yml
+		LICENSE = LICENSE
+		NuGet.config = NuGet.config
+		README.md = README.md
+		SECURITY.md = SECURITY.md
+		THIRD-PARTY-NOTICES.md = THIRD-PARTY-NOTICES.md
+		eng\Dependencies.props = eng\Dependencies.props
+		global.json = global.json
+		package.json = package.json
+	EndProjectSection
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CanKit.Pro.Actor", "src\CanKit.Pro.Actor\CanKit.Pro.Actor.csproj", "{EE488B24-01E3-5C1E-B2AF-BB0A9255C5F0}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CanKit.Pro.Addressing", "src\CanKit.Pro.Addressing\CanKit.Pro.Addressing.csproj", "{521A33A4-20B4-5353-ABCF-8C7F092AE769}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CanKit.Pro.RawCan", "src\CanKit.Pro.RawCan\CanKit.Pro.RawCan.csproj", "{6B12E933-034C-55E9-B329-B327B9915C8D}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CanKit.Pro.Reliability", "src\CanKit.Pro.Reliability\CanKit.Pro.Reliability.csproj", "{05E0D3F3-D3E0-50B6-99C1-C21375A4BE5B}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CanKit.Pro.Tests", "tests\CanKit.Pro.Tests\CanKit.Pro.Tests.csproj", "{B2CEA725-3299-5135-9AA3-12B6755A994F}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CanKit.Pro.Sample.Demux", "samples\CanKit.Pro.Sample.Demux\CanKit.Pro.Sample.Demux.csproj", "{5CA2A35B-8D10-5D92-933D-3E2E09145A25}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{EE488B24-01E3-5C1E-B2AF-BB0A9255C5F0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{EE488B24-01E3-5C1E-B2AF-BB0A9255C5F0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{EE488B24-01E3-5C1E-B2AF-BB0A9255C5F0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{EE488B24-01E3-5C1E-B2AF-BB0A9255C5F0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{521A33A4-20B4-5353-ABCF-8C7F092AE769}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{521A33A4-20B4-5353-ABCF-8C7F092AE769}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{521A33A4-20B4-5353-ABCF-8C7F092AE769}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{521A33A4-20B4-5353-ABCF-8C7F092AE769}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6B12E933-034C-55E9-B329-B327B9915C8D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6B12E933-034C-55E9-B329-B327B9915C8D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6B12E933-034C-55E9-B329-B327B9915C8D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6B12E933-034C-55E9-B329-B327B9915C8D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{05E0D3F3-D3E0-50B6-99C1-C21375A4BE5B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{05E0D3F3-D3E0-50B6-99C1-C21375A4BE5B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{05E0D3F3-D3E0-50B6-99C1-C21375A4BE5B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{05E0D3F3-D3E0-50B6-99C1-C21375A4BE5B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2CEA725-3299-5135-9AA3-12B6755A994F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2CEA725-3299-5135-9AA3-12B6755A994F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2CEA725-3299-5135-9AA3-12B6755A994F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2CEA725-3299-5135-9AA3-12B6755A994F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{5CA2A35B-8D10-5D92-933D-3E2E09145A25}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5CA2A35B-8D10-5D92-933D-3E2E09145A25}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5CA2A35B-8D10-5D92-933D-3E2E09145A25}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5CA2A35B-8D10-5D92-933D-3E2E09145A25}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{EE488B24-01E3-5C1E-B2AF-BB0A9255C5F0} = {5368F703-B5EE-5524-8E24-C0CAA76683E4}
+		{521A33A4-20B4-5353-ABCF-8C7F092AE769} = {5368F703-B5EE-5524-8E24-C0CAA76683E4}
+		{6B12E933-034C-55E9-B329-B327B9915C8D} = {5368F703-B5EE-5524-8E24-C0CAA76683E4}
+		{05E0D3F3-D3E0-50B6-99C1-C21375A4BE5B} = {5368F703-B5EE-5524-8E24-C0CAA76683E4}
+		{B2CEA725-3299-5135-9AA3-12B6755A994F} = {AA341A8E-EEE9-5677-8244-A59B5ACF2897}
+		{5CA2A35B-8D10-5D92-933D-3E2E09145A25} = {39893626-281F-585E-8992-C978453455F2}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {6E6D2B0C-41DD-50B5-BB14-835313D77048}
+	EndGlobalSection
+EndGlobal

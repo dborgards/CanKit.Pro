@@ -1,0 +1,39 @@
+<Project>
+
+  <Import Project="$(MSBuildThisFileDirectory)eng/Dependencies.props" />
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <ItemGroup Label="Upstream CanKit — consumed as NuGet packages (Apache-2.0)">
+    <PackageVersion Include="CanKit.Abstractions" Version="$(CanKitVersion)" />
+    <PackageVersion Include="CanKit.Core" Version="$(CanKitVersion)" />
+    <PackageVersion Include="CanKit.Adapter.Virtual" Version="$(CanKitVersion)" />
+  </ItemGroup>
+
+  <ItemGroup Label="netstandard2.0 polyfills">
+    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="9.0.10" />
+    <PackageVersion Include="System.Memory" Version="4.5.5" />
+    <PackageVersion Include="System.Threading.Channels" Version="9.0.10" />
+  </ItemGroup>
+
+  <ItemGroup Label="Test">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <!--
+      FluentAssertions is deliberately pinned to the 6.x line: from 8.0.0 onwards it ships under
+      the Xceed commercial license, which does not fit this MIT-licensed project. Do not accept an
+      automated major-version bump here (see .github/dependabot.yml).
+    -->
+    <PackageVersion Include="FluentAssertions" Version="6.12.2" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+  </ItemGroup>
+
+  <ItemGroup Label="Build / versioning (added to every project automatically)">
+    <GlobalPackageReference Include="GitVersion.MsBuild" Version="6.8.2" />
+  </ItemGroup>
+
+</Project>

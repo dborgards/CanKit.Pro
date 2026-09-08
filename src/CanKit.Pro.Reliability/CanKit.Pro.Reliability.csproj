@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Error/timeout infrastructure for CanKit (CanKit.Pro): a reusable actor-driven deadline primitive (DeadlineScheduler/Deadline) whose expiry is guaranteed to actually be checked and fired, plus a BusStateMonitor that pushes ICanBus.BusState transitions (ErrWarning/ErrPassive/BusOff and recovery) to protocol instances — composed on top of CanKit.Pro.Actor's single-mailbox loop, with no free-running timers or busy loops.</Description>
+    <PackageTags>$(PackageTags);timeout;deadline;bus-off;reliability</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CanKit.Abstractions" />
+    <ProjectReference Include="../CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Analyse the commits and print what would be released, without tagging or publishing"
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # create the tag, the GitHub Release, and commit the regenerated CHANGELOG
+  issues: write          # semantic-release comments on released issues
+  pull-requests: write   # ... and on released pull requests
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  release:
+    name: semantic-release
+    runs-on: ubuntu-latest
+    # A release must never publish something CI has not built and tested on this exact commit.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install release tooling
+        run: npm ci
+
+      - name: Restore
+        run: dotnet restore CanKit.Pro.sln
+
+      - name: Build
+        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
+
+      # The gate: nothing is tagged or pushed to nuget.org unless the tests pass on this commit.
+      - name: Test
+        run: dotnet test CanKit.Pro.sln --configuration Release --no-build
+
+      # semantic-release decides the version from the conventional commits since the last tag,
+      # then (via @semantic-release/exec) packs with exactly that version and pushes to nuget.org,
+      # writes CHANGELOG.md back to main, tags vX.Y.Z and opens the GitHub Release.
+      - name: Release
+        run: npx semantic-release ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}

@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in CanKit.Pro behaves differently than documented.
+labels: ["type: bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Bugs in CanKit itself (adapters, `ICanBus`, frame handling) belong in
+        [pkuyo/CanKit](https://github.com/pkuyo/CanKit/issues) — CanKit.Pro consumes it as a
+        NuGet package and does not maintain it.
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      options:
+        - CanKit.Pro.RawCan
+        - CanKit.Pro.Actor
+        - CanKit.Pro.Addressing
+        - CanKit.Pro.Reliability
+        - More than one / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: "1.2.3"
+    validations:
+      required: true
+
+  - type: input
+    id: cankit-version
+    attributes:
+      label: CanKit version
+      placeholder: "0.5.6"
+
+  - type: input
+    id: environment
+    attributes:
+      label: .NET version and OS
+      placeholder: ".NET 8.0.8, Windows 11 / Ubuntu 24.04"
+    validations:
+      required: true
+
+  - type: input
+    id: adapter
+    attributes:
+      label: Adapter and hardware
+      placeholder: "CanKit.Adapter.PCAN, PCAN-USB FD — or 'Virtual, no hardware'"
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+      description: Include the exception and stack trace if there was one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >
+        The smallest code that shows the problem. A repro on `virtual://` endpoints (no hardware)
+        gets fixed fastest, because it can go straight into the test suite.
+      render: csharp
+    validations:
+      required: true

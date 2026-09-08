@@ -1,0 +1,13 @@
+<Project>
+
+  <!--
+    Single source of truth for the upstream CanKit version CanKit.Pro builds and packs against.
+
+    CanKit.Pro is *not* a fork: it consumes CanKit from nuget.org like any other consumer.
+    Bumping this one property is the entire "update to a new CanKit" workflow.
+  -->
+  <PropertyGroup>
+    <CanKitVersion>0.5.6</CanKitVersion>
+  </PropertyGroup>
+
+</Project>
