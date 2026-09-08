@@ -15,6 +15,14 @@ workflow: GitHubFlow/v1
 mode: ContinuousDelivery
 tag-prefix: '[vV]?'
 
+# The floor GitVersion starts from while no `vX.Y.Z` tag exists yet. Without it, a repository
+# whose history contains neither a tag nor a merge base with `main` — a brand-new repository, or
+# a freshly branched fork — gives GitVersion nothing to count from and it fails the build with
+# "No base versions determined on the current branch". Once the first tag exists it outranks this
+# value and this line becomes inert; it is not a way to steer releases, which semantic-release
+# decides from the commits.
+next-version: 0.1.0
+
 # AssemblyVersion stays at major.minor.patch so a patch release does not force a binding redirect
 # on .NET Framework consumers. The exact build lands in FileVersion / InformationalVersion, which
 # is where a diagnostic tool looks anyway.
