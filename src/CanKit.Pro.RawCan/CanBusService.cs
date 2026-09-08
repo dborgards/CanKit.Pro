@@ -33,12 +33,14 @@ namespace CanKit.Pro.RawCan
         private readonly ICanBus _bus;
 
         // Guards the mutable registry and the rebuild of _snapshot; only entered on
-        // subscribe/dispose (setup/teardown), never on the per-frame dispatch path.
+        // subscribe/dispose (setup/teardown), never on the per-frame dispatch path. Mirrors the
+        // registry-lock discipline of VirtualBusHub.Join/Detach.
         private readonly object _gate = new();
         private readonly List<Subscription> _subscriptions = new();
 
         // Copy-on-write snapshot read lock-free by OnFrameObserved, so the dispatch hot path takes
-        // no lock and allocates nothing per frame: registry churn is rare, frames are not.
+        // no lock and allocates nothing per frame — same reasoning as VirtualBusHub.Broadcast not
+        // holding _hubsGate while delivering.
         private volatile Subscription[] _snapshot = Array.Empty<Subscription>();
 
         // Pending SendConfirmed calls awaiting an echo match, keyed by (ID, payload) so multiple
@@ -139,7 +141,7 @@ namespace CanKit.Pro.RawCan
         /// <summary>
         /// Deregisters <paramref name="subscription"/> so it stops receiving frames. Called from
         /// <see cref="Subscription.Dispose"/>. Held under <see cref="_gate"/> together with
-        /// <see cref="AddSubscription"/>.
+        /// <see cref="AddSubscription"/>, mirroring VirtualBusHub.Detach.
         /// </summary>
         internal void Remove(Subscription subscription)
         {
@@ -169,18 +171,22 @@ namespace CanKit.Pro.RawCan
                 // subscriptions for this frame, nor escape into the bus's FrameObserved multicast
                 // (which would abort dispatch to every subscription still pending in this loop) —
                 // that would violate the independence every subscription is guaranteed under
-                // FR-RAW-010. There is currently no fault channel on ICanBusService to surface this
-                // to the caller; swallowing here is the least-bad option until one exists.
+                // FR-RAW-010. The fault is surfaced through BackgroundExceptionOccurred instead
+                // of being silently swallowed.
                 try
                 {
                     subscription.TryDeliver(view);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // ignored: see remark above.
+                    try { BackgroundExceptionOccurred?.Invoke(this, ex); }
+                    catch { /* a fault listener must not break dispatch either */ }
                 }
             }
         }
+
+        /// <inheritdoc />
+        public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
         /// <inheritdoc />
         public void Dispose()
@@ -188,8 +194,8 @@ namespace CanKit.Pro.RawCan
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return; // idempotent
 
             // Detach first so no further frames are dispatched into subscriptions we're tearing
-            // down, and so the service does not leave a FrameObserved handler rooted on a bus that
-            // outlives it.
+            // down (no leaked FrameObserved handler — the exact class of leak the ownership PR
+            // fixed for VirtualBusHub._hubs, here for the subscription registry).
             _bus.FrameObserved -= OnFrameObserved;
             _bus.FaultOccurred -= OnFaultOccurred;
 
@@ -250,7 +256,7 @@ namespace CanKit.Pro.RawCan
             // declares the hardware capability *and* has actually enabled it for this session --
             // CanFeature.Echo alone only means "this adapter type is capable of it", exactly like
             // every other CanFeature flag; WorkMode == Echo is the existing cross-adapter opt-in
-            // that turns real echo delivery on for a given bus.
+            // that turns real echo delivery on for a given bus (see VirtualBusHub.Broadcast).
             var useEcho = _bus.Options.Features.HasFlag(CanFeature.Echo)
                           && _bus.Options.WorkMode == ChannelWorkMode.Echo;
 

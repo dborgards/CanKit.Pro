@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>SAE J1939 application-layer node for CanKit.Pro: PGN send/receive with 29-bit Priority/PF/PS/SA encode/decode, SPN scale/offset extraction, PGN 0xEE00 Address Claiming with NAME arbitration (including Cannot-Claim), PGN 0xEA00 Request-PGN, and automatic multi-frame routing through CanKit.Pro.J1939Tp for payloads > 8 bytes. Composes on the CanKit.Pro L2 services (RawCan demux, TX-confirm, Actor, Reliability deadlines) with no vendor-SDK dependency.</Description>
+    <PackageTags>$(PackageTags);J1939;J1939-21;J1939-81;PGN;SPN;address claim</PackageTags>
+    <!--
+      Not published yet: the L3/L4 stack is pre-release, exactly as CanKit.Pro.legacy marked it.
+      It is built and tested on every CI run, so it cannot rot; it just does not reach nuget.org
+      until its API is settled.
+    -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CanKit.Abstractions" />
+    <ProjectReference Include="../CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
+    <ProjectReference Include="../CanKit.Pro.Addressing/CanKit.Pro.Addressing.csproj" />
+    <ProjectReference Include="../CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
+    <ProjectReference Include="../CanKit.Pro.Reliability/CanKit.Pro.Reliability.csproj" />
+    <ProjectReference Include="../CanKit.Pro.J1939Tp/CanKit.Pro.J1939Tp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
+    <PackageReference Include="System.Memory" />
+    <PackageReference Include="System.Threading.Channels" />
+  </ItemGroup>
+
+  <!-- The tests drive the wire format directly, injecting synthetic control frames. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+</Project>

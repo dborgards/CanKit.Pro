@@ -10,8 +10,8 @@ This package depends only on `CanKit.Abstractions` (for `ICanBus`/`BusState`) an
 `IProtocolActor`). Every protocol instance already runs on a `ProtocolActor` (FR-RAW-020), so a
 deadline is not an independent standalone timer — it is scheduled through the actor's own
 event-driven timer queue, which is exactly why its expiry can never sit as inert, never-checked
-data (the deep-code-review finding "Deadlines werden gepflegt, aber nie geprüft", §1.1 Punkt 10
-of `docs/reviews/2026-07-14-deep-code-review.md`).
+data (the deep-code-review finding "Deadlines werden gepflegt, aber nie geprüft", Review §1.1
+Punkt 10).
 
 ```csharp
 using CanKit.Core;
@@ -95,7 +95,7 @@ FR-RAW-052 (a *Should*: reserved/invalid protocol values in incoming frames — 
 STmin values `0x80`–`0xF0`/`0xFA`–`0xFF` — should be interpreted per-spec, as 127 ms, rather than
 throwing) is intentionally **not** implemented in this package. It is protocol-codec-specific: the
 correct handling lives inside the ISO-TP frame codec, not in a generic reliability primitive, and
-belongs with the future ISO-TP fix (FR-TP-007, the same review finding as docs/reviews/2026-07-14-deep-code-review.md §1.1 Punkt 6).
+belongs with the future ISO-TP fix (FR-TP-007, the same review finding as Review §1.1 Punkt 6).
 Building a generic "reserved value" abstraction here would be speculative over-engineering, so this
 package deliberately covers only FR-RAW-050 and FR-RAW-051.
 

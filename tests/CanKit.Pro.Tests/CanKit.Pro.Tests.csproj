@@ -8,8 +8,14 @@
   <ItemGroup Label="System under test">
     <ProjectReference Include="../../src/CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
     <ProjectReference Include="../../src/CanKit.Pro.Addressing/CanKit.Pro.Addressing.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.CANopen/CanKit.Pro.CANopen.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.Hawe/CanKit.Pro.Hawe.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.IsoTp/CanKit.Pro.IsoTp.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.J1939/CanKit.Pro.J1939.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.J1939Tp/CanKit.Pro.J1939Tp.csproj" />
     <ProjectReference Include="../../src/CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
     <ProjectReference Include="../../src/CanKit.Pro.Reliability/CanKit.Pro.Reliability.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.Uds/CanKit.Pro.Uds.csproj" />
   </ItemGroup>
 
   <ItemGroup Label="Upstream CanKit, exactly as a consumer gets it from nuget.org">

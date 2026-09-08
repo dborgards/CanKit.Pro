@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Generic HAWE extension framework for CanKit (CanKit.Pro): a public SPI (IHaweCodec, IHaweCodecRegistry, IHaweChannel) and reference host that lets a proprietary, out-of-repository HAWE codec module plug into CanKit's L2 raw-CAN service (subscriptions, TX-confirm, actor loop, deadline scheduler) without disclosing any HAWE protocol detail. This assembly contains only the generic framework surface required by SRS FR-HAWE-001..005; no HAWE service IDs, frame layouts, session logic, or secrets are shipped (SRS CON-006 / A-6).</Description>
+    <PackageTags>$(PackageTags);HAWE;framework;SPI</PackageTags>
+    <!--
+      Not published yet: the L3/L4 stack is pre-release, exactly as CanKit.Pro.legacy marked it.
+      It is built and tested on every CI run, so it cannot rot; it just does not reach nuget.org
+      until its API is settled.
+    -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CanKit.Abstractions" />
+    <ProjectReference Include="../CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
+    <ProjectReference Include="../CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
+    <ProjectReference Include="../CanKit.Pro.Reliability/CanKit.Pro.Reliability.csproj" />
+  </ItemGroup>
+
+</Project>

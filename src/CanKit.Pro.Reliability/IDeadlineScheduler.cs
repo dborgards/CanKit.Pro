@@ -11,7 +11,7 @@ namespace CanKit.Pro.Reliability
     /// </summary>
     /// <remarks>
     /// This directly addresses the deep-code-review finding "Deadlines werden gepflegt, aber nie
-    /// geprüft" (docs/reviews/2026-07-14-deep-code-review.md §1.1 Punkt 10): a deadline scheduled here is composed on top of the owning
+    /// geprüft" (Review §1.1 Punkt 10): a deadline scheduled here is composed on top of the owning
     /// <see cref="IProtocolActor"/>'s own event-driven timer queue (<see cref="IProtocolActor.Schedule"/>),
     /// so its expiry is guaranteed to actually fire and be checked on the actor's loop -- it can
     /// never sit as inert data that is written but never re-examined. Because every protocol
