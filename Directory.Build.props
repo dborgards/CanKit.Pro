@@ -1,0 +1,68 @@
+<Project>
+
+  <!--
+    eng/Dependencies.props (the CanKit version) is imported by Directory.Packages.props, which is
+    where package versions belong. Importing it here as well would import the same file twice into
+    every project (MSB4011).
+  -->
+
+  <PropertyGroup Label="Repository layout">
+    <RepositoryRoot>$(MSBuildThisFileDirectory)</RepositoryRoot>
+    <RepoArtifactsDir>$(RepositoryRoot)artifacts/</RepoArtifactsDir>
+    <PackageOutputPath>$(RepoArtifactsDir)nuget/</PackageOutputPath>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Language">
+    <LangVersion>12</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <!--
+      CS1591 (missing XML comment) is reported per member; the public API is documented, but we do
+      not want an incidental internal helper to break the build. `dotnet build -warnaserror` in a
+      local sweep is the way to tighten this later.
+    -->
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Versioning">
+    <!--
+      Versions come from git:
+
+        * every ordinary build  -> GitVersion.MsBuild derives a SemVer from tags + branch,
+        * every release build   -> the release pipeline passes -p:Version=X.Y.Z, the number
+                                   semantic-release computed from the conventional commits.
+
+      A build with no git history at all (source archive, `dotnet pack` inside a container that
+      only copied the sources) falls back to VersionPrefix so it still produces something valid.
+    -->
+    <VersionPrefix>0.0.0</VersionPrefix>
+    <GitVersion_NoFetchEnabled>true</GitVersion_NoFetchEnabled>
+    <DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND !Exists('$(RepositoryRoot).git')">true</DisableGitVersionTask>
+    <DisableGitVersionTask Condition="'$(DisableGitVersionTask)' == '' AND '$(Version)' != ''">true</DisableGitVersionTask>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package identity">
+    <Authors>Dietmar Borgards</Authors>
+    <Company>Dietmar Borgards</Company>
+    <Product>CanKit.Pro</Product>
+    <Copyright>Copyright (c) 2026 Dietmar Borgards</Copyright>
+    <PackageProjectUrl>https://github.com/dborgards/CanKit.Pro</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/dborgards/CanKit.Pro</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Reproducible builds">
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(ContinuousIntegrationBuild)' == '' AND '$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+</Project>

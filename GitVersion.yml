@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/GitTools/GitVersion/main/schemas/6.0/GitVersion.configuration.json
+#
+# GitVersion answers "what version is *this* commit?" for every build that is not a release: CI
+# artifacts, pull-request builds and local `dotnet pack` runs all get a real, ordered SemVer
+# instead of 0.0.0. It never decides what the next release is — semantic-release does that from
+# the conventional commits and writes the `vX.Y.Z` tag, which GitVersion then reads back.
+#
+# During a release build `Directory.Build.props` disables GitVersion entirely, because
+# semantic-release passes the authoritative version via -p:Version=X.Y.Z.
+#
+# Trunk-based: `main` is the only long-lived branch (see CONTRIBUTING.md), so the GitHubFlow
+# preset fits; everything not matched below falls through to its catch-all branch configuration.
+workflow: GitHubFlow/v1
+
+mode: ContinuousDelivery
+tag-prefix: '[vV]?'
+
+# AssemblyVersion stays at major.minor.patch so a patch release does not force a binding redirect
+# on .NET Framework consumers. The exact build lands in FileVersion / InformationalVersion, which
+# is where a diagnostic tool looks anyway.
+assembly-versioning-scheme: MajorMinorPatch
+assembly-file-versioning-scheme: MajorMinorPatch
+
+branches:
+  main:
+    label: ''
+    increment: Patch
+  pull-request:
+    label: pr

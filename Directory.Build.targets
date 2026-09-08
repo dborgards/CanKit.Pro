@@ -1,0 +1,9 @@
+<Project>
+
+  <!--
+    Nothing here yet. The file exists so that per-directory Directory.Build.targets files
+    (src/, tests/) have a documented, predictable place to hook into, and so that adding a
+    repository-wide target later does not change the import graph.
+  -->
+
+</Project>

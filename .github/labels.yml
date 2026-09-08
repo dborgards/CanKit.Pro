@@ -1,0 +1,44 @@
+# Repository labels, applied by .github/workflows/sync-labels.yml.
+# Editing this file is how labels change; editing them in the UI gets overwritten.
+
+- name: "type: bug"
+  color: "d73a4a"
+  description: Something behaves differently than documented
+- name: "type: feature"
+  color: "0e8a16"
+  description: New behaviour
+- name: "type: docs"
+  color: "0075ca"
+  description: Documentation only
+- name: "type: chore"
+  color: "cfd3d7"
+  description: Build, CI, tooling, housekeeping
+
+- name: "area: rawcan"
+  color: "1d76db"
+  description: CanKit.Pro.RawCan — demux, subscriptions, TX-confirm
+- name: "area: actor"
+  color: "1d76db"
+  description: CanKit.Pro.Actor — threading and scheduling
+- name: "area: addressing"
+  color: "1d76db"
+  description: CanKit.Pro.Addressing — CAN IDs, J1939 fields
+- name: "area: reliability"
+  color: "1d76db"
+  description: CanKit.Pro.Reliability — deadlines, bus state
+- name: "area: build"
+  color: "5319e7"
+  description: Build, packaging, release pipeline
+
+- name: "upstream: cankit"
+  color: "e99695"
+  description: Belongs in pkuyo/CanKit, not here
+- name: "breaking"
+  color: "b60205"
+  description: Requires a major version bump
+- name: "good first issue"
+  color: "7057ff"
+  description: A self-contained place to start
+- name: "help wanted"
+  color: "008672"
+  description: Maintainer would welcome a contributor here

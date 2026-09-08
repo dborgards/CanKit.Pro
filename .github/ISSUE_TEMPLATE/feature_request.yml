@@ -1,0 +1,37 @@
+name: Feature request
+description: Propose new behaviour for a CanKit.Pro package.
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation you are in, not the API you have in mind — the design follows from the problem.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer would this live in?
+      options:
+        - CanKit.Pro.RawCan (demux, subscriptions, TX-confirm)
+        - CanKit.Pro.Actor (threading, scheduling)
+        - CanKit.Pro.Addressing (CAN IDs, J1939 fields)
+        - CanKit.Pro.Reliability (deadlines, bus state)
+        - A new package (ISO-TP, J1939, CANopen, UDS, ...)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: sketch
+    attributes:
+      label: How would it be used?
+      description: A short usage sketch, if you have one in mind.
+      render: csharp
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What are you doing today instead?

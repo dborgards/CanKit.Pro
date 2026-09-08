@@ -1,0 +1,45 @@
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      test-tooling:
+        patterns:
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+          - "coverlet.*"
+    ignore:
+      # FluentAssertions 8.x is published under the Xceed commercial license, which does not fit
+      # this MIT-licensed project. Staying on 6.x is a deliberate choice, not neglect.
+      - dependency-name: "FluentAssertions"
+        update-types: ["version-update:semver-major"]
+      # CanKit is the upstream this product is built on; moving to a new version is a decision
+      # about compatibility and testing, made by bumping CanKitVersion in eng/Dependencies.props.
+      - dependency-name: "CanKit.*"
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      semantic-release:
+        patterns:
+          - "semantic-release"
+          - "@semantic-release/*"
+          - "conventional-changelog-*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci(deps)"

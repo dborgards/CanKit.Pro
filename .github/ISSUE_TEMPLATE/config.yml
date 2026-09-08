@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/dborgards/CanKit.Pro/discussions
+    about: Ask a question or float an idea in Discussions.
+  - name: Issue with CanKit itself (adapters, ICanBus, frames)
+    url: https://github.com/pkuyo/CanKit/issues
+    about: CanKit.Pro builds on CanKit but does not maintain it. Adapter and core-bus issues belong upstream.

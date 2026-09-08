@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CanKit.Pro.Addressing/CanKit.Pro.Addressing.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CanKit.Core" />
+    <PackageReference Include="CanKit.Adapter.Virtual" />
+  </ItemGroup>
+
+</Project>

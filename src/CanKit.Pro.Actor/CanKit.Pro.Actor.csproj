@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Generic protocol-instance actor/scheduler for CanKit (CanKit.Pro): a single-mailbox, single-writer execution model with event-driven timer scheduling and a dedicated background-exception channel, giving protocol layers (ISO-TP, J1939, CANopen, ...) a documented threading model instead of hand-rolled locks and busy loops.</Description>
+    <PackageTags>$(PackageTags);actor;scheduler;threading</PackageTags>
+  </PropertyGroup>
+
+</Project>
