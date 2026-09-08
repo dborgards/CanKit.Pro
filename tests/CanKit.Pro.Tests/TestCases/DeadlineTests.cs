@@ -82,19 +82,24 @@ public class DeadlineTests
         var scheduler = new DeadlineScheduler(actor);
         var fired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(120), () => fired.TrySetResult(true));
+        // The windows are deliberately far apart rather than merely different: on a loaded CI
+        // runner a 50 ms Task.Delay can overshoot by hundreds of milliseconds, and with a tight
+        // original window that overshoot expires the deadline before Rearm is even called --
+        // failing the test for a scheduling hiccup rather than for the behaviour under test.
+        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired.TrySetResult(true));
 
-        // Re-arm to a much longer window well before the original 120 ms would elapse.
-        await Task.Delay(TimeSpan.FromMilliseconds(40));
-        deadline.Rearm(TimeSpan.FromMilliseconds(400)).Should().BeTrue("re-arming a still-pending deadline succeeds");
+        // Re-arm to a much longer window, well before the original 600 ms would elapse.
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        deadline.Rearm(TimeSpan.FromMilliseconds(2000)).Should().BeTrue("re-arming a still-pending deadline succeeds");
 
-        // The ORIGINAL timer (120 ms from arm) must NOT fire -- Rearm superseded it, and the stale
-        // pre-Rearm timer must be generation-guarded out rather than double-firing.
-        (await Task.WhenAny(fired.Task, Task.Delay(TimeSpan.FromMilliseconds(220)))).Should().NotBe(fired.Task,
+        // The ORIGINAL timer (600 ms from arm) must NOT fire -- Rearm superseded it, and the stale
+        // pre-Rearm timer must be generation-guarded out rather than double-firing. Waiting 850 ms
+        // takes us comfortably past when it would have.
+        (await Task.WhenAny(fired.Task, Task.Delay(TimeSpan.FromMilliseconds(850)))).Should().NotBe(fired.Task,
             "the original timeout must have been superseded by Rearm");
         deadline.IsExpired.Should().BeFalse();
 
-        // ...but the re-armed timer (400 ms from Rearm) eventually does fire.
+        // ...but the re-armed timer (2000 ms from Rearm) eventually does fire.
         (await Task.WhenAny(fired.Task, Task.Delay(Bounded))).Should().Be(fired.Task,
             "the re-armed timeout must still fire at its new deadline");
         deadline.IsExpired.Should().BeTrue();
