@@ -215,7 +215,7 @@ namespace CanKit.Pro.Reliability
 
         // Runs on the actor's loop thread (via Schedule), so it is single-writer-safe against every
         // other loop callback -- the whole reason deadlines are composed on the actor instead of a
-        // private timer (FR-RAW-050 / docs/reviews/2026-07-14-deep-code-review.md §1.1 Punkt 10).
+        // private timer (FR-RAW-050 / Review §1.1 Punkt 10).
         private void Fire(int generation)
         {
             // Generation guard first: a stale pre-Rearm timer that was already dispatched onto the

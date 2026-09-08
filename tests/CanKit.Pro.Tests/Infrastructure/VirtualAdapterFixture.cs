@@ -21,6 +21,9 @@ public sealed class VirtualAdapterFixture
     /// <summary>Arbitration bitrate used by every bus these tests open.</summary>
     public const int Bitrate = 500_000;
 
+    /// <summary>Data-phase bitrate for the CAN FD buses (ISO-TP over FD, mainly).</summary>
+    public const int DataBitrate = 2_000_000;
+
     static VirtualAdapterFixture()
     {
         // Throwing here would fail every test with an unrelated fixture error, but so would the

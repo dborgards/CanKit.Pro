@@ -23,10 +23,12 @@ namespace CanKit.Pro.Tests.TestCases;
 /// </summary>
 public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 {
-    private static string NewSession() => VirtualAdapterFixture.NewSession("rawcan");
+    private static string NewSession() => $"rawcan-{Guid.NewGuid():N}";
 
-    // Opens a loopback bus on a unique session so tests never collide.
-    private static ICanBus Open(string session, int channel) => VirtualAdapterFixture.Open(session, channel);
+    // Opens a Virtual bus on a unique session so tests never collide.
+    private static ICanBus Open(string session, int channel) => CanBus.Open(
+        $"virtual://{session}/{channel}",
+        cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
     // Drains up to `count` frames from a subscription, giving up after `timeout`. Delivery on the
     // Virtual hub is synchronous inside Transmit, so a short timeout only guards against a hang if
@@ -131,6 +133,32 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
             sub.Dispose();
 
         service.SubscriptionCount.Should().Be(0);
+    }
+
+    // FR-RAW-014: reconfiguring a subscription's filter at runtime applies to subsequent frames only.
+    [Fact]
+    public async Task Reconfigure_Filter_At_Runtime_Subsequent_Frames_Follow_New_Criterion()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        using var sub = service.Subscribe(CanIdFilter.Range(0x100, 0x1FF, CanFilterIDType.Standard));
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        sender.Transmit(CanFrame.Classic(0x200, new byte[] { 2 }));
+
+        var before = await Drain(sub, 1, ShortTimeout);
+        before.Select(f => f.ID).Should().Equal(0x100);
+
+        sub.Reconfigure(CanIdFilter.Range(0x200, 0x2FF, CanFilterIDType.Standard));
+
+        sender.Transmit(CanFrame.Classic(0x101, new byte[] { 3 }));
+        sender.Transmit(CanFrame.Classic(0x201, new byte[] { 4 }));
+
+        var after = await Drain(sub, 1, ShortTimeout);
+        after.Select(f => f.ID).Should().Equal(0x201);
     }
 
     // FR-RAW-013: the ID-range/mask fast path matches and excludes correctly (unit-level, no bus).
@@ -282,6 +310,32 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         sender.Transmit(CanFrame.Classic(0x100, new byte[] { 9 }));
 
+        var healthyFrames = await Drain(healthy, 1, ShortTimeout);
+        healthyFrames.Select(f => f.ID).Should().Equal(0x100);
+    }
+
+    // The same predicate fault must also be surfaced through the service's fault channel
+    // (BackgroundExceptionOccurred) instead of being silently swallowed.
+    [Fact]
+    public async Task Throwing_Predicate_Is_Surfaced_Via_BackgroundExceptionOccurred()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.BackgroundExceptionOccurred += (_, ex) => observed.TrySetResult(ex);
+
+        using var broken = service.Subscribe(_ => throw new InvalidOperationException("boom"));
+        using var healthy = service.Subscribe();
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 9 }));
+
+        var ex = await observed.Task.WaitAsync(ShortTimeout);
+        ex.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Be("boom");
+
+        // Delivery isolation still holds alongside the fault channel.
         var healthyFrames = await Drain(healthy, 1, ShortTimeout);
         healthyFrames.Select(f => f.ID).Should().Equal(0x100);
     }

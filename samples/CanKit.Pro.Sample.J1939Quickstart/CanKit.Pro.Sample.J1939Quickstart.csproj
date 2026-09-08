@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CanKit.Pro.J1939/CanKit.Pro.J1939.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CanKit.Core" />
+    <PackageReference Include="CanKit.Adapter.Virtual" />
+  </ItemGroup>
+
+</Project>

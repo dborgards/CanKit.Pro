@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
@@ -186,5 +187,35 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = async () => await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.Zero);
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    // FR-RAW-033: a bus-off transition while a confirmation is outstanding must resolve it
+    // immediately with FailureReason = BusOff -- not leave the caller hanging until the configured
+    // timeout.
+    [Fact]
+    public async Task Outstanding_SendConfirmed_Resolves_As_BusOff_Immediately_On_Fault()
+    {
+        using var sender = OpenEcho();
+        sender.EchoAcceptedFrames = false;
+        using var service = new CanBusService(sender);
+
+        var pendingTask = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }),
+            TimeSpan.FromSeconds(30));
+
+        // What a real adapter does when the controller drops off the bus: the state goes BusOff and
+        // a Fault-severity exception is reported through the bus's fault channel. The service's
+        // OnFaultOccurred must then fail every outstanding confirmation.
+        sender.BusState = BusState.BusOff;
+        sender.RaiseFault(new InvalidOperationException("simulated bus-off"));
+
+        var sw = Stopwatch.StartNew();
+        var result = await pendingTask;
+        sw.Stop();
+
+        result.Confirmed.Should().BeFalse();
+        result.IsApproximated.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff);
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
+            "the BusOff path must resolve the confirmation immediately, not via the 30 s timeout");
     }
 }
