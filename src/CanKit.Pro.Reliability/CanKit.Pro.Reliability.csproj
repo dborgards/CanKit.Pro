@@ -9,6 +9,7 @@
     <PackageReference Include="CanKit.Abstractions" />
     <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" VersionOverride="10.0.12" />
     <PackageReference Include="System.Memory" />
+    <PackageReference Include="System.Threading.Channels" VersionOverride="10.0.12" />
     <ProjectReference Include="../CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
   </ItemGroup>
 
