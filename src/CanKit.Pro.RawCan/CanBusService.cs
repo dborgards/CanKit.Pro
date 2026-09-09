@@ -179,14 +179,26 @@ namespace CanKit.Pro.RawCan
                 }
                 catch (Exception ex)
                 {
-                    try { BackgroundExceptionOccurred?.Invoke(this, ex); }
-                    catch { /* a fault listener must not break dispatch either */ }
+                    RaiseBackgroundException(ex);
                 }
             }
         }
 
         /// <inheritdoc />
         public event EventHandler<Exception>? BackgroundExceptionOccurred;
+
+        /// <summary>
+        /// Routes <paramref name="ex"/> through <see cref="BackgroundExceptionOccurred"/>,
+        /// isolating a misbehaving listener from the caller. Internal (not part of
+        /// <see cref="ICanBusService"/>) because events can only be raised from their declaring
+        /// type; exposed so <see cref="CanBusServiceExtensions.Subscribe"/> can report a failing
+        /// callback handler through this same fault channel instead of a second, parallel one.
+        /// </summary>
+        internal void RaiseBackgroundException(Exception ex)
+        {
+            try { BackgroundExceptionOccurred?.Invoke(this, ex); }
+            catch { /* a fault listener must not break dispatch either */ }
+        }
 
         /// <inheritdoc />
         public void Dispose()
