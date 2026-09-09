@@ -35,6 +35,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+          # The default GITHUB_TOKEN cannot push to main: the branch ruleset requires a pull
+          # request and only bypasses for the repo-owner role, which the Actions bot token does
+          # not hold. RELEASE_TOKEN is a fine-grained PAT scoped to this repo (Contents: R/W)
+          # from an account that does hold that role, so @semantic-release/git's push and
+          # @semantic-release/github's release creation (below) both go through as that identity.
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
@@ -74,5 +80,5 @@ jobs:
       - name: Release
         run: npx semantic-release ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
