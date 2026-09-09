@@ -18,6 +18,7 @@ permissions:
   contents: write        # create the tag, the GitHub Release, and commit the regenerated CHANGELOG
   issues: write          # semantic-release comments on released issues
   pull-requests: write   # ... and on released pull requests
+  id-token: write        # request the OIDC token for NuGet Trusted Publishing
 
 env:
   DOTNET_NOLOGO: true
@@ -59,6 +60,14 @@ jobs:
       - name: Test
         run: dotnet test CanKit.Pro.sln --configuration Release --no-build
 
+      # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
+      # Requested right before the release step so it doesn't expire before the push happens.
+      - name: NuGet login (OIDC -> temp API key)
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       # semantic-release decides the version from the conventional commits since the last tag,
       # then (via @semantic-release/exec) packs with exactly that version and pushes to nuget.org,
       # writes CHANGELOG.md back to main, tags vX.Y.Z and opens the GitHub Release.
@@ -66,4 +75,4 @@ jobs:
         run: npx semantic-release ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
