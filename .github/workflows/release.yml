@@ -31,7 +31,7 @@ jobs:
     # A release must never publish something CI has not built and tested on this exact commit.
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: true
