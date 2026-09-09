@@ -158,7 +158,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         var busEventCount = 0;
         receiver.FrameObserved += (_, _) => Interlocked.Increment(ref busEventCount);
 
-        var block = new SemaphoreSlim(0); // never released: the slow handler blocks forever
+        using var block = new SemaphoreSlim(0); // never released: the slow handler blocks forever
         using var slow = service.Subscribe(_ => block.Wait(), bufferCapacity: 1);
 
         var fastCount = 0;
