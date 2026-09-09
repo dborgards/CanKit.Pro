@@ -1242,10 +1242,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         public void RearmDeadline(DeadlineScheduler scheduler, TimeSpan timeout, Action onExpired)
         {
             var existing = Deadline;
-            if (existing is not null && !existing.IsExpired && !existing.IsCancelled)
-            {
-                if (existing.Rearm(timeout)) return;
-            }
+            if (existing is not null && !existing.IsExpired && !existing.IsCancelled && existing.Rearm(timeout)) return;
             existing?.Dispose();
             Deadline = scheduler.Arm(timeout, onExpired);
         }

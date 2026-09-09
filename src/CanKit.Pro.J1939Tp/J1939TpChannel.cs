@@ -112,11 +112,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // (global 0xFF or our own SA) at the actor. Two mask filters cover both PFs; anything
             // else on the bus is skipped by the demux without ever reaching us.
             var tpCmFilter = CanIdFilter.Mask(
-                accCode: (uint)J1939Pgn.TpCm << 8,      // PF = 0xEC in bits 23..16 of the 29-bit ID
+                accCode: J1939Pgn.TpCm << 8,      // PF = 0xEC in bits 23..16 of the 29-bit ID
                 accMask: 0x00FF0000u,
                 idType: CanFilterIDType.Extend);
             var tpDtFilter = CanIdFilter.Mask(
-                accCode: (uint)J1939Pgn.TpDt << 8,      // PF = 0xEB in bits 23..16
+                accCode: J1939Pgn.TpDt << 8,      // PF = 0xEB in bits 23..16
                 accMask: 0x00FF0000u,
                 idType: CanFilterIDType.Extend);
             _subscription = _service.Subscribe(f => tpCmFilter.Matches(f) || tpDtFilter.Matches(f));
@@ -905,7 +905,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     // retransmission (§5.10.2.4 "no retry").
                     var ex = confirmation.FailureReason switch
                     {
-                        TxConfirmFailureReason.Rejected => (Exception)new J1939TpSendRejectedException(
+                        TxConfirmFailureReason.Rejected => new J1939TpSendRejectedException(
                             "CAN driver rejected a J1939-TP frame."),
                         TxConfirmFailureReason.BusOff => new J1939TpException("CAN bus went BusOff during J1939-TP transmission."),
                         _ => new J1939TpException($"J1939-TP frame TX confirmation failed: {confirmation.FailureReason}."),
@@ -1177,10 +1177,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public void RearmT1()
         {
             var existing = Deadline;
-            if (existing is not null && !existing.IsExpired && !existing.IsCancelled)
-            {
-                if (existing.Rearm(_t1)) return;
-            }
+            if (existing is not null && !existing.IsExpired && !existing.IsCancelled && existing.Rearm(_t1)) return;
             existing?.Dispose();
             Deadline = _scheduler.Arm(_t1, () => _onT1(this));
         }
