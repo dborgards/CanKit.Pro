@@ -10,6 +10,8 @@ class CanKit.Pro.RawCan.CanBusService
   method System.Void Dispose()
   prop CanKit.Abstractions.API.Can.ICanBus Bus {get}
   prop System.Int32 SubscriptionCount {get}
+class CanKit.Pro.RawCan.CanBusServiceExtensions
+  method System.IDisposable Subscribe(CanKit.Pro.RawCan.ICanBusService service, System.Action<CanKit.Abstractions.API.Can.Definitions.CanFrameView> onNext, System.Func<CanKit.Abstractions.API.Can.Definitions.CanFrameView,System.Boolean> predicate, System.Nullable<System.Int32> bufferCapacity)
 struct CanKit.Pro.RawCan.CanIdFilter
   method CanKit.Pro.RawCan.CanIdFilter Mask(System.UInt32 accCode, System.UInt32 accMask, CanKit.Abstractions.API.Common.Definitions.CanFilterIDType idType)
   method CanKit.Pro.RawCan.CanIdFilter Range(System.UInt32 from, System.UInt32 to, CanKit.Abstractions.API.Common.Definitions.CanFilterIDType idType)
