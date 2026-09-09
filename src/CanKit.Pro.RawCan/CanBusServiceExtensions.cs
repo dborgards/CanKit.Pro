@@ -56,36 +56,39 @@ namespace CanKit.Pro.RawCan
             if (service is null) throw new ArgumentNullException(nameof(service));
             if (onNext is null) throw new ArgumentNullException(nameof(onNext));
 
-            var subscription = service.Subscribe(predicate, bufferCapacity);
-            var pumpTask = Task.Run(async () =>
-            {
-                await foreach (var frame in subscription.Frames.ConfigureAwait(false))
-                {
-                    try
-                    {
-                        onNext(frame);
-                    }
-                    catch (Exception ex)
-                    {
-                        if (service is CanBusService concrete)
-                            concrete.RaiseBackgroundException(ex);
-                    }
-                }
-            });
-
-            return new CallbackSubscription(subscription, pumpTask);
+            return new CallbackSubscription(service.Subscribe(predicate, bufferCapacity), service, onNext);
         }
 
         private sealed class CallbackSubscription : IDisposable
         {
             private readonly ISubscription _subscription;
             private readonly Task _pumpTask;
+            private readonly AsyncLocal<bool> _isOnPump = new();
             private int _disposed;
 
-            public CallbackSubscription(ISubscription subscription, Task pumpTask)
+            public CallbackSubscription(ISubscription subscription, ICanBusService service, Action<CanFrameView> onNext)
             {
                 _subscription = subscription;
-                _pumpTask = pumpTask;
+                _pumpTask = Task.Run(async () =>
+                {
+                    // Marks the entire pump (including onNext) so Dispose can skip the join
+                    // below when invoked from the callback itself -- waiting on this task from
+                    // inside it would deadlock until the timeout. Same reentrancy guard as
+                    // ProtocolActor.Dispose / _isOnLoop.
+                    _isOnPump.Value = true;
+                    await foreach (var frame in _subscription.Frames.ConfigureAwait(false))
+                    {
+                        try
+                        {
+                            onNext(frame);
+                        }
+                        catch (Exception ex)
+                        {
+                            if (service is CanBusService concrete)
+                                concrete.RaiseBackgroundException(ex);
+                        }
+                    }
+                });
             }
 
             public void Dispose()
@@ -94,6 +97,7 @@ namespace CanKit.Pro.RawCan
                 // Completes the channel, which ends the pump task's `await foreach` gracefully
                 // (no exception -- see Subscription.Dispose/ReadAsync).
                 _subscription.Dispose();
+                if (_isOnPump.Value) return;
                 // Best-effort bounded join so a caller who disposes and then immediately tears
                 // down surrounding state doesn't race the last in-flight onNext call; matches the
                 // same dispose-teardown idiom used for background readers throughout this codebase.

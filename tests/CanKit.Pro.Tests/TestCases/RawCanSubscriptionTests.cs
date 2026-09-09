@@ -206,6 +206,29 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref count).Should().Be(countAfterDispose);
     }
 
+    // Disposing the handle from inside onNext must not join the pump that is currently
+    // invoking that callback: a self-wait can only finish via the two-second timeout.
+    [Fact]
+    public async Task Callback_Subscribe_Dispose_From_Inside_Handler_Does_Not_Hang()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        IDisposable? subscription = null;
+        var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        subscription = service.Subscribe(_ =>
+        {
+            subscription!.Dispose();
+            disposed.TrySetResult(true);
+        });
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        // The pump join timeout is 2s; completing well under that proves the self-wait was skipped.
+        await disposed.Task.WaitAsync(TimeSpan.FromMilliseconds(500));
+    }
+
     // A handler exception is isolated per frame -- delivery continues -- and surfaced via the
     // service's existing fault channel, the same as a throwing predicate.
     [Fact]
