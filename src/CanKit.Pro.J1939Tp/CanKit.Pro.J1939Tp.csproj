@@ -3,12 +3,6 @@
   <PropertyGroup>
     <Description>SAE J1939-21 Transport Protocol (TP.BAM broadcast + TP.CM connection-mode RTS/CTS/EndOfMsgAck) for CanKit.Pro: an actor-driven multi-session channel that composes on top of the CanKit.Pro L2 services (RawCan demux, TX-confirm, Actor, Reliability deadlines) and the CanKit.Pro.Addressing J1939 PGN helpers -- no vendor-SDK dependency.</Description>
     <PackageTags>$(PackageTags);J1939;J1939-21;TP.BAM;TP.CM;transport</PackageTags>
-    <!--
-      Not published yet: the L3/L4 stack is pre-release, exactly as CanKit.Pro.legacy marked it.
-      It is built and tested on every CI run, so it cannot rot; it just does not reach nuget.org
-      until its API is settled.
-    -->
-    <IsPackable>false</IsPackable>
   </PropertyGroup>
 
   <ItemGroup>

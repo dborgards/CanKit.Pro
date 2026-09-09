@@ -1,0 +1,217 @@
+class CanKit.Pro.CANopen.CanOpen
+  method CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Abstractions.API.Can.ICanBus bus, System.Byte nodeId, CanKit.Pro.CANopen.CanOpenNodeOptions options)
+  method CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Pro.RawCan.ICanBusService service, System.Byte nodeId, CanKit.Pro.CANopen.CanOpenNodeOptions options, System.Boolean leaveOpen)
+class CanKit.Pro.CANopen.CanOpenCobId
+  field System.Byte MaxNodeId
+  field System.Byte MinNodeId
+  field System.UInt32 EmcyBase
+  field System.UInt32 HeartbeatBase
+  field System.UInt32 NmtCommand
+  field System.UInt32 Rpdo1Base
+  field System.UInt32 Rpdo2Base
+  field System.UInt32 Rpdo3Base
+  field System.UInt32 Rpdo4Base
+  field System.UInt32 SdoRxBase
+  field System.UInt32 SdoTxBase
+  field System.UInt32 Sync
+  field System.UInt32 Tpdo1Base
+  field System.UInt32 Tpdo2Base
+  field System.UInt32 Tpdo3Base
+  field System.UInt32 Tpdo4Base
+  method System.UInt32 Emcy(System.Byte nodeId)
+  method System.UInt32 Heartbeat(System.Byte nodeId)
+  method System.UInt32 RpdoDefault(System.Byte nodeId, System.Int32 pdoIndex)
+  method System.UInt32 SdoRx(System.Byte nodeId)
+  method System.UInt32 SdoTx(System.Byte nodeId)
+  method System.UInt32 TpdoDefault(System.Byte nodeId, System.Int32 pdoIndex)
+  method System.Void ValidateNodeId(System.Byte nodeId)
+class CanKit.Pro.CANopen.CanOpenNodeOptions
+  ctor ()
+  method CanKit.Pro.CANopen.CanOpenNodeOptions With(System.Nullable<System.TimeSpan> sdoTimeout, System.Nullable<System.TimeSpan> sdoServerTimeout, System.Nullable<System.TimeSpan> defaultTpdoEventTimerInterval, System.Nullable<System.Int32> eventQueueCapacity, System.Nullable<System.Int32> maxSdoTransferBytes, System.Nullable<System.Int32> sdoBlockThresholdBytes, System.Nullable<System.Byte> sdoBlockSize, System.Nullable<System.Boolean> sdoBlockCrcSupported, System.Nullable<System.Int32> sdoBlockMaxRetransmissions, System.Nullable<System.Boolean> respondToNodeGuardingRtr, System.Nullable<System.Boolean> enableChangeOfStateTpdo)
+  prop System.Boolean EnableChangeOfStateTpdo {get/set}
+  prop System.Boolean RespondToNodeGuardingRtr {get/set}
+  prop System.Boolean SdoBlockCrcSupported {get/set}
+  prop System.Byte SdoBlockSize {get/set}
+  prop System.Int32 EventQueueCapacity {get/set}
+  prop System.Int32 MaxSdoTransferBytes {get/set}
+  prop System.Int32 SdoBlockMaxRetransmissions {get/set}
+  prop System.Int32 SdoBlockThresholdBytes {get/set}
+  prop System.TimeSpan DefaultTpdoEventTimerInterval {get/set}
+  prop System.TimeSpan SdoServerTimeout {get/set}
+  prop System.TimeSpan SdoTimeout {get/set}
+class CanKit.Pro.CANopen.CanOpenTransportException
+  ctor (System.String message)
+  ctor (System.String message, System.Exception inner)
+class CanKit.Pro.CANopen.Emcy.EmcyMessage
+  ctor (System.Byte producerNodeId, System.UInt16 errorCode, System.Byte errorRegister, System.ReadOnlySpan<System.Byte> manufacturerSpecific)
+  field System.Int32 ManufacturerFieldLength
+  field System.Int32 WireSize
+  method CanKit.Pro.CANopen.Emcy.EmcyMessage Decode(System.Byte producerNodeId, System.ReadOnlySpan<System.Byte> data)
+  method System.Byte[] Encode()
+  prop System.Byte ErrorRegister {get}
+  prop System.Byte ProducerNodeId {get}
+  prop System.Byte[] ManufacturerSpecific {get}
+  prop System.UInt16 ErrorCode {get}
+class CanKit.Pro.CANopen.EmcyReceivedEventArgs
+  ctor (CanKit.Pro.CANopen.Emcy.EmcyMessage message, System.DateTime timestamp)
+  prop CanKit.Pro.CANopen.Emcy.EmcyMessage Message {get}
+  prop System.DateTime Timestamp {get}
+class CanKit.Pro.CANopen.HeartbeatReceivedEventArgs
+  ctor (System.Byte producerNodeId, CanKit.Pro.CANopen.Nmt.NmtState state, System.DateTime timestamp)
+  prop CanKit.Pro.CANopen.Nmt.NmtState State {get}
+  prop System.Byte ProducerNodeId {get}
+  prop System.DateTime Timestamp {get}
+class CanKit.Pro.CANopen.HeartbeatTimeoutEventArgs
+  ctor (System.Byte producerNodeId, System.TimeSpan timeout)
+  prop System.Byte ProducerNodeId {get}
+  prop System.TimeSpan Timeout {get}
+interface CanKit.Pro.CANopen.ICanOpenNode
+  event System.EventHandler<CanKit.Pro.CANopen.EmcyReceivedEventArgs> EmcyReceived
+  event System.EventHandler<CanKit.Pro.CANopen.HeartbeatReceivedEventArgs> HeartbeatReceived
+  event System.EventHandler<CanKit.Pro.CANopen.HeartbeatTimeoutEventArgs> HeartbeatTimeout
+  event System.EventHandler<CanKit.Pro.CANopen.NmtCommandReceivedEventArgs> NmtCommandReceived
+  event System.EventHandler<CanKit.Pro.CANopen.NodeGuardingReceivedEventArgs> NodeGuardingReceived
+  event System.EventHandler<CanKit.Pro.CANopen.NodeGuardingTimeoutEventArgs> NodeGuardingTimeout
+  event System.EventHandler<CanKit.Pro.CANopen.RpdoReceivedEventArgs> RpdoReceived
+  event System.EventHandler<CanKit.Pro.CANopen.SyncReceivedEventArgs> SyncReceived
+  event System.EventHandler<System.Exception> BackgroundExceptionOccurred
+  method System.Threading.Tasks.Task SdoDownloadAsync(System.Byte serverNodeId, System.UInt16 index, System.Byte subindex, System.ReadOnlyMemory<System.Byte> data, CanKit.Pro.CANopen.Sdo.SdoTransferMode mode, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SdoDownloadAsync(System.Byte serverNodeId, System.UInt16 index, System.Byte subindex, System.ReadOnlyMemory<System.Byte> data, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SendEmcyAsync(System.UInt16 errorCode, System.Byte errorRegister, System.ReadOnlyMemory<System.Byte> manufacturerSpecific, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SendNmtCommandAsync(CanKit.Pro.CANopen.Nmt.NmtCommand command, System.Byte targetNodeId, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SendSyncAsync(System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task TriggerTpdoAsync(System.Int32 pdoIndex, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task<System.Byte[]> SdoUploadAsync(System.Byte serverNodeId, System.UInt16 index, System.Byte subindex, CanKit.Pro.CANopen.Sdo.SdoTransferMode mode, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task<System.Byte[]> SdoUploadAsync(System.Byte serverNodeId, System.UInt16 index, System.Byte subindex, System.Threading.CancellationToken cancellationToken)
+  method System.Void AddHeartbeatConsumer(System.Byte producerNodeId, System.TimeSpan timeout)
+  method System.Void ConfigureRpdo(System.Int32 pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, System.Nullable<System.UInt32> cobId)
+  method System.Void ConfigureTpdo(System.Int32 pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, CanKit.Pro.CANopen.Pdo.TpdoTransmission transmission, System.Nullable<System.UInt32> cobId, System.Nullable<System.TimeSpan> eventTimerInterval)
+  method System.Void RemoveHeartbeatConsumer(System.Byte producerNodeId)
+  method System.Void StartHeartbeatProducer(System.TimeSpan interval)
+  method System.Void StartNodeGuardingConsumer(System.Byte producerNodeId, System.TimeSpan guardTime, System.Byte lifeTimeFactor)
+  method System.Void StartSyncProducer(System.TimeSpan interval)
+  method System.Void StopHeartbeatProducer()
+  method System.Void StopNodeGuardingConsumer(System.Byte producerNodeId)
+  method System.Void StopSyncProducer()
+  prop CanKit.Pro.CANopen.CanOpenNodeOptions Options {get}
+  prop CanKit.Pro.CANopen.Nmt.NmtState State {get}
+  prop CanKit.Pro.CANopen.ObjectDictionary ObjectDictionary {get}
+  prop System.Byte NodeId {get}
+enum CanKit.Pro.CANopen.Nmt.NmtCommand : Byte
+  field CanKit.Pro.CANopen.Nmt.NmtCommand EnterPreOperational
+  field CanKit.Pro.CANopen.Nmt.NmtCommand ResetCommunication
+  field CanKit.Pro.CANopen.Nmt.NmtCommand ResetNode
+  field CanKit.Pro.CANopen.Nmt.NmtCommand Start
+  field CanKit.Pro.CANopen.Nmt.NmtCommand Stop
+enum CanKit.Pro.CANopen.Nmt.NmtState : Byte
+  field CanKit.Pro.CANopen.Nmt.NmtState Initializing
+  field CanKit.Pro.CANopen.Nmt.NmtState Operational
+  field CanKit.Pro.CANopen.Nmt.NmtState PreOperational
+  field CanKit.Pro.CANopen.Nmt.NmtState Stopped
+class CanKit.Pro.CANopen.NmtCommandReceivedEventArgs
+  ctor (CanKit.Pro.CANopen.Nmt.NmtCommand command, System.Byte targetNodeId)
+  prop CanKit.Pro.CANopen.Nmt.NmtCommand Command {get}
+  prop System.Byte TargetNodeId {get}
+class CanKit.Pro.CANopen.NodeGuardingReceivedEventArgs
+  ctor (System.Byte producerNodeId, CanKit.Pro.CANopen.Nmt.NmtState state, System.Boolean toggle, System.DateTime timestamp)
+  prop CanKit.Pro.CANopen.Nmt.NmtState State {get}
+  prop System.Boolean Toggle {get}
+  prop System.Byte ProducerNodeId {get}
+  prop System.DateTime Timestamp {get}
+class CanKit.Pro.CANopen.NodeGuardingTimeoutEventArgs
+  ctor (System.Byte producerNodeId, System.TimeSpan guardTime, System.Byte lifeTimeFactor)
+  prop System.Byte LifeTimeFactor {get}
+  prop System.Byte ProducerNodeId {get}
+  prop System.TimeSpan GuardTime {get}
+class CanKit.Pro.CANopen.ObjectDictionary
+  ctor ()
+  method CanKit.Pro.CANopen.OdEntry AddDomain(System.UInt16 index, System.Byte subindex, System.Byte[] value, CanKit.Pro.CANopen.OdAccess access)
+  method CanKit.Pro.CANopen.OdEntry AddI16(System.UInt16 index, System.Byte subindex, System.Int16 value, CanKit.Pro.CANopen.OdAccess access)
+  method CanKit.Pro.CANopen.OdEntry AddI32(System.UInt16 index, System.Byte subindex, System.Int32 value, CanKit.Pro.CANopen.OdAccess access)
+  method CanKit.Pro.CANopen.OdEntry AddI8(System.UInt16 index, System.Byte subindex, System.SByte value, CanKit.Pro.CANopen.OdAccess access)
+  method CanKit.Pro.CANopen.OdEntry AddU16(System.UInt16 index, System.Byte subindex, System.UInt16 value, CanKit.Pro.CANopen.OdAccess access)
+  method CanKit.Pro.CANopen.OdEntry AddU32(System.UInt16 index, System.Byte subindex, System.UInt32 value, CanKit.Pro.CANopen.OdAccess access)
+  method CanKit.Pro.CANopen.OdEntry AddU8(System.UInt16 index, System.Byte subindex, System.Byte value, CanKit.Pro.CANopen.OdAccess access)
+  method System.Boolean TryGet(System.UInt16 index, System.Byte subindex, CanKit.Pro.CANopen.OdEntry& entry)
+  method System.Boolean TryReadRaw(System.UInt16 index, System.Byte subindex, System.Byte[]& value)
+  method System.Byte[] ReadRaw(System.UInt16 index, System.Byte subindex)
+  method System.Int32 ReadSigned(System.UInt16 index, System.Byte subindex)
+  method System.UInt32 ReadUnsigned(System.UInt16 index, System.Byte subindex)
+  method System.Void WriteRaw(System.UInt16 index, System.Byte subindex, System.Byte[] value)
+  method System.Void WriteUnsigned(System.UInt16 index, System.Byte subindex, System.UInt32 value)
+  prop System.Int32 Count {get}
+enum CanKit.Pro.CANopen.OdAccess : Byte
+  field CanKit.Pro.CANopen.OdAccess ReadOnly
+  field CanKit.Pro.CANopen.OdAccess ReadWrite
+  field CanKit.Pro.CANopen.OdAccess WriteOnly
+enum CanKit.Pro.CANopen.OdDataType : Byte
+  field CanKit.Pro.CANopen.OdDataType Domain
+  field CanKit.Pro.CANopen.OdDataType Integer16
+  field CanKit.Pro.CANopen.OdDataType Integer32
+  field CanKit.Pro.CANopen.OdDataType Integer8
+  field CanKit.Pro.CANopen.OdDataType Unsigned16
+  field CanKit.Pro.CANopen.OdDataType Unsigned32
+  field CanKit.Pro.CANopen.OdDataType Unsigned8
+class CanKit.Pro.CANopen.OdEntry
+  method System.Byte[] GetRawValue()
+  prop CanKit.Pro.CANopen.OdAccess Access {get}
+  prop CanKit.Pro.CANopen.OdDataType DataType {get}
+  prop System.Int32 Size {get}
+class CanKit.Pro.CANopen.Pdo.PdoMapping
+  ctor ()
+  ctor (System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> entries)
+  method CanKit.Pro.CANopen.Pdo.PdoMapping Add(CanKit.Pro.CANopen.Pdo.PdoMappingEntry entry)
+  method CanKit.Pro.CANopen.Pdo.PdoMapping Add(System.UInt16 index, System.Byte subindex, System.Byte bitLength)
+  method System.Void Clear()
+  prop System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Entries {get}
+  prop System.Int32 TotalBytes {get}
+struct CanKit.Pro.CANopen.Pdo.PdoMappingEntry
+  ctor (System.UInt16 index, System.Byte subindex, System.Byte bitLength)
+  method System.Boolean Equals(CanKit.Pro.CANopen.Pdo.PdoMappingEntry other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  prop System.Byte BitLength {get}
+  prop System.Byte Subindex {get}
+  prop System.Int32 ByteLength {get}
+  prop System.UInt16 Index {get}
+enum CanKit.Pro.CANopen.Pdo.TpdoTransmission : Byte
+  field CanKit.Pro.CANopen.Pdo.TpdoTransmission EventDriven
+  field CanKit.Pro.CANopen.Pdo.TpdoTransmission EventTimer
+  field CanKit.Pro.CANopen.Pdo.TpdoTransmission Synchronous
+class CanKit.Pro.CANopen.RpdoReceivedEventArgs
+  ctor (System.Int32 pdoIndex, System.UInt32 cobId, System.Byte[] payload)
+  prop System.Byte[] Payload {get}
+  prop System.Int32 PdoIndex {get}
+  prop System.UInt32 CobId {get}
+enum CanKit.Pro.CANopen.Sdo.SdoAbortCode : UInt32
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode AttemptReadWriteOnly
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode AttemptWriteReadOnly
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode CommandSpecifierInvalid
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode CrcError
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode DataTypeLengthMismatch
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode General
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode InvalidBlockSize
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode LengthTooHigh
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode LengthTooLow
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode ObjectCannotBeMapped
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode ObjectDoesNotExist
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode OutOfMemory
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode PdoMappingLengthExceeded
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode SdoProtocolTimedOut
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode SubIndexDoesNotExist
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode ToggleBitNotAlternated
+  field CanKit.Pro.CANopen.Sdo.SdoAbortCode UnsupportedAccess
+class CanKit.Pro.CANopen.Sdo.SdoAbortException
+  ctor (System.UInt16 index, System.Byte subindex, CanKit.Pro.CANopen.Sdo.SdoAbortCode abortCode)
+  ctor (System.UInt16 index, System.Byte subindex, System.UInt32 abortCode, System.String message)
+  prop System.Byte Subindex {get}
+  prop System.UInt16 Index {get}
+  prop System.UInt32 AbortCode {get}
+enum CanKit.Pro.CANopen.Sdo.SdoTransferMode : Int32
+  field CanKit.Pro.CANopen.Sdo.SdoTransferMode Auto
+  field CanKit.Pro.CANopen.Sdo.SdoTransferMode Block
+  field CanKit.Pro.CANopen.Sdo.SdoTransferMode Expedited
+  field CanKit.Pro.CANopen.Sdo.SdoTransferMode Segmented
+class CanKit.Pro.CANopen.SyncReceivedEventArgs
+  ctor (System.DateTime timestamp)
+  prop System.DateTime Timestamp {get}

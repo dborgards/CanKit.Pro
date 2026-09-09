@@ -39,7 +39,7 @@ Das Dokument spezifiziert:
 
 - **L2 Raw-CAN-Dienstebene** (neu zu bauen) – die Härtung und Erweiterung von `ICanBus`/`CanFrame` um Multi-Consumer-Demultiplexing, einen verbindlichen Frame-Ownership-Vertrag, TX-Bestätigung, Adressierungs-Helfer und ein einheitliches Threading-Modell je Protokollinstanz.
 - **L3 Transport-Ebene** – Fertigstellung von ISO-TP (ISO 15765-2) sowie Neubau von J1939-TP (TP.BAM/TP.CM).
-- **L4 Anwendungsprotokoll-Ebene** – UDS (ISO 14229 über ISO-TP), CANopen (CiA 301), J1939-Applikation (SAE J1939/ISO 11783), sowie ein generischer Rahmen für ein proprietäres VENDOR-Privatprotokoll.
+- **L4 Anwendungsprotokoll-Ebene** – UDS (ISO 14229 über ISO-TP), CANopen (CiA 301), J1939-Applikation (SAE J1939/ISO 11783).
 
 Nicht im Scope: Neuimplementierung von L0 (Vendor-Adapter) und der bereits vorhandenen L1-Kernfunktionalität (`ICanBus`, `CanFrame`, `CanRegistry`) – diese werden als gegeben vorausgesetzt und nur dort referenziert, wo L2 auf ihnen aufsetzt oder bestehende Defekte (siehe Review) die L2-Anforderungen begründen.
 
@@ -82,7 +82,6 @@ Nicht im Scope: Neuimplementierung von L0 (Vendor-Adapter) und der bereits vorha
 - SAE J1939 / ISO 11783: Serial Control and Communications Vehicle Network (Nutzfahrzeuge/Agrartechnik)
 - CiA 301: CANopen Application Layer and Communication Profile
 - CiA 302: CANopen Additional Application Layer Functions (Netzwerkmanagement, Boot-up)
-- VENDOR-Privatprotokoll: proprietär, vertraulich, extern verwaltet – in dieser SRS nur als generischer Rahmen mit Erweiterungspunkten spezifiziert (siehe Annahme A-6)
 - `docs/reviews/2026-07-14-deep-code-review.md` – Ist-Zustands-Review, Quelle der L2-Architekturlücken
 - ISO/IEC/IEEE 29148:2018 – Requirements Engineering
 - IREB CPRE-Lehrplan (Satzschablonen, MoSCoW)
@@ -101,7 +100,7 @@ CanKit wird in fünf Ebenen strukturiert. Diese Nomenklatur ist verbindlich und 
 | L1 | Raw-CAN-Kern | `ICanBus`, `CanFrame`/`CanFrameView`, `ITransceiver`, `ICanDevice`, `IPeriodicTx`, `CanRegistry`, Utilities (`AsyncFramePipe`, `QueuedTxCanBus`, `SoftwarePeriodicTx`, `PreciseDelay`, `BitTimingSolver`) | **vorhanden**, mit bekannten Defekten (siehe Review) |
 | L2 | Raw-CAN-Dienstebene | Multi-Consumer-Demultiplexing, Frame-Ownership-Vertrag, TX-Bestätigung, Adressierungs-Helfer, Threading-Modell je Protokollinstanz, Fehler-/Timeout-Infrastruktur | **neu zu bauen** – Gegenstand dieser SRS |
 | L3 | Transport-Ebene | ISO-TP (ISO 15765-2), J1939-TP (TP.BAM/TP.CM) | ISO-TP: **unfertiger, funktional defekter Prototyp** (`CanKit.Transport.IsoTp`); J1939-TP: **nicht vorhanden** |
-| L4 | Anwendungsprotokoll-Ebene | UDS (auf ISO-TP), CANopen, J1939 (Applikation), VENDOR-Privatprotokoll | **nicht vorhanden** |
+| L4 | Anwendungsprotokoll-Ebene | UDS (auf ISO-TP), CANopen, J1939 (Applikation) | **nicht vorhanden** |
 
 L2 ist die vom Auftraggeber geforderte zusätzliche „raw-CAN“-Schicht: Sie kapselt alles, was mehrere Protokoll-Stacks gemeinsam benötigen und was heute nicht (oder nicht korrekt) in L1 existiert.
 
@@ -113,7 +112,6 @@ L2 ist die vom Auftraggeber geforderte zusätzliche „raw-CAN“-Schicht: Sie k
 - UDS-Client-Funktionalität für Diagnosewerkzeuge/Testautomatisierung.
 - CANopen-Basisdienste (SDO, PDO, NMT, Heartbeat, EMCY) für Automatisierungsanwendungen.
 - J1939-Applikationsschicht (PGN/SPN-Zugriff, Address Claiming, Request-PGN).
-- Erweiterungsrahmen für das VENDOR-Privatprotokoll.
 
 ### 2.3 Nutzer-/Stakeholder-Charakteristik
 
@@ -132,8 +130,7 @@ Siehe Abschnitt 6 (`CON-xxx`). Zentral: Multi-Targeting (netstandard2.0, net8.0,
 | A-3 | J1939-TP wird als eigenständiger Transport nach demselben SPI-Muster wie ISO-TP (`IIsoTpRegister`-Analogon) realisiert. |
 | A-4 | Vendor-SDK-Lizenzen (Peak PCANBasic, Kvaser CANlib, Vector XL-Driver) bleiben proprietär und werden nicht Teil dieser Spezifikation; nur die Integrationspunkte werden betrachtet. |
 | A-5 | HIL-Testinfrastruktur mit realer Hardware wird für Abnahmetests der L3/L4-Ebenen benötigt, ist aber nicht Gegenstand dieser SRS (siehe Abschnitt 7). |
-| A-6 | Das VENDOR-Protokoll ist vertraulich und dem Requirements-Team nicht im Detail bekannt; entsprechende Anforderungen (`FR-VENDOR-xxx`) sind bewusst generisch als Rahmen mit Erweiterungspunkten formuliert und müssen bei Verfügbarkeit der Protokollspezifikation verfeinert werden. |
-| A-7 | `netstandard2.0` bleibt Ziel-TFM für Kernbibliothek und L2/L3, um .NET-Framework-Konsumenten (Windows-Altsysteme mit Kvaser/Vector/PCAN) zu unterstützen. |
+| A-6 | `netstandard2.0` bleibt Ziel-TFM für Kernbibliothek und L2/L3, um .NET-Framework-Konsumenten (Windows-Altsysteme mit Kvaser/Vector/PCAN) zu unterstützen. |
 
 ---
 
@@ -146,7 +143,6 @@ Siehe Abschnitt 6 (`CON-xxx`). Zentral: Multi-Targeting (netstandard2.0, net8.0,
 | **Steuergerät (ECU, extern)** | Kommunikationspartner auf dem Bus; kein CanKit-Nutzer, aber Quelle von Antworten/Fehlerbedingungen, gegen die CanKit robust sein muss. |
 | **CANopen-Master/-Node-Anwendung** | Nutzt L4-CANopen-API für NMT/PDO/SDO-Interaktion. |
 | **J1939-Anwendung** | Nutzt L4-J1939-API für PGN/SPN-Zugriff und Address Claiming. |
-| **VENDOR-Integrationsanwendung** | Nutzt den generischen VENDOR-Rahmen für ein proprietäres Frame-Protokoll. |
 | **Bibliotheks-Maintainer** | Verantwortlich für Architektur, Code-Qualität, SPI-Erweiterbarkeit, Release-Prozess. |
 | **CI/Testautomatisierung** | Führt Unit-, Virtual-Loopback- und (wo verfügbar) HIL-Tests automatisiert aus; Konsument der Fake-Native-Schicht. |
 
@@ -315,18 +311,6 @@ Ist-Zustand: nicht vorhanden, Neubau; setzt FR-TP-030ff. voraus.
 | FR-J1939-006 | Das System MUSS für PGN-Nachrichten > 8 Byte automatisch das J1939-TP (FR-TP-030ff.) verwenden, für ≤8 Byte den direkten Single-Frame-Pfad. | Must | Integrationstest: PGN mit 20-Byte-Payload nutzt TP.BAM/TP.CM, PGN mit 6-Byte-Payload nutzt Single Frame. | SAE J1939-21 |
 | FR-J1939-007 | Das System SOLLTE periodisches Senden von PGNs mit spezifikationsgemäßer Standardrate unterstützen (Nutzung von `IPeriodicTx`/L2-Scheduling). | Should | Integrationstest: konfigurierte PGN wird mit korrekter Periodenrate gesendet. | SAE J1939-71; `IPeriodicTx` |
 
-#### 4.3.4 VENDOR-Privatprotokoll (generischer Rahmen)
-
-Ist-Zustand: nicht vorhanden; Protokolldetails vertraulich/extern (Annahme A-6). Anforderungen sind bewusst generisch gehalten und definieren Erweiterungspunkte statt konkreter Serviceinhalte.
-
-| ID | Anforderung | Priorität | Verifikation | Quelle |
-|---|---|---|---|---|
-| FR-VENDOR-001 | Das System MUSS dem Applikationsentwickler einen Erweiterungspunkt (SPI, analog `IIsoTpRegister`) bieten, über den ein VENDOR-spezifisches Frame-Codec-Modul (Kodierung/Dekodierung proprietärer Nachrichtenformate) eingebunden werden kann, ohne den L2/L3-Kern zu verändern. | Must | Architekturtest: Referenz-Dummy-Codec wird über SPI registriert und im Registry-Auto-Discovery gefunden. | Auftrag, Annahme A-6 |
-| FR-VENDOR-002 | Das System MUSS dem Applikationsentwickler die Möglichkeit bieten, beliebige rohe CAN-Frame-Payloads gemäß einem konfigurierbaren, frame-basierten Muster (ID-Bereich, Payload-Layout) zu senden und zu empfangen, ohne dass CanKit-Kern das konkrete VENDOR-Format kennen muss. | Must | Integrationstest: generisches Frame-Muster wird über Virtual-Loopback korrekt gesendet/empfangen. | Auftrag |
-| FR-VENDOR-003 | Das System SOLLTE dem VENDOR-Erweiterungsmodul Zugriff auf die L2-Dienste (Demultiplexing, TX-Confirm, Threading-Modell) auf gleicher Grundlage wie ISO-TP/CANopen/J1939 gewähren. | Should | Architekturreview: VENDOR-Referenzmodul nutzt dieselben L2-SPI-Schnittstellen wie ISO-TP. | Konsistenzanforderung |
-| FR-VENDOR-004 | Das System KANN einen Platzhalter-Zustandsautomaten (Session/Handshake) als Vorlage für die spätere Umsetzung der tatsächlichen VENDOR-Protokolllogik bereitstellen, sobald die Spezifikation verfügbar ist. | Could | Nicht verifizierbar vor Vorliegen der VENDOR-Spezifikation; Platzhalter-Vorhandensein per Codereview. | Annahme A-6 |
-| FR-VENDOR-005 | Das System MUSS bei Verfügbarkeit der VENDOR-Spezifikation eine Nachführung dieser Anforderungen (Verfeinerung von FR-VENDOR-001..004) vorsehen; bis dahin gilt dieser Abschnitt als vorläufig. | Must | Dokumentationsprozess: SRS-Änderungsprotokoll. | Annahme A-6 |
-
 ---
 
 ## 5. Nicht-funktionale Anforderungen
@@ -356,10 +340,9 @@ Ist-Zustand: nicht vorhanden; Protokolldetails vertraulich/extern (Annahme A-6).
 | CON-002 | Vendor-Adapter-Integrationen (PCAN, Kvaser, Vector, ControlCAN) basieren auf P/Invoke gegen proprietäre native SDKs/DLLs; L2/L3-Komponenten dürfen diese Abhängigkeiten nicht direkt referenzieren, sondern ausschließlich über `ICanBus`/`ITransceiver`-Abstraktionen nutzen. | technisch | Review §1.1 Punkt 16 (Negativbeispiel: ISO-TP referenziert `Peak.PCANBasic.NET` grundlos) |
 | CON-003 | Lizenzbedingungen der Vendor-SDKs (Peak PCANBasic, Kvaser CANlib, Vector XL-Driver) sind proprietär; Distribution/Verwendung dieser SDKs unterliegt Drittanbieter-Lizenzen, die außerhalb der Kontrolle dieses Projekts liegen. | rechtlich | `CanKit.Adapter.PCAN.csproj` (`Peak.PCANBasic.NET`-Referenz) |
 | CON-004 | Neue Pakete (L3/L4) MÜSSEN, solange sie funktional unvollständig sind, klar als experimentell gekennzeichnet oder von der Release-Pipeline ausgeschlossen werden (`IsPackable=false`), analog der Review-Empfehlung für den aktuellen ISO-TP-Stand. | organisatorisch | Review §1.1, Empfehlung Pkt. 1 |
-| CON-005 | Das Projekt verwendet Apache-2.0-Lizenzierung (`PackageLicenseExpression` in `Directory.Build.props`); neue L3/L4-Pakete MÜSSEN dieselbe Lizenz führen, sofern keine abweichende vertragliche Regelung (z. B. VENDOR-Vertraulichkeit) entgegensteht. | rechtlich/organisatorisch | `src/Directory.Build.props` |
-| CON-006 | Das VENDOR-Protokoll ist vertraulich; jegliche konkrete Protokolldetails DÜRFEN NICHT in öffentlichen CanKit-Repositories oder NuGet-Paketen offengelegt werden. Nur der generische Rahmen (FR-VENDOR-xxx) ist öffentlich. | rechtlich | Auftrag, Annahme A-6 |
-| CON-007 | CI-Workflows testen aktuell projektweise über `.slnf`-Filterdateien (z. B. `CanKitAdapters.slnf`, `CanKitTransports.slnf`); neue L3/L4-Pakete MÜSSEN in eine passende `.slnf`-Datei mit eigenem CI-Workflow aufgenommen werden. | organisatorisch | Review §4 („ISO-TP-Projekt hat keinen eigenen Workflow“) |
-| CON-008 | Der Standard-Git-Branch ist `master`; Release-/Paket-Pipelines MÜSSEN konsistent auf diesen Branch referenzieren. | organisatorisch | Review §3, §5 Pkt. 9 (`nuget-pipeline.yml` Branch-Trigger-Fehler) |
+| CON-005 | Das Projekt verwendet MIT-Lizenzierung (`PackageLicenseExpression` in `Directory.Build.props`); neue L3/L4-Pakete MÜSSEN dieselbe Lizenz führen, sofern keine abweichende vertragliche Regelung entgegensteht. | rechtlich/organisatorisch | `src/Directory.Build.props` |
+| CON-006 | CI-Workflows testen aktuell projektweise über `.slnf`-Filterdateien (z. B. `CanKitAdapters.slnf`, `CanKitTransports.slnf`); neue L3/L4-Pakete MÜSSEN in eine passende `.slnf`-Datei mit eigenem CI-Workflow aufgenommen werden. | organisatorisch | Review §4 („ISO-TP-Projekt hat keinen eigenen Workflow“) |
+| CON-007 | Der Standard-Git-Branch ist `master`; Release-/Paket-Pipelines MÜSSEN konsistent auf diesen Branch referenzieren. | organisatorisch | Review §3, §5 Pkt. 9 (`nuget-pipeline.yml` Branch-Trigger-Fehler) |
 
 ---
 
@@ -396,7 +379,6 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 | FR-UDS-001..012 | L4 – *UDS-Client* (geplant, neues Paket auf `IIsoTpChannel`) | Virtual-Loopback-Integrationstest, HIL-Stichprobe |
 | FR-CO-001..012 | L4 – *CANopen-Stack* (geplant, neues Paket auf L2-Demultiplexing + L1 `ICanBus`) | Virtual-Loopback-Integrationstest, HIL-Stichprobe |
 | FR-J1939-001..007 | L4 – *J1939-Applikationsschicht* (geplant, aufbauend auf L3 J1939-TP) | Virtual-Loopback-Integrationstest, HIL-Stichprobe |
-| FR-VENDOR-001..005 | L4 – *VENDOR-Erweiterungsrahmen* (geplant, SPI-Erweiterungspunkt analog `IIsoTpRegister`, `src/core/CanKit.Abstractions/SPI/Registry/Transports/IIsoTpRegister.cs`) | Architekturreview, Virtual-Loopback-Integrationstest (generischer Referenzcodec) |
 | NFR-001..003 | L2/L3 Timing-Infrastruktur, L1 `SoftwarePeriodicTx`/`PreciseDelay` (`src/core/CanKit.Core/Utils/SoftwarePeriodicTx.cs`) | Performance-/Timing-Test |
 | NFR-004, CON-001 | Alle Ebenen – Multi-Targeting (`src/Directory.Build.props`) | CI-Testmatrix |
 | NFR-005, CON-002, CON-003 | L0 – Vendor-Adapter (`src/adapters/*`) | Buildmatrix, Codereview |
@@ -406,7 +388,7 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 | NFR-009 | Alle Ebenen – Testinfrastruktur, L0 `CanKit.Adapter.Virtual`, Fake-Native-Muster | CI-Lauf |
 | NFR-010 | L2/L3/L4 – SPI-Registrierungsmuster, L1 `CanRegistryEntryAttribute`/`ICanRegistryEntry` (`src/core/CanKit.Abstractions/Attributes/CanRegistryEntryAttribute.cs`) | Architekturreview |
 | NFR-011, NFR-012 | Alle neuen Ebenen – API-Namenskonventionen | API-Review |
-| CON-004..008 | Release-/CI-Prozess (`eng/`, `.github/workflows`) | Prozessreview |
+| CON-004..007 | Release-/CI-Prozess (`eng/`, `.github/workflows`) | Prozessreview |
 
 ---
 
@@ -414,5 +396,4 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 
 1. Konkrete Zielwerte für Jitter/Durchsatz (NFR-001) sind projektspezifisch festzulegen (aktuell als Platzhalter markiert) – abhängig von Zielanwendungen (Diagnose vs. Steuerungs-Echtzeit).
 2. J1939-TP- und CANopen-Pakete existieren im Repository noch nicht; Anforderungen in Abschnitt 4.2.2/4.3.2/4.3.3 sind Neubau-Spezifikationen ohne Ist-Code-Referenz.
-3. VENDOR-Anforderungen (Abschnitt 4.3.4) sind bewusst als Rahmen gehalten und müssen bei Vorliegen der vertraulichen Spezifikation verfeinert werden (Annahme A-6).
-4. Die Traceability-Matrix referenziert `docs/architecture/arc42-CanKit.Pro.md`, das zum Zeitpunkt dieser SRS noch nicht vorliegt; Bausteinnamen sind als *geplant* markiert und beim Erscheinen des Architekturdokuments gegenzuprüfen.
+3. Die Traceability-Matrix referenziert `docs/architecture/arc42-CanKit.Pro.md`, das zum Zeitpunkt dieser SRS noch nicht vorliegt; Bausteinnamen sind als *geplant* markiert und beim Erscheinen des Architekturdokuments gegenzuprüfen.

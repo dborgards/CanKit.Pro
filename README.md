@@ -21,7 +21,9 @@ needs and that people otherwise rebuild, slightly differently and slightly wrong
 
 ## Packages
 
-**L2 — the raw-CAN service layer.** Published to nuget.org, versioned and released together.
+Published to nuget.org, versioned and released together.
+
+**L2 — the raw-CAN service layer.**
 
 | Package | What it gives you | Depends on |
 | --- | --- | --- |
@@ -30,9 +32,7 @@ needs and that people otherwise rebuild, slightly differently and slightly wrong
 | [`CanKit.Pro.Addressing`](src/CanKit.Pro.Addressing) | Validated 11/29-bit CAN IDs, J1939 PGN/priority/PDU/source-address composition, J1939 NAME and PGN catalogues. | — |
 | [`CanKit.Pro.Reliability`](src/CanKit.Pro.Reliability) | Deadlines whose expiry is guaranteed to be checked, and a `BusStateMonitor` that pushes `ErrWarning`/`ErrPassive`/`BusOff` transitions and recovery. | `CanKit.Abstractions`, `CanKit.Pro.Actor` |
 
-**L3/L4 — transports and application protocols.** Built and tested on every CI run, **not yet
-published**: the APIs are still settling, and shipping them now would freeze decisions that
-should stay open. Reference the projects from a clone until they are ready.
+**L3/L4 — transports and application protocols.**
 
 | Package | What it gives you |
 | --- | --- |
@@ -41,9 +41,8 @@ should stay open. Reference the projects from a clone until they are ready.
 | [`CanKit.Pro.CANopen`](src/CanKit.Pro.CANopen) | CiA 301: SDO client/server incl. block transfer, static and dynamic PDO mapping, NMT, heartbeat and node guarding, EMCY, object dictionary. |
 | [`CanKit.Pro.J1939`](src/CanKit.Pro.J1939) | J1939 node: address claim with arbitrary-address fallback, fixed-rate periodic send, SPN catalogue over J1939-71. |
 | [`CanKit.Pro.Uds`](src/CanKit.Pro.Uds) | ISO 14229-1 client over ISO-TP: session control, security access, read/write by identifier, routine control, upload/download, P2/P2\* timing and 0x78 response-pending. |
-| [`CanKit.Pro.Vendor`](src/CanKit.Pro.Vendor) | Framework for the VENDOR private protocol: codec registry and typed message dispatch. |
 
-Everything targets `netstandard2.0` and `net8.0`.
+Everything targets `netstandard2.0` and `net10.0`.
 
 ## Install
 
