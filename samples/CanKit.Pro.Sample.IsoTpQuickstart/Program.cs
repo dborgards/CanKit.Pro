@@ -20,7 +20,7 @@ using var busB = CanBus.Open($"virtual://{session}/1", cfg => cfg.SetProtocolMod
 using var sender = IsoTp.Open(busA, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
 using var receiver = IsoTp.Open(busB, IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0));
 
-var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
 // 1) Single Frame (≤ 7 payload bytes on classic CAN).
 var receiveSf = receiver.ReceiveAsync(cts.Token);
