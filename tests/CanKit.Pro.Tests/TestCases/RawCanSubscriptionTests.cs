@@ -229,6 +229,48 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         await disposed.Task.WaitAsync(TimeSpan.FromMilliseconds(500));
     }
 
+    // Completing the channel writer does not drop items already queued. Disposing from inside
+    // onNext skips the pump join, so the pump must stop on the disposed flag rather than drain
+    // the remainder -- otherwise further onNext calls run after Dispose has returned.
+    [Fact]
+    public async Task Callback_Subscribe_Dispose_From_Inside_Handler_Does_Not_Deliver_Buffered_Frames()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        IDisposable? subscription = null;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var proceed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var count = 0;
+        subscription = service.Subscribe(_ =>
+        {
+            if (Interlocked.Increment(ref count) == 1)
+            {
+                entered.TrySetResult(true);
+                proceed.Task.GetAwaiter().GetResult();
+                subscription!.Dispose();
+                disposed.TrySetResult(true);
+            }
+        });
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        await entered.Task.WaitAsync(ShortTimeout);
+
+        // Burst into the bounded buffer while onNext is blocked; these would otherwise be
+        // delivered after Dispose returns if the pump kept draining the completed channel.
+        for (var i = 0; i < 16; i++)
+            sender.Transmit(CanFrame.Classic(0x100, new byte[] { (byte)i }));
+
+        proceed.TrySetResult(true);
+        await disposed.Task.WaitAsync(ShortTimeout);
+        await Task.Delay(200);
+
+        Volatile.Read(ref count).Should().Be(1);
+    }
+
     // A handler exception is isolated per frame -- delivery continues -- and surfaced via the
     // service's existing fault channel, the same as a throwing predicate.
     [Fact]
