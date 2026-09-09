@@ -22,7 +22,7 @@ using var ecuChannel = IsoTp.Open(busEcu, IsoTpEndpoint.Normal(txCanId: 0x7E8, r
 
 // --- Tiny simulated ECU: answers DiagnosticSessionControl (0x10) and ReadDataByIdentifier (0x22).
 var vin = "WBAEX00000EXAMPLE"u8.ToArray();
-var ecuCts = new CancellationTokenSource();
+using var ecuCts = new CancellationTokenSource();
 _ = Task.Run(async () =>
 {
     try
@@ -45,7 +45,7 @@ _ = Task.Run(async () =>
 });
 
 using var client = UdsClient.Create(clientChannel);
-var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
 // Switch to the extended diagnostic session (FR-UDS-001).
 await client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token);

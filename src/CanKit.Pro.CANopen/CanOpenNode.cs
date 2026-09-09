@@ -767,10 +767,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         int i = 0;
         foreach (var key in _tpdos.Keys) indices[i++] = key;
         Array.Sort(indices);
-        foreach (var t in indices.Select(idx => _tpdos[idx]))
+        foreach (var t in indices.Select(idx => _tpdos[idx])
+            .Where(t => t.Transmission == TpdoTransmission.Synchronous && _state == NmtState.Operational))
         {
-            if (t.Transmission == TpdoTransmission.Synchronous && _state == NmtState.Operational)
-                EmitTpdo(t);
+            EmitTpdo(t);
         }
     }
 
@@ -1413,8 +1413,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // expedited for zero-length data).
                 if (session.Payload!.Length <= 4)
                 {
-                    _sdoClients.Remove(serverNodeId);
                     session.Deadline?.Dispose();
+                    _sdoClients.Remove(serverNodeId);
                     session.Tcs.TrySetResult(Array.Empty<byte>());
                     return;
                 }
@@ -1433,8 +1433,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 session.Toggle = !session.Toggle;
                 if (session.Offset >= session.Payload!.Length)
                 {
-                    _sdoClients.Remove(serverNodeId);
                     session.Deadline?.Dispose();
+                    _sdoClients.Remove(serverNodeId);
                     session.Tcs.TrySetResult(Array.Empty<byte>());
                     return;
                 }
@@ -1450,8 +1450,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             {
                 // Expedited upload complete.
                 var value = SdoFrames.ReadExpeditedPayload(data);
-                _sdoClients.Remove(serverNodeId);
                 session.Deadline?.Dispose();
+                _sdoClients.Remove(serverNodeId);
                 session.Tcs.TrySetResult(value);
                 return;
             }
@@ -1512,8 +1512,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                         Buffer.BlockCopy(final, 0, trimmed, 0, session.Offset);
                         final = trimmed;
                     }
-                    _sdoClients.Remove(serverNodeId);
                     session.Deadline?.Dispose();
+                    _sdoClients.Remove(serverNodeId);
                     session.Tcs.TrySetResult(final);
                     return;
                 }
@@ -1704,9 +1704,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (dirty is null || dirty.Count == 0) return;
         if (_disposed != 0 || _state != NmtState.Operational) return;
 
-        foreach (var config in _tpdos.Values)
+        foreach (var config in _tpdos.Values.Where(config => config.Transmission == TpdoTransmission.EventDriven))
         {
-            if (config.Transmission != TpdoTransmission.EventDriven) continue;
             var entries = config.Mapping.Entries;
             for (int i = 0; i < entries.Count; i++)
             {
