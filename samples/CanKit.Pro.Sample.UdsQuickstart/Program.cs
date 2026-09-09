@@ -23,7 +23,7 @@ using var ecuChannel = IsoTp.Open(busEcu, IsoTpEndpoint.Normal(txCanId: 0x7E8, r
 // --- Tiny simulated ECU: answers DiagnosticSessionControl (0x10) and ReadDataByIdentifier (0x22).
 var vin = "WBAEX00000EXAMPLE"u8.ToArray();
 var ecuCts = new CancellationTokenSource();
-var ecuTask = Task.Run(async () =>
+_ = Task.Run(async () =>
 {
     try
     {

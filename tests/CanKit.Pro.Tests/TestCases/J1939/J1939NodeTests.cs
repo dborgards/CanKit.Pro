@@ -193,7 +193,6 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var loserName = Name(identity: 0x0000BB);
 
         // Shrink the arbitration window so the test finishes quickly (default is 250 ms).
-        var opts = (J1939NodeOptions optsFor) => optsFor;
         var optsWinner = new J1939NodeOptions(winnerName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) };
         var optsLoser = new J1939NodeOptions(loserName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) };
 
@@ -1105,7 +1104,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // Room for the required emissions plus a few dropped ticks before giving up.
         var collectTimeout = TimeSpan.FromMilliseconds(periodMs * (requiredEmissions + 6));
 
-        using (var handle = sender.StartPeriodicSend(message, period))
+        using (sender.StartPeriodicSend(message, period))
         {
             var deadline = Stopwatch.GetTimestamp() + (long)(collectTimeout.TotalSeconds * Stopwatch.Frequency);
             while (true)
