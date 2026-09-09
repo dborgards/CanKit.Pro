@@ -7,17 +7,20 @@
 // catches is the failure mode a PR *can* introduce: a typo'd plugin name, a plugin dropped from
 // package.json, or a preset/tooling version combination that no longer resolves.
 
-import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 
-const require = createRequire(import.meta.url);
 const config = JSON.parse(readFileSync(new URL('../.releaserc.json', import.meta.url), 'utf8'));
 
 const problems = [];
 
+// import.meta.resolve (not require.resolve): the semantic-release plugins that actually load
+// these presets (@semantic-release/commit-analyzer, @semantic-release/release-notes-generator)
+// do so via `import-from-esm`, which understands ESM-only packages. require.resolve does not --
+// it fails on a package whose exports map has no "require" condition, even though the real
+// pipeline loads it fine. conventional-changelog-conventionalcommits went ESM-only in 10.x.
 const check = (what, id) => {
   try {
-    require.resolve(id);
+    import.meta.resolve(id);
     console.log(`ok       ${what} ${id}`);
   } catch {
     problems.push(`${what} ${id} cannot be resolved`);
