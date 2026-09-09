@@ -78,6 +78,12 @@ namespace CanKit.Pro.RawCan
                     _isOnPump.Value = true;
                     await foreach (var frame in _subscription.Frames.ConfigureAwait(false))
                     {
+                        // Completing the channel writer (Subscription.Dispose) does not drop
+                        // items already buffered. Without these checks a self-dispose from
+                        // onNext would skip the pump join and still deliver every remaining
+                        // queued frame after Dispose has returned.
+                        if (Volatile.Read(ref _disposed) != 0) break;
+
                         try
                         {
                             onNext(frame);
@@ -87,6 +93,8 @@ namespace CanKit.Pro.RawCan
                             if (service is CanBusService concrete)
                                 concrete.RaiseBackgroundException(ex);
                         }
+
+                        if (Volatile.Read(ref _disposed) != 0) break;
                     }
                 });
             }
