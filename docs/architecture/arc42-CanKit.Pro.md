@@ -33,7 +33,7 @@
 > voraussetzen, nicht durchsetzen (siehe Abschnitt 11).
 >
 > Requirement-IDs verweisen auf das SRS (`docs/requirements/SRS-CanKit.Pro.md`); Schema:
-> `FR-RAW-*`, `FR-TP-*`, `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*`, `FR-HAWE-*`, `NFR-*`, `CON-*`. Die
+> `FR-RAW-*`, `FR-TP-*`, `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*`, `NFR-*`, `CON-*`. Die
 > technischen Schulden in Abschnitt 11 sind aus dem Deep-Code-Review
 > (`docs/reviews/2026-07-14-deep-code-review.md`) abgeleitet; dessen Abschnittsnummern werden als
 > „Review §x.y" referenziert.
@@ -50,7 +50,7 @@ Diese Nomenklatur ist identisch zur SRS und wird im gesamten Dokument verwendet:
 | **L1** | Raw-CAN-Kern | vorhanden | `ICanBus`, `CanFrame`, Registry, Utilities, Diagnostics |
 | **L2** | Raw-CAN-Dienstebene | **NEU / Ziel** | Multi-Consumer-Demux, Ownership-Vertrag, TX-Confirm, Adressierung, Aktor-Modell, Fehler-/Timeout-Infrastruktur |
 | **L3** | Transport-Ebene | Prototyp (ISO-TP) / Ziel (J1939-TP) | ISO-TP (ISO 15765-2), J1939-TP (BAM/CM) |
-| **L4** | Anwendungsprotokoll-Ebene | **NEU / Ziel** | UDS, CANopen, J1939-App, HAWE-Privatprotokoll |
+| **L4** | Anwendungsprotokoll-Ebene | **NEU / Ziel** | UDS, CANopen, J1939-App |
 
 ### Auflösung der Requirement-Referenzen (arc42 ↔ SRS)
 
@@ -85,7 +85,7 @@ CanKit ist eine **herstellerneutrale .NET-Bibliothek für den CAN-Bus** (Classic
 und CAN FD). Sie kapselt heterogene Vendor-Treiber (SocketCAN, ZLG, PCAN, Kvaser,
 Vector, ControlCAN) hinter einer einheitlichen API (`ICanBus`) und stellt darüber
 hinaus eine Erweiterungsplattform (SPI + Registry) bereit, auf der Transport- und
-Anwendungsprotokolle (ISO-TP, UDS, J1939, CANopen, HAWE) aufsetzen können.
+Anwendungsprotokolle (ISO-TP, UDS, J1939, CANopen) aufsetzen können.
 
 Kernanliegen:
 
@@ -119,7 +119,7 @@ Zero-Copy) erhöhen den Aufwand für Q4 und für einen sicheren **Frame-Ownershi
 |-------|------------------------------|
 | **Anwendungsentwickler** (Diagnose/Steuerung) | Stabile, hardwareunabhängige API; einfache Endpoint-Öffnung; async-Streaming. |
 | **Adapter-Autor** (Vendor-Integration) | Klares Adapter-Muster (Bus/Transceiver/Options/Native), SPI-Verträge, Fake-Schicht als Vorlage. |
-| **Protokoll-Autor** (ISO-TP/UDS/J1939/CANopen/HAWE) | Verbindlicher Ownership-Vertrag, Multi-Consumer-Demux, TX-Confirm, definiertes Threading-Modell (→ L2). |
+| **Protokoll-Autor** (ISO-TP/UDS/J1939/CANopen) | Verbindlicher Ownership-Vertrag, Multi-Consumer-Demux, TX-Confirm, definiertes Threading-Modell (→ L2). |
 | **Maintainer / Architekt** | Geringe Kopplung, testbare Kerne, dokumentierte Entscheidungen (ADRs), Kontrolle über Release-Reife. |
 | **CI/Release-Engineer** | Adapterweise Pfadfilter, `-c Fake`-Builds, NuGet-Packaging, reproduzierbare Matrix. |
 | **Endnutzer/Betreiber** | Zuverlässiges Verhalten unter Last, kein Ressourcenleck über lange Laufzeiten. |
@@ -181,7 +181,7 @@ flowchart TB
     subgraph App["Anwendungsprozess (.NET)"]
         UserApp["Anwendungscode<br/>Diagnose / Steuerung / Telemetrie"]
         subgraph CanKitLib["CanKit (Bibliothek, in-process)"]
-            L4["L4 Anwendungsprotokolle<br/>UDS / CANopen / J1939 / HAWE  (NEU)"]
+            L4["L4 Anwendungsprotokolle<br/>UDS / CANopen / J1939  (NEU)"]
             L3["L3 Transport<br/>ISO-TP (Prototyp) / J1939-TP (Ziel)"]
             L2["L2 Raw-CAN-Dienste<br/>Demux / Ownership / TX-Confirm  (NEU)"]
             L1["L1 Raw-CAN-Kern<br/>ICanBus / CanFrame / Registry"]
@@ -254,7 +254,6 @@ flowchart TB
         UDS["UDS (ISO 14229)"]
         CANopen["CANopen (SDO/PDO/NMT/EMCY)"]
         J1939App["J1939 (Applikation)"]
-        HAWE["HAWE-Privatprotokoll"]
     end
 
     subgraph L3["L3 Transport"]
@@ -293,7 +292,6 @@ flowchart TB
     UDS --> IsoTp
     CANopen --> Demux
     J1939App --> J1939Tp
-    HAWE --> Demux
     IsoTp --> Demux
     J1939Tp --> Demux
     Demux --> ICanBus
@@ -322,7 +320,7 @@ flowchart TB
 | L1 Raw-CAN-Kern | vorhanden | Herstellerneutraler Frame-Zugriff, Discovery, Utilities, Diagnostics. | `ICanBus`, `CanBus.Open`, `CanRegistry` | `FR-RAW-*` |
 | L2 Raw-CAN-Dienste | NEU | Ein RX-Strom → N unabhängige gefilterte Consumer; Ownership-Vertrag; TX-Confirm; Aktor-Modell. | (neu) `ICanBusService` / `ISubscription` | `FR-RAW-DEMUX-*`, `FR-RAW-OWN-*`, `FR-RAW-TXC-*` |
 | L3 Transport | Prototyp/Ziel | Segmentierung/Reassemblierung (ISO-TP), Sessions (J1939-TP). | `IIsoTpChannel`, `IIsoTpScheduler` | `FR-TP-*` |
-| L4 Anwendungsprotokolle | NEU | Diagnose-/Applikationssemantik auf L3/L2. | (neu) protokollspezifisch | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*`, `FR-HAWE-*` |
+| L4 Anwendungsprotokolle | NEU | Diagnose-/Applikationssemantik auf L3/L2. | (neu) protokollspezifisch | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*` |
 
 ## 5.2 Ebene 2 – Zoom L1 (Raw-CAN-Kern, vorhanden)
 
@@ -1308,7 +1306,6 @@ Ziel-Architektur und Voraussetzung für belastbare L3/L4-Stacks.
 | **CANopen** | Höheres Protokoll (CiA 301) auf CAN. |
 | **SDO / PDO** | Service / Process Data Object (CANopen). |
 | **NMT / EMCY** | Network Management / Emergency Object (CANopen). |
-| **HAWE** | Hier: herstellerspezifisches Privatprotokoll (Ziel-L4). |
 | **SPI (hier)** | Service Provider Interface; interne Erweiterungspunkte (`CanKit.Abstractions.SPI.*`), nicht der Hardware-SPI-Bus. |
 | **Fake-Native** | `*.Fake.cs`-Spiegel der P/Invoke-Schicht für hardwarelose Builds (`-c Fake`). |
 | **Virtual-Hub** | In-Memory-Loopback-Adapter (`VirtualBusHub`) für Tests. |

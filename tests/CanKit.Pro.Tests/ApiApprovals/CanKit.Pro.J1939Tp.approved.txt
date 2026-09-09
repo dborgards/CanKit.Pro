@@ -1,0 +1,53 @@
+interface CanKit.Pro.J1939Tp.IJ1939TpChannel
+  event System.EventHandler<CanKit.Pro.J1939Tp.J1939TpDatagram> DatagramReceived
+  event System.EventHandler<System.Exception> BackgroundExceptionOccurred
+  method System.Collections.Generic.IAsyncEnumerable<CanKit.Pro.J1939Tp.J1939TpDatagram> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SendBamAsync(System.UInt32 pgn, System.ReadOnlyMemory<System.Byte> payload, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SendCmAsync(System.UInt32 pgn, System.Byte destinationAddress, System.ReadOnlyMemory<System.Byte> payload, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task<CanKit.Pro.J1939Tp.J1939TpDatagram> ReceiveAsync(System.Threading.CancellationToken cancellationToken)
+  prop CanKit.Pro.J1939Tp.J1939TpOptions Options {get}
+  prop System.Byte SourceAddress {get}
+class CanKit.Pro.J1939Tp.J1939Tp
+  method CanKit.Pro.J1939Tp.IJ1939TpChannel Open(CanKit.Abstractions.API.Can.ICanBus bus, System.Byte sourceAddress, CanKit.Pro.J1939Tp.J1939TpOptions options)
+  method CanKit.Pro.J1939Tp.IJ1939TpChannel Open(CanKit.Pro.RawCan.ICanBusService service, System.Byte sourceAddress, CanKit.Pro.J1939Tp.J1939TpOptions options, System.Boolean leaveOpen)
+class CanKit.Pro.J1939Tp.J1939TpAbortException
+  ctor (CanKit.Pro.J1939Tp.J1939TpAbortReason reason, System.UInt32 pgn, System.String message)
+  prop CanKit.Pro.J1939Tp.J1939TpAbortReason Reason {get}
+  prop System.UInt32 Pgn {get}
+enum CanKit.Pro.J1939Tp.J1939TpAbortReason : Byte
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason NoResourcesAvailable
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason ReceiverAbort
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason ResourceNeededForHigherPriorityProcess
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason RetransmitNotSupported
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason SessionAlreadyOpen
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason Timeout
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason UnexpectedCtsNumPackets
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason UnexpectedCtsSequenceNumber
+  field CanKit.Pro.J1939Tp.J1939TpAbortReason Unknown
+struct CanKit.Pro.J1939Tp.J1939TpDatagram
+  ctor (System.UInt32 pgn, System.Byte sourceAddress, System.Byte destinationAddress, CanKit.Pro.J1939Tp.J1939TpKind kind, System.Byte[] payload)
+  prop CanKit.Pro.J1939Tp.J1939TpKind Kind {get}
+  prop System.Byte DestinationAddress {get}
+  prop System.Byte SourceAddress {get}
+  prop System.Byte[] Payload {get}
+  prop System.UInt32 Pgn {get}
+class CanKit.Pro.J1939Tp.J1939TpException
+  ctor (System.String message)
+  ctor (System.String message, System.Exception innerException)
+enum CanKit.Pro.J1939Tp.J1939TpKind : Byte
+  field CanKit.Pro.J1939Tp.J1939TpKind Bam
+  field CanKit.Pro.J1939Tp.J1939TpKind Cm
+class CanKit.Pro.J1939Tp.J1939TpOptions
+  ctor ()
+  method CanKit.Pro.J1939Tp.J1939TpOptions With(System.Nullable<System.TimeSpan> t1, System.Nullable<System.TimeSpan> t2, System.Nullable<System.TimeSpan> t3, System.Nullable<System.TimeSpan> t4, System.Nullable<System.TimeSpan> tr, System.Nullable<System.TimeSpan> th, System.Nullable<System.Byte> priority, System.Nullable<System.Byte> maxPacketsPerCts, System.Nullable<System.Int32> receiveBufferCapacity)
+  prop System.Byte MaxPacketsPerCts {get/set}
+  prop System.Byte Priority {get/set}
+  prop System.Int32 ReceiveBufferCapacity {get/set}
+  prop System.TimeSpan T1 {get/set}
+  prop System.TimeSpan T2 {get/set}
+  prop System.TimeSpan T3 {get/set}
+  prop System.TimeSpan T4 {get/set}
+  prop System.TimeSpan Th {get/set}
+  prop System.TimeSpan Tr {get/set}
+class CanKit.Pro.J1939Tp.J1939TpSendRejectedException
+  ctor (System.String message)

@@ -25,6 +25,11 @@ public class PublicApiSurfaceTests
         ("CanKit.Pro.Addressing", "CanKit.Pro.Addressing"),
         ("CanKit.Pro.RawCan", "CanKit.Pro.RawCan"),
         ("CanKit.Pro.Reliability", "CanKit.Pro.Reliability"),
+        ("CanKit.Pro.IsoTp", "CanKit.Pro.IsoTp"),
+        ("CanKit.Pro.J1939Tp", "CanKit.Pro.J1939Tp"),
+        ("CanKit.Pro.CANopen", "CanKit.Pro.CANopen"),
+        ("CanKit.Pro.J1939", "CanKit.Pro.J1939"),
+        ("CanKit.Pro.Uds", "CanKit.Pro.Uds"),
     };
 
     [Theory]

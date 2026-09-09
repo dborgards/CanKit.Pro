@@ -1,0 +1,84 @@
+interface CanKit.Pro.J1939.IJ1939Node
+  event System.EventHandler<CanKit.Pro.J1939.J1939ClaimEventArgs> AddressClaimChanged
+  event System.EventHandler<CanKit.Pro.J1939.J1939Message> MessageReceived
+  event System.EventHandler<System.Exception> BackgroundExceptionOccurred
+  method System.IDisposable StartPeriodicSend(CanKit.Pro.J1939.J1939Message message, System.TimeSpan period)
+  method System.Threading.Tasks.Task ClaimAddressAsync(System.Byte preferredAddress, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task RequestPgnAsync(System.UInt32 requestedPgn, System.Byte destinationAddress, System.Threading.CancellationToken cancellationToken)
+  method System.Threading.Tasks.Task SendAsync(CanKit.Pro.J1939.J1939Message message, System.Threading.CancellationToken cancellationToken)
+  prop CanKit.Pro.Addressing.J1939Name Name {get}
+  prop CanKit.Pro.J1939.J1939ClaimState ClaimState {get}
+  prop CanKit.Pro.J1939.J1939NodeOptions Options {get}
+  prop System.Nullable<System.Byte> Address {get}
+class CanKit.Pro.J1939.J1939CannotClaimException
+  ctor (System.Byte preferredAddress)
+  prop System.Byte PreferredAddress {get}
+class CanKit.Pro.J1939.J1939ClaimEventArgs
+  ctor (CanKit.Pro.J1939.J1939ClaimState state, System.Nullable<System.Byte> address, System.Nullable<System.Byte> contendingSourceAddress, System.Nullable<CanKit.Pro.Addressing.J1939Name> contendingName)
+  prop CanKit.Pro.J1939.J1939ClaimState State {get}
+  prop System.Nullable<CanKit.Pro.Addressing.J1939Name> ContendingName {get}
+  prop System.Nullable<System.Byte> Address {get}
+  prop System.Nullable<System.Byte> ContendingSourceAddress {get}
+enum CanKit.Pro.J1939.J1939ClaimState : Int32
+  field CanKit.Pro.J1939.J1939ClaimState CannotClaim
+  field CanKit.Pro.J1939.J1939ClaimState Claimed
+  field CanKit.Pro.J1939.J1939ClaimState Claiming
+  field CanKit.Pro.J1939.J1939ClaimState NotClaimed
+struct CanKit.Pro.J1939.J1939Message
+  ctor (System.UInt32 pgn, System.ReadOnlyMemory<System.Byte> payload, System.Byte priority, System.Byte sourceAddress, System.Byte destinationAddress)
+  method System.Boolean Equals(CanKit.Pro.J1939.J1939Message other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Int32 GetHashCode()
+  prop System.Boolean WasMultiFrame {get}
+  prop System.Byte DestinationAddress {get}
+  prop System.Byte Priority {get}
+  prop System.Byte SourceAddress {get}
+  prop System.ReadOnlyMemory<System.Byte> Payload {get}
+  prop System.UInt32 Pgn {get}
+class CanKit.Pro.J1939.J1939NoAddressException
+  ctor ()
+class CanKit.Pro.J1939.J1939Node
+  method CanKit.Pro.J1939.IJ1939Node Open(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.J1939.J1939NodeOptions options)
+  method CanKit.Pro.J1939.IJ1939Node Open(CanKit.Pro.RawCan.ICanBusService service, CanKit.Pro.J1939.J1939NodeOptions options, System.Boolean leaveOpen)
+class CanKit.Pro.J1939.J1939NodeException
+  ctor (System.String message)
+  ctor (System.String message, System.Exception innerException)
+class CanKit.Pro.J1939.J1939NodeOptions
+  ctor (CanKit.Pro.Addressing.J1939Name name)
+  prop CanKit.Pro.Addressing.J1939Name Name {get}
+  prop CanKit.Pro.J1939Tp.J1939TpOptions TransportOptions {get/set}
+  prop System.Byte ClaimPriority {get/set}
+  prop System.Byte DefaultPriority {get/set}
+  prop System.Int32 ReceiveBufferCapacity {get/set}
+  prop System.Nullable<System.Boolean> EnableArbitraryAddressClaiming {get/set}
+  prop System.TimeSpan ClaimAnnounceTimeout {get/set}
+class CanKit.Pro.J1939.J1939Spn
+  method System.Double Extract(System.ReadOnlySpan<System.Byte> payload, System.Int32 byteOffset, System.Int32 bitLength, System.Double resolution, System.Double offset)
+  method System.Double Extract(System.ReadOnlySpan<System.Byte> payload, System.Int32 byteOffset, System.Int32 startBit, System.Int32 bitLength, System.Double resolution, System.Double offset)
+  method System.UInt64 ExtractRaw(System.ReadOnlySpan<System.Byte> payload, System.Int32 byteOffset, System.Int32 startBit, System.Int32 bitLength)
+  method System.Void WriteRaw(System.Span<System.Byte> payload, System.Int32 byteOffset, System.Int32 startBit, System.Int32 bitLength, System.UInt64 rawValue)
+class CanKit.Pro.J1939.J1939SpnCatalog
+  ctor ()
+  method CanKit.Pro.J1939.J1939SpnCatalog Register(CanKit.Pro.J1939.J1939SpnDefinition definition)
+  method System.Boolean TryGet(System.Int32 spn, CanKit.Pro.J1939.J1939SpnDefinition& definition)
+  method System.Collections.Generic.IEnumerator<CanKit.Pro.J1939.J1939SpnDefinition> GetEnumerator()
+  method System.Double Extract(System.ReadOnlySpan<System.Byte> payload, System.Int32 spn)
+  prop CanKit.Pro.J1939.J1939SpnCatalog Default {get}
+class CanKit.Pro.J1939.J1939SpnDefinition
+  ctor (System.Int32 Spn, System.String Name, System.UInt32 Pgn, System.Int32 ByteOffset, System.Int32 StartBit, System.Int32 BitLength, System.Double Resolution, System.Double Offset, System.String Unit)
+  method CanKit.Pro.J1939.J1939SpnDefinition <Clone>$()
+  method System.Boolean Equals(CanKit.Pro.J1939.J1939SpnDefinition other)
+  method System.Boolean Equals(System.Object obj)
+  method System.Double Extract(System.ReadOnlySpan<System.Byte> payload)
+  method System.Int32 GetHashCode()
+  method System.String ToString()
+  method System.Void Deconstruct(System.Int32& Spn, System.String& Name, System.UInt32& Pgn, System.Int32& ByteOffset, System.Int32& StartBit, System.Int32& BitLength, System.Double& Resolution, System.Double& Offset, System.String& Unit)
+  prop System.Double Offset {get/set}
+  prop System.Double Resolution {get/set}
+  prop System.Int32 BitLength {get/set}
+  prop System.Int32 ByteOffset {get/set}
+  prop System.Int32 Spn {get/set}
+  prop System.Int32 StartBit {get/set}
+  prop System.String Name {get/set}
+  prop System.String Unit {get/set}
+  prop System.UInt32 Pgn {get/set}

@@ -38,7 +38,7 @@ four L2 packages, while the entire transport and application stack is on `develo
 | --- | --- |
 | `src/core/CanKit.Pro.{Actor,Addressing,RawCan,Reliability}/` | → `src/CanKit.Pro.*/` — **source unchanged** apart from comments referring to fork-internal files |
 | `src/transports/CanKit.Pro.{IsoTp,J1939Tp}/` | → `src/CanKit.Pro.*/` |
-| `src/protocols/CanKit.Pro.{CANopen,J1939,Uds,Hawe}/` | → `src/CanKit.Pro.*/` |
+| `src/protocols/CanKit.Pro.{CANopen,J1939,Uds}/` | → `src/CanKit.Pro.*/` |
 | The Pro test suites in `tests/CanKit.Tests/TestCases/` | → `tests/CanKit.Pro.Tests/TestCases/`, adapted (below) |
 | The five Pro quickstart samples | → `samples/CanKit.Pro.Sample.*/` |
 | `docs/architecture/`, `docs/requirements/`, `docs/reviews/` | → `docs/`, with headers that mark CanKit as external context |
@@ -47,12 +47,20 @@ The flat `src/CanKit.Pro.<Name>/` layout replaces the legacy `core/transports/pr
 a repository whose every project is a `CanKit.Pro.*` package, the extra directory level encoded a
 layer that the package name already states.
 
+`CanKit.Pro.Hawe` (the generic extension framework for a customer's confidential private
+protocol) moved over with everything else initially, but was later removed from this public
+repository entirely and continues as a separate, internal-only repo — its presence here was never
+more than the generic SPI extension point, and even that is confidential enough not to belong in
+a public source history.
+
 ### Publishing
 
-Only the four L2 packages publish. `CanKit.Pro.{IsoTp,J1939Tp,CANopen,J1939,Uds,Hawe}` keep
-`IsPackable=false`, which is the legacy repository's own assessment (`publish: false` in its
-`eng/packages.json`) — they are pre-release, and this migration is not the moment to overrule
-that. They are still built and tested on every CI run, so they cannot rot silently.
+All `CanKit.Pro.*` packages built from this repo publish to nuget.org. The four L2 packages
+(`Actor`, `Addressing`, `RawCan`, `Reliability`) were first; `CanKit.Pro.{IsoTp,J1939Tp,CANopen,
+J1939,Uds}` initially kept `IsPackable=false` — the legacy repository's own assessment
+(`publish: false` in its `eng/packages.json`), since they were pre-release and this migration was
+not the moment to overrule that — until their APIs settled enough to ship. They were built and
+tested on every CI run throughout, so they could not rot silently while unpublished.
 
 ## What did not move
 
