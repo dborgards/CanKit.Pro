@@ -113,6 +113,129 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref busEventCount).Should().Be(n);
     }
 
+    // Callback-style Subscribe(onNext, predicate): the handler is invoked for matching frames
+    // only, in arrival order.
+    [Fact]
+    public async Task Callback_Subscribe_Invokes_Handler_For_Matching_Frames_Only()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var received = new List<int>();
+        var lastReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = service.Subscribe(
+            frame =>
+            {
+                lock (received)
+                {
+                    received.Add(frame.ID);
+                    if (received.Count >= 2) lastReceived.TrySetResult(true);
+                }
+            },
+            predicate: f => f.ID == 0x123);
+
+        sender.Transmit(CanFrame.Classic(0x123, new byte[] { 1 }));
+        sender.Transmit(CanFrame.Classic(0x456, new byte[] { 2 })); // filtered out
+        sender.Transmit(CanFrame.Classic(0x123, new byte[] { 3 }));
+
+        await lastReceived.Task.WaitAsync(ShortTimeout);
+        lock (received) received.Should().Equal(0x123, 0x123);
+    }
+
+    // Callback-style Subscribe must uphold the same FR-RAW-011 guarantee as the raw pull API: a
+    // slow/blocking onNext only ever falls behind its own subscription, never the bus event or a
+    // second, actively-draining subscription.
+    [Fact]
+    public async Task Callback_Subscribe_Slow_Handler_Does_Not_Block_Others_Or_The_Bus_Event()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var busEventCount = 0;
+        receiver.FrameObserved += (_, _) => Interlocked.Increment(ref busEventCount);
+
+        var block = new SemaphoreSlim(0); // never released: the slow handler blocks forever
+        using var slow = service.Subscribe(_ => block.Wait(), bufferCapacity: 1);
+
+        var fastCount = 0;
+        var allFastReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        const int n = 200;
+        using var fast = service.Subscribe(_ =>
+        {
+            if (Interlocked.Increment(ref fastCount) >= n) allFastReceived.TrySetResult(true);
+        }, bufferCapacity: 512);
+
+        for (var i = 0; i < n; i++)
+            sender.Transmit(CanFrame.Classic(0x300 + (i & 0x0F), new byte[] { (byte)i }));
+
+        await allFastReceived.Task.WaitAsync(ShortTimeout);
+        Volatile.Read(ref busEventCount).Should().Be(n);
+    }
+
+    // Disposing the callback handle stops delivery: no further onNext calls after Dispose returns.
+    [Fact]
+    public async Task Callback_Subscribe_Dispose_Stops_Delivery()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var count = 0;
+        var firstReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var subscription = service.Subscribe(_ =>
+        {
+            Interlocked.Increment(ref count);
+            firstReceived.TrySetResult(true);
+        });
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        await firstReceived.Task.WaitAsync(ShortTimeout);
+
+        subscription.Dispose();
+        var countAfterDispose = Volatile.Read(ref count);
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 2 }));
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 3 }));
+        await Task.Delay(200);
+
+        Volatile.Read(ref count).Should().Be(countAfterDispose);
+    }
+
+    // A handler exception is isolated per frame -- delivery continues -- and surfaced via the
+    // service's existing fault channel, the same as a throwing predicate.
+    [Fact]
+    public async Task Callback_Subscribe_Handler_Exception_Is_Surfaced_And_Delivery_Continues()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.BackgroundExceptionOccurred += (_, ex) => observed.TrySetResult(ex);
+
+        var secondReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+        using var subscription = service.Subscribe(_ =>
+        {
+            if (Interlocked.Increment(ref calls) == 1)
+                throw new InvalidOperationException("boom");
+            secondReceived.TrySetResult(true);
+        });
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        var ex = await observed.Task.WaitAsync(ShortTimeout);
+        ex.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Be("boom");
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 2 }));
+        await secondReceived.Task.WaitAsync(ShortTimeout);
+    }
+
     // FR-RAW-012: creating and disposing N subscriptions leaves no entries in the service registry.
     [Fact]
     public void Disposing_Subscriptions_Leaves_No_Registry_Entries()
