@@ -721,23 +721,17 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 P2ClientMax = TimeSpan.FromSeconds(5),
                 P2StarClientMax = TimeSpan.FromSeconds(5),
             });
-        try
-        {
-            var inFlight = client.ReadDataByIdentifierAsync(0xF190,
-                new CancellationTokenSource(ShortTimeout).Token);
-            await Task.Delay(50); // enter ReceiveWithTimeout under the request lock
+        using var teardown = dispose;
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190,
+            new CancellationTokenSource(ShortTimeout).Token);
+        await Task.Delay(50); // enter ReceiveWithTimeout under the request lock
 
-            Action act = () => client.Dispose();
-            act.Should().NotThrow(
-                "Dispose must wait for the in-flight request to Release before disposing _requestLock");
+        Action act = () => client.Dispose();
+        act.Should().NotThrow(
+            "Dispose must wait for the in-flight request to Release before disposing _requestLock");
 
-            Func<Task> wait = () => inFlight;
-            await wait.Should().ThrowAsync<OperationCanceledException>();
-        }
-        finally
-        {
-            dispose.Dispose();
-        }
+        Func<Task> wait = () => inFlight;
+        await wait.Should().ThrowAsync<OperationCanceledException>();
     }
 
     // -----------------------------------------------------------------------------------
@@ -755,32 +749,26 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 P2ClientMax = TimeSpan.FromSeconds(5),
                 P2StarClientMax = TimeSpan.FromSeconds(5),
             });
-        try
-        {
-            // Hold the request lock with a silent ECU read so suppress TesterPresent blocks
-            // in WaitAsync rather than racing through Send.
-            var inFlight = client.ReadDataByIdentifierAsync(0xF190,
-                new CancellationTokenSource(ShortTimeout).Token);
-            await Task.Delay(50);
+        using var teardown = dispose;
+        // Hold the request lock with a silent ECU read so suppress TesterPresent blocks
+        // in WaitAsync rather than racing through Send.
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190,
+            new CancellationTokenSource(ShortTimeout).Token);
+        await Task.Delay(50);
 
-            var testerPresent = client.TesterPresentAsync(suppressPositiveResponse: true,
-                new CancellationTokenSource(ShortTimeout).Token);
-            await Task.Delay(30); // park on _requestLock.WaitAsync
+        var testerPresent = client.TesterPresentAsync(suppressPositiveResponse: true,
+            new CancellationTokenSource(ShortTimeout).Token);
+        await Task.Delay(30); // park on _requestLock.WaitAsync
 
-            Action act = () => client.Dispose();
-            act.Should().NotThrow();
+        Action act = () => client.Dispose();
+        act.Should().NotThrow();
 
-            Func<Task> waitTp = () => testerPresent;
-            await waitTp.Should().ThrowAsync<OperationCanceledException>(
-                "suppress TesterPresent must link _lifetimeCts so Dispose aborts WaitAsync/Send");
+        Func<Task> waitTp = () => testerPresent;
+        await waitTp.Should().ThrowAsync<OperationCanceledException>(
+            "suppress TesterPresent must link _lifetimeCts so Dispose aborts WaitAsync/Send");
 
-            Func<Task> waitRead = () => inFlight;
-            await waitRead.Should().ThrowAsync<OperationCanceledException>();
-        }
-        finally
-        {
-            dispose.Dispose();
-        }
+        Func<Task> waitRead = () => inFlight;
+        await waitRead.Should().ThrowAsync<OperationCanceledException>();
     }
 
     private sealed class CompositeDisposable : IDisposable
