@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 
@@ -265,12 +266,9 @@ internal sealed partial class CanOpenNode
                 ? t.Mapping.Entries
                 : Array.Empty<PdoMappingEntry>();
         }
-        foreach (var kv in _rpdosByCobId)
+        foreach (var kv in _rpdosByCobId.Where(kv => kv.Value.PdoIndex == pdoIndex))
         {
-            if (kv.Value.PdoIndex == pdoIndex)
-            {
-                return kv.Value.Mapping.Entries;
-            }
+            return kv.Value.Mapping.Entries;
         }
         return Array.Empty<PdoMappingEntry>();
     }
@@ -307,13 +305,10 @@ internal sealed partial class CanOpenNode
     private void ApplyRpdoMappingFromSdo(int pdoIndex, PdoMapping mapping)
     {
         uint cobId = CanOpenCobId.RpdoDefault(_nodeId, pdoIndex);
-        foreach (var kv in _rpdosByCobId)
+        foreach (var kv in _rpdosByCobId.Where(kv => kv.Value.PdoIndex == pdoIndex))
         {
-            if (kv.Value.PdoIndex == pdoIndex)
-            {
-                cobId = kv.Key;
-                break;
-            }
+            cobId = kv.Key;
+            break;
         }
 
         // Remove any previous entry for this slot (same cleanup as ConfigureRpdo.Apply).
@@ -323,12 +318,9 @@ internal sealed partial class CanOpenNode
         {
             existingKeys[i++] = kv.Key;
         }
-        foreach (var key in existingKeys)
+        foreach (var key in existingKeys.Where(key => _rpdosByCobId[key].PdoIndex == pdoIndex))
         {
-            if (_rpdosByCobId[key].PdoIndex == pdoIndex)
-            {
-                _rpdosByCobId.Remove(key);
-            }
+            _rpdosByCobId.Remove(key);
         }
         _rpdosByCobId[cobId] = new RpdoConfig(pdoIndex, cobId, mapping);
     }

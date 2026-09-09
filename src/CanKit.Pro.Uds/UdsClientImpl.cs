@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.IsoTp;
@@ -217,8 +218,8 @@ internal sealed class UdsClientImpl : IUdsClient
         if (result.Count != dataIdentifiers.Count)
         {
             var missing = new List<string>();
-            foreach (var did in dataIdentifiers)
-                if (!result.ContainsKey(did)) missing.Add($"0x{did:X4}");
+            foreach (var did in dataIdentifiers.Where(did => !result.ContainsKey(did)))
+                missing.Add($"0x{did:X4}");
             throw new UdsProtocolException(
                 $"Multi-DID ReadDataByIdentifier response missing DIDs: {string.Join(", ", missing)}.");
         }

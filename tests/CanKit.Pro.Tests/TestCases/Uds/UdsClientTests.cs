@@ -90,14 +90,14 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task CanFd_DiagnosticSessionControl_And_ReadDid_Work_Like_On_Classic()
     {
-        var (client, ecu, dispose) = BuildPair(e =>
+        var (client, _, dispose) = BuildPair(e =>
         {
             e.On(0x10, req => new byte[] { req[1], 0x00, 0x32, 0x01, 0xF4 });
             e.On(0x22, req => new byte[] { req[1], req[2], 0x57, 0x42, 0x41 });
         }, useCanFd: true);
         using (dispose)
         {
-            var sessionResponse = await client.DiagnosticSessionControlAsync(UdsSessionType.Extended,
+            await client.DiagnosticSessionControlAsync(UdsSessionType.Extended,
                 new CancellationTokenSource(ShortTimeout).Token);
             client.CurrentSession.Should().Be((byte)UdsSessionType.Extended);
 
@@ -111,7 +111,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task CanFd_WriteDid_And_MultiFrame_Transfer_Work_Like_On_Classic()
     {
         var written = new List<byte>();
-        var (client, ecu, dispose) = BuildPair(e => e.On(0x2E, req =>
+        var (client, _, dispose) = BuildPair(e => e.On(0x2E, req =>
         {
             written.Clear();
             written.AddRange(req);
@@ -440,7 +440,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     {
         int count = 0;
         var handled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var (client, ecu, dispose) = BuildPair(e => e.On(0x3E, req =>
+        var (client, _, dispose) = BuildPair(e => e.On(0x3E, req =>
         {
             req[0].Should().Be(0x3E);
             (req[1] & 0x80).Should().Be(0x80, "keep-alive must suppress positive response");
@@ -452,7 +452,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using (dispose)
         {
-            using (var handle = client.StartTesterPresentKeepAlive())
+            using (client.StartTesterPresentKeepAlive())
             {
                 await handled.Task.WaitAsync(ShortTimeout);
             }

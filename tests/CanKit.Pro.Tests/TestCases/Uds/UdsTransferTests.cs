@@ -188,7 +188,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task TransferData_Wrong_BlockSequenceCounter_Yields_Nrc_0x73()
     {
-        var (client, ecu, dispose) = BuildPair(e =>
+        var (client, _, dispose) = BuildPair(e =>
         {
             e.On(0x34, _ => new byte[] { 0x10, 0x10 });
             byte expected = 0x01;
@@ -273,7 +273,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task RequestUpload_Parses_MaxNumberOfBlockLength_Multi_Byte()
     {
-        var (client, ecu, dispose) = BuildPair(e => e.On(0x35, req =>
+        var (client, _, dispose) = BuildPair(e => e.On(0x35, req =>
         {
             req[0].Should().Be(0x35);
             req[1].Should().Be(0x00); // dataFormatIdentifier
@@ -433,9 +433,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
                 order[i].Should().NotBe(0x3E,
                     $"TesterPresent (0x3E) at index {i} would have interleaved the download");
             // Every 0x36 must sit strictly between 0x34 and 0x37 with no 0x3E in between.
-            int downloadCount = 0;
-            foreach (var sid in order)
-                if (sid == 0x36) downloadCount++;
+            int downloadCount = order.Count(sid => sid == 0x36);
             downloadCount.Should().Be(blockCount);
         }
     }
@@ -448,7 +446,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     public async Task Upload_Full_Cycle_Round_Trips_Payload()
     {
         var source = Enumerable.Range(0, 250).Select(i => (byte)(i & 0xFF)).ToArray();
-        var (client, ecu, dispose) = BuildPair(e => WireUploadEcu(e, source,
+        var (client, _, dispose) = BuildPair(e => WireUploadEcu(e, source,
             maxBlockLength: 64, chunkSize: 7));
         using (dispose)
         {
@@ -487,7 +485,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     public async Task UploadAsync_OneShot_Round_Trips_Payload()
     {
         var source = Enumerable.Range(0, 250).Select(i => (byte)(i & 0xFF)).ToArray();
-        var (client, ecu, dispose) = BuildPair(e => WireUploadEcu(e, source,
+        var (client, _, dispose) = BuildPair(e => WireUploadEcu(e, source,
             maxBlockLength: 64, chunkSize: 7));
         using (dispose)
         {
