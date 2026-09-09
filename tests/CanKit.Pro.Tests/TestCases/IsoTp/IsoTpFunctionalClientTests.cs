@@ -500,7 +500,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         int framesObserved = 0;
         busB.FrameObserved += (_, e) =>
         {
-            if (e.CanFrame.ID == unchecked((int)0x7DF))
+            if (e.CanFrame.ID == 0x7DF)
                 Interlocked.Increment(ref framesObserved);
         };
 

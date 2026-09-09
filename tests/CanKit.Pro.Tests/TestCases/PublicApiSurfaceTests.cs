@@ -135,10 +135,10 @@ public class PublicApiSurfaceTests
                 .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"));
             lines.Add($"method {FormatTypeName(method.ReturnType)} {method.Name}{generic}({pars})");
         }
-        foreach (var ctor in type.GetConstructors(Flags))
+        foreach (var pars in type.GetConstructors(Flags)
+            .Select(ctor => string.Join(", ", ctor.GetParameters()
+                .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"))))
         {
-            var pars = string.Join(", ", ctor.GetParameters()
-                .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"));
             lines.Add($"ctor ({pars})");
         }
 

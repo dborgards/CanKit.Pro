@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -385,9 +386,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             uint[] existingKeys = new uint[_rpdosByCobId.Count];
             int i = 0;
             foreach (var kv in _rpdosByCobId) existingKeys[i++] = kv.Key;
-            foreach (var key in existingKeys)
+            foreach (var key in existingKeys.Where(key => _rpdosByCobId[key].PdoIndex == pdoIndex))
             {
-                if (_rpdosByCobId[key].PdoIndex == pdoIndex) _rpdosByCobId.Remove(key);
+                _rpdosByCobId.Remove(key);
             }
             _rpdosByCobId[actualCobId] = new RpdoConfig(pdoIndex, actualCobId, mapping);
         }
@@ -766,9 +767,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         int i = 0;
         foreach (var key in _tpdos.Keys) indices[i++] = key;
         Array.Sort(indices);
-        foreach (var idx in indices)
+        foreach (var t in indices.Select(idx => _tpdos[idx]))
         {
-            var t = _tpdos[idx];
             if (t.Transmission == TpdoTransmission.Synchronous && _state == NmtState.Operational)
                 EmitTpdo(t);
         }
@@ -1704,9 +1704,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (dirty is null || dirty.Count == 0) return;
         if (_disposed != 0 || _state != NmtState.Operational) return;
 
-        foreach (var kv in _tpdos)
+        foreach (var config in _tpdos.Values)
         {
-            var config = kv.Value;
             if (config.Transmission != TpdoTransmission.EventDriven) continue;
             var entries = config.Mapping.Entries;
             for (int i = 0; i < entries.Count; i++)
@@ -1728,9 +1727,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var set = new HashSet<uint>();
         if (_options.EnableChangeOfStateTpdo)
         {
-            foreach (var kv in _tpdos)
+            foreach (var kv in _tpdos.Where(kv => kv.Value.Transmission == TpdoTransmission.EventDriven))
             {
-                if (kv.Value.Transmission != TpdoTransmission.EventDriven) continue;
                 foreach (var e in kv.Value.Mapping.Entries)
                 {
                     set.Add(CosKey(e.Index, e.Subindex));
