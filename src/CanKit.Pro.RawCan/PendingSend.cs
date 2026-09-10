@@ -11,8 +11,6 @@ namespace CanKit.Pro.RawCan
     /// see <see cref="CanBusService"/>'s pending-send tracking (FR-RAW-031). This mirrors, at the
     /// L2 echo-matching layer, the exact class of bug the review flagged for the ISO-TP prototype's
     /// deadline queue crashing on identical in-flight frames.
-    /// (通过 CAN ID 与载荷内容标识一路等待回显匹配的发送。多路并发、键相同的发送与到达的、键相同的回显帧
-    /// 严格按 FIFO（最先等待的发送优先）匹配。)
     /// </summary>
     internal readonly struct PendingKey : IEquatable<PendingKey>
     {
@@ -52,9 +50,6 @@ namespace CanKit.Pro.RawCan
     /// disposal) without scanning. Exactly one of those paths ever completes <see cref="Tcs"/>;
     /// all use <c>TrySet*</c>, so a race between two paths (e.g. an echo arriving the same instant
     /// the timeout fires) resolves harmlessly to whichever wins first.
-    /// (一次等待回显匹配的、尚未完成的 <see cref="ICanBusService.SendConfirmed"/> 调用。持有其在所属
-    /// <see cref="PendingKey"/> FIFO 链表中的节点引用，以便在匹配、超时、取消、总线关闭或服务释放等任一
-    /// 结束路径下以 O(1) 复杂度自我移除，无需遍历。)
     /// </summary>
     internal sealed class PendingSend
     {

@@ -9,8 +9,6 @@ namespace CanKit.Pro.RawCan
     /// Callback-style convenience layer over <see cref="ICanBusService.Subscribe(Func{CanFrameView,bool}?,int?)"/>
     /// for callers who want "filter + handler" instead of driving the async-enumerable
     /// <see cref="ISubscription.Frames"/> stream themselves.
-    /// (对 <see cref="ICanBusService.Subscribe(Func{CanFrameView,bool}?,int?)"/> 的回调式便捷封装，
-    /// 面向只想要"过滤 + 处理函数"、不想自己驱动 <see cref="ISubscription.Frames"/> 异步流的调用方。)
     /// </summary>
     public static class CanBusServiceExtensions
     {
@@ -18,8 +16,6 @@ namespace CanKit.Pro.RawCan
         /// Registers a subscription and invokes <paramref name="onNext"/> for every frame it
         /// accepts, on a dedicated background task. Disposing the returned handle stops delivery
         /// and lets that task end.
-        /// (注册一路订阅，对其接收到的每一帧在专用后台任务上调用 <paramref name="onNext"/>；
-        /// 释放返回的句柄会停止投递并使该任务结束。)
         /// </summary>
         /// <remarks>
         /// Built entirely on the existing <see cref="ISubscription"/> pull API, so the same
@@ -32,12 +28,6 @@ namespace CanKit.Pro.RawCan
         /// is a <see cref="CanBusService"/>, routed through
         /// <see cref="ICanBusService.BackgroundExceptionOccurred"/>, the same fault channel every
         /// other background failure in this service uses.
-        /// (完全基于现有的 <see cref="ISubscription"/> 拉取式 API 构建，因此同样适用逐订阅有界、
-        /// 丢弃最旧的缓冲区（FR-RAW-011）：迟缓的 <paramref name="onNext"/> 只会自己落后并丢弃自己最旧的帧——
-        /// 因为分发热路径从不等待订阅方的消费者，它永远不会延迟向其他订阅或总线自身 <c>FrameObserved</c>
-        /// 事件的投递。<paramref name="onNext"/> 抛出的异常按帧隔离——投递会以下一帧继续——当
-        /// <paramref name="service"/> 是 <see cref="CanBusService"/> 时，异常会经由
-        /// <see cref="ICanBusService.BackgroundExceptionOccurred"/> 上抛，与本服务其余后台故障共用同一通道。)
         /// </remarks>
         /// <param name="service">The service to subscribe on.</param>
         /// <param name="onNext">Invoked for each accepted frame, in arrival order.</param>

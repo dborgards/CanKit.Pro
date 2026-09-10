@@ -75,10 +75,6 @@ namespace CanKit.Pro.Actor
         /// <see cref="AsyncLocal{T}"/> Dispose() uses to detect reentrant disposal, so it flows
         /// through <c>await</c> and <see cref="System.Threading.SynchronizationContext.Send"/>
         /// hops and is correct regardless of which OS thread is currently running the callback.
-        /// (在本 Actor 循环运行某个工作项/定时器回调所处的逻辑执行上下文中为 true，否则为 false；
-        /// 与 <see cref="Dispose"/> 检测再入式释放共用同一份 <see cref="AsyncLocal{T}"/>，
-        /// 因此可正确穿过 <c>await</c> 与 <see cref="System.Threading.SynchronizationContext.Send"/>
-        /// 边界，与实际运行回调的 OS 线程无关。)
         /// </summary>
         /// <remarks>
         /// Lets a public sync API safely detect that it is already on the actor loop and run the
@@ -91,7 +87,7 @@ namespace CanKit.Pro.Actor
 
         /// <summary>
         /// Creates an actor and immediately starts its mailbox loop under
-        /// <paramref name="mode"/>. (创建 Actor 并立即以 <paramref name="mode"/> 启动其邮箱循环。)
+        /// <paramref name="mode"/>.
         /// </summary>
         /// <param name="mode">Execution context for the loop (FR-RAW-024). Defaults to a dedicated thread.</param>
         /// <param name="synchronizationContext">

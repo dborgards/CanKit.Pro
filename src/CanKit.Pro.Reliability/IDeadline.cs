@@ -6,7 +6,7 @@ namespace CanKit.Pro.Reliability
     /// A single armed deadline (SRS FR-RAW-050). A deadline starts <c>Pending</c> and resolves
     /// exactly once into one of three terminal outcomes: it <b>expires</b> (its <c>onExpired</c>
     /// callback fired), it is <b>completed</b> (the awaited transition finished in time), or it is
-    /// <b>cancelled</b> (disposed). (单个已装载的超时（SRS FR-RAW-050）。)
+    /// <b>cancelled</b> (disposed).
     /// </summary>
     /// <remarks>
     /// The three terminal outcomes are mutually exclusive under normal operation: whichever of the
@@ -19,26 +19,25 @@ namespace CanKit.Pro.Reliability
     {
         /// <summary>
         /// True once the deadline's timeout elapsed and its <c>onExpired</c> callback won the race
-        /// to fire. (超时已到期并触发回调时为 true。)
+        /// to fire.
         /// </summary>
         bool IsExpired { get; }
 
         /// <summary>
         /// True once <see cref="Complete"/> won the race, i.e. the awaited transition finished
-        /// before the timeout. (在超时前调用 <see cref="Complete"/> 成功后为 true。)
+        /// before the timeout.
         /// </summary>
         bool IsCompleted { get; }
 
         /// <summary>
         /// True once the deadline was cancelled via <see cref="IDisposable.Dispose"/> before it
-        /// expired or completed. (在到期/完成前经 <see cref="IDisposable.Dispose"/> 取消后为 true。)
+        /// expired or completed.
         /// </summary>
         bool IsCancelled { get; }
 
         /// <summary>
         /// Extends (or shortens) a still-<c>Pending</c> deadline to a new timeout measured from now,
-        /// e.g. an ISO-TP receiver refreshing N_Cr on each consecutive frame. (将仍处于 Pending 的
-        /// 超时重新设定为自当前时刻起的新时长。)
+        /// e.g. an ISO-TP receiver refreshing N_Cr on each consecutive frame.
         /// </summary>
         /// <param name="timeout">New time until expiry, measured from now. Must be &gt;= <see cref="TimeSpan.Zero"/>.</param>
         /// <returns>
@@ -49,7 +48,6 @@ namespace CanKit.Pro.Reliability
 
         /// <summary>
         /// Marks a still-<c>Pending</c> deadline as completed, cancelling its pending expiry.
-        /// (将仍处于 Pending 的超时标记为已完成，取消其到期触发。)
         /// </summary>
         /// <returns>
         /// True if this call won the race and moved the deadline from <c>Pending</c> to
