@@ -58,6 +58,14 @@ updates:
       interval: monthly
     commit-message:
       prefix: "ci(deps)"
+    groups:
+      # The Pages chain has to move together: the deploy job never runs on a pull request, so a
+      # separate bump of either half would first be exercised by a real deployment on main.
+      github-pages:
+        patterns:
+          - "actions/upload-pages-artifact"
+          - "actions/deploy-pages"
+          - "actions/configure-pages"
 
   - package-ecosystem: pip
     # eng/docs-requirements.txt: the website build (MkDocs + Material). Not "build(deps)" for the
