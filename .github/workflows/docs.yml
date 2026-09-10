@@ -7,8 +7,17 @@ name: Docs
 # repository's Pages source must be set to "GitHub Actions" once (Settings → Pages).
 #
 # Pull requests only build (strict mode, so a broken link fails the check); pushes to main deploy.
+#
+# A release is a third trigger: semantic-release commits the changelog to main with "[skip ci]",
+# which suppresses every push-triggered workflow including this one, so the site's changelog page
+# would otherwise lag until the next unrelated docs change. Listening for the Release workflow's
+# completion rebuilds right after each release instead.
 
 on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+    branches: [main]
   push:
     branches: [main]
     paths:
@@ -41,6 +50,8 @@ concurrency:
 jobs:
   build:
     name: build
+    # After a Release run, rebuild only if it succeeded; a failed release has no new changelog.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

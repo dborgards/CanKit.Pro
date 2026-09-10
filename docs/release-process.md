@@ -115,6 +115,11 @@ Ordering matters here: packing and pushing happen in `prepare`/`publish`, *befor
 created. A failed `dotnet nuget push` therefore aborts the run without leaving a tag that claims a
 release nobody can install.
 
+The `[skip ci]` marker on the changelog commit suppresses every push-triggered workflow, so the
+website (`.github/workflows/docs.yml`) additionally listens for the Release workflow's completion
+and rebuilds right after a successful release. Without that, the changelog page would lag until
+the next unrelated documentation change.
+
 ## Setup checklist
 
 Needed once, in repository settings:

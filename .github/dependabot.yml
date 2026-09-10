@@ -46,3 +46,18 @@ updates:
       interval: monthly
     commit-message:
       prefix: "ci(deps)"
+
+  - package-ecosystem: pip
+    # eng/docs-requirements.txt: the website build (MkDocs + Material). Not "build(deps)" for the
+    # same reason as npm above — a docs-tooling bump must not publish a NuGet release.
+    directory: "/eng"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      # MkDocs 2.0 removes the plugin and theming systems Material depends on; see the comment in
+      # eng/docs-requirements.txt. Minor and patch updates of 1.x are fine.
+      - dependency-name: "mkdocs"
+        update-types: ["version-update:semver-major"]
