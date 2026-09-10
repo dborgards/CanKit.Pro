@@ -7,7 +7,7 @@ namespace CanKit.Pro.Reliability
     /// A reusable, actor-driven timeout primitive (SRS FR-RAW-050). Protocol layers (ISO-TP N_Bs/
     /// N_Cr, J1939 timeouts, UDS P2/P2*, CANopen SDO, ...) arm a <see cref="IDeadline"/> for a
     /// time-bounded state transition and are notified via <c>onExpired</c> when the transition did
-    /// not complete in time. (可复用的、由 Actor 驱动的超时原语（SRS FR-RAW-050）。)
+    /// not complete in time.
     /// </summary>
     /// <remarks>
     /// This directly addresses the deep-code-review finding "Deadlines werden gepflegt, aber nie
@@ -24,7 +24,7 @@ namespace CanKit.Pro.Reliability
         /// <summary>
         /// Arms a new deadline that will invoke <paramref name="onExpired"/> on the owning actor's
         /// loop once <paramref name="timeout"/> has elapsed, unless it is completed or cancelled
-        /// first. (装载一个新的超时。)
+        /// first.
         /// </summary>
         /// <param name="timeout">
         /// Time until expiry. Must be &gt;= <see cref="TimeSpan.Zero"/>; a zero timeout fires on the
