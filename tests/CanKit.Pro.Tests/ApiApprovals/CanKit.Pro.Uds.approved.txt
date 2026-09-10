@@ -1,108 +1,142 @@
-interface CanKit.Pro.Uds.IUdsClient
-  method System.IDisposable StartTesterPresentKeepAlive(System.Nullable<System.TimeSpan> period)
-  method System.Threading.Tasks.Task DownloadAsync(System.Byte dataFormatIdentifier, System.Byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<System.Byte> memoryAddress, System.ReadOnlyMemory<System.Byte> memorySize, System.ReadOnlyMemory<System.Byte> data, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task RequestTransferExitAsync(System.ReadOnlyMemory<System.Byte> transferRequestParameterRecord, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task SecurityAccessAsync(System.Byte requestSeedLevel, System.Func<System.Byte[],System.Byte[]> computeKey, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task TesterPresentAsync(System.Boolean suppressPositiveResponse, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task WriteDataByIdentifierAsync(System.UInt16 dataIdentifier, System.ReadOnlyMemory<System.Byte> data, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<CanKit.Pro.Uds.UdsDownloadResponse> RequestDownloadAsync(System.Byte dataFormatIdentifier, System.Byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<System.Byte> memoryAddress, System.ReadOnlyMemory<System.Byte> memorySize, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<CanKit.Pro.Uds.UdsUploadResponse> RequestUploadAsync(System.Byte dataFormatIdentifier, System.Byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<System.Byte> memoryAddress, System.ReadOnlyMemory<System.Byte> memorySize, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> DiagnosticSessionControlAsync(CanKit.Pro.Uds.UdsSessionType session, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> DiagnosticSessionControlAsync(System.Byte sessionType, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> EcuResetAsync(CanKit.Pro.Uds.UdsEcuResetType resetType, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> ReadDataByIdentifierAsync(System.UInt16 dataIdentifier, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> RoutineControlAsync(CanKit.Pro.Uds.UdsRoutineControlType routineType, System.UInt16 routineIdentifier, System.ReadOnlyMemory<System.Byte> routineControlOptionRecord, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> SendRawAsync(System.ReadOnlyMemory<System.Byte> request, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> TransferDataAsync(System.Byte blockSequenceCounter, System.ReadOnlyMemory<System.Byte> data, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> UploadAsync(System.Byte dataFormatIdentifier, System.Byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<System.Byte> memoryAddress, System.ReadOnlyMemory<System.Byte> memorySize, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyDictionary<System.UInt16,System.Byte[]>> ReadDataByIdentifierAsync(System.Collections.Generic.IReadOnlyList<System.UInt16> dataIdentifiers, System.Collections.Generic.IReadOnlyDictionary<System.UInt16,System.Int32> dataRecordLengths, System.Threading.CancellationToken cancellationToken)
-  prop CanKit.Pro.IsoTp.IIsoTpChannel Channel {get}
-  prop CanKit.Pro.Uds.UdsClientOptions Options {get}
-  prop System.Byte CurrentSession {get}
-class CanKit.Pro.Uds.UdsClient
-  method CanKit.Pro.Uds.IUdsClient Create(CanKit.Pro.IsoTp.IIsoTpChannel channel, CanKit.Pro.Uds.UdsClientOptions options, System.Boolean leaveOpen)
-class CanKit.Pro.Uds.UdsClientOptions
-  ctor ()
-  field System.TimeSpan DefaultP2
-  field System.TimeSpan DefaultP2Star
-  field System.TimeSpan DefaultTesterPresentPeriod
-  method CanKit.Pro.Uds.UdsClientOptions With(System.Nullable<System.TimeSpan> p2ClientMax, System.Nullable<System.TimeSpan> p2StarClientMax, System.Nullable<System.Int32> maxResponsePendingCount, System.Nullable<System.TimeSpan> testerPresentPeriod, System.Nullable<System.Boolean> keepAliveSuppressPositiveResponse)
-  prop System.Boolean KeepAliveSuppressPositiveResponse {get/set}
-  prop System.Int32 MaxResponsePendingCount {get/set}
-  prop System.TimeSpan P2ClientMax {get/set}
-  prop System.TimeSpan P2StarClientMax {get/set}
-  prop System.TimeSpan TesterPresentPeriod {get/set}
-struct CanKit.Pro.Uds.UdsDownloadResponse
-  ctor (System.Byte lengthFormatIdentifier, System.UInt64 maxNumberOfBlockLength)
-  prop System.Byte LengthFormatIdentifier {get}
-  prop System.UInt64 MaxNumberOfBlockLength {get}
-enum CanKit.Pro.Uds.UdsEcuResetType : Byte
-  field CanKit.Pro.Uds.UdsEcuResetType DisableRapidPowerShutDown
-  field CanKit.Pro.Uds.UdsEcuResetType EnableRapidPowerShutDown
-  field CanKit.Pro.Uds.UdsEcuResetType HardReset
-  field CanKit.Pro.Uds.UdsEcuResetType KeyOffOnReset
-  field CanKit.Pro.Uds.UdsEcuResetType SoftReset
-class CanKit.Pro.Uds.UdsException
-  ctor (System.String message)
-  ctor (System.String message, System.Exception innerException)
-enum CanKit.Pro.Uds.UdsNegativeResponseCode : Byte
-  field CanKit.Pro.Uds.UdsNegativeResponseCode BusyRepeatRequest
-  field CanKit.Pro.Uds.UdsNegativeResponseCode ConditionsNotCorrect
-  field CanKit.Pro.Uds.UdsNegativeResponseCode ExceedNumberOfAttempts
-  field CanKit.Pro.Uds.UdsNegativeResponseCode GeneralProgrammingFailure
-  field CanKit.Pro.Uds.UdsNegativeResponseCode GeneralReject
-  field CanKit.Pro.Uds.UdsNegativeResponseCode IncorrectMessageLengthOrInvalidFormat
-  field CanKit.Pro.Uds.UdsNegativeResponseCode InvalidKey
-  field CanKit.Pro.Uds.UdsNegativeResponseCode RequestCorrectlyReceivedResponsePending
-  field CanKit.Pro.Uds.UdsNegativeResponseCode RequestOutOfRange
-  field CanKit.Pro.Uds.UdsNegativeResponseCode RequestSequenceError
-  field CanKit.Pro.Uds.UdsNegativeResponseCode RequiredTimeDelayNotExpired
-  field CanKit.Pro.Uds.UdsNegativeResponseCode SecurityAccessDenied
-  field CanKit.Pro.Uds.UdsNegativeResponseCode ServiceNotSupported
-  field CanKit.Pro.Uds.UdsNegativeResponseCode ServiceNotSupportedInActiveSession
-  field CanKit.Pro.Uds.UdsNegativeResponseCode SubFunctionNotSupported
-  field CanKit.Pro.Uds.UdsNegativeResponseCode SubFunctionNotSupportedInActiveSession
-  field CanKit.Pro.Uds.UdsNegativeResponseCode TransferDataSuspended
-  field CanKit.Pro.Uds.UdsNegativeResponseCode UploadDownloadNotAccepted
-  field CanKit.Pro.Uds.UdsNegativeResponseCode WrongBlockSequenceCounter
-class CanKit.Pro.Uds.UdsNegativeResponseException
-  ctor (CanKit.Pro.Uds.UdsServiceId requestedService, System.Byte code)
-  prop CanKit.Pro.Uds.UdsServiceId RequestedService {get}
-  prop System.Byte Code {get}
-  prop System.Nullable<CanKit.Pro.Uds.UdsNegativeResponseCode> CodeAsEnum {get}
-  prop System.String CodeName {get}
-class CanKit.Pro.Uds.UdsProtocolException
-  ctor (System.String message)
-enum CanKit.Pro.Uds.UdsRoutineControlType : Byte
-  field CanKit.Pro.Uds.UdsRoutineControlType RequestRoutineResults
-  field CanKit.Pro.Uds.UdsRoutineControlType StartRoutine
-  field CanKit.Pro.Uds.UdsRoutineControlType StopRoutine
-enum CanKit.Pro.Uds.UdsServiceId : Byte
-  field CanKit.Pro.Uds.UdsServiceId DiagnosticSessionControl
-  field CanKit.Pro.Uds.UdsServiceId EcuReset
-  field CanKit.Pro.Uds.UdsServiceId ReadDataByIdentifier
-  field CanKit.Pro.Uds.UdsServiceId RequestDownload
-  field CanKit.Pro.Uds.UdsServiceId RequestTransferExit
-  field CanKit.Pro.Uds.UdsServiceId RequestUpload
-  field CanKit.Pro.Uds.UdsServiceId RoutineControl
-  field CanKit.Pro.Uds.UdsServiceId SecurityAccess
-  field CanKit.Pro.Uds.UdsServiceId TesterPresent
-  field CanKit.Pro.Uds.UdsServiceId TransferData
-  field CanKit.Pro.Uds.UdsServiceId WriteDataByIdentifier
-enum CanKit.Pro.Uds.UdsSessionType : Byte
-  field CanKit.Pro.Uds.UdsSessionType Default
-  field CanKit.Pro.Uds.UdsSessionType Extended
-  field CanKit.Pro.Uds.UdsSessionType Programming
-  field CanKit.Pro.Uds.UdsSessionType SafetySystem
-class CanKit.Pro.Uds.UdsTimeoutException
-  ctor (CanKit.Pro.Uds.UdsServiceId requestedService, CanKit.Pro.Uds.UdsTimeoutTimer timer, System.TimeSpan elapsed)
-  prop CanKit.Pro.Uds.UdsServiceId RequestedService {get}
-  prop CanKit.Pro.Uds.UdsTimeoutTimer Timer {get}
-  prop System.TimeSpan Elapsed {get}
-enum CanKit.Pro.Uds.UdsTimeoutTimer : Int32
-  field CanKit.Pro.Uds.UdsTimeoutTimer P2
-  field CanKit.Pro.Uds.UdsTimeoutTimer P2Star
-struct CanKit.Pro.Uds.UdsUploadResponse
-  ctor (System.Byte lengthFormatIdentifier, System.UInt64 maxNumberOfBlockLength)
-  prop System.Byte LengthFormatIdentifier {get}
-  prop System.UInt64 MaxNumberOfBlockLength {get}
+namespace CanKit.Pro.Uds
+{
+    public interface IUdsClient : System.IDisposable
+    {
+        CanKit.Pro.IsoTp.IIsoTpChannel Channel { get; }
+        byte CurrentSession { get; }
+        CanKit.Pro.Uds.UdsClientOptions Options { get; }
+        System.Threading.Tasks.Task<byte[]> DiagnosticSessionControlAsync(CanKit.Pro.Uds.UdsSessionType session, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> DiagnosticSessionControlAsync(byte sessionType, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task DownloadAsync(byte dataFormatIdentifier, byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<byte> memoryAddress, System.ReadOnlyMemory<byte> memorySize, System.ReadOnlyMemory<byte> data, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> EcuResetAsync(CanKit.Pro.Uds.UdsEcuResetType resetType, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> ReadDataByIdentifierAsync(ushort dataIdentifier, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyDictionary<ushort, byte[]>> ReadDataByIdentifierAsync(System.Collections.Generic.IReadOnlyList<ushort> dataIdentifiers, System.Collections.Generic.IReadOnlyDictionary<ushort, int> dataRecordLengths, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.Uds.UdsDownloadResponse> RequestDownloadAsync(byte dataFormatIdentifier, byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<byte> memoryAddress, System.ReadOnlyMemory<byte> memorySize, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task RequestTransferExitAsync(System.ReadOnlyMemory<byte> transferRequestParameterRecord = default, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.Uds.UdsUploadResponse> RequestUploadAsync(byte dataFormatIdentifier, byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<byte> memoryAddress, System.ReadOnlyMemory<byte> memorySize, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> RoutineControlAsync(CanKit.Pro.Uds.UdsRoutineControlType routineType, ushort routineIdentifier, System.ReadOnlyMemory<byte> routineControlOptionRecord = default, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task SecurityAccessAsync(byte requestSeedLevel, System.Func<byte[], byte[]> computeKey, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> SendRawAsync(System.ReadOnlyMemory<byte> request, System.Threading.CancellationToken cancellationToken = default);
+        System.IDisposable StartTesterPresentKeepAlive(System.TimeSpan? period = default);
+        System.Threading.Tasks.Task TesterPresentAsync(bool suppressPositiveResponse = true, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> TransferDataAsync(byte blockSequenceCounter, System.ReadOnlyMemory<byte> data, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> UploadAsync(byte dataFormatIdentifier, byte addressAndLengthFormatIdentifier, System.ReadOnlyMemory<byte> memoryAddress, System.ReadOnlyMemory<byte> memorySize, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task WriteDataByIdentifierAsync(ushort dataIdentifier, System.ReadOnlyMemory<byte> data, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public static class UdsClient
+    {
+        public static CanKit.Pro.Uds.IUdsClient Create(CanKit.Pro.IsoTp.IIsoTpChannel channel, CanKit.Pro.Uds.UdsClientOptions? options = null, bool leaveOpen = true) { }
+    }
+    public sealed class UdsClientOptions
+    {
+        public static readonly System.TimeSpan DefaultP2;
+        public static readonly System.TimeSpan DefaultP2Star;
+        public static readonly System.TimeSpan DefaultTesterPresentPeriod;
+        public UdsClientOptions() { }
+        public bool KeepAliveSuppressPositiveResponse { get; init; }
+        public int MaxResponsePendingCount { get; init; }
+        public System.TimeSpan P2ClientMax { get; init; }
+        public System.TimeSpan P2StarClientMax { get; init; }
+        public System.TimeSpan TesterPresentPeriod { get; init; }
+        public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default) { }
+    }
+    public readonly struct UdsDownloadResponse
+    {
+        public UdsDownloadResponse(byte lengthFormatIdentifier, ulong maxNumberOfBlockLength) { }
+        public byte LengthFormatIdentifier { get; }
+        public ulong MaxNumberOfBlockLength { get; }
+    }
+    public enum UdsEcuResetType : byte
+    {
+        HardReset = 1,
+        KeyOffOnReset = 2,
+        SoftReset = 3,
+        EnableRapidPowerShutDown = 4,
+        DisableRapidPowerShutDown = 5,
+    }
+    public class UdsException : CanKit.Core.Exceptions.CanKitException
+    {
+        public UdsException(string message) { }
+        protected UdsException(CanKit.Core.Exceptions.CanKitErrorCode errorCode, string message) { }
+        public UdsException(string message, System.Exception innerException) { }
+    }
+    public enum UdsNegativeResponseCode : byte
+    {
+        GeneralReject = 16,
+        ServiceNotSupported = 17,
+        SubFunctionNotSupported = 18,
+        IncorrectMessageLengthOrInvalidFormat = 19,
+        BusyRepeatRequest = 33,
+        ConditionsNotCorrect = 34,
+        RequestSequenceError = 36,
+        RequestOutOfRange = 49,
+        SecurityAccessDenied = 51,
+        InvalidKey = 53,
+        ExceedNumberOfAttempts = 54,
+        RequiredTimeDelayNotExpired = 55,
+        UploadDownloadNotAccepted = 112,
+        TransferDataSuspended = 113,
+        GeneralProgrammingFailure = 114,
+        WrongBlockSequenceCounter = 115,
+        RequestCorrectlyReceivedResponsePending = 120,
+        SubFunctionNotSupportedInActiveSession = 126,
+        ServiceNotSupportedInActiveSession = 127,
+    }
+    public sealed class UdsNegativeResponseException : CanKit.Pro.Uds.UdsException
+    {
+        public UdsNegativeResponseException(CanKit.Pro.Uds.UdsServiceId requestedService, byte code) { }
+        public byte Code { get; }
+        public CanKit.Pro.Uds.UdsNegativeResponseCode? CodeAsEnum { get; }
+        public string CodeName { get; }
+        public CanKit.Pro.Uds.UdsServiceId RequestedService { get; }
+    }
+    public sealed class UdsProtocolException : CanKit.Pro.Uds.UdsException
+    {
+        public UdsProtocolException(string message) { }
+    }
+    public enum UdsRoutineControlType : byte
+    {
+        StartRoutine = 1,
+        StopRoutine = 2,
+        RequestRoutineResults = 3,
+    }
+    public enum UdsServiceId : byte
+    {
+        DiagnosticSessionControl = 16,
+        EcuReset = 17,
+        ReadDataByIdentifier = 34,
+        SecurityAccess = 39,
+        WriteDataByIdentifier = 46,
+        RoutineControl = 49,
+        RequestDownload = 52,
+        RequestUpload = 53,
+        TransferData = 54,
+        RequestTransferExit = 55,
+        TesterPresent = 62,
+    }
+    public enum UdsSessionType : byte
+    {
+        Default = 1,
+        Programming = 2,
+        Extended = 3,
+        SafetySystem = 4,
+    }
+    public sealed class UdsTimeoutException : CanKit.Pro.Uds.UdsException
+    {
+        public UdsTimeoutException(CanKit.Pro.Uds.UdsServiceId requestedService, CanKit.Pro.Uds.UdsTimeoutTimer timer, System.TimeSpan elapsed) { }
+        public System.TimeSpan Elapsed { get; }
+        public CanKit.Pro.Uds.UdsServiceId RequestedService { get; }
+        public CanKit.Pro.Uds.UdsTimeoutTimer Timer { get; }
+    }
+    public enum UdsTimeoutTimer
+    {
+        P2 = 0,
+        P2Star = 1,
+    }
+    public readonly struct UdsUploadResponse
+    {
+        public UdsUploadResponse(byte lengthFormatIdentifier, ulong maxNumberOfBlockLength) { }
+        public byte LengthFormatIdentifier { get; }
+        public ulong MaxNumberOfBlockLength { get; }
+    }
+}
