@@ -94,14 +94,42 @@ jobs:
       - name: Build
         run: dotnet build CanKit.Pro.sln --configuration Release --no-restore -p:Version=${{ needs.version.outputs.semver }}
 
-      - name: Test
+      # Split per target framework rather than one solution-wide run, for two reasons that only
+      # appeared once the net48 leg existed:
+      #
+      #   * both legs wrote the same LogFileName, so the second silently overwrote the first --
+      #     the uploaded Windows test-results artifact held net48 only;
+      #   * coverlet.collector 10.x ships no .NET Framework assets, so it is referenced for
+      #     net10.0 only (see tests/Directory.Build.props). Passing --collect to a solution-wide
+      #     run asked the net48 leg for a collector that cannot be there, and VSTest reported
+      #     "Unable to find a datacollector with friendly name 'XPlat Code Coverage'" on every
+      #     Windows run. Coverage was never actually lost; the message was noise, but noise that
+      #     reads like a broken build.
+      #
+      # TestTfmsInParallel is already false, so this changes ordering not at all -- the legs ran
+      # back to back before and still do.
+      - name: Test (net10.0)
         run: >
           dotnet test CanKit.Pro.sln
           --configuration Release
           --no-build
+          --framework net10.0
           -p:Version=${{ needs.version.outputs.semver }}
-          --logger "trx;LogFileName=test-results.trx"
+          --logger "trx;LogFileName=test-results-net10.0.trx"
           --collect:"XPlat Code Coverage"
+          --results-directory artifacts/test-results
+
+      # Windows only: net48 is where the netstandard2.0 assets actually execute. No --collect,
+      # for the reason above.
+      - name: Test (net48)
+        if: runner.os == 'Windows'
+        run: >
+          dotnet test CanKit.Pro.sln
+          --configuration Release
+          --no-build
+          --framework net48
+          -p:Version=${{ needs.version.outputs.semver }}
+          --logger "trx;LogFileName=test-results-net48.trx"
           --results-directory artifacts/test-results
 
       # An approval test that has no baseline yet writes what it saw; printing it means the
