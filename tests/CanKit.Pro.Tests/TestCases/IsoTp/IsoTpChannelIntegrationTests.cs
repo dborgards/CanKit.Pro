@@ -417,9 +417,19 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.Dispose();
         channel.Dispose();
 
-        // ReceiveAsync should now throw (channel disposed) rather than hang.
-        Func<Task> act = () => recvTask;
-        await act.Should().ThrowAsync<Exception>();
+        // Pinned to the exact failure ReceiveAsync documents for a disposed channel. "Any
+        // exception" would also have accepted the two outcomes this test exists to rule out: a
+        // ChannelClosedException leaking the inbox implementation to the caller, and an
+        // OperationCanceledException from the reader's own CTS, which callers would reasonably
+        // treat as "my token was cancelled, retry" rather than "this channel is finished".
+        // WaitAsync bounds the wait so a Dispose that fails to unblock the reader fails this
+        // test instead of hanging the run.
+        Func<Task> act = () => recvTask.WaitAsync(ShortTimeout);
+        var thrown = (await act.Should().ThrowAsync<InvalidOperationException>()).Which;
+        // BeOfType, not the ThrowAsync<T> above: ObjectDisposedException derives from
+        // InvalidOperationException and would satisfy it.
+        thrown.Should().BeOfType<InvalidOperationException>();
+        thrown.Message.Should().Contain("disposed");
     }
 
     // --------------------------------------------------------------------------------
@@ -705,14 +715,20 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
-    // Bugbot 3594960783 (HIGH) — a codec throw inside BeginSendOnLoop (e.g. > 4095 bytes
-    // on classic CAN triggers ArgumentOutOfRangeException from BuildFirstFrame) must
-    // (1) fault the awaiting SendAsync with the codec exception, (2) release the send-gate,
-    // and (3) leave the channel usable for subsequent sends -- rather than leaking _tx and
-    // hanging every future SendAsync forever behind the gate.
+    // A PDU longer than this channel's frame kind can address is rejected by SendAsync's own
+    // pre-check, before the send-gate is taken and before anything reaches the actor. That is
+    // the entire behaviour here, so it is asserted exactly: the specific exception, the
+    // parameter it names, and that nothing was put on the wire.
+    //
+    // This test used to be named for the codec throw inside BeginSendOnLoop (Bugbot 3594960783)
+    // and accepted any of three exception types. It never reached that code: SendAsync's
+    // pre-check enforces the same limit the codec does (MaxClassicFirstFrameLength = 4095), so
+    // an oversized PDU is refused two layers above the actor, and "any of three exception types"
+    // could not distinguish the layer it came from. The actor-side failure contract that Bugbot
+    // finding is about is asserted by the next test, over a failure that is actually reachable.
     // --------------------------------------------------------------------------------
     [Fact]
-    public async Task Send_Faults_On_Codec_Throw_And_Channel_Remains_Usable()
+    public async Task SendAsync_Rejects_Oversized_Pdu_Before_Anything_Reaches_The_Bus()
     {
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
@@ -724,26 +740,61 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var sender = IsoTpFactory.Open(busA, epAB, FastOptions());
         using var receiver = IsoTpFactory.Open(busB, epBA, FastOptions());
 
-        // >4095 bytes on classic-CAN forces BuildFirstFrame to throw ArgumentOutOfRangeException
-        // synchronously on the actor loop -- the exact "codec throws inside BeginSendOnLoop" path
-        // Bugbot flagged.
-        byte[] oversized = new byte[4096];
+        var framesOnWire = 0;
+        busB.FrameObserved += (_, _) => Interlocked.Increment(ref framesOnWire);
 
-        // WaitAsync bounds the wait: under the bug this SendAsync would hang forever because
-        // the actor's synchronous BuildFirstFrame throw is swallowed by
-        // BackgroundExceptionOccurred without ever completing the TCS.
+        // One byte more than the 12-bit classic First-Frame length field can announce.
+        byte[] oversized = new byte[IsoTpFrameCodec.MaxClassicFirstFrameLength + 1];
+
         Func<Task> act = () => sender.SendAsync(oversized).WaitAsync(ShortTimeout);
-        var caught = (await act.Should().ThrowAsync<Exception>()).Which;
-        // Codec-thrown ArgumentOutOfRangeException surfaces directly (wrapped only in the actor's
-        // synchronous invocation path; unwrapped as-is by FailTx -> TCS -> await).
-        caught.Should().Match(e =>
-            e is ArgumentOutOfRangeException
-            || e is IsoTpException
-            || e is InvalidOperationException,
-            "codec throw must fault the awaiting SendAsync, not hang it");
+        var thrown = (await act.Should().ThrowAsync<ArgumentOutOfRangeException>()).Which;
+        thrown.ParamName.Should().Be("pdu");
 
-        // The gate MUST be released and _tx cleared. A normal send after the failure must
-        // succeed within the same short timeout.
+        Volatile.Read(ref framesOnWire).Should().Be(0,
+            "the length check runs before the send-gate, so no frame is ever built or transmitted");
+
+        // The rejected call must not have consumed the send-gate: a normal send still works.
+        var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        byte[] normal = { 0x11, 0x22, 0x33 };
+        await sender.SendAsync(normal).WaitAsync(ShortTimeout);
+        (await recvTask).Should().Equal(normal);
+    }
+
+    // --------------------------------------------------------------------------------
+    // Bugbot 3594960783 (HIGH), the reachable half — when a send fails *after* the actor has
+    // taken ownership of the PDU (here: the bus layer throws out of SendConfirmed), the channel
+    // must (1) fault the awaiting SendAsync with that exact exception, (2) release the send-gate
+    // and clear _tx, and (3) stay usable — rather than reporting the failure only through
+    // BackgroundExceptionOccurred and hanging every future SendAsync behind the gate.
+    //
+    // The failure is injected at the bus layer because that is the only way in: SendAsync's
+    // pre-check duplicates the codec's own length limit, so no PDU that reaches BeginSendOnLoop
+    // can make the codec throw. Asserting the exact exception is what gives this test teeth --
+    // a channel that swallowed it, rewrote it as a generic IsoTpException, or completed the send
+    // anyway all fail here.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task Send_Faults_With_The_Bus_Layer_Exception_And_Channel_Remains_Usable()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epAB = IsoTpEndpoint.Normal(0x210, 0x211);
+        var epBA = IsoTpEndpoint.Normal(0x211, 0x210);
+
+        using var svcA = new CanBusService(busA);
+        var failing = new ThrowOnFirstConfirmService(svcA, new InvalidOperationException("bus-layer boom"));
+
+        using var sender = IsoTpFactory.Open(failing, epAB, FastOptions(), leaveOpen: true);
+        using var receiver = IsoTpFactory.Open(busB, epBA, FastOptions());
+
+        Func<Task> act = () => sender.SendAsync(new byte[] { 1, 2, 3 }).WaitAsync(ShortTimeout);
+        var thrown = (await act.Should().ThrowAsync<InvalidOperationException>()).Which;
+        thrown.Message.Should().Be("bus-layer boom",
+            "the failure the bus layer reported must reach the caller unrewritten");
+
+        // Gate free and _tx cleared: the very next send goes through end to end.
         var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
         byte[] normal = { 0x11, 0x22, 0x33 };
         await sender.SendAsync(normal).WaitAsync(ShortTimeout);
@@ -1267,6 +1318,53 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         await Task.Delay(50);
         Volatile.Read(ref fcCount).Should().Be(3);
+    }
+
+    /// <summary>
+    /// Test double: the first <see cref="ICanBusService.SendConfirmed"/> call throws the supplied
+    /// exception instead of transmitting; every later call is forwarded to the inner service
+    /// untouched. Models the L2/driver layer failing outright — as opposed to reporting a
+    /// <see cref="TxConfirmation"/> that says the send failed — which is the one failure a
+    /// channel's send can hit *after* the actor already owns the PDU.
+    /// </summary>
+    private sealed class ThrowOnFirstConfirmService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly Exception _failure;
+        private int _calls;
+
+        public ThrowOnFirstConfirmService(ICanBusService inner, Exception failure)
+        {
+            _inner = inner;
+            _failure = failure;
+        }
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
+            => _inner.Subscribe(predicate, bufferCapacity);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
+            => _inner.Subscribe(filter, bufferCapacity);
+
+        public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _calls) == 1) throw _failure;
+            return _inner.SendConfirmed(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() { /* wrapper: the test owns and disposes the inner service */ }
     }
 
     /// <summary>

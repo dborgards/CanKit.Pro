@@ -94,6 +94,11 @@ Every behavioural change needs a test, and tests here are expected to be determi
 - **No hardware, no timing luck.** Use the `virtual://` loopback adapter for anything about real
   bus behaviour, and `ControllableBus` (`tests/CanKit.Pro.Tests/Infrastructure/`) when the test
   needs to control what the bus does — echo frames, bus state, whether a transmit is accepted.
+  `ControllableBus.DeferredEchoCapable(...)` parks each TX echo in a `DeferredEchoQueue` instead
+  of raising it inside `Transmit`, which is the only way to have two sends pending at once: a
+  synchronous echo re-enters `CanBusService`'s pending-send lock on the transmitting thread, so
+  the pending list never holds more than that thread's own entry. Reach for it whenever the
+  behaviour under test is about how several in-flight sends relate to each other.
 - **Do not test through an adapter's internals.** If a test needs reflection into another
   package's private state, it is testing that package, not ours; drive the scenario through the
   double instead.

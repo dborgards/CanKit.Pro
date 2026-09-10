@@ -10,6 +10,27 @@ using CanKit.Abstractions.API.Common.Definitions;
 namespace CanKit.Pro.Tests.Infrastructure;
 
 /// <summary>
+/// When the TX echo of an accepted transmit reaches <see cref="ICanBus.FrameObserved"/>.
+/// </summary>
+public enum EchoDelivery
+{
+    /// <summary>
+    /// Raised from inside <see cref="ControllableBus.Transmit(in CanFrame)"/> — on the
+    /// transmitting thread, inside whatever lock the caller holds while transmitting. What a real
+    /// echo-mode adapter (CanKit.Adapter.Virtual in <c>ChannelWorkMode.Echo</c>) does, and what
+    /// makes the reentrancy in <c>CanBusService.SendWithEchoConfirmAsync</c> observable.
+    /// </summary>
+    Synchronous,
+
+    /// <summary>
+    /// Parked in <see cref="ControllableBus.DeferredEchoes"/> instead of being raised. The test
+    /// chooses when each echo is delivered, which lets more than one pending send exist at once —
+    /// see <see cref="DeferredEchoQueue"/> for why that is not achievable synchronously.
+    /// </summary>
+    Deferred,
+}
+
+/// <summary>
 /// An <see cref="ICanBus"/> the test drives directly: it decides whether a transmit is accepted,
 /// whether (and when) a TX echo comes back, and what <see cref="BusState"/> the controller reports.
 ///
@@ -40,10 +61,12 @@ public sealed class ControllableBus : ICanBus
     private readonly IBusRTOptionsConfigurator _options;
     private int _disposed;
 
-    private ControllableBus(ICanBus configurationSource)
+    private ControllableBus(ICanBus configurationSource, EchoDelivery echoDelivery)
     {
         _configurationSource = configurationSource;
         _options = new EchoCapableOptions(configurationSource.Options);
+        EchoMode = echoDelivery;
+        DeferredEchoes = new DeferredEchoQueue(frame => RaiseObserved(frame, isEcho: true));
         // What a healthy CAN controller reports; tests move it from here.
         BusState = BusState.ErrActive;
     }
@@ -51,18 +74,46 @@ public sealed class ControllableBus : ICanBus
     /// <summary>
     /// Creates a double whose <see cref="Options"/> report <c>ChannelWorkMode.Echo</c> and the
     /// <c>CanFeature.Echo</c> capability — the combination that makes <c>SendConfirmed</c> take
-    /// the real-echo-matching path (FR-RAW-031).
+    /// the real-echo-matching path (FR-RAW-031) — and that echoes synchronously from inside
+    /// <see cref="Transmit(in CanFrame)"/>, exactly as a real echo-mode adapter does.
     /// </summary>
     public static ControllableBus EchoCapable(string session)
-        => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo));
+        => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo), EchoDelivery.Synchronous);
 
-
+    /// <summary>
+    /// Same echo-capable configuration as <see cref="EchoCapable"/>, but every accepted transmit's
+    /// echo is parked in <see cref="DeferredEchoes"/> until the test releases it.
+    /// </summary>
+    /// <remarks>
+    /// Use this whenever the behaviour under test needs two or more sends to be pending at the
+    /// same time. A synchronous echo makes that impossible — it re-enters
+    /// <c>CanBusService</c>'s pending-send lock on the transmitting thread before that thread ever
+    /// leaves <c>Transmit</c>, so the pending list only ever holds the entry belonging to the
+    /// thread currently inside it, no matter how many callers race. See
+    /// <see cref="DeferredEchoQueue"/>.
+    /// </remarks>
+    public static ControllableBus DeferredEchoCapable(string session)
+        => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo), EchoDelivery.Deferred);
 
     /// <summary>Whether <see cref="Transmit(in CanFrame)"/> reports the frame as accepted.</summary>
     public bool AcceptTransmit { get; set; } = true;
 
     /// <summary>Whether an accepted frame is echoed back through <see cref="FrameObserved"/>.</summary>
     public bool EchoAcceptedFrames { get; set; } = true;
+
+    /// <summary>
+    /// Whether an accepted frame's echo is raised inside <see cref="Transmit(in CanFrame)"/> or
+    /// parked in <see cref="DeferredEchoes"/>. Settable mid-test so a scenario can, for example,
+    /// let the first send confirm normally and only defer the ones it needs to overlap.
+    /// </summary>
+    public EchoDelivery EchoMode { get; set; }
+
+    /// <summary>
+    /// Echoes parked by <see cref="EchoDelivery.Deferred"/> mode, and the handle that releases
+    /// them. Always present; stays empty while <see cref="EchoMode"/> is
+    /// <see cref="EchoDelivery.Synchronous"/>.
+    /// </summary>
+    public DeferredEchoQueue DeferredEchoes { get; }
 
     /// <summary>Number of frames handed to <see cref="Transmit(in CanFrame)"/>.</summary>
     public int TransmitCount => Volatile.Read(ref _transmitCount);
@@ -92,9 +143,17 @@ public sealed class ControllableBus : ICanBus
         Interlocked.Increment(ref _transmitCount);
         if (!AcceptTransmit) return 0;
 
-        // A real echo-mode adapter delivers the echo synchronously from inside Transmit; matching
-        // that is what makes the reentrancy in CanBusService.SendWithEchoConfirmAsync observable.
-        if (EchoAcceptedFrames) RaiseObserved(frame, isEcho: true);
+        if (EchoAcceptedFrames)
+        {
+            // Synchronous is the default because that is what a real echo-mode adapter does, and
+            // matching it is what makes the reentrancy in CanBusService.SendWithEchoConfirmAsync
+            // observable. Deferred parks the echo instead, so the caller leaves Transmit — and
+            // releases the service's pending-send lock — with its entry still pending; see
+            // DeferredEchoQueue for why some FR-RAW-031 behaviour is only reachable that way.
+            if (EchoMode == EchoDelivery.Deferred) DeferredEchoes.Park(frame);
+            else RaiseObserved(frame, isEcho: true);
+        }
+
         return 1;
     }
 

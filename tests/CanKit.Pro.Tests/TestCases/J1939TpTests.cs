@@ -508,6 +508,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
 
+        var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
         {
@@ -515,17 +516,21 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
             if (fields.SourceAddress != senderSa || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
             var data = e.CanFrame.Data.ToArray();
-            if (data.Length >= 8 && data[0] == J1939TpFrames.ControlAbort
-                && J1939TpFrames.ReadDataPgn(data) == pgn)
-                abortSeen.TrySetResult(data);
+            if (data.Length < 8 || J1939TpFrames.ReadDataPgn(data) != pgn) return;
+            if (data[0] == J1939TpFrames.ControlRts) rtsSeen.TrySetResult(data);
+            if (data[0] == J1939TpFrames.ControlAbort) abortSeen.TrySetResult(data);
         };
 
         // Peer never replies with CTS, so the session stays open after RTS until we cancel.
         using var cts = new CancellationTokenSource();
         var send = sender.SendCmAsync(pgn, destinationAddress: peerSa, RandomPayload(50, seed: 71), cts.Token);
 
-        // Wait until RTS has hit the wire (actor has registered the TX session).
-        await Task.Delay(50);
+        // Cancel only once the RTS is actually on the wire, i.e. the actor has registered the TX
+        // session there is something to abort. Waiting for the frame instead of 50 ms removes
+        // both failure modes of the delay: cancelling too early on a loaded machine (nothing
+        // registered yet, so no Connection Abort is due and the test fails for the wrong reason),
+        // and spending 50 ms per run when the RTS is out in microseconds.
+        await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
         cts.Cancel();
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);

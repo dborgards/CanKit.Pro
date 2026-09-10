@@ -791,9 +791,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     //
     // The pre-fix window between Open and Task.Run(Dispose) is sub-millisecond on the
     // virtual bus, so this test cannot deterministically reproduce the race on every run;
-    // it pins the correctness invariant (received <= sent) across many claim/re-claim
-    // cycles under continuous broadcast BAM traffic. The synchronous-dispose fix makes the
-    // invariant hold by construction.
+    // it pins the correctness invariant across many claim/re-claim cycles under continuous
+    // broadcast BAM traffic. The synchronous-dispose fix makes the invariant hold by
+    // construction.
+    //
+    // Each BAM carries its own sequence number, and the invariant is stated per sequence
+    // number rather than as a count comparison. "received <= sent" was too weak twice over:
+    // a build that dropped *every* BAM satisfied it, and so did one that delivered BAM 7
+    // twice while losing BAM 8. Both are now failures — the first through the delivery floor
+    // below, the second because a duplicate sequence number is what "delivered twice"
+    // actually means.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task RebindTransport_DoesNotDeliverBamMoreThanOncePerRebind()
@@ -811,16 +818,19 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         };
         using var node = J1939Node.Open(busNode, opts);
 
-        int received = 0;
+        // Every delivered BAM is recorded by the sequence number it carries, so a duplicate is
+        // identifiable as such instead of only showing up as "one more than expected".
+        var receivedSeqs = new List<int>();
+        var receivedGate = new object();
         node.MessageReceived += (_, m) =>
         {
-            if (m.Pgn == 0xFED1u) Interlocked.Increment(ref received);
+            if (m.Pgn != 0xFED1u) return;
+            var seq = BitConverter.ToInt32(m.Payload.Span.Slice(0, 4));
+            lock (receivedGate) receivedSeqs.Add(seq);
         };
 
         using var peerTp = CanKit.Pro.J1939Tp.J1939Tp.Open(busPeer, sourceAddress: 0x77,
             new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(2)));
-        var payload = new byte[12];
-        for (int b = 0; b < payload.Length; b++) payload[b] = (byte)(0xE0 + b);
 
         int sent = 0;
         using var peerCts = new CancellationTokenSource();
@@ -830,6 +840,12 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             {
                 while (!peerCts.IsCancellationRequested)
                 {
+                    // 12 bytes, so still a genuine multi-frame BAM; the first four carry the
+                    // sequence number and the rest is the same filler as before.
+                    var payload = new byte[12];
+                    BitConverter.TryWriteBytes(payload.AsSpan(0, 4), Volatile.Read(ref sent));
+                    for (int b = 4; b < payload.Length; b++) payload[b] = (byte)(0xE0 + b);
+
                     await peerTp.SendBamAsync(pgn: 0xFED1u, payload, peerCts.Token)
                         .ConfigureAwait(false);
                     Interlocked.Increment(ref sent);
@@ -857,21 +873,30 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await Task.Delay(150);
 
         int finalSent = Volatile.Read(ref sent);
-        int finalReceived = Volatile.Read(ref received);
+        List<int> delivered;
+        lock (receivedGate) delivered = new List<int>(receivedSeqs);
 
-        // The received count must never exceed sent: any excess means a rebind delivered
-        // the same broadcast BAM through two overlapping node-side transports. (Received <
-        // sent is expected — BAMs whose DT frames land during the ~ms rebind window get
-        // aborted / dropped by the disposed channel and never reassembled by the new one.
-        // The bug we are guarding against is duplicate delivery, not loss.)
-        finalReceived.Should().BeLessOrEqualTo(finalSent,
-            "no broadcast TP.BAM may be surfaced twice — before the fix, the fire-and-" +
-            "forget Dispose of the previous channel overlapped a freshly-opened channel " +
-            "and both subscriptions delivered the same reassembled datagram");
         // Sanity: this test is only meaningful if the peer actually managed to run many
         // BAMs across the rebind cycles.
         finalSent.Should().BeGreaterThan(5,
             "the peer must generate enough BAM traffic to exercise the rebind window");
+
+        // The actual invariant. Before the fix, the fire-and-forget Dispose of the previous
+        // channel overlapped a freshly-opened one and both subscriptions delivered the same
+        // reassembled datagram — which shows up here as the same sequence number twice.
+        delivered.Should().OnlyHaveUniqueItems(
+            "no broadcast TP.BAM may be surfaced twice, and each carries its own sequence number");
+        delivered.Should().OnlyContain(seq => seq >= 0 && seq < finalSent,
+            "every delivered datagram must be one the peer actually sent, reassembled intact");
+
+        // Loss is expected and allowed: BAMs whose DT frames land during the ~ms rebind window
+        // are dropped by the disposed channel and never reassembled by the new one. Losing
+        // *everything* is not — that would be a node that stopped receiving broadcasts after
+        // the first rebind, which the old "received <= sent" assertion accepted silently. Half
+        // is a deliberately loose floor: there are 16 rebinds and each can cost at most the one
+        // BAM in flight across it, so anything near half means something is broken, not busy.
+        delivered.Should().HaveCountGreaterThan(finalSent / 2,
+            "rebinding may drop the BAM in flight across each window, but must not stop delivery");
     }
 
     // ---------------------------------------------------------------------------------------

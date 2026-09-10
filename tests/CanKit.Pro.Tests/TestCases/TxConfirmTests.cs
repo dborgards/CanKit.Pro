@@ -29,6 +29,12 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
     private static ControllableBus OpenEcho() => ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("txconfirm"));
 
+    private static ControllableBus OpenDeferredEcho()
+        => ControllableBus.DeferredEchoCapable(VirtualAdapterFixture.NewSession("txconfirm"));
+
+    // Only ever a bound against a hang: every wait below is on an event the test itself caused.
+    private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
+
     // FR-RAW-030/032: without echo, SendConfirmed resolves as soon as the driver accepts the
     // frame, explicitly marked as an approximation.
     [Fact]
@@ -59,14 +65,71 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         result.FailureReason.Should().Be(TxConfirmFailureReason.None);
     }
 
-    // FR-RAW-031: concurrent, byte-identical sends must each be matched to their own confirmation
-    // -- no cross-matching, no crash. This is the exact class of bug the review flagged for the
-    // ISO-TP prototype's deadline queue crashing on identical in-flight frames. Launched via
-    // Task.Run so they can genuinely interleave across real threads; the echo is delivered
-    // synchronously inside Transmit (as a real echo-mode adapter does), so true overlap of pending
-    // registrations isn't guaranteed on every single run, but this still exercises the exact
-    // thread-safety-sensitive paths (concurrent register/match/remove under the service's pending
-    // registry lock) end to end.
+    // FR-RAW-031, the actual FIFO assertion: with several byte-identical sends pending at once,
+    // the n-th echo must confirm the n-th *transmitted* send. Nothing else can tell the callers
+    // apart -- the frames are identical on the wire and the TxConfirmations they receive are
+    // identical too -- so the only observable of "matched FIFO" is which caller's task completes
+    // when, and that is exactly what this asserts.
+    //
+    // This needs ControllableBus in Deferred echo mode. With the synchronous echo a real adapter
+    // delivers, the echo re-enters CanBusService's pending-send lock on the transmitting thread
+    // before that thread leaves Transmit, so the pending list holds exactly one entry -- that
+    // thread's own -- for the entire match. Every FIFO ordering rule is then vacuously satisfied
+    // and the test cannot fail however the matching code is written (see DeferredEchoQueue).
+    [Fact]
+    public async Task Echo_Bus_Matches_Identical_Pending_Sends_In_Fifo_Order()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        const int n = 4;
+        var frame = CanFrame.Classic(0x500, new byte[] { 42 });
+
+        // Long per-call timeout: the sends must still be pending when the last one registers, and
+        // the only thing that may ever complete one is an echo this test releases.
+        var sends = new Task<TxConfirmation>[n];
+        for (var i = 0; i < n; i++)
+        {
+            sends[i] = service.SendConfirmed(frame, TimeSpan.FromSeconds(30));
+            // A parked echo means Transmit ran, which CanBusService does after registering the
+            // pending entry -- so this waits on registration order, not on wall-clock luck.
+            await sender.DeferredEchoes.WaitForEnqueuedAsync(i + 1, ShortTimeout);
+        }
+
+        sender.DeferredEchoes.Count.Should().Be(n, "no echo has been released yet");
+        sends.Should().OnlyContain(t => !t.IsCompleted,
+            "a send may only resolve once its own echo comes back");
+
+        for (var i = 0; i < n; i++)
+        {
+            sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+
+            // WhenAny over everything still outstanding, rather than awaiting sends[i] directly:
+            // a LIFO (or arbitrary) match resolves the *wrong* caller, and this reports that as
+            // "the wrong send was confirmed" immediately instead of as a timeout minutes later.
+            var completed = await Task.WhenAny(sends.Skip(i)).WaitAsync(ShortTimeout);
+            completed.Should().BeSameAs(sends[i],
+                "the {0}. echo must confirm the {0}. transmitted send, not a later one", i + 1);
+
+            var confirmation = await completed;
+            confirmation.Confirmed.Should().BeTrue();
+            confirmation.IsApproximated.Should().BeFalse();
+            confirmation.FailureReason.Should().Be(TxConfirmFailureReason.None);
+
+            for (var later = i + 1; later < n; later++)
+                sends[later].IsCompleted.Should().BeFalse(
+                    "one echo confirms exactly one send, so send {0} must still be pending", later);
+        }
+    }
+
+    // FR-RAW-031 under real concurrency: byte-identical sends racing across threads must each get
+    // their own confirmation -- no cross-matching, no crash. This is the exact class of bug the
+    // review flagged for the ISO-TP prototype's deadline queue crashing on identical in-flight
+    // frames. Deliberately kept on the *synchronous* echo bus: that is the reentrant
+    // register-transmit-match-remove path a real echo-mode adapter drives, and this test exists to
+    // hammer it from many threads at once. It says nothing about FIFO ordering -- with a
+    // synchronous echo there is never more than one pending entry to order. The test above is
+    // where ordering is proven.
     [Fact]
     public async Task Echo_Bus_Matches_Concurrent_Identical_Frames_Individually_Without_Crashing()
     {
