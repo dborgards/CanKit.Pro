@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  # A merge queue builds `main` plus the queued pull requests together and merges only if that
+  # combination is green. Without this trigger the queue would find no checks on its temporary
+  # `gh-readonly-queue/...` branch and stall every entry until the timeout.
+  #
+  # The reason it exists: #81 and #83 were each green and merged four minutes apart, and their
+  # combination broke the net48 leg on `main` (#85). Neither pull request was ever built against
+  # the other. Nothing below is event-specific, so the same jobs cover this trigger unchanged --
+  # `github.ref` is the queue's own branch, which keeps the concurrency group per entry, and the
+  # version job already tolerates a git shape GitVersion cannot name.
+  merge_group:
   workflow_dispatch:
 
 concurrency:
