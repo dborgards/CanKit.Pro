@@ -46,12 +46,17 @@ CODE = re.compile(r"```.*?```|(?<!\\)`[^`\n]*(?<!\\)`", re.DOTALL)
 
 # A dotted name as the generator escapes it: "CanKit\.Abstractions\.API\.Can\.ICanBus\.ReceiveAsync"
 # optionally followed by an escaped parameter list.
-# The trailing entity catches the halves a generic is split into: the generator emits
-# "System.Nullable<", the argument, and ">" as three separate links.
+# The trailing bracket catches the halves a generic is split into: the generator emits
+# "System.Nullable<", the argument, and ">" as three separate links. Both spellings of an angle
+# bracket are accepted here and in ANGLE below. The generator writes `&lt;` inside link text and
+# `\<` everywhere else, so shortening (which only ever reads link text) and fix_escaped_angles
+# (which never touches a link's target or title) do not in fact overlap — but neither pass should
+# depend on the other having run, or on that split staying the way it is.
+ANGLE = re.compile(r"&lt;|&gt;|\\<|\\>")
 QUALIFIED_NAME = re.compile(
     r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\\\.[A-Za-z_][A-Za-z0-9_]*)+)"
     r"(?P<params>\\\(.*\\\))?"
-    r"(?P<suffix>&lt;|&gt;)?$"
+    r"(?P<suffix>&lt;|&gt;|\\<|\\>)?$"
 )
 
 
@@ -121,7 +126,7 @@ def simple_name(text: str, entities: set[str]) -> str:
     params = parsed["params"] or ""
     # Each argument loses its namespace too — but only when none of them is itself generic, where
     # splitting on the comma would cut a type argument list in half.
-    if params and "&lt;" not in params and "&gt;" not in params:
+    if params and not ANGLE.search(params):
         arguments = (argument.split(".")[-1].strip() for argument in params[2:-2].split(","))
         params = "\\(" + ", ".join(arguments) + "\\)"
     keep = 2 if (params or "\\.".join(segments[:-1]) in entities) else 1
