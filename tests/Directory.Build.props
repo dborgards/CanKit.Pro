@@ -29,6 +29,15 @@
     -->
     <TargetFrameworks>net10.0</TargetFrameworks>
     <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows')) OR '$(CanKitProTestNetFrameworkLeg)' == 'true'">net10.0;net48</TargetFrameworks>
+    <!--
+      `dotnet test` runs a project's target frameworks in parallel by default. This suite measures
+      protocol timing (see the comment in CanKit.Pro.Tests.csproj, which is why collection
+      parallelism is off in xunit.runner.json), and two legs racing each other on a three-core
+      runner would put back exactly the contention that setting removes — worse, because the
+      second leg is a whole second test host rather than another thread. One leg at a time; it
+      costs about a minute of wall clock on the Windows job and nothing anywhere else.
+    -->
+    <TestTfmsInParallel>false</TestTfmsInParallel>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
