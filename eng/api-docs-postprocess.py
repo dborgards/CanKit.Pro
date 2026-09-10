@@ -31,6 +31,29 @@ from pathlib import Path
 # links files already carry those renamed.
 SAME_DIR_LINK = re.compile(r"\]\((?P<file>[^()\s/#]+\.md)(?=[#)\s])")
 
+# A reference the generator could not resolve, rendered as a learn.microsoft.com link. Its text is
+# the full name of the target, which is far too long to read inside a sentence. The quoted title is
+# always present in the generator's output, which is what bounds the URL match.
+UPSTREAM_LINK = re.compile(
+    r"\[(?P<text>(?:[^\[\]\\]|\\.)*)\]"
+    r"\((?P<url>https://learn\.microsoft\.com/en-us/dotnet/api/[^\s]*?) '(?P<title>[^']*)'\)"
+)
+
+# Fenced blocks and code spans, whose contents are copied verbatim and must not be rewritten. An
+# escaped backtick opens nothing — the generator writes the arity of a generic that way
+# (``System\.Func\`1``), and pairing those up would swallow half a line of real text.
+CODE = re.compile(r"```.*?```|(?<!\\)`[^`\n]*(?<!\\)`", re.DOTALL)
+
+# A dotted name as the generator escapes it: "CanKit\.Abstractions\.API\.Can\.ICanBus\.ReceiveAsync"
+# optionally followed by an escaped parameter list.
+# The trailing entity catches the halves a generic is split into: the generator emits
+# "System.Nullable<", the argument, and ">" as three separate links.
+QUALIFIED_NAME = re.compile(
+    r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\\\.[A-Za-z_][A-Za-z0-9_]*)+)"
+    r"(?P<params>\\\(.*\\\))?"
+    r"(?P<suffix>&lt;|&gt;)?$"
+)
+
 
 def rename(base: str, package: str) -> str:
     """Map a generated file name to its published one, within `package`."""
@@ -46,6 +69,74 @@ def rename(base: str, package: str) -> str:
 
 def rewrite_links(text: str, package: str) -> str:
     return SAME_DIR_LINK.sub(lambda m: "](" + rename(m["file"], package), text)
+
+
+def outside_code(text: str, transform) -> str:
+    """Apply `transform` to everything that is not a fenced block or a code span."""
+    out = []
+    last = 0
+    for match in CODE.finditer(text):
+        out.append(transform(text[last : match.start()]))
+        out.append(match.group(0))
+        last = match.end()
+    out.append(transform(text[last:]))
+    return "".join(out)
+
+
+def fix_escaped_angles(text: str) -> str:
+    r"""Turn the generator's `\<` and `\>` into entities.
+
+    The generator escapes every character it considers markdown-significant, angle brackets
+    included. Python-Markdown honours `\>` but not `\<` — `<` is not in its escapable set — so a
+    generic like `Nullable\<TimeSpan\>` renders with a visible backslash in headings and in the
+    table of contents. Entities say the same thing in a way both agree on.
+    """
+    return outside_code(text, lambda part: part.replace(r"\<", "&lt;").replace(r"\>", "&gt;"))
+
+
+def shorten_upstream_links(text: str, entities: set[str]) -> str:
+    """Display upstream references by their simple name, without touching the link itself.
+
+    The generator writes the full name of anything it cannot resolve into the link text, so a
+    sentence ends up carrying `CanKit.Abstractions.API.Can.ICanBus.ReceiveAsync(System.Int32,
+    System.Int32, System.Threading.CancellationToken)`. A member keeps its declaring type
+    (`ICanBus.ReceiveAsync(Int32, Int32, CancellationToken)`), a type keeps only its own name
+    (`ICanBus`). A name is a member when the corpus links its container as an entity of its own, or
+    when it carries a parameter list — namespaces are never linked, so this cannot mistake one for
+    a type. Anything that does not parse as a dotted name is left exactly as it was.
+    """
+
+    def replace(match: re.Match) -> str:
+        short = simple_name(match["text"], entities)
+        return f"[{short}]({match['url']} '{match['title']}')"
+
+    return UPSTREAM_LINK.sub(replace, text)
+
+
+def simple_name(text: str, entities: set[str]) -> str:
+    parsed = QUALIFIED_NAME.match(text)
+    if not parsed:
+        return text
+    segments = parsed["name"].split("\\.")
+    params = parsed["params"] or ""
+    # Each argument loses its namespace too — but only when none of them is itself generic, where
+    # splitting on the comma would cut a type argument list in half.
+    if params and "&lt;" not in params and "&gt;" not in params:
+        arguments = (argument.split(".")[-1].strip() for argument in params[2:-2].split(","))
+        params = "\\(" + ", ".join(arguments) + "\\)"
+    keep = 2 if (params or "\\.".join(segments[:-1]) in entities) else 1
+    return "\\.".join(segments[-keep:]) + params + (parsed["suffix"] or "")
+
+
+def collect_entities(api_dir: Path) -> set[str]:
+    """Every upstream name the corpus links, so a container can be told from a namespace."""
+    entities = set()
+    for page in api_dir.glob("*/*.md"):
+        for match in UPSTREAM_LINK.finditer(page.read_text(encoding="utf-8")):
+            parsed = QUALIFIED_NAME.match(match["text"])
+            if parsed and not parsed["params"]:
+                entities.add(parsed["name"])
+    return entities
 
 
 def promote_headings(text: str) -> str:
@@ -118,15 +209,22 @@ def do_pages(api_dir: Path, packages: list[str]) -> None:
         package_dir = api_dir / package
         if not package_dir.is_dir():
             raise SystemExit(f"{package_dir} does not exist — did the generator run?")
-
         for page in sorted(package_dir.glob("*.md")):
             new_name = rename(page.name, package)
             if new_name != page.name:
-                page = page.replace(package_dir / new_name)
+                page.replace(package_dir / new_name)
+
+    # Which upstream names are entities rather than namespaces can only be told from the corpus as
+    # a whole, so the rewriting waits until every package has been generated and renamed.
+    entities = collect_entities(api_dir)
+
+    for package in packages:
+        package_dir = api_dir / package
 
         for page in sorted(package_dir.glob("*.md")):
             text = rewrite_links(page.read_text(encoding="utf-8"), package)
-            page.write_text(promote_headings(text), encoding="utf-8")
+            text = shorten_upstream_links(text, entities)
+            page.write_text(fix_escaped_angles(promote_headings(text)), encoding="utf-8")
 
         index = package_dir / "index.md"
         if not index.exists():
