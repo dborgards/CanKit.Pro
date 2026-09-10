@@ -1,19 +1,28 @@
-enum CanKit.Pro.Actor.ActorExecutionMode : Int32
-  field CanKit.Pro.Actor.ActorExecutionMode DedicatedThread
-  field CanKit.Pro.Actor.ActorExecutionMode SynchronizationContext
-  field CanKit.Pro.Actor.ActorExecutionMode ThreadPool
-interface CanKit.Pro.Actor.IProtocolActor
-  event System.EventHandler<System.Exception> BackgroundExceptionOccurred
-  method System.IDisposable Schedule(System.TimeSpan delay, System.Action callback)
-  method System.Threading.Tasks.Task PostAsync(System.Action work)
-  method System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work)
-  method System.Void Post(System.Action work)
-class CanKit.Pro.Actor.ProtocolActor
-  ctor (CanKit.Pro.Actor.ActorExecutionMode mode, System.Threading.SynchronizationContext synchronizationContext)
-  event System.EventHandler<System.Exception> BackgroundExceptionOccurred
-  method System.IDisposable Schedule(System.TimeSpan delay, System.Action callback)
-  method System.Threading.Tasks.Task PostAsync(System.Action work)
-  method System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work)
-  method System.Void Dispose()
-  method System.Void Post(System.Action work)
-  prop System.Boolean IsOnCurrentActor {get}
+namespace CanKit.Pro.Actor
+{
+    public enum ActorExecutionMode
+    {
+        DedicatedThread = 0,
+        ThreadPool = 1,
+        SynchronizationContext = 2,
+    }
+    public interface IProtocolActor : System.IDisposable
+    {
+        event System.EventHandler<System.Exception> BackgroundExceptionOccurred;
+        void Post(System.Action work);
+        System.Threading.Tasks.Task PostAsync(System.Action work);
+        System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work);
+        System.IDisposable Schedule(System.TimeSpan delay, System.Action callback);
+    }
+    public sealed class ProtocolActor : CanKit.Pro.Actor.IProtocolActor, System.IDisposable
+    {
+        public ProtocolActor(CanKit.Pro.Actor.ActorExecutionMode mode = 0, System.Threading.SynchronizationContext? synchronizationContext = null) { }
+        public bool IsOnCurrentActor { get; }
+        public event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
+        public void Dispose() { }
+        public void Post(System.Action work) { }
+        public System.Threading.Tasks.Task PostAsync(System.Action work) { }
+        public System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work) { }
+        public System.IDisposable Schedule(System.TimeSpan delay, System.Action callback) { }
+    }
+}

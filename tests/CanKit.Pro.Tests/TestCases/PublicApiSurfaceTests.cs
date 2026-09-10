@@ -3,20 +3,30 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using FluentAssertions;
+using PublicApiGenerator;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases;
 
 /// <summary>
-/// Public-API tracking for the published CanKit.Pro L2 packages (1.0 readiness, Phase D):
-/// renders each assembly's public surface (types + public/protected member signatures) and
-/// compares it against the checked-in approved file under
+/// Public-API tracking for the published CanKit.Pro packages: renders each assembly's public
+/// surface as C# declarations and compares it against the checked-in approved file under
 /// <c>tests/CanKit.Pro.Tests/ApiApprovals/&lt;PackageId&gt;.approved.txt</c>. Any API change
 /// fails the test and drops a <c>.received.txt</c> next to the approval so the reviewer can
 /// see exactly what changed — updating the approval is a deliberate act in the same PR.
 /// </summary>
+/// <remarks>
+/// The rendering comes from <see href="https://github.com/PublicApiGenerator/PublicApiGenerator">
+/// PublicApiGenerator</see> rather than from reflection walked by hand. The hand-rolled renderer
+/// this replaces printed a type's kind, its name and its member signatures and nothing else, so
+/// six kinds of breaking change slipped past it unchanged: sealing a type or dropping
+/// <c>abstract</c>, removing a base type or an implemented interface, changing or deleting a
+/// parameter default, flipping an <c>in</c>/<c>ref</c>/<c>out</c> modifier, adding or removing an
+/// attribute (<c>[Obsolete]</c>, <c>[Flags]</c>), and tightening a nullable annotation.
+/// PublicApiGenerator reports all six, because it emits compilable C# declarations rather than a
+/// summary of them.
+/// </remarks>
 public class PublicApiSurfaceTests
 {
     private static readonly (string PackageId, string AssemblyName)[] Tracked =
@@ -82,88 +92,35 @@ public class PublicApiSurfaceTests
 
     // Canonical, diff-stable rendering of the assembly's public API.
     private static string Render(Assembly assembly)
+        => assembly.GeneratePublicApi(RenderOptions);
+
+    private static readonly ApiGeneratorOptions RenderOptions = new()
     {
-        var sb = new StringBuilder();
-        foreach (var type in assembly.GetExportedTypes().OrderBy(t => t.FullName, StringComparer.Ordinal))
-        {
-            sb.AppendLine(FormatType(type));
-            foreach (var member in FormatMembers(type))
-            {
-                sb.AppendLine("  " + member);
-            }
-        }
-        return sb.ToString();
-    }
+        // Assembly-level attributes are left out on purpose. They carry the build's version
+        // (AssemblyVersion, AssemblyInformationalVersion), and nothing in this repository computes
+        // that inside the build — it is 0.0.0 locally, the GitVersion SemVer in CI, and whatever
+        // semantic-release derived on a release (see Directory.Build.props). Including them would
+        // fail the approval on every CI run for a reason that has nothing to do with the public
+        // API. TargetFrameworkAttribute sits in the same set and would move with the TFMs.
+        IncludeAssemblyAttributes = false,
 
-    private static string FormatType(Type type)
-    {
-        var kind = type switch
-        {
-            _ when type.IsInterface => "interface",
-            _ when type.IsEnum => "enum",
-            _ when type.IsValueType => "struct",
-            _ => "class",
-        };
-        var suffix = type.IsEnum
-            ? " : " + Enum.GetUnderlyingType(type).Name
-            : string.Empty;
-        return $"{kind} {type.FullName}{suffix}";
-    }
+        // The generator defaults to printing a record as a plain class. Two of the shipped types
+        // are records — J1939SpnDefinition and TxConfirmation — and record-ness is part of what
+        // they promise: value equality, `with` expressions, and for the positional one a
+        // deconstruction that the class rendering would drop along with the primary constructor's
+        // parameter list. Turning a record back into a class is a breaking change, so print it.
+        TreatRecordsAsClasses = false,
 
-    private static IEnumerable<string> FormatMembers(Type type)
-    {
-        const BindingFlags Flags = BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static
-            | BindingFlags.DeclaredOnly;
-        var lines = new List<string>();
-
-        foreach (var field in type.GetFields(Flags).Where(f => !f.IsSpecialName))
+        // Compiler bookkeeping that records *how* the assembly was built rather than what it
+        // offers a consumer. The nullable attributes matter most: the generator already turns
+        // them into `?` annotations on the signatures themselves, so leaving them listed would
+        // print every annotation twice.
+        ExcludeAttributes = new[]
         {
-            lines.Add($"field {FormatTypeName(field.FieldType)} {field.Name}");
-        }
-        foreach (var property in type.GetProperties(Flags))
-        {
-            var accessors = string.Join("/",
-                new[] { property.CanRead ? "get" : null, property.CanWrite ? "set" : null }
-                    .Where(a => a is not null));
-            lines.Add($"prop {FormatTypeName(property.PropertyType)} {property.Name} {{{accessors}}}");
-        }
-        foreach (var evt in type.GetEvents(Flags))
-        {
-            lines.Add($"event {FormatTypeName(evt.EventHandlerType!)} {evt.Name}");
-        }
-        foreach (var method in type.GetMethods(Flags).Where(m => !m.IsSpecialName))
-        {
-            var generic = method.IsGenericMethodDefinition
-                ? $"<{string.Join(",", method.GetGenericArguments().Select(a => a.Name))}>"
-                : string.Empty;
-            var pars = string.Join(", ", method.GetParameters()
-                .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"));
-            lines.Add($"method {FormatTypeName(method.ReturnType)} {method.Name}{generic}({pars})");
-        }
-        foreach (var pars in type.GetConstructors(Flags)
-            .Select(ctor => string.Join(", ", ctor.GetParameters()
-                .Select(p => $"{FormatTypeName(p.ParameterType)} {p.Name}"))))
-        {
-            lines.Add($"ctor ({pars})");
-        }
-
-        lines.Sort(StringComparer.Ordinal);
-        return lines;
-    }
-
-    private static string FormatTypeName(Type type)
-    {
-        if (type.IsGenericParameter) return type.Name;
-        if (type.IsArray) return FormatTypeName(type.GetElementType()!) + "[]";
-        if (type.IsGenericType)
-        {
-            var def = type.GetGenericTypeDefinition();
-            var name = def.FullName!;
-            var tick = name.IndexOf('`');
-            if (tick >= 0) name = name.Substring(0, tick);
-            var args = string.Join(",", type.GetGenericArguments().Select(FormatTypeName));
-            return $"{name}<{args}>";
-        }
-        return type.FullName ?? type.Name;
-    }
+            "System.Diagnostics.DebuggerNonUserCodeAttribute",
+            "System.Runtime.CompilerServices.CompilerGeneratedAttribute",
+            "System.Runtime.CompilerServices.NullableAttribute",
+            "System.Runtime.CompilerServices.NullableContextAttribute",
+        },
+    };
 }

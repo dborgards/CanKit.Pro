@@ -1,77 +1,96 @@
-class CanKit.Pro.Addressing.CanIdRange
-  field System.UInt32 ExtendedMax
-  field System.UInt32 StandardMax
-  method System.Boolean IsValidExtended(System.UInt32 id)
-  method System.Boolean IsValidStandard(System.UInt32 id)
-  method System.UInt32 ValidateExtended(System.UInt32 id)
-  method System.UInt32 ValidateStandard(System.UInt32 id)
-struct CanKit.Pro.Addressing.J1939Fields
-  prop System.Boolean IsPdu1 {get}
-  prop System.Boolean Reserved {get}
-  prop System.Byte DataPage {get}
-  prop System.Byte PduFormat {get}
-  prop System.Byte PduSpecific {get}
-  prop System.Byte Priority {get}
-  prop System.Byte SourceAddress {get}
-  prop System.Nullable<System.Byte> DestinationAddress {get}
-  prop System.UInt32 Pgn {get}
-class CanKit.Pro.Addressing.J1939Id
-  method CanKit.Pro.Addressing.J1939Fields Decompose(System.UInt32 canId)
-  method System.UInt32 Compose(System.Byte priority, System.Boolean reserved, System.Byte dataPage, System.Byte pduFormat, System.Byte pduSpecific, System.Byte sourceAddress)
-  method System.UInt32 ComposePgn(System.Byte priority, System.UInt32 pgn, System.Byte sourceAddress, System.Byte destinationAddress)
-struct CanKit.Pro.Addressing.J1939Name
-  ctor (System.UInt32 identityNumber, System.UInt16 manufacturerCode, System.Byte ecuInstance, System.Byte functionInstance, System.Byte function, System.Boolean reserved, System.Byte vehicleSystem, System.Byte vehicleSystemInstance, System.Byte industryGroup, System.Boolean arbitraryAddressCapable)
-  field System.Byte EcuInstanceMax
-  field System.Byte FunctionInstanceMax
-  field System.Byte IndustryGroupMax
-  field System.Byte VehicleSystemInstanceMax
-  field System.Byte VehicleSystemMax
-  field System.UInt16 ManufacturerCodeMax
-  field System.UInt32 IdentityNumberMax
-  method CanKit.Pro.Addressing.J1939Name Decompose(System.UInt64 value)
-  method System.Boolean Equals(CanKit.Pro.Addressing.J1939Name other)
-  method System.Boolean Equals(System.Object obj)
-  method System.Boolean HasHigherClaimPriorityThan(CanKit.Pro.Addressing.J1939Name other)
-  method System.Boolean HasLowerClaimPriorityThan(CanKit.Pro.Addressing.J1939Name other)
-  method System.Int32 CompareClaimPriority(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right)
-  method System.Int32 CompareTo(CanKit.Pro.Addressing.J1939Name other)
-  method System.Int32 GetHashCode()
-  method System.String ToString()
-  method System.UInt64 Compose(System.UInt32 identityNumber, System.UInt16 manufacturerCode, System.Byte ecuInstance, System.Byte functionInstance, System.Byte function, System.Boolean reserved, System.Byte vehicleSystem, System.Byte vehicleSystemInstance, System.Byte industryGroup, System.Boolean arbitraryAddressCapable)
-  prop System.Boolean ArbitraryAddressCapable {get}
-  prop System.Boolean Reserved {get}
-  prop System.Byte EcuInstance {get}
-  prop System.Byte Function {get}
-  prop System.Byte FunctionInstance {get}
-  prop System.Byte IndustryGroup {get}
-  prop System.Byte VehicleSystem {get}
-  prop System.Byte VehicleSystemInstance {get}
-  prop System.UInt16 ManufacturerCode {get}
-  prop System.UInt32 IdentityNumber {get}
-  prop System.UInt64 Value {get}
-class CanKit.Pro.Addressing.J1939Pgn
-  field System.Byte GlobalAddress
-  field System.Byte NullAddress
-  field System.Byte Pdu2StartFormat
-  field System.Byte TpCmControlBam
-  field System.UInt32 AddressClaimed
-  field System.UInt32 CannotClaim
-  field System.UInt32 MaxValue
-  field System.UInt32 Request
-  field System.UInt32 TpCm
-  field System.UInt32 TpDt
-  method System.Boolean IsAddressClaim(System.UInt32 pgn)
-  method System.Boolean IsBam(System.UInt32 pgn, System.Byte tpCmControlByte)
-  method System.Boolean IsBamControlByte(System.Byte controlByte)
-  method System.Boolean IsCannotClaim(CanKit.Pro.Addressing.J1939Fields fields)
-  method System.Boolean IsPdu1(System.Byte pduFormat)
-  method System.Boolean IsPdu1(System.UInt32 pgn)
-  method System.Boolean IsPdu2(System.Byte pduFormat)
-  method System.Boolean IsPdu2(System.UInt32 pgn)
-  method System.Boolean IsRequest(System.UInt32 pgn)
-  method System.Boolean IsTransportCm(System.UInt32 pgn)
-  method System.Boolean IsTransportDt(System.UInt32 pgn)
-  method System.Boolean TryGetGroupExtension(System.UInt32 pgn, System.Byte& groupExtension)
-  method System.Byte GetGroupExtension(System.UInt32 pgn)
-  method System.Byte GetPduFormat(System.UInt32 pgn)
-  method System.UInt32 Normalize(System.UInt32 pgn)
+namespace CanKit.Pro.Addressing
+{
+    public static class CanIdRange
+    {
+        public const uint ExtendedMax = 536870911u;
+        public const uint StandardMax = 2047u;
+        public static bool IsValidExtended(uint id) { }
+        public static bool IsValidStandard(uint id) { }
+        public static uint ValidateExtended(uint id) { }
+        public static uint ValidateStandard(uint id) { }
+    }
+    public readonly struct J1939Fields
+    {
+        public byte DataPage { get; }
+        public byte? DestinationAddress { get; }
+        public bool IsPdu1 { get; }
+        public byte PduFormat { get; }
+        public byte PduSpecific { get; }
+        public uint Pgn { get; }
+        public byte Priority { get; }
+        public bool Reserved { get; }
+        public byte SourceAddress { get; }
+    }
+    public static class J1939Id
+    {
+        public static uint Compose(byte priority, bool reserved, byte dataPage, byte pduFormat, byte pduSpecific, byte sourceAddress) { }
+        public static uint ComposePgn(byte priority, uint pgn, byte sourceAddress, byte destinationAddress = 255) { }
+        public static CanKit.Pro.Addressing.J1939Fields Decompose(uint canId) { }
+    }
+    public readonly struct J1939Name : System.IComparable<CanKit.Pro.Addressing.J1939Name>, System.IEquatable<CanKit.Pro.Addressing.J1939Name>
+    {
+        public const byte EcuInstanceMax = 7;
+        public const byte FunctionInstanceMax = 31;
+        public const uint IdentityNumberMax = 2097151u;
+        public const byte IndustryGroupMax = 7;
+        public const ushort ManufacturerCodeMax = 2047;
+        public const byte VehicleSystemInstanceMax = 15;
+        public const byte VehicleSystemMax = 127;
+        public J1939Name(uint identityNumber, ushort manufacturerCode, byte ecuInstance, byte functionInstance, byte function, bool reserved, byte vehicleSystem, byte vehicleSystemInstance, byte industryGroup, bool arbitraryAddressCapable) { }
+        public bool ArbitraryAddressCapable { get; }
+        public byte EcuInstance { get; }
+        public byte Function { get; }
+        public byte FunctionInstance { get; }
+        public uint IdentityNumber { get; }
+        public byte IndustryGroup { get; }
+        public ushort ManufacturerCode { get; }
+        public bool Reserved { get; }
+        public ulong Value { get; }
+        public byte VehicleSystem { get; }
+        public byte VehicleSystemInstance { get; }
+        public int CompareTo(CanKit.Pro.Addressing.J1939Name other) { }
+        public bool Equals(CanKit.Pro.Addressing.J1939Name other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public bool HasHigherClaimPriorityThan(CanKit.Pro.Addressing.J1939Name other) { }
+        public bool HasLowerClaimPriorityThan(CanKit.Pro.Addressing.J1939Name other) { }
+        public override string ToString() { }
+        public static int CompareClaimPriority(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+        public static ulong Compose(uint identityNumber, ushort manufacturerCode, byte ecuInstance, byte functionInstance, byte function, bool reserved, byte vehicleSystem, byte vehicleSystemInstance, byte industryGroup, bool arbitraryAddressCapable) { }
+        public static CanKit.Pro.Addressing.J1939Name Decompose(ulong value) { }
+        public static bool operator !=(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+        public static bool operator <(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+        public static bool operator <=(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+        public static bool operator ==(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+        public static bool operator >(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+        public static bool operator >=(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
+    }
+    public static class J1939Pgn
+    {
+        public const uint AddressClaimed = 60928u;
+        public const uint CannotClaim = 60928u;
+        public const byte GlobalAddress = 255;
+        public const uint MaxValue = 262143u;
+        public const byte NullAddress = 254;
+        public const byte Pdu2StartFormat = 240;
+        public const uint Request = 59904u;
+        public const uint TpCm = 60416u;
+        public const byte TpCmControlBam = 32;
+        public const uint TpDt = 60160u;
+        public static byte GetGroupExtension(uint pgn) { }
+        public static byte GetPduFormat(uint pgn) { }
+        public static bool IsAddressClaim(uint pgn) { }
+        public static bool IsBam(uint pgn, byte tpCmControlByte) { }
+        public static bool IsBamControlByte(byte controlByte) { }
+        public static bool IsCannotClaim(CanKit.Pro.Addressing.J1939Fields fields) { }
+        public static bool IsPdu1(byte pduFormat) { }
+        public static bool IsPdu1(uint pgn) { }
+        public static bool IsPdu2(byte pduFormat) { }
+        public static bool IsPdu2(uint pgn) { }
+        public static bool IsRequest(uint pgn) { }
+        public static bool IsTransportCm(uint pgn) { }
+        public static bool IsTransportDt(uint pgn) { }
+        public static uint Normalize(uint pgn) { }
+        public static bool TryGetGroupExtension(uint pgn, out byte groupExtension) { }
+    }
+}
