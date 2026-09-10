@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-label="CanKit.Pro">
+  <rect width="64" height="64" rx="14" fill="#10233f"/>
+  <g fill="#1fb6d0">
+    <rect x="8" y="35" width="48" height="3.5" rx="1.75"/>
+    <rect x="8" y="42" width="48" height="3.5" rx="1.75"/>
+    <rect x="8" y="31" width="3.5" height="18.5" rx="1.5"/>
+    <rect x="52.5" y="31" width="3.5" height="18.5" rx="1.5"/>
+  </g>
+  <g fill="#ffffff">
+    <rect x="18" y="25" width="3.5" height="12" rx="1.5"/>
+    <rect x="30.25" y="25" width="3.5" height="12" rx="1.5"/>
+    <rect x="42.5" y="25" width="3.5" height="12" rx="1.5"/>
+    <rect x="14" y="14" width="11.5" height="12" rx="3"/>
+    <rect x="26.25" y="14" width="11.5" height="12" rx="3"/>
+    <rect x="38.5" y="14" width="11.5" height="12" rx="3"/>
+  </g>
+</svg>

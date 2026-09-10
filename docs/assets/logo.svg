@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="currentColor" aria-label="CanKit.Pro">
+  <!-- Two CAN rails with termination, three nodes hanging off the bus. -->
+  <rect x="4" y="34" width="56" height="3.5" rx="1.75"/>
+  <rect x="4" y="41" width="56" height="3.5" rx="1.75"/>
+  <rect x="4" y="30" width="3.5" height="18.5" rx="1.5"/>
+  <rect x="56.5" y="30" width="3.5" height="18.5" rx="1.5"/>
+  <rect x="16" y="24" width="3.5" height="12" rx="1.5"/>
+  <rect x="30.25" y="24" width="3.5" height="12" rx="1.5"/>
+  <rect x="44.5" y="24" width="3.5" height="12" rx="1.5"/>
+  <rect x="11" y="12" width="13.5" height="13" rx="3"/>
+  <rect x="25.25" y="12" width="13.5" height="13" rx="3"/>
+  <rect x="39.5" y="12" width="13.5" height="13" rx="3"/>
+</svg>

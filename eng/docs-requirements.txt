@@ -1,0 +1,8 @@
+# Python dependencies for the project website (mkdocs.yml). Used by .github/workflows/docs.yml;
+# for a local preview: pip install -r eng/docs-requirements.txt && mkdocs serve
+#
+# mkdocs is pinned explicitly: MkDocs 2.0 removes the plugin and theming systems Material relies
+# on (https://squidfunk.github.io/mkdocs-material/blog/2026/02/18/mkdocs-2.0/), so an unpinned
+# resolver must never be allowed to pick it up.
+mkdocs==1.6.1
+mkdocs-material==9.7.7

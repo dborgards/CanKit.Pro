@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/dborgards/CanKit.Pro/actions/workflows/ci.yml/badge.svg)](https://github.com/dborgards/CanKit.Pro/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-dborgards.github.io%2FCanKit.Pro-10233f)](https://dborgards.github.io/CanKit.Pro/)
 
 CanKit gives .NET a single, fast, vendor-neutral API for raw CAN and CAN FD frames. CanKit.Pro
 adds the layer above it — the plumbing every real protocol stack (ISO-TP, J1939, CANopen, UDS)
@@ -100,6 +101,9 @@ dotnet run --project samples/CanKit.Pro.Sample.Demux
 ```
 
 ## Documentation
+
+The project website, [dborgards.github.io/CanKit.Pro](https://dborgards.github.io/CanKit.Pro/),
+renders everything below plus the per-package READMEs with navigation and search.
 
 | | |
 | --- | --- |

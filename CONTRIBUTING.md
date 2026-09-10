@@ -98,7 +98,7 @@ Every behavioural change needs a test, and tests here are expected to be determi
   package's private state, it is testing that package, not ours; drive the scenario through the
   double instead.
 - **Cite the requirement.** Tests reference `FR-RAW-*` IDs from
-  [the SRS](docs/requirements/SRS-CanKit.Pro.md) so a reader can tell intended behaviour from
+  [the SRS](https://github.com/dborgards/CanKit.Pro/blob/main/docs/requirements/SRS-CanKit.Pro.md) so a reader can tell intended behaviour from
   incidental behaviour. Keep that up.
 
 Run a single class while iterating:
@@ -126,6 +126,6 @@ one after.
 
 ## License
 
-Contributions are accepted under the [MIT License](LICENSE). There is no CLA — opening a pull
+Contributions are accepted under the [MIT License](https://github.com/dborgards/CanKit.Pro/blob/main/LICENSE). There is no CLA — opening a pull
 request licenses your contribution under the repository's license. See
-[docs/licensing.md](docs/licensing.md).
+[docs/licensing.md](https://github.com/dborgards/CanKit.Pro/blob/main/docs/licensing.md).
