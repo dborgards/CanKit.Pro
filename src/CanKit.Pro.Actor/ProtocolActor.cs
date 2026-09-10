@@ -589,10 +589,21 @@ namespace CanKit.Pro.Actor
                     // PostAsync<T> wrap their own TaskCompletionSource completion *inside* `work`,
                     // so if it never runs, nothing else would ever complete their returned task --
                     // onDispatchFailure lets them fail it here instead of hanging forever.
-                    if (onDispatchFailure is not null)
-                        onDispatchFailure(ex);
-                    else
-                        RaiseBackgroundException(ex);
+                    //
+                    // This catch runs on the loop thread (Send never invoked the delegate), so
+                    // the same on-actor mark the delegate would have pushed is required here:
+                    // a BackgroundExceptionOccurred subscriber that Disposes, or a public sync
+                    // API that waits on PostAsync, would otherwise join/wait this very loop
+                    // until _shutdownTimeout and report a misleading TimeoutException.
+                    EnterCallbackScope();
+                    try
+                    {
+                        if (onDispatchFailure is not null)
+                            onDispatchFailure(ex);
+                        else
+                            RaiseBackgroundException(ex);
+                    }
+                    finally { ExitCallbackScope(); }
                 }
                 return;
             }

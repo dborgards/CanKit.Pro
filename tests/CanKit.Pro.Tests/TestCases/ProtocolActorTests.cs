@@ -355,6 +355,40 @@ public class ProtocolActorTests
     }
 
     [Fact]
+    public async Task Dispose_From_SynchronizationContext_Send_Failure_Does_Not_Wait_On_The_Loop()
+    {
+        // Regression: EnterCallbackScope used to wrap only the Send delegate, not the outer catch
+        // that reports a marshal failure. A BackgroundExceptionOccurred subscriber is then on the
+        // loop thread with IsOnCurrentActor clear, so Dispose joins the loop it is already on
+        // until _shutdownTimeout and reports a misleading TimeoutException.
+        var throwing = new AlwaysThrowingSynchronizationContext();
+        var actor = new ProtocolActor(
+            ActorExecutionMode.SynchronizationContext, throwing, timeSource: null, shutdownTimeout: TimeSpan.FromMilliseconds(250));
+        var seenOnActor = false;
+        Exception? timeout = null;
+        using var gate = new SemaphoreSlim(0);
+        actor.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is TimeoutException)
+            {
+                timeout = ex;
+                return;
+            }
+
+            seenOnActor = actor.IsOnCurrentActor;
+            actor.Dispose();
+            gate.Release();
+        };
+
+        actor.Post(() => { });
+
+        (await gate.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue(
+            "Dispose from a Send-failure handler must return promptly instead of waiting on its own loop");
+        seenOnActor.Should().BeTrue("the marshal-failure handler runs on the loop and must report as on-actor");
+        timeout.Should().BeNull("reentrant Dispose must skip the join, not time out");
+    }
+
+    [Fact]
     public async Task IsOnCurrentActor_Is_False_Off_Loop_And_True_Inside_Posted_Work()
     {
         // Regression: PR #30 review 3600429136/3600429144/3600429156 -- callers on the actor
