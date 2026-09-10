@@ -107,9 +107,9 @@ CanKit.Pro.CANopen/
 
 ## Install
 
-`CanKit.Pro.CANopen` is **not published to nuget.org yet** — its API is still settling. It is built
-and tested on every CI run, so it does not rot; to use it today, reference the project from a
-clone of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro).
+```bash
+dotnet add package CanKit.Pro.CANopen
+```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 

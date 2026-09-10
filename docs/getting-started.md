@@ -18,7 +18,7 @@ dotnet add package CanKit.Pro.Addressing
 dotnet add package CanKit.Pro.Reliability
 ```
 
-Targets `netstandard2.0` and `net8.0`, so .NET Framework 4.6.2+, .NET 8 and later all work.
+Targets `netstandard2.0` and `net10.0`, so .NET Framework 4.6.2+, .NET 8 and later all work.
 
 ## Open a bus
 
@@ -157,9 +157,15 @@ No hardware needed — it runs on the loopback adapter.
 
 ## The protocol layers
 
-Everything above is L2 — the plumbing. The protocol stacks that sit on it live in this repository
-too, and are built and tested on every CI run, but are **not published to nuget.org yet**: their
-APIs are still settling. Reference the projects from a clone to use them today.
+Everything above is L2 — the plumbing. The protocol stacks that sit on it are separate packages
+on nuget.org, versioned and released together with L2; each pulls in the infrastructure it needs.
+
+```bash
+dotnet add package CanKit.Pro.IsoTp      # ISO 15765-2
+dotnet add package CanKit.Pro.Uds        # ISO 14229-1, brings IsoTp along
+dotnet add package CanKit.Pro.CANopen    # CiA 301
+dotnet add package CanKit.Pro.J1939      # SAE J1939, brings J1939Tp and Addressing along
+```
 
 ```csharp
 // ISO 15765-2 over CAN or CAN FD.
@@ -185,7 +191,7 @@ under `tests/CanKit.Pro.Tests/TestCases/` are the most precise description of wh
 promises.
 
 > The snippets above sketch the shape of each API rather than quoting it verbatim — check the
-> package README or the tests for exact signatures while these layers are pre-release.
+> package README, the samples under `samples/`, or the tests for exact signatures.
 
 ## Where next
 

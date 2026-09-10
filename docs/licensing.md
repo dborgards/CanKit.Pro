@@ -1,6 +1,6 @@
 # Licensing: why CanKit.Pro is MIT
 
-CanKit.Pro is licensed under the [MIT License](../LICENSE). Its predecessor,
+CanKit.Pro is licensed under the [MIT License](https://github.com/dborgards/CanKit.Pro/blob/main/LICENSE). Its predecessor,
 [CanKit.Pro.legacy](https://github.com/dborgards/CanKit.Pro.legacy), was Apache-2.0. This document
 records why the change is sound, because "we relicensed" is the kind of claim a downstream user
 should be able to check rather than take on trust.
@@ -34,7 +34,7 @@ copyleft one. Using an Apache-2.0 library — calling its API, depending on its 
 alongside it — does not make the calling code a derivative work that must be Apache-2.0. Only the
 Apache-2.0 material itself stays under Apache-2.0, wherever it goes, with its attribution and
 NOTICE obligations attached. Those obligations travel with the CanKit packages, not with
-CanKit.Pro; see [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md).
+CanKit.Pro; see [THIRD-PARTY-NOTICES.md](https://github.com/dborgards/CanKit.Pro/blob/main/THIRD-PARTY-NOTICES.md).
 
 **2. Every file migrated here was written for the fork, not inherited from upstream.** That is the
 part that actually had to be verified, and it was, file by file, against the legacy repository's
@@ -75,7 +75,7 @@ what CanKit.Pro now is:
 - **It is the lowest-friction license for a library.** MIT is on nearly every corporate
   pre-approved list and needs no NOTICE handling from consumers.
 - **The attribution that matters is preserved anyway**, in
-  [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md), in every package README, and in the
+  [THIRD-PARTY-NOTICES.md](https://github.com/dborgards/CanKit.Pro/blob/main/THIRD-PARTY-NOTICES.md), in every package README, and in the
   packages' own dependency metadata — where a tool can actually find it.
 
 One thing Apache-2.0 gives that MIT does not: an express patent grant (and its retaliation
@@ -86,6 +86,6 @@ technical choice like any other, and it is versioned here in git.
 
 ## Contributions
 
-Contributions are accepted under MIT (see [CONTRIBUTING.md](../CONTRIBUTING.md)). There is no CLA:
+Contributions are accepted under MIT (see [CONTRIBUTING.md](contributing.md)). There is no CLA:
 opening a pull request licenses the contribution under the repository's license, which is the
 GitHub default and standard practice for a project this size.

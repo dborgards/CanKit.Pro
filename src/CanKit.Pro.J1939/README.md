@@ -86,15 +86,11 @@ node.MessageReceived += (_, msg) =>
 };
 ```
 
-## Status
-
-Pre-release; `IsPackable=false`. Not yet published to NuGet.
-
 ## Install
 
-`CanKit.Pro.J1939` is **not published to nuget.org yet** — its API is still settling. It is built
-and tested on every CI run, so it does not rot; to use it today, reference the project from a
-clone of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro).
+```bash
+dotnet add package CanKit.Pro.J1939
+```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.Addressing`, `CanKit.Pro.J1939Tp`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 

@@ -11,8 +11,6 @@ Experimental ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com
    Overflow) and enforces N_As/N_Bs/N_Cr timers, reassembles inbound PDUs (SN-checked), and delivers
    them via `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived`.
 
-`IsPackable=false` while the surface stabilizes and CAN-FD long-payload cases get more coverage.
-
 ## Scope
 
 - `IsoTpFrameCodec` — bounds-safe PCI parser, `BuildSingleFrame` / `BuildFirstFrame` /
@@ -125,13 +123,11 @@ and deliberately avoids the following defects:
     on classic CAN those bit-patterns are invalid and are rejected instead of being mis-parsed as
     escape headers (bugbot 3594958440 / 3594958445).
 
-Status: pre-release (0.1.x), codec-only.
-
 ## Install
 
-`CanKit.Pro.IsoTp` is **not published to nuget.org yet** — its API is still settling. It is built
-and tested on every CI run, so it does not rot; to use it today, reference the project from a
-clone of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro).
+```bash
+dotnet add package CanKit.Pro.IsoTp
+```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 

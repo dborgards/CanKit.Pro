@@ -42,3 +42,10 @@ Thumbs.db
 
 ## Agent scratch space
 .claude/
+
+## Website (mkdocs build output and the privacy plugin's asset cache)
+site/
+.cache/
+
+## Local Python environment for the website build
+.venv/

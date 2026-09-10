@@ -5,9 +5,8 @@ directly on top of `CanKit.Pro.IsoTp`'s `IIsoTpChannel`, so anything that speaks
 (virtual loopback, PCAN, SocketCAN, Vector, Kvaser, ZLG, ControlCAN, ...) can be driven with
 the same client.
 
-Status: **0.1.x MVP, `IsPackable=false`**. The public surface is stable for the services
-listed below; the shape of `SendRawAsync`, timing options and NRC-mapping types may still shift
-before the first NuGet release.
+The public surface is stable for the services listed below; the shape of `SendRawAsync`,
+timing options and NRC-mapping types may still shift.
 
 ## Service coverage (SRS FR-UDS-001..012)
 
@@ -84,9 +83,9 @@ await uds.DownloadAsync(
 
 ## Install
 
-`CanKit.Pro.Uds` is **not published to nuget.org yet** — its API is still settling. It is built
-and tested on every CI run, so it does not rot; to use it today, reference the project from a
-clone of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro).
+```bash
+dotnet add package CanKit.Pro.Uds
+```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.IsoTp`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 

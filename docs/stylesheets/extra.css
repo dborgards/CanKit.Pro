@@ -1,0 +1,325 @@
+/* CanKit.Pro website — theme overrides for MkDocs Material.
+ *
+ * Palette: deep navy for chrome, one electric accent for links/highlights. Everything else is
+ * Material's default so the docs pages stay readable and boring in the good way.
+ */
+
+:root {
+  --ck-navy-900: #070f1e;
+  --ck-navy-800: #0b1a33;
+  --ck-navy-700: #10233f;
+  --ck-navy-600: #1a3560;
+  --ck-accent: #1fb6d0;
+  --ck-accent-soft: rgba(31, 182, 208, 0.16);
+  --ck-amber: #f5b342;
+}
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: var(--ck-navy-700);
+  --md-primary-fg-color--light: var(--ck-navy-600);
+  --md-primary-fg-color--dark: var(--ck-navy-800);
+  --md-primary-bg-color: #ffffff;
+  --md-primary-bg-color--light: rgba(255, 255, 255, 0.7);
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: var(--ck-accent);
+  --md-accent-fg-color--transparent: var(--ck-accent-soft);
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: rgba(255, 255, 255, 0.7);
+}
+
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #0f7f93;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 218;
+  --md-typeset-a-color: #4fc9de;
+  --md-default-bg-color: #0d1526;
+  --md-code-bg-color: #101b30;
+}
+
+/* Header: a hairline of accent under the navy bar reads as "bus line". */
+.md-header {
+  box-shadow: inset 0 -2px 0 var(--ck-accent), 0 0 0.2rem rgba(0, 0, 0, 0.2);
+}
+.md-tabs {
+  background-color: var(--ck-navy-800);
+}
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.5rem;
+  width: auto;
+}
+
+/* ------------------------------------------------------------------------------------------ */
+/* Home page                                                                                  */
+/* ------------------------------------------------------------------------------------------ */
+
+.ck-home .md-content__inner {
+  margin-top: 0;
+  padding-top: 0;
+}
+.md-content__inner:has(> .ck-home) > .md-content__button {
+  display: none;
+}
+
+.ck-hero {
+  position: relative;
+  overflow: hidden;
+  margin: 0 0 2.4rem;
+  padding: 3.6rem 2.4rem 3rem;
+  border-radius: 0.6rem;
+  color: #e6edf7;
+  background:
+    radial-gradient(60rem 26rem at 85% -20%, rgba(31, 182, 208, 0.22), transparent 60%),
+    radial-gradient(40rem 20rem at -10% 120%, rgba(245, 179, 66, 0.12), transparent 60%),
+    linear-gradient(135deg, var(--ck-navy-900) 0%, var(--ck-navy-700) 100%);
+}
+.ck-hero::before {
+  /* Faint CAN bus: two rails with node stubs, drawn as a repeating background. */
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.07;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='120' viewBox='0 0 160 120'><g fill='none' stroke='%23ffffff' stroke-width='1.5'><path d='M0 84H160M0 92H160'/><path d='M40 84V56M120 92V116'/><rect x='30' y='40' width='20' height='16' rx='3'/><rect x='110' y='116' width='20' height='4' rx='2'/></g></svg>");
+  background-size: 160px 120px;
+  pointer-events: none;
+}
+.ck-hero > * {
+  position: relative;
+}
+.ck-hero__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 2.4rem;
+  align-items: center;
+}
+.ck-hero__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+  padding: 0.25rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #bcd3ef;
+  background: rgba(255, 255, 255, 0.05);
+}
+.ck-hero__eyebrow::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--ck-accent);
+  box-shadow: 0 0 0 0.25rem var(--ck-accent-soft);
+}
+.md-typeset .ck-hero__title {
+  margin: 0 0 0.8rem;
+  font-size: clamp(1.9rem, 4.2vw, 2.9rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  color: #ffffff;
+}
+.md-typeset .ck-hero__title em {
+  font-style: normal;
+  color: var(--ck-accent);
+}
+.md-typeset .ck-hero__lead {
+  margin: 0 0 1.6rem;
+  max-width: 34rem;
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: #c7d5ea;
+}
+.md-typeset .ck-hero__lead strong {
+  color: #ffffff;
+}
+.ck-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0 0 1.4rem;
+}
+.md-typeset .ck-hero .md-button {
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #ffffff;
+}
+.md-typeset .ck-hero .md-button:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-color: #ffffff;
+}
+.md-typeset .ck-hero .md-button--primary {
+  background-color: var(--ck-accent);
+  border-color: var(--ck-accent);
+  color: var(--ck-navy-900);
+}
+.md-typeset .ck-hero .md-button--primary:hover {
+  background-color: #4fd0e6;
+  border-color: #4fd0e6;
+  color: var(--ck-navy-900);
+}
+.ck-hero__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+.ck-hero__badges img {
+  height: 20px;
+}
+.ck-hero__code {
+  margin: 0;
+  min-width: 0;
+  /* The hero code block is always dark, whatever the page scheme: pin the slate token colors. */
+  --md-code-fg-color: #dce6f5;
+  --md-code-hl-number-color: #e6695b;
+  --md-code-hl-special-color: #f06090;
+  --md-code-hl-function-color: #c973d9;
+  --md-code-hl-constant-color: #9383e2;
+  --md-code-hl-keyword-color: #6791e0;
+  --md-code-hl-string-color: #2fb170;
+  --md-code-hl-name-color: #dce6f5;
+  --md-code-hl-operator-color: #9fb0c8;
+  --md-code-hl-punctuation-color: #9fb0c8;
+  --md-code-hl-comment-color: #8a9bb5;
+  --md-code-hl-generic-color: #9fb0c8;
+  --md-code-hl-variable-color: #9fb0c8;
+  --md-default-fg-color--lightest: rgba(255, 255, 255, 0.3);
+}
+.md-typeset .ck-hero__code pre {
+  margin: 0;
+}
+.md-typeset .ck-hero__code pre > code {
+  font-size: 0.66rem;
+}
+.md-typeset .ck-hero__code .highlight,
+.md-typeset .ck-hero__code pre > code {
+  border-radius: 0.4rem;
+  background: rgba(3, 8, 18, 0.72);
+  box-shadow: 0 1.2rem 2.4rem rgba(0, 0, 0, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+.md-typeset .ck-hero__code .highlight span.filename {
+  background: rgba(255, 255, 255, 0.06);
+  color: #bcd3ef;
+  border-radius: 0.4rem 0.4rem 0 0;
+}
+.md-typeset .ck-hero__code .highlight span.filename + pre > code {
+  border-radius: 0 0 0.4rem 0.4rem;
+}
+
+@media screen and (max-width: 76.1875em) {
+  .ck-hero {
+    padding: 2.6rem 1.6rem 2.2rem;
+  }
+  .ck-hero__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media screen and (max-width: 44.9375em) {
+  .ck-hero {
+    margin: 0 -0.8rem 2rem;
+    border-radius: 0;
+    padding: 2.2rem 1rem 1.8rem;
+  }
+}
+
+/* Section headings on the home page get an eyebrow line above them. */
+.md-typeset .ck-section {
+  margin-top: 3rem;
+}
+.md-typeset .ck-section > h2 {
+  margin-top: 0;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.md-typeset .ck-section > h2::before {
+  content: "";
+  display: block;
+  width: 2.4rem;
+  height: 0.2rem;
+  margin-bottom: 0.7rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--ck-accent), transparent);
+}
+.md-typeset .ck-section > p.ck-section__lead {
+  max-width: 44rem;
+  font-size: 0.85rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Four protocol cards: two per row instead of three plus one. */
+.md-typeset .grid.cards.ck-cards-2 {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+}
+
+/* Grid cards: tighter, with the layer tag in the corner. */
+.md-typeset .grid.cards > ul > li {
+  border-radius: 0.5rem;
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--ck-accent);
+  box-shadow: 0 0.6rem 1.6rem rgba(0, 0, 0, 0.12);
+  transform: translateY(-2px);
+}
+.md-typeset .grid.cards > ul > li > hr {
+  margin: 0.8rem 0;
+}
+.md-typeset .ck-tag {
+  display: inline-block;
+  padding: 0.05rem 0.45rem;
+  border-radius: 999px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ck-navy-700);
+  background: var(--ck-accent-soft);
+  vertical-align: middle;
+}
+[data-md-color-scheme="slate"] .md-typeset .ck-tag {
+  color: #9fe3f0;
+}
+.md-typeset .ck-std {
+  font-size: 0.7rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Layer diagram */
+.md-typeset .ck-diagram .mermaid {
+  display: flex;
+  justify-content: center;
+}
+
+/* Package table on the packages index: keep the badge column from wrapping. */
+.md-typeset .ck-pkg-table td:nth-child(2) {
+  white-space: nowrap;
+}
+.md-typeset .ck-pkg-table img {
+  vertical-align: middle;
+}
+
+/* Buttons outside the hero: Material paints them in the primary colour, which is navy on navy in
+ * the dark scheme. */
+[data-md-color-scheme="slate"] .md-typeset .md-button {
+  color: #d6e3f5;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+[data-md-color-scheme="slate"] .md-typeset .md-button:hover {
+  color: #ffffff;
+  border-color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary,
+[data-md-color-scheme="slate"] .md-typeset .md-button--primary:hover {
+  background-color: var(--ck-accent);
+  border-color: var(--ck-accent);
+  color: var(--ck-navy-900);
+}

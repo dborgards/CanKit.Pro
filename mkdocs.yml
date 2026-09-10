@@ -1,0 +1,163 @@
+# Project website: https://dborgards.github.io/CanKit.Pro/
+#
+# Built by .github/workflows/docs.yml with MkDocs + Material. Locally:
+#
+#   pip install -r eng/docs-requirements.txt
+#   mkdocs serve
+#
+# The package pages under docs/packages/ and the Contributing/Changelog pages are thin wrappers
+# that include the repository's own README.md / CONTRIBUTING.md / CHANGELOG.md via snippets, so
+# those files stay the single source of truth (they also ship inside the .nupkg).
+
+site_name: CanKit.Pro
+site_description: Higher CAN protocol layers for .NET — ISO-TP, J1939, CANopen and UDS on one shared bus, built on CanKit.
+site_url: https://dborgards.github.io/CanKit.Pro/
+site_author: Dietmar Borgards
+copyright: >
+  Copyright &copy; Dietmar Borgards · MIT License ·
+  Not affiliated with the <a href="https://github.com/pkuyo/CanKit">CanKit</a> project.
+
+repo_url: https://github.com/dborgards/CanKit.Pro
+repo_name: dborgards/CanKit.Pro
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: site
+strict: true
+
+# Internal working documents that live in docs/ but are not part of the website.
+exclude_docs: |
+  reviews/
+
+theme:
+  name: material
+  language: en
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    # Follows the OS preference until the visitor toggles.
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to system preference
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.instant
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - content.tabs.link
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/dborgards/CanKit.Pro
+      name: CanKit.Pro on GitHub
+    - icon: simple/nuget
+      link: https://www.nuget.org/packages?q=CanKit.Pro
+      name: CanKit.Pro on nuget.org
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets:
+      # Lets a page include repository files outside docs/ (package READMEs, CONTRIBUTING, CHANGELOG).
+      base_path:
+        - .
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search
+  # Self-hosts fonts and other external assets at build time (no third-party requests from the
+  # visitor's browser). Badges stay live so the NuGet version shown is the current one.
+  - privacy:
+      assets_exclude:
+        - img.shields.io/*
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Packages:
+      - packages/index.md
+      - L2 · Infrastructure:
+          - RawCan: packages/rawcan.md
+          - Actor: packages/actor.md
+          - Addressing: packages/addressing.md
+          - Reliability: packages/reliability.md
+      - L3 · Transports:
+          - ISO-TP: packages/isotp.md
+          - J1939 TP: packages/j1939tp.md
+      - L4 · Application protocols:
+          - UDS: packages/uds.md
+          - CANopen: packages/canopen.md
+          - J1939: packages/j1939.md
+  - Architecture:
+      - arc42 (German): architecture/arc42-CanKit.Pro.md
+      - Requirements (German): requirements/SRS-CanKit.Pro.md
+  - Development:
+      - Contributing: contributing.md
+      - Release process: release-process.md
+      - Changelog: changelog.md
+      - Licensing: licensing.md
+      - Migration from CanKit.Pro.legacy: migration-from-legacy.md
+      - Upstream candidates: upstream-candidates.md
