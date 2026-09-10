@@ -886,7 +886,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // reassembled datagram — which shows up here as the same sequence number twice.
         delivered.Should().OnlyHaveUniqueItems(
             "no broadcast TP.BAM may be surfaced twice, and each carries its own sequence number");
-        delivered.Should().OnlyContain(seq => seq >= 0 && seq < finalSent,
+        // `sent` is incremented only after SendBamAsync completes, so cancel leaves the
+        // in-flight BAM uncounted. The 150 ms wait above exists so that datagram can still
+        // reassemble; its sequence then equals finalSent, which is a cancelled send that
+        // reached the wire, not a corrupt payload.
+        delivered.Should().OnlyContain(seq => seq >= 0 && seq <= finalSent,
             "every delivered datagram must be one the peer actually sent, reassembled intact");
 
         // Loss is expected and allowed: BAMs whose DT frames land during the ~ms rebind window
