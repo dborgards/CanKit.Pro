@@ -11,8 +11,8 @@ release is the supported way to get a fix.
 Please do **not** open a public issue for a security problem.
 
 Use GitHub's private reporting — *Security* → *Report a vulnerability* on
-[this repository](https://github.com/dborgards/CanKit.Pro/security/advisories/new) — or email
-**dietmar@borgards.de**.
+[this repository](https://github.com/dborgards/CanKit.Pro/security/advisories/new). The report is
+visible only to you and the maintainers until an advisory is published.
 
 Helpful to include: the affected package and version, what an attacker can do, and a reproduction
 (a `virtual://` repro is ideal, since it needs no hardware).
