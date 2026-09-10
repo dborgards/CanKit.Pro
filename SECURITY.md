@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-CanKit.Pro is released as one version across all four packages. Fixes go into the **latest**
+CanKit.Pro is released as one version across all nine packages. Fixes go into the **latest**
 release; there are no maintenance branches for older versions. Upgrading to the newest patch
 release is the supported way to get a fix.
 

@@ -18,7 +18,7 @@ dotnet add package CanKit.Pro.Addressing
 dotnet add package CanKit.Pro.Reliability
 ```
 
-Targets `netstandard2.0` and `net8.0`, so .NET Framework 4.6.2+, .NET 8 and later all work.
+Targets `netstandard2.0` and `net10.0`, so .NET Framework 4.6.2+, .NET 10 and later all work.
 
 ## Open a bus
 
@@ -158,34 +158,34 @@ No hardware needed — it runs on the loopback adapter.
 ## The protocol layers
 
 Everything above is L2 — the plumbing. The protocol stacks that sit on it live in this repository
-too, and are built and tested on every CI run, but are **not published to nuget.org yet**: their
-APIs are still settling. Reference the projects from a clone to use them today.
+too and are published to nuget.org alongside the L2 packages:
 
 ```csharp
 // ISO 15765-2 over CAN or CAN FD.
-using var isoTp = IsoTp.Open(bus, IsoTpEndpoint.Normal(rxId: 0x7E8, txId: 0x7E0));
+using var isoTp = IsoTp.Open(bus, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
 await isoTp.SendAsync(payload);
 
 // UDS on top of it: sessions, security access, read/write by identifier, routine control.
-var uds = UdsClient.Create(isoTp);
-await uds.DiagnosticSessionControlAsync(UdsSession.Extended);
+using var uds = UdsClient.Create(isoTp);
+await uds.DiagnosticSessionControlAsync(UdsSessionType.Extended);
 var vin = await uds.ReadDataByIdentifierAsync(0xF190);
 
 // CANopen: SDO, PDO mapping, NMT, heartbeat, EMCY, object dictionary.
-var node = CanOpen.OpenNode(bus, nodeId: 0x10);
-var deviceType = await node.Sdo.ReadAsync<uint>(0x1000, 0x00);
+using var node = CanOpen.OpenNode(bus, nodeId: 0x01);
+var deviceType = await node.SdoUploadAsync(serverNodeId: 0x11, index: 0x1000, subindex: 0x00);
 
 // J1939: address claim, PGN messaging, transport protocol for >8-byte payloads.
-var j1939 = J1939.OpenNode(bus, preferredAddress: 0x80, name: myName);
-await j1939.SendAsync(pgn: 0xFEEE, payload);
+using var j1939 = J1939Node.Open(bus, new J1939NodeOptions(myName));
+await j1939.ClaimAddressAsync(0x80);
+await j1939.SendAsync(new J1939Message(pgn: 0xFEEEu, payload, priority: 6));
 ```
 
 Each package's `README.md` documents its own guarantees, options and edge cases; the test suites
 under `tests/CanKit.Pro.Tests/TestCases/` are the most precise description of what each layer
 promises.
 
-> The snippets above sketch the shape of each API rather than quoting it verbatim — check the
-> package README or the tests for exact signatures while these layers are pre-release.
+> Each snippet above uses one bus per node for readability; the quickstart samples under
+> `samples/` show the full, runnable version on the loopback adapter.
 
 ## Where next
 

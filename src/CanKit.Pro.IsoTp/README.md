@@ -11,7 +11,8 @@ Experimental ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com
    Overflow) and enforces N_As/N_Bs/N_Cr timers, reassembles inbound PDUs (SN-checked), and delivers
    them via `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived`.
 
-`IsPackable=false` while the surface stabilizes and CAN-FD long-payload cases get more coverage.
+Published on nuget.org since 1.2.0. CAN-FD long-payload cases still get the least coverage of
+the two halves.
 
 ## Scope
 
@@ -52,7 +53,7 @@ operating systems the effective CF spacing is **STmin + OS scheduling latency**:
 within ±1 ms of the configured value on idle Windows/Linux/macOS hosts, with no hard
 real-time guarantee under load. Sub-millisecond STmin values (`0xF1..0xF9`, 100–900 µs)
 are honored as-is but bottom out at the platform timer resolution. Verified end-to-end by
-`tests/CanKit.Tests/TestCases/IsoTp/IsoTpStminTimingTests.cs` (Virtual-loopback CF-spacing
+`tests/CanKit.Pro.Tests/TestCases/IsoTp/IsoTpStminTimingTests.cs` (Virtual-loopback CF-spacing
 measurement with CI-tolerant soft bounds).
 
 ## Functional (1:N) addressing — `IsoTpFunctionalClient` (FR-TP-019)
@@ -125,13 +126,16 @@ and deliberately avoids the following defects:
     on classic CAN those bit-patterns are invalid and are rejected instead of being mis-parsed as
     escape headers (bugbot 3594958440 / 3594958445).
 
-Status: pre-release (0.1.x), codec-only.
+Status: published (1.2.x); codec plus runtime channel.
 
 ## Install
 
-`CanKit.Pro.IsoTp` is **not published to nuget.org yet** — its API is still settling. It is built
-and tested on every CI run, so it does not rot; to use it today, reference the project from a
-clone of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro).
+```bash
+dotnet add package CanKit.Pro.IsoTp
+
+# plus a CanKit adapter for the hardware you actually talk to, e.g.
+dotnet add package CanKit.Adapter.Virtual   # loopback, no hardware
+```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 

@@ -113,7 +113,7 @@ is `MIT`.
 ### Versioning
 
 Per-package `<CanKitProActorVersion>` properties in `eng/package-versions.props` are gone. All
-four packages share one version, derived from the commit history — see
+packages share one version, derived from the commit history — see
 [release-process.md](release-process.md).
 
 ### The four protocol error codes
