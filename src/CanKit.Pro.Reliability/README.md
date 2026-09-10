@@ -64,9 +64,13 @@ deadline.Rearm(TimeSpan.FromMilliseconds(150));
 - **Actor lifetime**: disposing the owning actor implicitly stops still-pending deadlines from
   firing — the actor's `FinalDrain` discards not-yet-due `Schedule` callbacks rather than firing
   them, so a deadline that was `Pending` when the actor is disposed simply never resolves (neither
-  expires nor errors). Callers needing a guaranteed resolution must track actor lifetime
-  themselves. `Rearm` after the actor is disposed lets the resulting `ObjectDisposedException`
-  propagate rather than swallowing it.
+  expires nor errors) and reads exactly like a healthy pending one — none of `IsExpired`,
+  `IsCompleted`, `IsCancelled` will ever become true. Signalling that would need a fourth flag on
+  the public `IDeadline`, which is a break for implementers, so the rule is instead: resolve
+  outstanding deadlines (`Complete()`/`Dispose()`) before disposing the actor they run on.
+  `Rearm` is the one operation that notices, because it has to talk to the actor: it lets the
+  resulting `ObjectDisposedException` propagate rather than swallowing it, and forces the deadline
+  to `Cancelled` so it is not left as an unobservable zombie.
 
 ## Bus-state monitoring (FR-RAW-051)
 
@@ -88,7 +92,10 @@ deadline.Rearm(TimeSpan.FromMilliseconds(150));
   is still required (and idempotent) to detach the two bus event subscriptions, which are
   independent of the actor's lifetime.
 - **Helpers**: `BusStateExtensions.IsTransmitBlocked()` (true only for `BusOff`) and
-  `IsDegraded()` (true for `ErrWarning`/`ErrPassive`/`BusOff`).
+  `IsDegraded()` (true for `ErrWarning`/`ErrPassive`/`BusOff`/`Unknown`). The two treat `Unknown`
+  differently on purpose: it means "we could not determine the controller state", which is never a
+  basis for reporting health, but is equally never proof that the bus is off — so it degrades, and
+  it does not block transmission on the many adapters that simply never report a state.
 
 ## Out of scope: FR-RAW-052 (reserved/invalid protocol values)
 

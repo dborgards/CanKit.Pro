@@ -17,6 +17,34 @@ namespace CanKit.Pro.Actor
     /// </summary>
     public sealed class ProtocolActor : IProtocolActor
     {
+        // Matches the historical, hard-coded join timeout; overridable only through the internal
+        // constructor, so tests do not have to spend five seconds proving the timeout is reported.
+        private static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(5);
+
+        // How many cancelled entries _timers must be carrying before a sweep is worth its O(n).
+        // Small enough that a rearm-heavy protocol (an ISO-TP N_Cr refreshed per consecutive frame)
+        // never accumulates a meaningful corpse tail, large enough that the sweep does not run on
+        // every loop iteration of a healthy actor.
+        private const int CancelledTimerSweepThreshold = 8;
+
+        // Which actors' callbacks the *current thread* is currently inside, innermost last.
+        //
+        // Thread-static, not AsyncLocal: an AsyncLocal is captured into the ExecutionContext and
+        // therefore flows into every Task.Run and every await continuation started from a callback,
+        // so a pool thread spawned by actor work would report "I am on the actor" and take the
+        // run-inline branch of a public sync API -- mutating single-writer state from a second
+        // thread, and making Dispose() believe it was called reentrantly and skip its join. A
+        // thread-static is correct by construction: it is a property of the thread that is actually
+        // executing the callback, which is exactly the question IsOnCurrentActor asks.
+        //
+        // A stack rather than a single slot because callbacks can legitimately nest on one thread:
+        // a work item on actor A may synchronously dispose actor B, whose FinalDrain then runs B's
+        // queued work on this very thread. While inside B, A must still report true -- the
+        // "synchronously waiting on A would deadlock" hazard the property exists to warn about is
+        // just as real one frame down. Depth is 1 in every realistic case, so the scan is trivial.
+        [ThreadStatic]
+        private static List<ProtocolActor>? t_runningActors;
+
         private readonly ConcurrentQueue<MailboxItem> _mailbox = new();
 
         // Schedule() insertions go through this queue instead of _mailbox, and are always applied
@@ -31,12 +59,14 @@ namespace CanKit.Pro.Actor
         private readonly ConcurrentQueue<TimerEntry> _pendingTimerInserts = new();
 
         // Released once per Post/Schedule call; the loop waits on it (blocking or async depending
-        // on execution mode) instead of polling. Over-counting is harmless: each wake drains
-        // *everything* currently available, not just one item, so an extra pending count just
-        // causes one additional, cheap, empty-ish iteration.
+        // on execution mode) instead of polling. Over-counting is harmless: an extra pending count
+        // just causes one additional, cheap, empty-ish iteration. Under-counting relative to what
+        // is actually queued is harmless too, because NextWaitTimeoutMilliseconds refuses to wait
+        // at all while either queue is non-empty -- the semaphore is a wake-up hint, not the
+        // authority on how much work is outstanding.
         private readonly SemaphoreSlim _signal = new(0, int.MaxValue);
 
-        // Sorted ascending by TimerEntry.DueUtc. Touched only by the loop thread (both when
+        // Sorted ascending by TimerEntry.DueTimestamp. Touched only by the loop thread (both when
         // draining _pendingTimerInserts and when firing due timers), so it needs no lock of its
         // own -- the same single-writer guarantee FR-RAW-021 asks every protocol instance to have
         // for its own state.
@@ -46,7 +76,25 @@ namespace CanKit.Pro.Actor
         private readonly SynchronizationContext? _syncContext;
         private readonly Thread? _dedicatedThread;
         private readonly Task? _loopTask;
+
+        // Monotonic tick source for every due-time computation. Never DateTime.UtcNow: that is the
+        // wall clock, so an NTP step (or a DST jump, or an operator setting the clock) of -1 h made
+        // every armed deadline in the protocol stack fire an hour late, and +1 h made all of them
+        // fire at once -- N_Bs, N_Cr, P2/P2*, SDO timeouts, the heartbeat consumer, i.e. every
+        // timing guarantee the layers above exist to provide. A delay is an elapsed quantity and is
+        // now measured as one.
+        private readonly ITimeSource _time;
+
+        private readonly TimeSpan _shutdownTimeout;
+
         private int _disposedFlag;
+
+        // How many entries the timer machinery is carrying that have been cancelled but not yet
+        // dropped. Maintained with Interlocked because TimerHandle.Dispose runs on arbitrary
+        // caller threads; only ever read by the loop, and only as a heuristic (see
+        // CompactCancelledTimers), so a transient over- or undercount costs at most one
+        // unnecessary or deferred sweep, never correctness.
+        private int _cancelledTimerCount;
 
         // Guards the disposed-check-then-enqueue sequence in Post/Schedule against a concurrent
         // Dispose: without it, a caller could pass ThrowIfDisposed, lose a race to Dispose setting
@@ -57,33 +105,45 @@ namespace CanKit.Pro.Actor
         // completely rather than merely narrowing it.
         private readonly object _disposeGate = new();
 
-        // Set for the duration of the loop's own execution (RunLoopBlocking/RunLoopAsync), and
-        // correctly flows through await/thread-pool hops and into SynchronizationContext.Send
-        // callbacks via ExecutionContext, regardless of which OS thread ends up running any given
-        // piece of it. Lets Dispose() detect the one case it must never block in: being called
-        // reentrantly from a Post/Schedule callback that the actor's own loop is currently running.
-        // Instance-scoped (not static) so disposing a *different* actor from within this one's loop
-        // is correctly not treated as reentrant.
-        private readonly AsyncLocal<bool> _isOnLoop = new();
-
         /// <inheritdoc />
         public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
         /// <summary>
-        /// True when the current logical execution context is a work item / timer callback being
-        /// run by this actor's own loop, false otherwise. Backed by the same
-        /// <see cref="AsyncLocal{T}"/> Dispose() uses to detect reentrant disposal, so it flows
-        /// through <c>await</c> and <see cref="System.Threading.SynchronizationContext.Send"/>
-        /// hops and is correct regardless of which OS thread is currently running the callback.
+        /// True when <i>the calling thread</i> is currently executing a work item or timer callback
+        /// belonging to this actor, false otherwise.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// Lets a public sync API safely detect that it is already on the actor loop and run the
         /// requested work inline instead of routing it through <see cref="PostAsync(Action)"/> and
         /// synchronously waiting on the returned task — which would deadlock the loop against
         /// itself. External callers still take the marshal-through-mailbox path exactly as
         /// before.
+        /// </para>
+        /// <para>
+        /// Thread-scoped, deliberately: a <see cref="Task"/> started from inside a callback runs on
+        /// a different thread and reports <c>false</c>, because it genuinely is not on the actor
+        /// and must not mutate actor state inline. (Backing this with an
+        /// <see cref="AsyncLocal{T}"/> instead would flow the flag into every such task through the
+        /// <see cref="ExecutionContext"/> and report <c>true</c> there — the bug this property is
+        /// most likely to be trusted with preventing.) In
+        /// <see cref="ActorExecutionMode.SynchronizationContext"/> mode the flag is set on whichever
+        /// thread the context actually runs the callback on, so it stays correct there too.
+        /// </para>
         /// </remarks>
-        public bool IsOnCurrentActor => _isOnLoop.Value;
+        public bool IsOnCurrentActor
+        {
+            get
+            {
+                var running = t_runningActors;
+                if (running is null) return false;
+                for (var i = running.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(running[i], this)) return true;
+                }
+                return false;
+            }
+        }
 
         /// <summary>
         /// Creates an actor and immediately starts its mailbox loop under
@@ -95,6 +155,20 @@ namespace CanKit.Pro.Actor
         /// must be null for every other mode.
         /// </param>
         public ProtocolActor(ActorExecutionMode mode = ActorExecutionMode.DedicatedThread, SynchronizationContext? synchronizationContext = null)
+            : this(mode, synchronizationContext, timeSource: null, shutdownTimeout: null)
+        {
+        }
+
+        // Test seam. Kept internal (and as a separate overload rather than extra optional
+        // parameters on the public constructor, which would change that constructor's compiled
+        // signature) so the published surface stays exactly as it was: substituting the tick source
+        // is what makes timer behaviour testable without sleeping, and shortening the shutdown
+        // timeout is what makes the "Dispose gave up" path testable without a five-second wait.
+        internal ProtocolActor(
+            ActorExecutionMode mode,
+            SynchronizationContext? synchronizationContext,
+            ITimeSource? timeSource,
+            TimeSpan? shutdownTimeout)
         {
             if (mode == ActorExecutionMode.SynchronizationContext)
             {
@@ -105,6 +179,9 @@ namespace CanKit.Pro.Actor
             {
                 throw new ArgumentException($"{nameof(synchronizationContext)} is only used with {nameof(ActorExecutionMode.SynchronizationContext)} mode.", nameof(synchronizationContext));
             }
+
+            _time = timeSource ?? MonotonicTimeSource.Instance;
+            _shutdownTimeout = shutdownTimeout ?? DefaultShutdownTimeout;
 
             if (mode == ActorExecutionMode.DedicatedThread)
             {
@@ -192,7 +269,7 @@ namespace CanKit.Pro.Actor
             if (callback is null) throw new ArgumentNullException(nameof(callback));
             if (delay < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(delay), "Delay must not be negative.");
 
-            var entry = new TimerEntry(DateTime.UtcNow + delay, callback);
+            var entry = new TimerEntry(DueTimestamp(delay), callback);
             lock (_disposeGate)
             {
                 ThrowIfDisposed();
@@ -203,7 +280,7 @@ namespace CanKit.Pro.Actor
                 _pendingTimerInserts.Enqueue(entry);
                 _signal.Release();
             }
-            return new TimerHandle(entry);
+            return new TimerHandle(this, entry);
         }
 
         /// <inheritdoc />
@@ -221,7 +298,7 @@ namespace CanKit.Pro.Actor
             // ObjectDisposedException instead of silently queuing work nobody will run.
             _stopCts.Cancel();
 
-            if (_isOnLoop.Value)
+            if (IsOnCurrentActor)
             {
                 // Reentrant Dispose from within our own loop -- e.g. a Post/Schedule callback that
                 // decides to dispose the very actor currently running it. Waiting below would
@@ -233,13 +310,22 @@ namespace CanKit.Pro.Actor
                 return;
             }
 
-            if (_dedicatedThread is not null)
-                _dedicatedThread.Join(TimeSpan.FromSeconds(5));
-            else
+            var joined = _dedicatedThread is not null
+                ? _dedicatedThread.Join(_shutdownTimeout)
+                : WaitForLoopTask();
+
+            if (!joined)
             {
-                try { _loopTask?.Wait(TimeSpan.FromSeconds(5)); }
-                catch (AggregateException) { /* expected: the loop observed cancellation and exited via OperationCanceledException */ }
+                // Previously this timeout was silent, so a caller could not tell a clean shutdown
+                // from an abandoned loop -- the actor looked disposed while a work item was still
+                // running on a live background thread, mutating state the caller believed it now
+                // owned exclusively. There is exactly one defined channel for "something went wrong
+                // in the background" (FR-RAW-023); report it there rather than throwing, because
+                // Dispose must stay safe to call from a finally/using block.
+                RaiseBackgroundException(new TimeoutException(
+                    $"The {nameof(ProtocolActor)} loop did not finish within {_shutdownTimeout}. A work item or timer callback is still running; Dispose returned without joining it, and the loop will tear itself down whenever that callback eventually returns."));
             }
+
             // _stopCts/_signal are disposed by the loop itself once it actually finishes (see
             // RunLoopBlocking/RunLoopAsync's finally block below), never here -- so a timed-out
             // wait above (the loop still stuck inside a long-running callback) can never dispose
@@ -247,9 +333,23 @@ namespace CanKit.Pro.Actor
             // eventually returns and the loop winds down on its own.
         }
 
+        private bool WaitForLoopTask()
+        {
+            if (_loopTask is null) return true;
+            try
+            {
+                return _loopTask.Wait(_shutdownTimeout);
+            }
+            catch (AggregateException)
+            {
+                // Expected: the loop observed cancellation and exited via OperationCanceledException.
+                // It *did* finish, which is all this return value reports.
+                return true;
+            }
+        }
+
         private void RunLoopBlocking()
         {
-            _isOnLoop.Value = true;
             try
             {
                 while (true)
@@ -285,7 +385,6 @@ namespace CanKit.Pro.Actor
 
         private async Task RunLoopAsync()
         {
-            _isOnLoop.Value = true;
             try
             {
                 while (true)
@@ -322,25 +421,90 @@ namespace CanKit.Pro.Actor
         // not-yet-due timers; those are simply discarded.
         private void FinalDrain()
         {
-            DrainMailbox();
-            DrainPendingTimerInserts();
+            // Unlike the live loop, this drains to genuine emptiness: the batching in DrainMailbox
+            // exists to keep timers fair while the actor is running, and at shutdown there is
+            // nothing left to be fair to -- completeness is the whole promise. The queues cannot
+            // grow while we do this: Post/Schedule already throw, so at most a caller that won the
+            // _disposeGate race is still landing its final item.
+            while (!_mailbox.IsEmpty || !_pendingTimerInserts.IsEmpty)
+            {
+                DrainMailbox();
+                DrainPendingTimerInserts();
+            }
+
             FireDueTimers();
         }
 
         private int NextWaitTimeoutMilliseconds()
         {
-            while (_timers.Count > 0 && _timers[0].Cancelled)
+            // Queued work outranks any wait. The semaphore's count is only a hint (DrainMailbox
+            // deliberately stops short of emptying the mailbox), so asking the queues directly is
+            // what actually guarantees the loop comes straight back for the remainder instead of
+            // parking on a timer deadline with work still in hand.
+            if (!_mailbox.IsEmpty || !_pendingTimerInserts.IsEmpty) return 0;
+
+            CompactCancelledTimers();
+
+            while (_timers.Count > 0 && _timers[0].IsCancelled)
+            {
+                var head = _timers[0];
                 _timers.RemoveAt(0);
+                Retire(head);
+            }
 
             if (_timers.Count == 0) return Timeout.Infinite;
 
-            var remaining = _timers[0].DueUtc - DateTime.UtcNow;
-            return remaining <= TimeSpan.Zero ? 0 : ClampMilliseconds(remaining);
+            return ToTimeoutMilliseconds(_timers[0].DueTimestamp - _time.GetTimestamp());
+        }
+
+        // Cancelled entries in the middle of _timers are invisible to the cheap head-trim above:
+        // they only reach the head once every earlier entry is gone, i.e. no sooner than their own
+        // original due time. A protocol that re-arms a long deadline often (an ISO-TP N_Cr or a
+        // CANopen heartbeat consumer refreshed per frame) while some other, earlier timer stays
+        // pending therefore carried one corpse per re-arm, each of which the O(n) InsertTimerSorted
+        // then had to walk past -- turning a steady-state protocol into quadratic work. Sweeping is
+        // O(n) too, so it is amortised behind a threshold rather than done on every iteration.
+        private void CompactCancelledTimers()
+        {
+            var cancelled = Volatile.Read(ref _cancelledTimerCount);
+            if (cancelled < CancelledTimerSweepThreshold) return;
+            if (cancelled * 2 < _timers.Count) return; // a few corpses in a large live list: not worth the walk
+
+            // Side-effecting predicate on purpose: RemoveAll is the only single-pass removal
+            // List<T> offers, and each removed entry has to be retired (which is what keeps
+            // _cancelledTimerCount honest) while we still hold a reference to it.
+            _timers.RemoveAll(entry =>
+            {
+                if (!entry.IsCancelled) return false;
+                Retire(entry);
+                return true;
+            });
+        }
+
+        // Takes an entry out of the timer machinery for good and keeps _cancelledTimerCount in
+        // step: the counter tracks cancelled entries *still held* by _timers or
+        // _pendingTimerInserts, so every drop has to be paired with the increment that
+        // TimerHandle.Dispose made. Retiring also stops a later handle disposal from counting an
+        // entry that is no longer anywhere -- the drift that would otherwise make every
+        // `using var handle = actor.Schedule(...)` leak one phantom corpse into the threshold.
+        private void Retire(TimerEntry entry)
+        {
+            if (entry.Retire())
+                Interlocked.Decrement(ref _cancelledTimerCount);
         }
 
         private void DrainMailbox()
         {
-            while (_mailbox.TryDequeue(out var item))
+            // Bounded by a snapshot of what is queued *now*, not "until empty". Every RX reader
+            // posts one work item per received frame, so on a saturated bus (~8000 frames/s) an
+            // unbounded drain never returns to the timer list and no deadline fires at all --
+            // precisely the failure class the layers above this one exist to rule out. Taking a
+            // snapshot keeps throughput (still one wake per batch, not per item) while giving the
+            // timer check a guaranteed turn in between: anything that arrives during the batch is
+            // simply next batch's problem, and NextWaitTimeoutMilliseconds refuses to sleep while
+            // it is outstanding.
+            var budget = _mailbox.Count;
+            while (budget-- > 0 && _mailbox.TryDequeue(out var item))
                 RunSafely(item.Work, item.OnDispatchFailure);
         }
 
@@ -354,22 +518,35 @@ namespace CanKit.Pro.Actor
 
         private void FireDueTimers()
         {
-            var now = DateTime.UtcNow;
-            while (_timers.Count > 0 && _timers[0].DueUtc <= now)
+            var now = _time.GetTimestamp();
+            while (_timers.Count > 0 && _timers[0].DueTimestamp <= now)
             {
                 var entry = _timers[0];
                 _timers.RemoveAt(0);
-                if (!entry.Cancelled)
+
+                // Retire() reports whether this entry had been cancelled, and does so atomically
+                // with taking it out of circulation -- so a Dispose racing us either wins (we skip
+                // the callback) or loses and finds nothing left to cancel, matching Schedule's
+                // documented "a callback already in flight may still complete".
+                if (!entry.Retire())
                     RunSafely(entry.Callback);
+                else
+                    Interlocked.Decrement(ref _cancelledTimerCount);
             }
         }
 
         private void InsertTimerSorted(TimerEntry entry)
         {
-            if (entry.Cancelled) return; // cancelled before the loop got around to inserting it
+            if (entry.IsCancelled)
+            {
+                // Cancelled before the loop got around to inserting it: it never joins _timers, so
+                // it must not be left counted against the sweep threshold either.
+                Retire(entry);
+                return;
+            }
 
             var index = 0;
-            while (index < _timers.Count && _timers[index].DueUtc <= entry.DueUtc)
+            while (index < _timers.Count && _timers[index].DueTimestamp <= entry.DueTimestamp)
                 index++;
             _timers.Insert(index, entry);
         }
@@ -392,8 +569,14 @@ namespace CanKit.Pro.Actor
                 {
                     _syncContext.Send(state =>
                     {
+                        // Marked here, inside the delegate, because this runs on the context's own
+                        // thread, and "am I on the actor?" is a question about the thread actually
+                        // executing the callback -- not about the loop thread that is merely
+                        // blocked in Send waiting for it.
+                        EnterCallbackScope();
                         try { ((Action)state!)(); }
                         catch (Exception ex) { RaiseBackgroundException(ex); }
+                        finally { ExitCallbackScope(); }
                     }, work);
                 }
                 catch (Exception ex)
@@ -414,6 +597,7 @@ namespace CanKit.Pro.Actor
                 return;
             }
 
+            EnterCallbackScope();
             try
             {
                 work();
@@ -422,6 +606,22 @@ namespace CanKit.Pro.Actor
             {
                 RaiseBackgroundException(ex);
             }
+            finally
+            {
+                ExitCallbackScope();
+            }
+        }
+
+        private void EnterCallbackScope()
+        {
+            var running = t_runningActors ??= new List<ProtocolActor>(2);
+            running.Add(this);
+        }
+
+        private void ExitCallbackScope()
+        {
+            var running = t_runningActors!;
+            running.RemoveAt(running.Count - 1);
         }
 
         private void RaiseBackgroundException(Exception ex)
@@ -442,11 +642,37 @@ namespace CanKit.Pro.Actor
                 throw new ObjectDisposedException(nameof(ProtocolActor));
         }
 
-        private static int ClampMilliseconds(TimeSpan span)
+        // Monotonic timestamp at which a delay scheduled *now* becomes due. Rounds the tick
+        // conversion up so a timer can never come due even a fraction of a tick early -- a delay is
+        // a floor ("not before"), never a target to be missed on the low side.
+        private long DueTimestamp(TimeSpan delay)
         {
-            var ms = span.TotalMilliseconds;
-            return ms >= int.MaxValue ? int.MaxValue : (int)ms;
+            var now = _time.GetTimestamp();
+            var ticks = delay.TotalSeconds * _time.Frequency;
+
+            // TimeSpan reaches ~29 000 years; the tick counter does not. Saturating is the right
+            // answer for a delay nothing in this process will ever outlive anyway.
+            if (ticks >= long.MaxValue - now) return long.MaxValue;
+
+            return now + (long)Math.Ceiling(ticks);
         }
+
+        // Rounds *up*: truncating a 0.4 ms remainder to a 0 ms wait made the loop spin on the
+        // semaphore -- burning a core for up to a millisecond before every single timer -- while
+        // still not firing any earlier, since the timer is not due until it is due. One extra
+        // millisecond of wait costs nothing and turns the busy spin back into a single sleep.
+        private int ToTimeoutMilliseconds(long remainingTicks)
+        {
+            if (remainingTicks <= 0) return 0;
+
+            var ms = remainingTicks * 1000.0 / _time.Frequency;
+            return ms >= int.MaxValue ? int.MaxValue : (int)Math.Ceiling(ms);
+        }
+
+        // Loop-thread-only view of the pending timer list, for tests that need to prove cancelled
+        // entries are actually reclaimed rather than merely never fired. Reading _timers.Count is
+        // only safe from the loop, hence the accessor rather than exposing the list.
+        internal int PendingTimerCount => _timers.Count;
 
         // OnDispatchFailure is null for plain Post() items (BackgroundExceptionOccurred is their
         // only failure channel); PostAsync/PostAsync<T> set it to fail their own
@@ -465,22 +691,63 @@ namespace CanKit.Pro.Actor
 
         private sealed class TimerEntry
         {
-            public TimerEntry(DateTime dueUtc, Action callback)
+            private const int StateLive = 0;
+            private const int StateCancelled = 1;
+            private const int StateRetired = 2;
+
+            // Three states rather than a bool, because "cancelled" and "no longer held by the
+            // timer machinery" are different facts and _cancelledTimerCount needs both: an entry
+            // that already fired must not be counted when its handle is disposed afterwards
+            // (`using var handle = actor.Schedule(...)` does exactly that, every time).
+            private int _state;
+
+            public TimerEntry(long dueTimestamp, Action callback)
             {
-                DueUtc = dueUtc;
+                DueTimestamp = dueTimestamp;
                 Callback = callback;
             }
 
-            public DateTime DueUtc { get; }
+            /// <summary>Due point on the actor's monotonic tick source, not on the wall clock.</summary>
+            public long DueTimestamp { get; }
+
             public Action Callback { get; }
-            public volatile bool Cancelled;
+
+            public bool IsCancelled => Volatile.Read(ref _state) == StateCancelled;
+
+            /// <summary>
+            /// Live → Cancelled. True for the first caller of a still-live entry only: a second
+            /// Dispose of the same handle, or a Dispose of an entry the loop already retired, is a
+            /// no-op that must not be counted.
+            /// </summary>
+            public bool TryCancel() => Interlocked.CompareExchange(ref _state, StateCancelled, StateLive) == StateLive;
+
+            /// <summary>
+            /// Takes the entry out of circulation, whatever it was. Returns true if it had been
+            /// cancelled, i.e. if it is still counted in <c>_cancelledTimerCount</c> and if its
+            /// callback must not run.
+            /// </summary>
+            public bool Retire() => Interlocked.Exchange(ref _state, StateRetired) == StateCancelled;
         }
 
         private sealed class TimerHandle : IDisposable
         {
+            private readonly ProtocolActor _owner;
             private readonly TimerEntry _entry;
-            public TimerHandle(TimerEntry entry) => _entry = entry;
-            public void Dispose() => _entry.Cancelled = true;
+
+            public TimerHandle(ProtocolActor owner, TimerEntry entry)
+            {
+                _owner = owner;
+                _entry = entry;
+            }
+
+            public void Dispose()
+            {
+                // Only flags the entry -- removing it here would touch _timers from a caller
+                // thread. The loop reclaims it (see CompactCancelledTimers); this counter is how it
+                // learns there is anything to reclaim without walking the list to find out.
+                if (_entry.TryCancel())
+                    Interlocked.Increment(ref _owner._cancelledTimerCount);
+            }
         }
     }
 }
