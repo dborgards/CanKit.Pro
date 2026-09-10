@@ -18,6 +18,11 @@ body:
         - CanKit.Pro.Actor
         - CanKit.Pro.Addressing
         - CanKit.Pro.Reliability
+        - CanKit.Pro.IsoTp
+        - CanKit.Pro.J1939Tp
+        - CanKit.Pro.CANopen
+        - CanKit.Pro.J1939
+        - CanKit.Pro.Uds
         - More than one / not sure
     validations:
       required: true
@@ -40,7 +45,7 @@ body:
     id: environment
     attributes:
       label: .NET version and OS
-      placeholder: ".NET 8.0.8, Windows 11 / Ubuntu 24.04"
+      placeholder: ".NET 10.0.1, Windows 11 / Ubuntu 24.04"
     validations:
       required: true
 
