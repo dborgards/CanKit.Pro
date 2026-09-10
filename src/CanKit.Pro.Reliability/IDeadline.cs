@@ -14,6 +14,18 @@ namespace CanKit.Pro.Reliability
     /// field first "wins" the transition out of <c>Pending</c>, and the others become no-ops. This
     /// lets a caller (e.g. a UDS client tracking a P2 window) ask "did I complete before the
     /// deadline fired?" via <see cref="Complete"/>'s return value.
+    /// <para>
+    /// <b>One case resolves into none of the three</b>: if the owning actor is disposed while the
+    /// deadline is still <c>Pending</c>, the actor discards its not-yet-due callbacks, so the
+    /// expiry can never fire and all three flags stay false forever — indistinguishable from a
+    /// healthy pending deadline. Reporting that state would take a fourth flag (or an event) on
+    /// this interface, which existing implementers could not absorb without a break, so it is
+    /// documented rather than signalled: tie deadline lifetime to actor lifetime, i.e. resolve
+    /// outstanding deadlines with <see cref="Complete"/>/<see cref="IDisposable.Dispose"/> before
+    /// disposing the actor they were armed on. <see cref="Rearm"/> is the one operation that does
+    /// detect it, because it has to talk to the actor: it throws
+    /// <see cref="ObjectDisposedException"/> and forces the deadline to <c>Cancelled</c>.
+    /// </para>
     /// </remarks>
     public interface IDeadline : IDisposable
     {
