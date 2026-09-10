@@ -33,8 +33,10 @@ Examples of unacceptable behavior:
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project
-maintainer at **dietmar@borgards.de**. All complaints will be reviewed and investigated promptly
-and fairly, and the privacy and security of the reporter will be respected.
+maintainer [@dborgards](https://github.com/dborgards), or — if the report concerns the maintainer,
+or you would rather it not reach the project first — to GitHub through the
+[report abuse](https://github.com/contact/report-abuse) form. All complaints will be reviewed and
+investigated promptly and fairly, and the privacy and security of the reporter will be respected.
 
 Maintainers who do not follow or enforce this Code of Conduct in good faith may face temporary or
 permanent repercussions as determined by other members of the project's leadership.
