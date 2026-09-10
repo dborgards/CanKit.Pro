@@ -113,6 +113,10 @@ These are published libraries, so the public surface is a promise:
 
 - XML documentation on every public type and member. The existing code documents in English with
   a Chinese translation, inherited from CanKit's own style — English alone is fine for new code.
+  Those comments are published verbatim: `eng/build-api-docs.sh` turns them into the
+  [API reference](https://dborgards.github.io/CanKit.Pro/api/) on every website build, so what you
+  write there is what readers see, and the `FR-…`/`ADR-…` ids you cite become links into the SRS
+  and the arc42 document.
 - Prefer adding an overload to changing a signature. If a break is genuinely right, mark it `!`
   and write the migration into the footer.
 - New public types need a matching section in the package's `README.md`, which ships inside

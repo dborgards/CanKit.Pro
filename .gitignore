@@ -47,5 +47,11 @@ Thumbs.db
 site/
 .cache/
 
-## Local Python environment for the website build
+## Website API reference — generated from the XML doc comments by eng/build-api-docs.sh on every
+## build, so a checked-in copy could only ever be stale.
+docs/api/
+
+## Local Python environment for the website build, and the bytecode cache MkDocs leaves next to
+## eng/mkdocs_hooks.py when it imports it
 .venv/
+__pycache__/
