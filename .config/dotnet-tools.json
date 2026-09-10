@@ -6,6 +6,11 @@
       "version": "6.8.2",
       "commands": ["dotnet-gitversion"],
       "rollForward": false
+    },
+    "defaultdocumentation.console": {
+      "version": "1.2.5",
+      "commands": ["defaultdocumentation"],
+      "rollForward": true
     }
   }
 }

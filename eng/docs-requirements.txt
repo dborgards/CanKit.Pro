@@ -6,3 +6,8 @@
 # resolver must never be allowed to pick it up.
 mkdocs==1.6.1
 mkdocs-material==9.7.7
+# Builds the API tab's navigation from the generated docs/api/SUMMARY.md, because the names of the
+# generated pages are not known to mkdocs.yml ahead of time. Held at 0.6.2: 0.6.3 declares its
+# MkDocs dependency under the "properdocs" name and would install a second copy of MkDocs next to
+# the pinned one.
+mkdocs-literate-nav==0.6.2
