@@ -1,135 +1,181 @@
-enum CanKit.Pro.IsoTp.FlowStatus : Byte
-  field CanKit.Pro.IsoTp.FlowStatus ClearToSend
-  field CanKit.Pro.IsoTp.FlowStatus Overflow
-  field CanKit.Pro.IsoTp.FlowStatus Wait
-interface CanKit.Pro.IsoTp.IIsoTpChannel
-  event System.EventHandler<CanKit.Pro.IsoTp.IsoTpDatagramReceivedEventArgs> DatagramReceived
-  event System.EventHandler<System.Exception> BackgroundExceptionOccurred
-  method System.Collections.Generic.IAsyncEnumerable<System.Byte[]> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken)
-  method System.Int32 DiscardPendingPdus()
-  method System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<System.Byte> pdu, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken)
-  prop CanKit.Pro.IsoTp.IsoTpChannelOptions Options {get}
-  prop CanKit.Pro.IsoTp.IsoTpEndpoint Endpoint {get}
-class CanKit.Pro.IsoTp.IsoTp
-  method CanKit.Pro.IsoTp.IIsoTpChannel Open(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, CanKit.Pro.IsoTp.IsoTpChannelOptions options)
-  method CanKit.Pro.IsoTp.IIsoTpChannel Open(CanKit.Pro.RawCan.ICanBusService service, CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, CanKit.Pro.IsoTp.IsoTpChannelOptions options, System.Boolean leaveOpen)
-  method CanKit.Pro.IsoTp.IsoTpFunctionalClient OpenFunctional(CanKit.Abstractions.API.Can.ICanBus bus, System.UInt32 functionalTxCanId, System.UInt32 responseRxCanIdRangeStart, System.UInt32 responseRxCanIdRangeEnd, CanKit.Pro.IsoTp.IsoTpFunctionalOptions options)
-  method CanKit.Pro.IsoTp.IsoTpFunctionalClient OpenFunctional(CanKit.Pro.RawCan.ICanBusService service, System.UInt32 functionalTxCanId, System.UInt32 responseRxCanIdRangeStart, System.UInt32 responseRxCanIdRangeEnd, CanKit.Pro.IsoTp.IsoTpFunctionalOptions options, System.Boolean leaveOpen)
-enum CanKit.Pro.IsoTp.IsoTpAddressingMode : Int32
-  field CanKit.Pro.IsoTp.IsoTpAddressingMode Extended
-  field CanKit.Pro.IsoTp.IsoTpAddressingMode Mixed
-  field CanKit.Pro.IsoTp.IsoTpAddressingMode Normal
-  field CanKit.Pro.IsoTp.IsoTpAddressingMode NormalFixed
-class CanKit.Pro.IsoTp.IsoTpChannelOptions
-  ctor ()
-  field System.TimeSpan DefaultTimeout
-  method CanKit.Pro.IsoTp.IsoTpChannelOptions With(System.Nullable<System.Boolean> useCanFd, System.Nullable<System.Boolean> usePadding, System.Nullable<System.Byte> paddingByte, System.Nullable<System.Byte> localBlockSize, System.Nullable<System.TimeSpan> localStMin, System.Nullable<System.TimeSpan> nAs, System.Nullable<System.TimeSpan> nBs, System.Nullable<System.TimeSpan> nCr, System.Nullable<System.Int32> wftMax, System.Nullable<System.Int32> receiveBufferCapacity)
-  prop System.Boolean UseCanFd {get/set}
-  prop System.Boolean UsePadding {get/set}
-  prop System.Byte LocalBlockSize {get/set}
-  prop System.Byte PaddingByte {get/set}
-  prop System.Int32 ReceiveBufferCapacity {get/set}
-  prop System.Int32 WftMax {get/set}
-  prop System.TimeSpan LocalStMin {get/set}
-  prop System.TimeSpan NAs {get/set}
-  prop System.TimeSpan NBs {get/set}
-  prop System.TimeSpan NCr {get/set}
-class CanKit.Pro.IsoTp.IsoTpDatagramReceivedEventArgs
-  ctor (CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, System.Byte[] data)
-  prop CanKit.Pro.IsoTp.IsoTpEndpoint Endpoint {get}
-  prop System.Byte[] Data {get}
-struct CanKit.Pro.IsoTp.IsoTpEndpoint
-  method CanKit.Pro.IsoTp.IsoTpEndpoint Extended(System.UInt32 txCanId, System.UInt32 rxCanId, System.Byte sourceAddress, System.Byte targetAddress, System.Boolean isExtendedCanId)
-  method CanKit.Pro.IsoTp.IsoTpEndpoint Mixed(System.UInt32 txCanId, System.UInt32 rxCanId, System.Byte addressExtension, System.Boolean isExtendedCanId)
-  method CanKit.Pro.IsoTp.IsoTpEndpoint Normal(System.UInt32 txCanId, System.UInt32 rxCanId, System.Boolean isExtendedCanId)
-  method CanKit.Pro.IsoTp.IsoTpEndpoint NormalFixed(System.UInt32 txCanId, System.UInt32 rxCanId)
-  method System.Boolean Equals(CanKit.Pro.IsoTp.IsoTpEndpoint other)
-  method System.Boolean Equals(System.Object obj)
-  method System.Int32 GetHashCode()
-  prop CanKit.Pro.IsoTp.IsoTpAddressingMode AddressingMode {get}
-  prop System.Boolean IsExtendedCanId {get}
-  prop System.Boolean UsesAddressExtension {get}
-  prop System.Byte AddressExtension {get}
-  prop System.Byte RxAddressExtension {get}
-  prop System.Int32 AddressExtensionSize {get}
-  prop System.UInt32 RxCanId {get}
-  prop System.UInt32 TxCanId {get}
-class CanKit.Pro.IsoTp.IsoTpException
-  ctor (System.String message)
-  ctor (System.String message, System.Exception innerException)
-class CanKit.Pro.IsoTp.IsoTpFrameCodec
-  field System.Byte DefaultPaddingByte
-  field System.Byte FirstConsecutiveSequenceNumber
-  field System.Int32 CanFdMaxData
-  field System.Int32 ClassicCanMaxData
-  field System.Int32 MaxClassicFirstFrameLength
-  field System.Int32 SequenceNumberModulus
-  field System.UInt32 MaxFdFirstFrameLength
-  method System.Boolean TryParsePci(System.ReadOnlySpan<System.Byte> canPayload, CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.Boolean isCanFd, CanKit.Pro.IsoTp.Pci& pci)
-  method System.Byte EncodeStMin(System.TimeSpan value)
-  method System.Byte NextConsecutiveSequenceNumber(System.Byte current)
-  method System.Byte[] BuildConsecutiveFrame(CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.Byte sequenceNumber, System.ReadOnlySpan<System.Byte> chunk, System.Boolean isCanFd, System.Boolean padding, System.Byte paddingByte)
-  method System.Byte[] BuildFirstFrame(CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.Int32 totalLength, System.ReadOnlySpan<System.Byte> firstChunk, System.Boolean isCanFd)
-  method System.Byte[] BuildFlowControl(CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, CanKit.Pro.IsoTp.FlowStatus flowStatus, System.Byte blockSize, System.Byte stMinRaw, System.Boolean isCanFd, System.Boolean padding, System.Byte paddingByte)
-  method System.Byte[] BuildSingleFrame(CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.ReadOnlySpan<System.Byte> userData, System.Boolean isCanFd, System.Boolean padding, System.Byte paddingByte)
-  method System.Int32 BuildConsecutiveFrame(System.Span<System.Byte> destination, CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.Byte sequenceNumber, System.ReadOnlySpan<System.Byte> chunk, System.Boolean isCanFd, System.Boolean padding, System.Byte paddingByte)
-  method System.Int32 BuildFirstFrame(System.Span<System.Byte> destination, CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.Int32 totalLength, System.ReadOnlySpan<System.Byte> firstChunk, System.Boolean isCanFd)
-  method System.Int32 BuildFlowControl(System.Span<System.Byte> destination, CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, CanKit.Pro.IsoTp.FlowStatus flowStatus, System.Byte blockSize, System.Byte stMinRaw, System.Boolean isCanFd, System.Boolean padding, System.Byte paddingByte)
-  method System.Int32 BuildSingleFrame(System.Span<System.Byte> destination, CanKit.Pro.IsoTp.IsoTpEndpoint& endpoint, System.ReadOnlySpan<System.Byte> userData, System.Boolean isCanFd, System.Boolean padding, System.Byte paddingByte)
-  method System.Int32 ConsecutiveFrameMaxDataLength(System.Boolean isCanFd, System.Boolean usesAddressExtension)
-  method System.Int32 FirstFrameMaxDataLength(System.Boolean isCanFd, System.Boolean usesAddressExtension, System.Boolean useLongLength)
-  method System.Int32 NextValidFrameLength(System.Int32 dataLength, System.Boolean isCanFd)
-  method System.Int32 SingleFrameMaxDataLength(System.Boolean isCanFd, System.Boolean usesAddressExtension)
-  method System.Int32 SingleFrameShortFormMaxDataLength(System.Boolean usesAddressExtension)
-  method System.TimeSpan DecodeStMin(System.Byte raw)
-class CanKit.Pro.IsoTp.IsoTpFunctionalClient
-  method System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<System.Byte> pdu, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> CollectResponsesAsync(System.TimeSpan window, System.Threading.CancellationToken cancellationToken)
-  method System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> SendAndCollectAsync(System.ReadOnlyMemory<System.Byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken)
-  method System.Void Dispose()
-  prop CanKit.Pro.IsoTp.IsoTpFunctionalOptions Options {get}
-  prop System.UInt32 FunctionalTxCanId {get}
-class CanKit.Pro.IsoTp.IsoTpFunctionalOptions
-  ctor ()
-  field System.TimeSpan DefaultTimeout
-  prop System.Boolean IsExtendedCanId {get/set}
-  prop System.Boolean UseCanFd {get/set}
-  prop System.Boolean UsePadding {get/set}
-  prop System.Byte PaddingByte {get/set}
-  prop System.TimeSpan NAs {get/set}
-class CanKit.Pro.IsoTp.IsoTpFunctionalResponse
-  prop System.Byte[] Data {get}
-  prop System.UInt32 SourceCanId {get}
-class CanKit.Pro.IsoTp.IsoTpOverflowException
-  ctor (System.String message)
-class CanKit.Pro.IsoTp.IsoTpSendRejectedException
-  ctor (System.String message)
-class CanKit.Pro.IsoTp.IsoTpTimeoutException
-  ctor (CanKit.Pro.IsoTp.IsoTpTimer timer, System.String message)
-  prop CanKit.Pro.IsoTp.IsoTpTimer Timer {get}
-enum CanKit.Pro.IsoTp.IsoTpTimer : Int32
-  field CanKit.Pro.IsoTp.IsoTpTimer NAs
-  field CanKit.Pro.IsoTp.IsoTpTimer NBs
-  field CanKit.Pro.IsoTp.IsoTpTimer NCr
-class CanKit.Pro.IsoTp.IsoTpWaitFrameLimitExceededException
-  ctor (System.Int32 received, System.Int32 limit)
-  prop System.Int32 Limit {get}
-  prop System.Int32 WaitFramesReceived {get}
-struct CanKit.Pro.IsoTp.Pci
-  method System.Boolean Equals(CanKit.Pro.IsoTp.Pci other)
-  method System.Boolean Equals(System.Object obj)
-  method System.Int32 GetHashCode()
-  prop CanKit.Pro.IsoTp.FlowStatus FlowStatus {get}
-  prop CanKit.Pro.IsoTp.PciType Type {get}
-  prop System.Byte BlockSize {get}
-  prop System.Byte SequenceNumber {get}
-  prop System.Byte StMinRaw {get}
-  prop System.Int32 DataOffset {get}
-  prop System.Int32 Length {get}
-  prop System.TimeSpan StMin {get}
-enum CanKit.Pro.IsoTp.PciType : Byte
-  field CanKit.Pro.IsoTp.PciType ConsecutiveFrame
-  field CanKit.Pro.IsoTp.PciType FirstFrame
-  field CanKit.Pro.IsoTp.PciType FlowControl
-  field CanKit.Pro.IsoTp.PciType SingleFrame
+namespace CanKit.Pro.IsoTp
+{
+    public enum FlowStatus : byte
+    {
+        ClearToSend = 0,
+        Wait = 1,
+        Overflow = 2,
+    }
+    public interface IIsoTpChannel : System.IDisposable
+    {
+        CanKit.Pro.IsoTp.IsoTpEndpoint Endpoint { get; }
+        CanKit.Pro.IsoTp.IsoTpChannelOptions Options { get; }
+        event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
+        event System.EventHandler<CanKit.Pro.IsoTp.IsoTpDatagramReceivedEventArgs>? DatagramReceived;
+        int DiscardPendingPdus();
+        System.Collections.Generic.IAsyncEnumerable<byte[]> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public static class IsoTp
+    {
+        public static CanKit.Pro.IsoTp.IIsoTpChannel Open(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, CanKit.Pro.IsoTp.IsoTpChannelOptions? options = null) { }
+        public static CanKit.Pro.IsoTp.IIsoTpChannel Open(CanKit.Pro.RawCan.ICanBusService service, CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, CanKit.Pro.IsoTp.IsoTpChannelOptions? options = null, bool leaveOpen = true) { }
+        public static CanKit.Pro.IsoTp.IsoTpFunctionalClient OpenFunctional(CanKit.Abstractions.API.Can.ICanBus bus, uint functionalTxCanId, uint responseRxCanIdRangeStart, uint responseRxCanIdRangeEnd, CanKit.Pro.IsoTp.IsoTpFunctionalOptions? options = null) { }
+        public static CanKit.Pro.IsoTp.IsoTpFunctionalClient OpenFunctional(CanKit.Pro.RawCan.ICanBusService service, uint functionalTxCanId, uint responseRxCanIdRangeStart, uint responseRxCanIdRangeEnd, CanKit.Pro.IsoTp.IsoTpFunctionalOptions? options = null, bool leaveOpen = true) { }
+    }
+    public enum IsoTpAddressingMode
+    {
+        Normal = 0,
+        NormalFixed = 1,
+        Extended = 2,
+        Mixed = 3,
+    }
+    public sealed class IsoTpChannelOptions
+    {
+        public static readonly System.TimeSpan DefaultTimeout;
+        public IsoTpChannelOptions() { }
+        public byte LocalBlockSize { get; init; }
+        public System.TimeSpan LocalStMin { get; init; }
+        public System.TimeSpan NAs { get; init; }
+        public System.TimeSpan NBs { get; init; }
+        public System.TimeSpan NCr { get; init; }
+        public byte PaddingByte { get; init; }
+        public int ReceiveBufferCapacity { get; init; }
+        public bool UseCanFd { get; init; }
+        public bool UsePadding { get; init; }
+        public int WftMax { get; init; }
+        public CanKit.Pro.IsoTp.IsoTpChannelOptions With(bool? useCanFd = default, bool? usePadding = default, byte? paddingByte = default, byte? localBlockSize = default, System.TimeSpan? localStMin = default, System.TimeSpan? nAs = default, System.TimeSpan? nBs = default, System.TimeSpan? nCr = default, int? wftMax = default, int? receiveBufferCapacity = default) { }
+    }
+    public sealed class IsoTpDatagramReceivedEventArgs : System.EventArgs
+    {
+        public IsoTpDatagramReceivedEventArgs(CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, byte[] data) { }
+        public byte[] Data { get; }
+        public CanKit.Pro.IsoTp.IsoTpEndpoint Endpoint { get; }
+    }
+    public readonly struct IsoTpEndpoint : System.IEquatable<CanKit.Pro.IsoTp.IsoTpEndpoint>
+    {
+        public byte AddressExtension { get; }
+        public int AddressExtensionSize { get; }
+        public CanKit.Pro.IsoTp.IsoTpAddressingMode AddressingMode { get; }
+        public bool IsExtendedCanId { get; }
+        public byte RxAddressExtension { get; }
+        public uint RxCanId { get; }
+        public uint TxCanId { get; }
+        public bool UsesAddressExtension { get; }
+        public bool Equals(CanKit.Pro.IsoTp.IsoTpEndpoint other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public static CanKit.Pro.IsoTp.IsoTpEndpoint Extended(uint txCanId, uint rxCanId, byte sourceAddress, byte targetAddress, bool isExtendedCanId = false) { }
+        public static CanKit.Pro.IsoTp.IsoTpEndpoint Mixed(uint txCanId, uint rxCanId, byte addressExtension, bool isExtendedCanId = false) { }
+        public static CanKit.Pro.IsoTp.IsoTpEndpoint Normal(uint txCanId, uint rxCanId, bool isExtendedCanId = false) { }
+        public static CanKit.Pro.IsoTp.IsoTpEndpoint NormalFixed(uint txCanId, uint rxCanId) { }
+        public static bool operator !=(CanKit.Pro.IsoTp.IsoTpEndpoint left, CanKit.Pro.IsoTp.IsoTpEndpoint right) { }
+        public static bool operator ==(CanKit.Pro.IsoTp.IsoTpEndpoint left, CanKit.Pro.IsoTp.IsoTpEndpoint right) { }
+    }
+    public class IsoTpException : CanKit.Core.Exceptions.CanKitException
+    {
+        public IsoTpException(string message) { }
+        protected IsoTpException(CanKit.Core.Exceptions.CanKitErrorCode errorCode, string message) { }
+        public IsoTpException(string message, System.Exception innerException) { }
+    }
+    public static class IsoTpFrameCodec
+    {
+        public const int CanFdMaxData = 64;
+        public const int ClassicCanMaxData = 8;
+        public const byte DefaultPaddingByte = 204;
+        public const byte FirstConsecutiveSequenceNumber = 1;
+        public const int MaxClassicFirstFrameLength = 4095;
+        public const uint MaxFdFirstFrameLength = 4294967295u;
+        public const int SequenceNumberModulus = 16;
+        public static byte[] BuildConsecutiveFrame(in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, byte sequenceNumber, System.ReadOnlySpan<byte> chunk, bool isCanFd, bool padding, byte paddingByte = 204) { }
+        public static int BuildConsecutiveFrame(System.Span<byte> destination, in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, byte sequenceNumber, System.ReadOnlySpan<byte> chunk, bool isCanFd, bool padding, byte paddingByte = 204) { }
+        public static byte[] BuildFirstFrame(in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, int totalLength, System.ReadOnlySpan<byte> firstChunk, bool isCanFd) { }
+        public static int BuildFirstFrame(System.Span<byte> destination, in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, int totalLength, System.ReadOnlySpan<byte> firstChunk, bool isCanFd) { }
+        public static byte[] BuildFlowControl(in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, CanKit.Pro.IsoTp.FlowStatus flowStatus, byte blockSize, byte stMinRaw, bool isCanFd, bool padding, byte paddingByte = 204) { }
+        public static int BuildFlowControl(System.Span<byte> destination, in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, CanKit.Pro.IsoTp.FlowStatus flowStatus, byte blockSize, byte stMinRaw, bool isCanFd, bool padding, byte paddingByte = 204) { }
+        public static byte[] BuildSingleFrame(in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, System.ReadOnlySpan<byte> userData, bool isCanFd, bool padding, byte paddingByte = 204) { }
+        public static int BuildSingleFrame(System.Span<byte> destination, in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, System.ReadOnlySpan<byte> userData, bool isCanFd, bool padding, byte paddingByte = 204) { }
+        public static int ConsecutiveFrameMaxDataLength(bool isCanFd, bool usesAddressExtension) { }
+        public static System.TimeSpan DecodeStMin(byte raw) { }
+        public static byte EncodeStMin(System.TimeSpan value) { }
+        public static int FirstFrameMaxDataLength(bool isCanFd, bool usesAddressExtension, bool useLongLength) { }
+        public static byte NextConsecutiveSequenceNumber(byte current) { }
+        public static int NextValidFrameLength(int dataLength, bool isCanFd) { }
+        public static int SingleFrameMaxDataLength(bool isCanFd, bool usesAddressExtension) { }
+        public static int SingleFrameShortFormMaxDataLength(bool usesAddressExtension) { }
+        public static bool TryParsePci(System.ReadOnlySpan<byte> canPayload, in CanKit.Pro.IsoTp.IsoTpEndpoint endpoint, bool isCanFd, out CanKit.Pro.IsoTp.Pci pci) { }
+    }
+    public sealed class IsoTpFunctionalClient : System.IDisposable
+    {
+        public uint FunctionalTxCanId { get; }
+        public CanKit.Pro.IsoTp.IsoTpFunctionalOptions Options { get; }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> CollectResponsesAsync(System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public void Dispose() { }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> SendAndCollectAsync(System.ReadOnlyMemory<byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class IsoTpFunctionalOptions
+    {
+        public static readonly System.TimeSpan DefaultTimeout;
+        public IsoTpFunctionalOptions() { }
+        public bool IsExtendedCanId { get; init; }
+        public System.TimeSpan NAs { get; init; }
+        public byte PaddingByte { get; init; }
+        public bool UseCanFd { get; init; }
+        public bool UsePadding { get; init; }
+    }
+    public sealed class IsoTpFunctionalResponse
+    {
+        public byte[] Data { get; }
+        public uint SourceCanId { get; }
+    }
+    public sealed class IsoTpOverflowException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpOverflowException(string message) { }
+    }
+    public sealed class IsoTpSendRejectedException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpSendRejectedException(string message) { }
+    }
+    public sealed class IsoTpTimeoutException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpTimeoutException(CanKit.Pro.IsoTp.IsoTpTimer timer, string message) { }
+        public CanKit.Pro.IsoTp.IsoTpTimer Timer { get; }
+    }
+    public enum IsoTpTimer
+    {
+        NAs = 0,
+        NBs = 1,
+        NCr = 2,
+    }
+    public sealed class IsoTpWaitFrameLimitExceededException : CanKit.Pro.IsoTp.IsoTpException
+    {
+        public IsoTpWaitFrameLimitExceededException(int received, int limit) { }
+        public int Limit { get; }
+        public int WaitFramesReceived { get; }
+    }
+    public readonly struct Pci : System.IEquatable<CanKit.Pro.IsoTp.Pci>
+    {
+        public byte BlockSize { get; }
+        public int DataOffset { get; }
+        public CanKit.Pro.IsoTp.FlowStatus FlowStatus { get; }
+        public int Length { get; }
+        public byte SequenceNumber { get; }
+        public System.TimeSpan StMin { get; }
+        public byte StMinRaw { get; }
+        public CanKit.Pro.IsoTp.PciType Type { get; }
+        public bool Equals(CanKit.Pro.IsoTp.Pci other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public static bool operator !=(CanKit.Pro.IsoTp.Pci left, CanKit.Pro.IsoTp.Pci right) { }
+        public static bool operator ==(CanKit.Pro.IsoTp.Pci left, CanKit.Pro.IsoTp.Pci right) { }
+    }
+    public enum PciType : byte
+    {
+        SingleFrame = 0,
+        FirstFrame = 1,
+        ConsecutiveFrame = 2,
+        FlowControl = 3,
+    }
+}
