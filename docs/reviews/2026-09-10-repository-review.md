@@ -1,6 +1,6 @@
 # CanKit.Pro – Repository-Review
 
-**Datum:** 2026-09-10 · **Stand:** `main` @ `acd8ab9` (v1.2.0) · **Umfang:** 9 Pakete, ~16.700 Zeilen
+**Datum:** 2026-09-10 · **Stand:** `main` @ `1270ed1` (v1.2.0, nach dem History-Rewrite) · **Umfang:** 9 Pakete, ~16.700 Zeilen
 Bibliothekscode, ~13.000 Zeilen Tests, CI/Release-Pipeline, Dokumentation, Samples.
 
 > Dieses Dokument ist ein Review von **CanKit.Pro selbst**. Das ältere
@@ -293,12 +293,29 @@ Attribute oder Nullability. Eine Klasse `sealed` zu machen oder ein Interface zu
 passiert den Test. *Fix:* `PublicApiGenerator` oder ergänzend `EnablePackageValidation` mit
 Baseline 1.2.0 (prüft zusätzlich die TFM-Konsistenz).
 
-**B10 · Vertraulicher VENDOR-Code liegt weiterhin in der öffentlichen Historie** — Commit
-`a6d43eb` entfernt `src/CanKit.Pro.Vendor` mit der Begründung „confidential enough not to
-belong in a public source history“; die Quellen sind über `8116883` und die Tags v1.0.0 /
-v1.1.0 (inkl. Release-Archive) weiterhin öffentlich. Entweder das akzeptieren und die
-Formulierung „customer's confidential private protocol“ aus den Docs nehmen, oder History
-rewrite (nach drei Releases kaum noch sinnvoll).
+**B10 · Privatprotokoll-Paket in der öffentlichen Historie — teilweise erledigt** — Der
+ursprüngliche Befund: Das Paket wurde zwar aus `main` entfernt, seine Quellen blieben aber
+über den Migrations-Commit, den Entfernungs-Commit und die Tags v1.0.0 / v1.1.0 samt
+Release-Archiven öffentlich abrufbar.
+
+Am 2026-09-10 wurde die Historie umgeschrieben: Projektverzeichnis und Testdatei sind aus
+allen Commits, Trees, Branches und Tags entfernt, der Produktname ist in Dateiinhalten und
+Commit-Messages durch einen neutralen Platzhalter ersetzt, und die 21 Commit-Links im
+CHANGELOG zeigen auf die neuen SHAs, damit das Repository nicht mehr in die verwaiste
+Historie verweist. Verifiziert: kein Treffer mehr in Pfaden, Blobs, Commit-Messages,
+Autorenfeldern oder Tags; Build und 403/403 Tests unverändert grün.
+
+**Was bewusst offen bleibt:** GitHub führt `refs/pull/<n>/head` als serverseitige Refs, die
+ein Force-Push nicht berührt und der Repository-Eigentümer nicht löschen kann. Zwölf dieser
+Refs tragen den vollständigen Quellbaum, und die Dateiansicht des Pull Requests, der das
+Paket entfernt hat, zeigt den Quelltext weiterhin im Diff. Zusätzlich bleiben die
+Vor-Rewrite-Objekte über ihre SHA erreichbar, bis GitHub eine Garbage Collection ausführt.
+Beides beseitigt nur ein Ticket beim GitHub-Support (Purge der PR-Refs plus gc) oder ein
+Neuanlegen des Repositories. Diese Restexposition wurde nach Abwägung in Kauf genommen: Der
+Inhalt ist ein generisches SPI ohne Protokolldetails — das csproj sagt selbst „no service
+IDs, frame layouts, session logic, or secrets“, und alle Hex-Werte im entfernten Code sind
+synthetische Test-Bereiche —, das Paket war `IsPackable=false` und damit nie auf nuget.org,
+und das Repository hatte zum Zeitpunkt des Rewrites null Forks und null Stars.
 
 ---
 
@@ -470,7 +487,7 @@ parken Confirmations gezielt; Bugbot-Regressionsfälle sind sauber referenziert;
    Abschnitt 4 genannten Negativtests, damit die Fixes abgesichert sind.
 3. **Prozess:** B3 (Release an 3-OS-CI koppeln), B4 (Runbook + Recovery-Pfad), B5
    (npm-Bumps ohne Release), B6 (Action-Pins), B7 (ns2.0-Tests), B9 (Package Validation),
-   Entscheidung zu B10 (VENDOR-Historie).
+   B10 (Rest-Exposition über die PR-Refs, siehe dort).
 4. **Ehrlichkeit der Docs:** CANopen-README auf „CiA-301-Teilmenge“ zurückschneiden,
    „Experimental“ in den Paketbeschreibungen mit der SemVer-Major 1 in Einklang bringen
    (bewusst entscheiden, ob 1.x „stabil“ bedeuten soll), net8.0/„vier Pakete“-Reste
