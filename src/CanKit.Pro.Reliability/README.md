@@ -83,6 +83,17 @@ deadline.Rearm(TimeSpan.FromMilliseconds(150));
   touching the poll timer — the self-rearming poll remains the independent reliability floor. If an
   adapter refuses these subscriptions (e.g. `AllowErrorInfo=false`), the monitor degrades cleanly to
   poll-only.
+- **Hints are coalesced**: a bus-off or error-passive storm raises `ErrorFrameReceived` thousands of
+  times per second, so at most **one** un-run hint recheck is ever outstanding in the mailbox —
+  further hints arriving while it is queued are dropped instead of posted. A recheck is a *sample of
+  a level* (`BusState` is a plain getter), not the delivery of a queued event, so N back-to-back
+  samples of an unchanged level report exactly what one reports; what is dropped is mailbox traffic
+  that would otherwise starve the protocol work the state change exists to abort. The gate is
+  released *before* the sample is taken, so a hint racing an in-flight recheck posts a follow-up and
+  the last hint of a storm is always succeeded by a sample taken after it. Coalescing does not make
+  the monitor miss edges it would otherwise report: as ever, the intermediate levels of a fast
+  ErrWarning → ErrPassive → BusOff cascade are only seen if a sample lands between them — shorten
+  the poll interval if you need finer granularity.
 - **Edge-triggered**: `StateChanged` fires only when the newly-read state differs from the last-seen
   one, for both degrading and recovering transitions (BusOff → ErrActive matters too).
 - **Loop-thread cost**: each tick reads `BusState` synchronously on the actor's loop thread; a slow
