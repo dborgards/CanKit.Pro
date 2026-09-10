@@ -166,12 +166,20 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     //      applied to the abandoned buffer or committed to the OD. Prior to the fix the
     //      expedited path did not clear _sdoServer, so the stale download session would still
     //      accept and commit those segment frames.
+    //
+    // Part (2) is observed on the wire rather than by waiting: "0x3000 is still all zeros" is
+    // equally true of a server that rejected the stray segments and of one that never received
+    // them, so the fixed Task.Delay this used to sit on decided which behaviour was being
+    // asserted. A third bus watches the slave's SDO TX, and the test waits for the server's own
+    // responses — the session ack, then one CommandSpecifierInvalid abort per stray segment.
+    // That the aborts arrive is the proof the segments were delivered and refused.
     [Fact]
     public async Task Sdo_ExpeditedInitiate_ClearsStaleSegmentedServerSession()
     {
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var busObserver = Open(session, 2);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
@@ -204,6 +212,36 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // are rejected with SdoAbortCode.CommandSpecifierInvalid instead.
         slave.ObjectDictionary.AddDomain(0x3000, 0x00, new byte[8]);
 
+        // Watch what the slave itself puts on the wire (COB-ID 0x580 + 0x11 = 0x591) from a
+        // third bus, so the slave's responses are distinguishable from the master's requests.
+        var sessionInstalled = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var straysRejected = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rejections = new List<byte[]>();
+        busObserver.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (frame.IsExtendedFrame || (uint)frame.ID != 0x580u + 0x11u) return;
+            var data = frame.Data.ToArray();
+            if (data.Length < 8) return;
+
+            // scs=0x60 for (0x3000, 0x00): the server acknowledged the segmented initiate, so
+            // the session this test needs to be superseded is now genuinely installed.
+            if (data[0] == 0x60 && data[1] == 0x00 && data[2] == 0x30 && data[3] == 0x00)
+                sessionInstalled.TrySetResult(data);
+
+            if (data[0] != 0x80) return; // not an abort
+            uint code = (uint)(data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24));
+            // Only CommandSpecifierInvalid: the expedited initiate below also emits a supersede
+            // abort for 0x3000 (SdoAbortCode.General, see Sdo_ServerSupersede_EmitsWireAbort_
+            // ForPriorTransfer), and that one says nothing about the stray segments.
+            if (code != (uint)SdoAbortCode.CommandSpecifierInvalid) return;
+            lock (rejections)
+            {
+                rejections.Add(data);
+                if (rejections.Count == 2) straysRejected.TrySetResult(null);
+            }
+        };
+
         // Segmented download initiate (cs=0x21) for 0x3000:00, declared length 8.
         var initFrame = new byte[8]
         {
@@ -213,8 +251,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         };
         busA.Transmit(CanFrame.Classic(0x600 + 0x11, initFrame, isExtendedFrame: false));
 
-        // Give the actor loop a moment to install the segmented session for 0x3000.
-        await Task.Delay(50);
+        // Wait for the server's own ack rather than a delay: the segmented session for 0x3000
+        // is installed exactly when that ack goes out.
+        await sessionInstalled.Task.WithTimeoutAsync(ShortTimeout);
 
         // Expedited SDO download to 0x2001 (an unrelated U16 slot). With the fix, this
         // supersedes the still-open 0x3000 segmented session and clears _sdoServer.
@@ -232,8 +271,15 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         busA.Transmit(CanFrame.Classic(0x600 + 0x11, seg1Frame, isExtendedFrame: false));
         busA.Transmit(CanFrame.Classic(0x600 + 0x11, seg2Frame, isExtendedFrame: false));
 
-        // Wait long enough for both segment frames to be processed on the actor loop.
-        await Task.Delay(100);
+        // Both segment frames reached the server and were refused as "no such transfer is
+        // open". This is the load-bearing wait: without it, every assertion below would also
+        // hold for a run in which the strays never arrived at all.
+        await straysRejected.Task.WithTimeoutAsync(ShortTimeout);
+        lock (rejections)
+        {
+            rejections.Should().HaveCount(2,
+                "each stray segment must be individually rejected, not silently absorbed");
+        }
 
         // Verification:
         //   * With the fix: 0x3000:00 stays untouched (all zeros) because the expedited
@@ -649,6 +695,12 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // FR-CO-007: Stop then EnterPre-Op state-machine coverage.
+    //
+    // Each transition waits for the heartbeat the slave emits to announce its new state, not for
+    // a fixed 30 ms. The slave applies the command and sends that heartbeat in the same actor-loop
+    // work item, so the heartbeat's arrival is proof the transition happened — whereas 30 ms was
+    // only ever a guess that happened to hold on an unloaded machine, and three of them in a row
+    // gave the test three chances to fail under CI load for reasons unrelated to NMT.
     [Fact]
     public async Task Nmt_StopAndPreOp_TransitionsWork()
     {
@@ -659,17 +711,28 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
 
-        await master.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
-        await Task.Delay(30);
-        slave.State.Should().Be(NmtState.Operational);
+        // One handler for the whole test: each step arms the state it is waiting for. The slave
+        // also emits an unsolicited boot-up heartbeat, which no step waits for and which the
+        // state match therefore ignores.
+        TaskCompletionSource<NmtState>? pending = null;
+        NmtState expected = default;
+        master.HeartbeatReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == 0x11 && e.State == expected) pending?.TrySetResult(e.State);
+        };
 
-        await master.SendNmtCommandAsync(NmtCommand.Stop, targetNodeId: 0x11);
-        await Task.Delay(30);
-        slave.State.Should().Be(NmtState.Stopped);
+        async Task CommandAndAwaitState(NmtCommand command, NmtState state)
+        {
+            expected = state;
+            pending = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await master.SendNmtCommandAsync(command, targetNodeId: 0x11);
+            await pending.Task.WithTimeoutAsync(ShortTimeout);
+            slave.State.Should().Be(state);
+        }
 
-        await master.SendNmtCommandAsync(NmtCommand.EnterPreOperational, targetNodeId: 0x11);
-        await Task.Delay(30);
-        slave.State.Should().Be(NmtState.PreOperational);
+        await CommandAndAwaitState(NmtCommand.Start, NmtState.Operational);
+        await CommandAndAwaitState(NmtCommand.Stop, NmtState.Stopped);
+        await CommandAndAwaitState(NmtCommand.EnterPreOperational, NmtState.PreOperational);
     }
 
     // FR-CO-007: reset node causes a bootup frame (0x00 on 0x700+id) to be re-emitted.

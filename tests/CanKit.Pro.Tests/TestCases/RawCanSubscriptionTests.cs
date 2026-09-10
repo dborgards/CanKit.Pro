@@ -53,6 +53,17 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         return result;
     }
 
+    // Empties a subscription's buffer through the synchronous TryRead path and returns the IDs in
+    // arrival order. Used by the ControllableBus-driven tests, where delivery already happened
+    // synchronously inside RaiseObserved, so there is nothing left to wait for and Drain's
+    // timeout would only add a way for the test to pass by accident.
+    private static List<int> DrainIds(ISubscription sub)
+    {
+        var ids = new List<int>();
+        while (sub.TryRead(out var frame)) ids.Add(frame.ID);
+        return ids;
+    }
+
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(2);
 
     // FR-RAW-010: two subscriptions with disjoint ID filters on the same bus each receive only
@@ -347,6 +358,112 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         var after = await Drain(sub, 1, ShortTimeout);
         after.Select(f => f.ID).Should().Equal(0x201);
+    }
+
+    // FR-RAW-014, predicate overload: the same runtime-reconfiguration guarantee as for the
+    // ID-filter overload, plus the two things only this overload can express -- replacing an
+    // ID filter with a predicate, and passing null to go back to accepting everything.
+    // Driven through ControllableBus so each RaiseObserved is delivered synchronously on this
+    // thread: "which frames arrived after the reconfigure" is then a fact, not a drain race.
+    [Fact]
+    public void Reconfigure_Predicate_At_Runtime_Subsequent_Frames_Follow_New_Criterion()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        using var sub = service.Subscribe(CanIdFilter.Range(0x100, 0x1FF, CanFilterIDType.Standard));
+
+        bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 1 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x200, new byte[] { 2 }), isEcho: false);
+        DrainIds(sub).Should().Equal(0x100);
+
+        // Predicate replaces the ID filter outright: 0x200 now matches and 0x100 no longer does,
+        // which an "and-ed on top of the old filter" implementation could not produce.
+        sub.Reconfigure(f => f.ID >= 0x200);
+
+        bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 3 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x201, new byte[] { 4 }), isEcho: false);
+        DrainIds(sub).Should().Equal(0x201);
+
+        // null is documented as "accept all", so both of the above must now arrive.
+        sub.Reconfigure((Func<CanFrameView, bool>?)null);
+
+        bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 5 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x201, new byte[] { 6 }), isEcho: false);
+        DrainIds(sub).Should().Equal(0x100, 0x201);
+    }
+
+    // FR-RAW-012/014: a disposed subscription is not a silently inert one. Reconfigure after
+    // Dispose must throw ObjectDisposedException -- reconfiguring a subscription that will never
+    // deliver another frame is a caller bug, and swallowing it would hide it.
+    [Fact]
+    public void Reconfigure_After_Dispose_Throws_On_Both_Overloads()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var sub = service.Subscribe();
+        sub.Dispose();
+
+        var byFilter = () => sub.Reconfigure(CanIdFilter.Range(0x100, 0x1FF, CanFilterIDType.Standard));
+        var byPredicate = () => sub.Reconfigure(f => f.ID == 0x100);
+
+        byFilter.Should().Throw<ObjectDisposedException>();
+        byPredicate.Should().Throw<ObjectDisposedException>();
+    }
+
+    // FR-RAW-011: the per-subscription buffer is bounded *and* drop-oldest. Bounded alone is not
+    // the requirement -- a drop-newest buffer is also bounded, and also never blocks dispatch, so
+    // only asserting "the consumer is not blocked" leaves the discard policy untested. What must
+    // hold is that an undrained subscription keeps the most recent `capacity` frames: monitoring
+    // consumers want current traffic, not a snapshot frozen at the moment they fell behind.
+    [Fact]
+    public void Full_Subscription_Buffer_Drops_The_Oldest_Frames_Not_The_Newest()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        const int capacity = 4;
+        const int sent = 7;
+        using var sub = service.Subscribe(bufferCapacity: capacity);
+
+        // Never drained while sending: every frame past the fourth has to displace one.
+        for (var i = 0; i < sent; i++)
+            bus.RaiseObserved(CanFrame.Classic(0x100 + i, new byte[] { (byte)i }), isEcho: false);
+
+        var buffered = DrainIds(sub);
+
+        buffered.Should().HaveCount(capacity, "the buffer is bounded at its configured capacity");
+        buffered.Should().Equal(new[] { 0x103, 0x104, 0x105, 0x106 },
+            "a full drop-oldest buffer discards the three oldest frames and keeps the newest four, "
+            + "still in arrival order");
+    }
+
+    // TryRead is the non-blocking counterpart to Frames: it removes what is already buffered and
+    // reports emptiness rather than waiting. Both halves matter -- a TryRead that awaited arrival
+    // would deadlock the request/reply clients that use it to drain stale chatter before issuing
+    // a request, and one that returned a stale frame twice would double-deliver it.
+    [Fact]
+    public void TryRead_Removes_One_Buffered_Frame_And_Reports_An_Empty_Buffer()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe();
+
+        sub.TryRead(out var nothing).Should().BeFalse("nothing has been delivered yet");
+        nothing.Should().Be(default(CanFrameView));
+
+        bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 1 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x101, new byte[] { 2 }), isEcho: false);
+
+        sub.TryRead(out var first).Should().BeTrue();
+        first.ID.Should().Be(0x100);
+        first.Data.ToArray().Should().Equal(new byte[] { 1 });
+
+        sub.TryRead(out var second).Should().BeTrue("TryRead consumes, so the next call sees the next frame");
+        second.ID.Should().Be(0x101);
+
+        sub.TryRead(out _).Should().BeFalse("both buffered frames have been consumed");
     }
 
     // FR-RAW-013: the ID-range/mask fast path matches and excludes correctly (unit-level, no bus).

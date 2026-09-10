@@ -791,16 +791,51 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     //
     // The pre-fix window between Open and Task.Run(Dispose) is sub-millisecond on the
     // virtual bus, so this test cannot deterministically reproduce the race on every run;
-    // it pins the correctness invariant (received <= sent) across many claim/re-claim
-    // cycles under continuous broadcast BAM traffic. The synchronous-dispose fix makes the
-    // invariant hold by construction.
+    // it pins the correctness invariant across many claim/re-claim cycles under continuous
+    // broadcast BAM traffic. The synchronous-dispose fix makes the invariant hold by
+    // construction.
+    //
+    // Two separate invariants, each carried by its own traffic, because they need opposite
+    // things from the test:
+    //
+    //   * "never twice" needs *concurrent* traffic — a BAM must be in flight while a rebind
+    //     happens for the two-live-channels window to be hit at all. That is the background
+    //     stream below. It is free-running, and nothing is asserted about how much of it
+    //     arrives; only that no sequence number arrives more than once.
+    //
+    //   * "still delivering" needs *quiet* traffic — one BAM sent after a rebind has finished,
+    //     with no further rebind due until the test issues the next claim, so it cannot be
+    //     straddled and its delivery is guaranteed rather than probable. That is the probe.
+    //
+    // Trying to get both from one free-running stream is what made this test fail on Windows CI
+    // and pass everywhere else. It asserted a delivery floor of sent/2 over the background
+    // stream, and how much of that stream survives is a ratio of two unrelated clocks: the
+    // rebind cadence (ClaimAnnounceTimeout, 40 ms) against how long one BAM occupies the wire
+    // (Th between DT frames). A BAM that straddles a rebind is dropped by the disposed channel
+    // — that is by design, reassembly state is not carried across a rebind — so as the BAM
+    // period approaches the rebind spacing, *every* BAM straddles one and delivery collapses.
+    // Measured on this suite by stretching Th, which is what a runner with coarse timer
+    // granularity does to the peer's requested 2 ms:
+    //
+    //     Th =  2 ms  ->  118 sent, 101 delivered, losses in 15 runs of at most 2
+    //     Th = 16 ms  ->   17 sent,   2 delivered, losses in 2 runs, longest 12
+    //     Th = 32 ms  ->    8 sent,   0 delivered, one run of 8
+    //
+    // No duplicate was ever observed, in any of those. The floor was measuring the runner, not
+    // the node — so it is gone, replaced by the probe, which is exact (all 8 arrive) and holds
+    // however slow the machine is.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task RebindTransport_DoesNotDeliverBamMoreThanOncePerRebind()
     {
+        const uint backgroundPgn = 0xFED1u;
+        const uint probePgn = 0xFED2u;
+        const int claims = 8;
+
         var session = NewSession();
         using var busPeer = Open(session, 0);
         using var busNode = Open(session, 1);
+        using var busProbe = Open(session, 2);
 
         // Short arbitration window so many rebinds happen while peer traffic is in flight;
         // small Th so a single BAM takes a couple of ms end-to-end.
@@ -811,16 +846,35 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         };
         using var node = J1939Node.Open(busNode, opts);
 
-        int received = 0;
+        // Every delivered BAM is recorded as (PGN, sequence number), so a duplicate is
+        // identifiable as such instead of only showing up as "one more than expected".
+        var delivered = new List<(uint Pgn, int Seq)>();
+        var deliveredGate = new object();
+        TaskCompletionSource<int>? probeArrived = null;
         node.MessageReceived += (_, m) =>
         {
-            if (m.Pgn == 0xFED1u) Interlocked.Increment(ref received);
+            if (m.Pgn != backgroundPgn && m.Pgn != probePgn) return;
+            var seq = BitConverter.ToInt32(m.Payload.Span.Slice(0, 4));
+            lock (deliveredGate) delivered.Add((m.Pgn, seq));
+            if (m.Pgn == probePgn) probeArrived?.TrySetResult(seq);
         };
+
+        static byte[] Datagram(int seq)
+        {
+            // 12 bytes, so still a genuine multi-frame BAM; the first four carry the sequence
+            // number and the rest is the same filler as before.
+            var payload = new byte[12];
+            BitConverter.TryWriteBytes(payload.AsSpan(0, 4), seq);
+            for (int b = 4; b < payload.Length; b++) payload[b] = (byte)(0xE0 + b);
+            return payload;
+        }
 
         using var peerTp = CanKit.Pro.J1939Tp.J1939Tp.Open(busPeer, sourceAddress: 0x77,
             new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(2)));
-        var payload = new byte[12];
-        for (int b = 0; b < payload.Length; b++) payload[b] = (byte)(0xE0 + b);
+        // A second source address for the probes: one SA may only run one BAM session at a
+        // time, and the probe must not have to queue behind the background stream.
+        using var probeTp = CanKit.Pro.J1939Tp.J1939Tp.Open(busProbe, sourceAddress: 0x78,
+            new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(2)));
 
         int sent = 0;
         using var peerCts = new CancellationTokenSource();
@@ -830,7 +884,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             {
                 while (!peerCts.IsCancellationRequested)
                 {
-                    await peerTp.SendBamAsync(pgn: 0xFED1u, payload, peerCts.Token)
+                    await peerTp.SendBamAsync(backgroundPgn, Datagram(Volatile.Read(ref sent)), peerCts.Token)
                         .ConfigureAwait(false);
                     Interlocked.Increment(ref sent);
                 }
@@ -842,36 +896,71 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // Cycle re-claims to a new SA every iteration. Each ClaimAddressAsync triggers two
         // RebindTransportOnLoop calls (unbind to 0xFE, then rebind to the new SA) — that is
         // where the old/new channel overlap window lived pre-fix.
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < claims; i++)
         {
             byte sa = (byte)(0x30 + i);
             await node.ClaimAddressAsync(sa).WithTimeout(ShortTimeout);
             node.ClaimState.Should().Be(J1939ClaimState.Claimed);
-            await Task.Delay(30);
+
+            // The probe, sent the moment the rebind is done. Two things ride on it: the node
+            // must still receive broadcasts through the channel it just opened (asserted right
+            // here, so a build that stops delivering fails at the first claim rather than in an
+            // aggregate at the end), and this is also the instant a fire-and-forget-disposed
+            // predecessor would still be subscribed — so a duplicate is most likely exactly
+            // here, where the uniqueness check below will see it.
+            probeArrived = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await probeTp.SendBamAsync(probePgn, Datagram(i)).WithTimeout(ShortTimeout);
+            (await probeArrived.Task.AsTaskWithTimeout(ShortTimeout)).Should().Be(i,
+                "the node must still receive broadcast BAM after rebinding to a new source address");
         }
 
         peerCts.Cancel();
         try { await peerTask.WithTimeout(ShortTimeout); } catch { /* peer cancel/dispose */ }
 
-        // Let any in-flight reassembly surface before the final count check.
+        // Let any in-flight reassembly surface before the final duplicate check. This is a
+        // settle for a negative assertion — there is no event that says "no duplicate is
+        // coming" — so it is a delay by necessity, not by convenience.
         await Task.Delay(150);
 
         int finalSent = Volatile.Read(ref sent);
-        int finalReceived = Volatile.Read(ref received);
+        List<(uint Pgn, int Seq)> got;
+        lock (deliveredGate) got = new List<(uint, int)>(delivered);
 
-        // The received count must never exceed sent: any excess means a rebind delivered
-        // the same broadcast BAM through two overlapping node-side transports. (Received <
-        // sent is expected — BAMs whose DT frames land during the ~ms rebind window get
-        // aborted / dropped by the disposed channel and never reassembled by the new one.
-        // The bug we are guarding against is duplicate delivery, not loss.)
-        finalReceived.Should().BeLessOrEqualTo(finalSent,
-            "no broadcast TP.BAM may be surfaced twice — before the fix, the fire-and-" +
-            "forget Dispose of the previous channel overlapped a freshly-opened channel " +
-            "and both subscriptions delivered the same reassembled datagram");
-        // Sanity: this test is only meaningful if the peer actually managed to run many
-        // BAMs across the rebind cycles.
+        // Sanity: the background stream exists to put a BAM in flight across the rebinds, so
+        // the uniqueness assertion below is only meaningful if it actually produced traffic.
+        // The slowest configuration measured above still managed 8, and Windows CI 29.
         finalSent.Should().BeGreaterThan(5,
-            "the peer must generate enough BAM traffic to exercise the rebind window");
+            "the background stream must generate BAM traffic across the rebind windows");
+
+        // The actual invariant. Before the fix, the fire-and-forget Dispose of the previous
+        // channel overlapped a freshly-opened one and both subscriptions delivered the same
+        // reassembled datagram — which shows up here as the same (PGN, sequence) twice.
+        got.Should().OnlyHaveUniqueItems(
+            "no broadcast TP.BAM may be surfaced twice, and each carries its own sequence number");
+        // NotContain rather than OnlyContain: how much of the background stream survives is
+        // exactly what this test refuses to assert, and OnlyContain fails on an empty
+        // collection — which would smuggle "at least one background BAM arrived" back in as a
+        // hidden throughput assumption. Stated as a negative, it holds at any delivery rate
+        // including zero, while still catching a corrupted or invented sequence number.
+        //
+        // The bound is <= finalSent, not <: `sent` is incremented only after SendBamAsync
+        // completes, so cancelling the peer leaves the in-flight BAM uncounted while its DT
+        // frames may already be on the wire. The settle above exists precisely so that
+        // datagram can still reassemble, and its sequence is then equal to finalSent — a
+        // cancelled send that got through, not a corrupt payload. (Carried over from
+        // 2b13918, which found this on the previous form of the assertion; it applies
+        // unchanged here.)
+        got.Where(d => d.Pgn == backgroundPgn).Should()
+            .NotContain(d => d.Seq < 0 || d.Seq > finalSent,
+                "every delivered datagram must be one the peer actually sent, reassembled intact");
+
+        // Exact, and independent of how fast the runner is: one probe per claim, all delivered.
+        // Loss in the background stream is expected and deliberately not asserted on — a BAM
+        // straddling a rebind is dropped by design — but a node that stops receiving after a
+        // rebind cannot get all eight probes through.
+        got.Where(d => d.Pgn == probePgn).Select(d => d.Seq).Should()
+            .Equal(Enumerable.Range(0, claims),
+                "each rebind must be followed by a delivered probe, exactly once, in order");
     }
 
     // ---------------------------------------------------------------------------------------
