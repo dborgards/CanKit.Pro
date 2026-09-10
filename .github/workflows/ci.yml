@@ -179,3 +179,26 @@ jobs:
       # has the rights the GitHub plugin needs.
       - name: Verify release configuration loads
         run: node eng/verify-release-config.mjs
+
+  format:
+    name: format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      # `dotnet format` was never run in CI, so import ordering and whitespace drifted on `main`
+      # until three separate agents tripped over the same three files. The formatter's own rules
+      # are the arbiter here; nothing in .editorconfig was changed to accommodate the fixes.
+      #
+      # Deliberately its own job rather than a step in build-test: the three OS legs are the
+      # required status checks on `main`, and a misplaced blank line has no business blocking a
+      # merge. This reports, it does not gate. Promote it to a required check if that turns out
+      # to be too weak.
+      - name: Verify formatting
+        run: dotnet format CanKit.Pro.sln --verify-no-changes --verbosity diagnostic
