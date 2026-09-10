@@ -854,7 +854,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.MessageReceived += (_, m) =>
         {
             if (m.Pgn != backgroundPgn && m.Pgn != probePgn) return;
-            var seq = BitConverter.ToInt32(m.Payload.Span.Slice(0, 4));
+            // The array overloads, not BitConverter's Span ones: BitConverter is a static BCL
+            // class, so the members .NET Framework lacks cannot be polyfilled the way
+            // Task.WaitAsync and TaskCompletionSource are, and the net48 leg has to compile too.
+            // Byte-for-byte the same conversion — both read four bytes in machine endianness.
+            var seq = BitConverter.ToInt32(m.Payload.Span.Slice(0, 4).ToArray(), 0);
             lock (deliveredGate) delivered.Add((m.Pgn, seq));
             if (m.Pgn == probePgn) probeArrived?.TrySetResult(seq);
         };
@@ -864,7 +868,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             // 12 bytes, so still a genuine multi-frame BAM; the first four carry the sequence
             // number and the rest is the same filler as before.
             var payload = new byte[12];
-            BitConverter.TryWriteBytes(payload.AsSpan(0, 4), seq);
+            BitConverter.GetBytes(seq).CopyTo(payload, 0);
             for (int b = 4; b < payload.Length; b++) payload[b] = (byte)(0xE0 + b);
             return payload;
         }
