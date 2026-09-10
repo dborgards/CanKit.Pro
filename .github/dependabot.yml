@@ -29,7 +29,10 @@ updates:
       interval: monthly
     open-pull-requests-limit: 3
     commit-message:
-      prefix: "build(deps)"
+      # Not "build(deps)": .releaserc.json maps build/deps to a patch release, and npm here is
+      # only the release tooling itself. A semantic-release bump must not publish nine NuGet
+      # packages that contain no change (that is what happened in 1.1.0).
+      prefix: "chore(deps)"
     groups:
       semantic-release:
         patterns:
