@@ -85,7 +85,7 @@ jobs:
       # then (via @semantic-release/exec) packs with exactly that version and pushes to nuget.org,
       # writes CHANGELOG.md back to main, tags vX.Y.Z and opens the GitHub Release.
       - name: Release
-        run: npx semantic-release ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: npx semantic-release ${{ fromJSON(inputs.dry_run) && '--dry-run' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
