@@ -5,4 +5,14 @@
     <PackageTags>$(PackageTags);actor;scheduler;threading</PackageTags>
   </PropertyGroup>
 
+  <!--
+    The tests substitute the actor's internal monotonic tick source, so timer behaviour can be
+    proven by moving a clock instead of by sleeping and hoping.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>
