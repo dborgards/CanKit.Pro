@@ -177,7 +177,7 @@ public class ProtocolActorTimerTests
         // callback -- and still mutating state the caller now believes it owns exclusively.
         // The shutdown timeout is shortened through the internal constructor purely so this test
         // does not have to spend five seconds proving it.
-        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100));
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100));
         using var callbackEntered = new ManualResetEventSlim(false);
         using var releaseCallback = new ManualResetEventSlim(false);
         Exception? observed = null;
@@ -204,7 +204,7 @@ public class ProtocolActorTimerTests
     {
         // Guards the test above from passing for the wrong reason: the timeout must be reported
         // only when the loop genuinely could not be joined, never on every Dispose.
-        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(500));
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(500));
         Exception? observed = null;
         actor.BackgroundExceptionOccurred += (_, ex) => observed ??= ex;
 
