@@ -107,6 +107,21 @@ Run a single class while iterating:
 dotnet test CanKit.Pro.sln --filter "FullyQualifiedName~TxConfirmTests"
 ```
 
+### The `net48` leg
+
+The libraries ship `netstandard2.0` as well as `net10.0`, so the suite multi-targets
+`net10.0;net48` — `net48` consumes the `netstandard2.0` assets, which is the only way that build
+is ever executed rather than merely compiled (SRS NFR-004). The extra target framework is added
+only when the build runs **on Windows**, because nothing else can host it; on Linux and macOS
+`dotnet test` runs `net10.0` alone and the Windows CI job covers the rest.
+
+A test that genuinely cannot run on .NET Framework belongs behind `#if NET`, not outside the
+suite. To compile-check the `net48` leg without a Windows machine:
+
+```bash
+dotnet build tests/CanKit.Pro.Tests -f net48 -p:CanKitProTestNetFrameworkLeg=true
+```
+
 ## Public API
 
 These are published libraries, so the public surface is a promise:
