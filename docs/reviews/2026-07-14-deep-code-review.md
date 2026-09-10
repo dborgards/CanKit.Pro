@@ -1,6 +1,14 @@
 # CanKit – Tiefes Code-Review (komplettes Repository)
 
 **Datum:** 2026-07-14 · **Stand:** `master` @ `36866ff` · **Umfang:** ~245 C#-Dateien, ~33.600 Zeilen (Core, Abstractions, ISO-TP-Transport, 7 Adapter, Tests, CI/Eng)
+**Ursprung:** verfasst am 2026-07-14 im Vorgänger-Repository
+[CanKit.Pro.legacy](https://github.com/dborgards/CanKit.Pro.legacy)
+
+> **Externer Kontext.** Dieses Dokument reviewt das Upstream-Projekt
+> [CanKit](https://github.com/pkuyo/CanKit), nicht CanKit.Pro. CanKit wird hier als
+> NuGet-Paket konsumiert und nicht gepflegt; Befunde daraus gehören nach
+> [pkuyo/CanKit](https://github.com/pkuyo/CanKit/issues). Das Review von CanKit.Pro selbst ist
+> `2026-09-10-repository-review.md` im selben Ordner.
 
 ---
 

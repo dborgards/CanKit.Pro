@@ -14,5 +14,4 @@ anything.
 The `.received.txt` files are generated output and are git-ignored; only the approvals are checked
 in.
 
-Only the four published L2 packages are tracked. The L3/L4 packages are still pre-release, and
-pinning their API before it has settled would be ceremony rather than protection.
+All nine published packages are tracked, L2 and L3/L4 alike.

@@ -9,8 +9,9 @@ encoding and static TPDO/RPDO mapping — all composed on the CanKit.Pro L2 pipe
 
 ## Coverage
 
-Every CiA 301 **Must**, **Should** and (formerly deferred) **Could** requirement from SRS
-§4.3.2 is implemented:
+This is a **subset of CiA 301**, not a complete implementation of it. What the subset covers is
+every **Must**, **Should** and (formerly deferred) **Could** requirement from SRS §4.3.2 — the
+requirements this repository set itself:
 
 | SRS id | Feature |
 | --- | --- |
@@ -26,6 +27,27 @@ Every CiA 301 **Must**, **Should** and (formerly deferred) **Could** requirement
 | FR-CO-010 | SYNC producer and consumer |
 | FR-CO-011 | EMCY encode/decode + structured receive event |
 | FR-CO-012 | Uses the L2 `ICanBusService` demux (subscription with COB-ID filter) |
+
+## Not implemented
+
+CiA 301 features outside SRS §4.3.2 that a conformance tester or a foreign master will expect and
+not find here:
+
+* **Communication-parameter OD objects**: 0x1005/0x1006/0x1007 (SYNC COB-ID, cycle period, sync
+  window length), 0x1016/0x1017 (heartbeat consumer/producer time), 0x1200ff (SDO server
+  parameters), 0x1400ff/0x1600ff and 0x1800ff/0x1A00ff *communication* records. PDO mapping is
+  configured through the API (`ConfigureTpdo`/`ConfigureRpdo`) and, for the mapping records only,
+  through dynamic mapping over SDO; a master cannot configure this node purely over the OD.
+* **Transmission types** beyond `TpdoTransmission` (event-driven, event-timer, every SYNC): the
+  CiA 301 byte values 0 (synchronous-acyclic), 2–240 (every n-th SYNC) and 252/253 (RTR-triggered)
+  are not honored, and there are no RTR-triggered PDOs at all.
+* **Inhibit time** and **sync window length** — a change-of-state TPDO is not rate-limited, and a
+  synchronous TPDO is not suppressed once the sync window has closed.
+* **Dummy mapping** entries (0x0001–0x0007), used to pad an RPDO to a peer's layout.
+* **Life guarding on the producer side** (§7.2.8.3.3): this node answers guarding RTRs and can act
+  as a guarding master, but does not supervise its own guard time as a producer.
+* **Reset-Communication semantics**: the NMT command is accepted, but communication parameters are
+  not re-initialized from the OD, because they do not live in the OD (see above).
 
 ## Open items
 
@@ -85,7 +107,7 @@ node.HeartbeatTimeout += (s, e) => Console.WriteLine($"missed HB from 0x{e.Produ
 await node.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0);
 ```
 
-See `tests/CanKit.Tests/TestCases/CANopen` for end-to-end examples that exercise every FR-CO
+See `tests/CanKit.Pro.Tests/TestCases/CANopen` for end-to-end examples that exercise every FR-CO
 requirement over the `CanKit.Adapter.Virtual` loopback bus.
 
 ## Layout
@@ -107,9 +129,12 @@ CanKit.Pro.CANopen/
 
 ## Install
 
-`CanKit.Pro.CANopen` is **not published to nuget.org yet** — its API is still settling. It is built
-and tested on every CI run, so it does not rot; to use it today, reference the project from a
-clone of [CanKit.Pro](https://github.com/dborgards/CanKit.Pro).
+```bash
+dotnet add package CanKit.Pro.CANopen
+
+# plus a CanKit adapter for the hardware you actually talk to, e.g.
+dotnet add package CanKit.Adapter.Virtual   # loopback, no hardware
+```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.
 

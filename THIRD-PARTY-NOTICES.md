@@ -27,7 +27,7 @@ MIT license.
 ### .NET platform packages — MIT
 
 `Microsoft.Bcl.AsyncInterfaces`, `System.Memory` and `System.Threading.Channels` are referenced by
-`CanKit.Pro.RawCan` on `netstandard2.0` only; on `net8.0` those APIs are in the framework and no
+`CanKit.Pro.RawCan` on `netstandard2.0` only; on `net10.0` those APIs are in the framework and no
 package is pulled in.
 
     Copyright (c) .NET Foundation and Contributors
@@ -51,7 +51,7 @@ These never reach a consumer's application: they are `PrivateAssets`/test-projec
 
 ## Relationship to CanKit.Pro.legacy
 
-The four packages in this repository were originally developed inside
+The packages in this repository were originally developed inside
 [CanKit.Pro.legacy](https://github.com/dborgards/CanKit.Pro.legacy), a fork of CanKit that was
 therefore Apache-2.0 in its entirety. Only code originally written in that fork — the four
 `CanKit.Pro.*` libraries, their tests, and their documentation — was migrated here; no forked
