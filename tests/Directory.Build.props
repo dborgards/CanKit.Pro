@@ -3,7 +3,41 @@
   <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" />
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <!--
+      The shipping libraries multi-target `netstandard2.0;net10.0`, but this suite used to run on
+      `net10.0` alone: the netstandard2.0 assembly was compiled on every CI run and then never
+      executed. That is precisely the blind spot the inverted `Queue.TryPeek` polyfill shipped
+      through (FR-TP-013), and SRS NFR-004 / CON-001 ask for a TFM matrix instead.
+
+      `net48` resolves the `netstandard2.0` asset of every project reference, so a second leg of
+      the same tests runs the assembly a .NET Framework consumer actually gets — including the
+      polyfill packages (System.Memory, System.Threading.Channels, Microsoft.Bcl.AsyncInterfaces)
+      that only netstandard2.0 pulls in.
+
+      That leg is Windows-only, and the condition is on the *build host* rather than on the CI
+      job so that a working copy behaves the same way a CI runner does. Compiling `net48`
+      elsewhere works — the SDK restores the .NET Framework reference assemblies — but there is
+      no host to *run* it on without Mono, and `dotnet test` would try. So on Linux and macOS the
+      property collapses to `net10.0` and a plain `dotnet build` / `dotnet test` behaves exactly
+      as it did before; the Windows CI leg is what makes NFR-004's matrix real.
+
+      CanKitProTestNetFrameworkLeg is the opt-in for the rest of us: it adds the target framework
+      wherever it is set, so `dotnet build tests/CanKit.Pro.Tests -f net48
+      -p:CanKitProTestNetFrameworkLeg=true` compile-checks the leg from Linux or macOS before the
+      change reaches Windows CI. (Overriding TargetFrameworks itself would not work — as a global
+      property it flows into the referenced shipping projects and retargets those too.)
+    -->
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::IsOSPlatform('Windows')) OR '$(CanKitProTestNetFrameworkLeg)' == 'true'">net10.0;net48</TargetFrameworks>
+    <!--
+      `dotnet test` runs a project's target frameworks in parallel by default. This suite measures
+      protocol timing (see the comment in CanKit.Pro.Tests.csproj, which is why collection
+      parallelism is off in xunit.runner.json), and two legs racing each other on a three-core
+      runner would put back exactly the contention that setting removes — worse, because the
+      second leg is a whole second test host rather than another thread. One leg at a time; it
+      costs about a minute of wall clock on the Windows job and nothing anywhere else.
+    -->
+    <TestTfmsInParallel>false</TestTfmsInParallel>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
@@ -22,7 +56,13 @@
     <PackageReference Include="PublicApiGenerator">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
-    <PackageReference Include="coverlet.collector">
+    <!--
+      coverlet.collector 10.x ships build assets for net8.0 and newer only; there is nothing in it
+      for a .NET Framework test host. Referencing it there would put an unusable collector on the
+      net48 leg, so coverage stays a net10.0 concern — the net48 leg exists to execute the
+      netstandard2.0 code, and the two legs run the same tests, so no line goes unmeasured.
+    -->
+    <PackageReference Include="coverlet.collector" Condition="'$(TargetFramework)' != 'net48'">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>

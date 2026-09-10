@@ -26,6 +26,14 @@ namespace CanKit.Pro.Tests.TestCases;
 /// attribute (<c>[Obsolete]</c>, <c>[Flags]</c>), and tightening a nullable annotation.
 /// PublicApiGenerator reports all six, because it emits compilable C# declarations rather than a
 /// summary of them.
+/// <para>
+/// On the <c>net48</c> leg of the suite this same test approves the <c>netstandard2.0</c> build,
+/// because <see cref="Assembly.Load(AssemblyName)"/> resolves whichever asset that target
+/// framework was given. One approval file therefore covers both shipped assets: the two surfaces
+/// are expected to be identical — the sources are the same and PublicApiGenerator renders from
+/// metadata rather than from the running framework's reflection — so a divergence is a finding,
+/// not a baseline that needs splitting per target framework.
+/// </para>
 /// </remarks>
 public class PublicApiSurfaceTests
 {
