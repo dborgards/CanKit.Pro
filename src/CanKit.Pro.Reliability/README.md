@@ -49,7 +49,8 @@ deadline.Rearm(TimeSpan.FromMilliseconds(150));
 - **Guaranteed to be checked, not just stored**: `onExpired` is scheduled via the actor's own
   `Schedule`, so it is dispatched and run on the loop rather than sitting as data nobody re-reads.
 - **Single, race-free resolution**: a deadline is `Pending` until exactly one of *expiry*,
-  `Complete()`, or `Cancel()`/`Dispose()` wins an `Interlocked` state transition; the others become
+  `Complete()`, or `Dispose()` (which is how a deadline is cancelled — there is no separate
+  `Cancel()`) wins an `Interlocked` state transition; the others become
   idempotent no-ops. `Complete()` returns whether it won — a caller's answer to "did I finish
   before the deadline fired?".
 - **`Rearm` best-effort semantics**: re-arming a still-`Pending` deadline disposes the old

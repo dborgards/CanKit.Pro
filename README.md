@@ -59,6 +59,8 @@ dotnet add package CanKit.Adapter.Virtual    # loopback, no hardware
 ## Two minutes
 
 ```csharp
+using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.Actor;
 using CanKit.Pro.RawCan;
@@ -105,7 +107,7 @@ renders everything below plus the per-package READMEs with navigation and search
 
 | | |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | Install, open a bus, the four packages in context |
+| [Getting started](docs/getting-started.md) | Install, open a bus, the packages in context |
 | [Architecture (arc42)](docs/architecture/arc42-CanKit.Pro.md) | Layer model L0–L4, building blocks, runtime views, ADRs — German |
 | [Requirements (SRS)](docs/requirements/SRS-CanKit.Pro.md) | The `FR-RAW-*` requirements the code and tests cite — German |
 | [Release process](docs/release-process.md) | GitVersion + semantic-release, how a commit becomes a NuGet package |
@@ -118,9 +120,9 @@ renders everything below plus the per-package READMEs with navigation and search
 The layer model these packages implement (L2, "Raw-CAN service layer") exists to carry the layers
 above it. In rough order:
 
-- **Publish the L3/L4 packages.** They are implemented and tested; what remains is settling their
-  public APIs and, for several of them, validating against real hardware rather than only the
-  loopback adapter.
+- **Validate the L3/L4 packages against real hardware and foreign stacks.** They are published,
+  implemented and tested, but so far only against this repository's own implementation and the
+  loopback adapter — not against conformance testers or third-party ECUs.
 - Source generators for object dictionaries and PGN definitions; DBC and EDS import.
 - XCP, DeviceNet, CANopen Safety.
 

@@ -13,6 +13,9 @@
 - name: "type: chore"
   color: "cfd3d7"
   description: Build, CI, tooling, housekeeping
+- name: "type: tests"
+  color: "fbca04"
+  description: Test coverage — a missing, weak or flaky test
 
 - name: "area: rawcan"
   color: "1d76db"
@@ -26,9 +29,24 @@
 - name: "area: reliability"
   color: "1d76db"
   description: CanKit.Pro.Reliability — deadlines, bus state
+- name: "area: isotp"
+  color: "1d76db"
+  description: CanKit.Pro.IsoTp — ISO 15765-2 codec and channel
+- name: "area: uds"
+  color: "1d76db"
+  description: CanKit.Pro.Uds — ISO 14229 diagnostics client
+- name: "area: j1939"
+  color: "1d76db"
+  description: CanKit.Pro.J1939 and .J1939Tp — node, address claim, transport protocol
+- name: "area: canopen"
+  color: "1d76db"
+  description: CanKit.Pro.CANopen — SDO, PDO, NMT, object dictionary
 - name: "area: build"
   color: "5319e7"
   description: Build, packaging, release pipeline
+- name: "area: tests"
+  color: "5319e7"
+  description: Test suite, coverage, API approvals
 
 - name: "upstream: cankit"
   color: "e99695"

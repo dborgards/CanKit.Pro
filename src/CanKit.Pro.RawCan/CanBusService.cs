@@ -20,13 +20,12 @@ namespace CanKit.Pro.RawCan
     {
         /// <summary>
         /// Default per-subscription bounded buffer capacity when none is specified.
-        /// (未显式指定时每路订阅的默认有界缓冲容量。)
         /// </summary>
         public const int DefaultBufferCapacity = 1024;
 
         /// <summary>
         /// Default <see cref="SendConfirmed"/> echo-wait timeout when none is specified
-        /// (FR-RAW-034). (未显式指定时 <see cref="SendConfirmed"/> 等待回显的默认超时。)
+        /// (FR-RAW-034).
         /// </summary>
         public static readonly TimeSpan DefaultConfirmTimeout = TimeSpan.FromSeconds(1);
 
@@ -63,8 +62,7 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// Creates a service that demultiplexes <paramref name="bus"/>. Attaches to the bus's
-        /// <see cref="ICanBus.FrameObserved"/> event immediately. (创建对 <paramref name="bus"/>
-        /// 进行解复用的服务，并立即挂接其 <see cref="ICanBus.FrameObserved"/> 事件。)
+        /// <see cref="ICanBus.FrameObserved"/> event immediately.
         /// </summary>
         public CanBusService(ICanBus bus)
         {

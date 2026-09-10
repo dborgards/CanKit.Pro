@@ -27,8 +27,8 @@ dotnet build CanKit.Pro.sln -c Release
 dotnet test  CanKit.Pro.sln -c Release
 ```
 
-You need the **.NET 8 SDK or newer**; `global.json` rolls forward to whatever major you have
-installed. No CAN hardware is needed — the whole suite runs on CanKit's `virtual://` loopback
+You need the **.NET 10 SDK or newer** (`global.json` pins `10.0.100` and rolls forward to a later
+major if that is what you have installed). No CAN hardware is needed — the whole suite runs on CanKit's `virtual://` loopback
 adapter and on in-repo test doubles.
 
 A local build produces version `0.0.0`, deliberately: nothing in the build computes a version, it

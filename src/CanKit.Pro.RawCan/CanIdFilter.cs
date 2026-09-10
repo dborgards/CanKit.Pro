@@ -10,9 +10,6 @@ namespace CanKit.Pro.RawCan
     /// acceptance code/mask) per protocol instance": it is evaluated directly against the
     /// read-only <see cref="CanFrameView"/> that the demux layer carries, without allocating or
     /// invoking a generic <see cref="Func{T,TResult}"/> delegate per frame.
-    /// 用于订阅的免分配 ID 范围/掩码过滤器（FR-RAW-013，Should）。针对“每个协议实例一个 11/29 位
-    /// CAN-ID 范围（或验收码/掩码）”的常见场景，直接对解复用层携带的只读 <see cref="CanFrameView"/>
-    /// 求值，避免每帧分配并调用泛型委托。
     /// </summary>
     /// <remarks>
     /// The match logic (ID-type/extended guard + inclusive range / acceptance-mask compare)
@@ -54,17 +51,16 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// ID space this filter targets (standard 11-bit vs. extended 29-bit). Frames of the other
-        /// ID space never match. (该过滤器作用的 ID 空间：标准 11 位或扩展 29 位；另一空间的帧不匹配。)
+        /// ID space never match.
         /// </summary>
         public CanFilterIDType IdType { get; }
 
         /// <summary>
         /// Creates an inclusive ID-range filter [<paramref name="from"/>..<paramref name="to"/>].
-        /// (创建包含端点的 ID 范围过滤器。)
         /// </summary>
-        /// <param name="from">Minimum ID, inclusive. (最小 ID，含。)</param>
-        /// <param name="to">Maximum ID, inclusive. (最大 ID，含。)</param>
-        /// <param name="idType">Standard or extended ID space. (标准或扩展 ID 空间。)</param>
+        /// <param name="from">Minimum ID, inclusive.</param>
+        /// <param name="to">Maximum ID, inclusive.</param>
+        /// <param name="idType">Standard or extended ID space.</param>
         public static CanIdFilter Range(uint from, uint to, CanFilterIDType idType = CanFilterIDType.Standard)
         {
             if (to < from) throw new ArgumentException("'to' must be greater than or equal to 'from'.", nameof(to));
@@ -73,16 +69,16 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// Creates an acceptance-code/mask filter: a frame matches when
-        /// <c>(id &amp; accMask) == (accCode &amp; accMask)</c>. (创建验收码/掩码过滤器。)
+        /// <c>(id &amp; accMask) == (accCode &amp; accMask)</c>.
         /// </summary>
-        /// <param name="accCode">Acceptance code. (验收码。)</param>
-        /// <param name="accMask">Acceptance mask; only the set bits are compared. (屏蔽码；仅比较置位的位。)</param>
-        /// <param name="idType">Standard or extended ID space. (标准或扩展 ID 空间。)</param>
+        /// <param name="accCode">Acceptance code.</param>
+        /// <param name="accMask">Acceptance mask; only the set bits are compared.</param>
+        /// <param name="idType">Standard or extended ID space.</param>
         public static CanIdFilter Mask(uint accCode, uint accMask, CanFilterIDType idType = CanFilterIDType.Standard)
             => new CanIdFilter(Kind.Mask, accCode, accMask, idType);
 
         /// <summary>
-        /// Returns true when <paramref name="frame"/> matches this filter. (当帧匹配该过滤器时返回 true。)
+        /// Returns true when <paramref name="frame"/> matches this filter.
         /// </summary>
         public bool Matches(in CanFrameView frame)
         {
@@ -102,9 +98,7 @@ namespace CanKit.Pro.RawCan
         /// match (FR-RAW-041, "Should") -- a diagnostic for catching misconfigured protocol
         /// instances whose subscriptions were meant to have disjoint ID spaces. Filters targeting
         /// different <see cref="IdType"/> spaces (Standard vs. Extended) never overlap, since a
-        /// frame is never both. (是否存在某个 CAN ID 同时被本过滤器与 <paramref name="other"/> 匹配——用于诊断
-        /// 本应互不重叠、但实际重叠的多个协议实例订阅配置错误。作用于不同 ID 空间（标准/扩展）的过滤器恒不重叠，
-        /// 因为一帧不可能同时属于两者。)
+        /// frame is never both.
         /// </summary>
         public bool Overlaps(CanIdFilter other)
         {

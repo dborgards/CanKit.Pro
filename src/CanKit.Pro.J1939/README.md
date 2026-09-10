@@ -1,6 +1,6 @@
 # CanKit.Pro.J1939
 
-Application-layer SAE J1939 node for CanKit.Pro. MVP (0.1.x) covering SRS
+Application-layer SAE J1939 node for CanKit.Pro, covering SRS
 FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
 
 ## What it does
@@ -86,10 +86,17 @@ node.MessageReceived += (_, msg) =>
 };
 ```
 
+## Status
+
+Published on nuget.org since 1.2.0.
+
 ## Install
 
 ```bash
 dotnet add package CanKit.Pro.J1939
+
+# plus a CanKit adapter for the hardware you actually talk to, e.g.
+dotnet add package CanKit.Adapter.Virtual   # loopback, no hardware
 ```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.Addressing`, `CanKit.Pro.J1939Tp`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.

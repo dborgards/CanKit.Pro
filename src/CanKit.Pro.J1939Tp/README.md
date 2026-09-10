@@ -7,7 +7,7 @@ SAE J1939-21 Transport Protocol (TP) for CanKit.Pro. Implements both flavors of 
 
 TP.DT (Data Transfer) frames carry the segmented payload for both flavors, sequence-numbered from 1 (FR-TP-032). Every session runs on its own actor-owned state and its own set of `IDeadline`s (T1, T2, T3, T4, Tr, Th — FR-TP-033), so multiple sessions can execute in parallel over the same physical bus (FR-TP-034/035) without interfering with each other.
 
-The channel is shipped alongside the other `CanKit.Pro.*` L2/L3 building blocks. It re-uses:
+The channel ships on nuget.org alongside the other `CanKit.Pro.*` L2/L3 building blocks. It re-uses:
 
 - `CanKit.Pro.RawCan` — one `ICanBusService` per channel to demultiplex the TP.CM / TP.DT frames back out of the shared bus stream and to confirm outbound frames.
 - `CanKit.Pro.Actor` — one `IProtocolActor` mailbox for single-writer session state.
@@ -53,6 +53,9 @@ var received = await receiver.ReceiveAsync();
 
 ```bash
 dotnet add package CanKit.Pro.J1939Tp
+
+# plus a CanKit adapter for the hardware you actually talk to, e.g.
+dotnet add package CanKit.Adapter.Virtual   # loopback, no hardware
 ```
 
 Dependencies: `CanKit.Abstractions`, `CanKit.Pro.Actor`, `CanKit.Pro.Addressing`, `CanKit.Pro.RawCan`, `CanKit.Pro.Reliability`.

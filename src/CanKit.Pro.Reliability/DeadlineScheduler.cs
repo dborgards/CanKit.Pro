@@ -7,7 +7,7 @@ namespace CanKit.Pro.Reliability
     /// <summary>
     /// Default <see cref="IDeadlineScheduler"/> (SRS FR-RAW-050): hands out <see cref="Deadline"/>
     /// instances that arm their expiry through a single owning <see cref="IProtocolActor"/>'s
-    /// event-driven timer queue. (默认的 <see cref="IDeadlineScheduler"/>（SRS FR-RAW-050）。)
+    /// event-driven timer queue.
     /// </summary>
     /// <remarks>
     /// Stateless apart from the actor reference: a scheduler is just a factory, and every deadline
@@ -21,7 +21,6 @@ namespace CanKit.Pro.Reliability
 
         /// <summary>
         /// Creates a scheduler whose deadlines fire on <paramref name="actor"/>'s loop.
-        /// (创建一个其超时在 <paramref name="actor"/> 循环上触发的调度器。)
         /// </summary>
         /// <param name="actor">
         /// The protocol instance's actor. Reused deliberately (rather than spinning up a private
@@ -191,9 +190,10 @@ namespace CanKit.Pro.Reliability
         }
 
         /// <summary>
-        /// Cancels a still-<c>Pending</c> deadline (<see cref="IDeadline"/>'s <c>Cancel</c>).
+        /// Cancels a still-<c>Pending</c> deadline: <see cref="IDeadline"/> has no separate
+        /// <c>Cancel</c>, disposing it <i>is</i> the cancellation.
         /// Idempotent: a second call, or a call after the deadline already expired/completed, is a
-        /// harmless no-op. (取消仍处于 Pending 的超时；可重复调用且幂等。)
+        /// harmless no-op.
         /// </summary>
         public void Dispose()
         {

@@ -10,7 +10,7 @@ namespace CanKit.Pro.Reliability
     /// Event args for <see cref="BusStateMonitor.StateChanged"/> (SRS FR-RAW-051): carries both the
     /// previous and the newly-observed <see cref="BusState"/> so a subscriber can react to the
     /// specific transition (e.g. only abort on entering <see cref="BusState.BusOff"/>, only resume
-    /// on leaving it). (<see cref="BusStateMonitor.StateChanged"/> 的事件参数（SRS FR-RAW-051）。)
+    /// on leaving it).
     /// </summary>
     public sealed class BusStateChangedEventArgs : EventArgs
     {
@@ -21,17 +21,17 @@ namespace CanKit.Pro.Reliability
             Current = current;
         }
 
-        /// <summary>The last state observed before this transition. (此次转换前观测到的状态。)</summary>
+        /// <summary>The last state observed before this transition.</summary>
         public BusState Previous { get; }
 
-        /// <summary>The state observed now, which differs from <see cref="Previous"/>. (当前观测到的状态。)</summary>
+        /// <summary>The state observed now, which differs from <see cref="Previous"/>.</summary>
         public BusState Current { get; }
     }
 
     /// <summary>
     /// Pushes <see cref="ICanBus.BusState"/> transitions to a protocol instance so it can abort or
     /// pause controlled transmissions on degradation (ErrWarning/ErrPassive/BusOff) and resume once
-    /// the bus recovers (SRS FR-RAW-051). (将 <see cref="ICanBus.BusState"/> 的状态转换推送给协议实例。)
+    /// the bus recovers (SRS FR-RAW-051).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -91,7 +91,6 @@ namespace CanKit.Pro.Reliability
 
         /// <summary>
         /// Wraps <paramref name="bus"/> and drives its state polling through <paramref name="actor"/>.
-        /// (包装 <paramref name="bus"/>，并通过 <paramref name="actor"/> 驱动状态轮询。)
         /// </summary>
         /// <param name="bus">The bus whose <see cref="ICanBus.BusState"/> is observed.</param>
         /// <param name="actor">The protocol instance's actor; the poll runs on its loop (FR-RAW-020/051).</param>
@@ -149,7 +148,7 @@ namespace CanKit.Pro.Reliability
 
         /// <summary>
         /// The most recently observed <see cref="BusState"/>. Reflects the bus's actual state at
-        /// construction time and is updated on every observed transition. (最近观测到的 <see cref="BusState"/>。)
+        /// construction time and is updated on every observed transition.
         /// </summary>
         public BusState CurrentState => (BusState)Volatile.Read(ref _stateRaw);
 
@@ -157,7 +156,7 @@ namespace CanKit.Pro.Reliability
         /// Raised on the actor's loop whenever the observed state differs from the last-seen one --
         /// for both degrading (e.g. ErrActive → BusOff) and recovering (e.g. BusOff → ErrActive)
         /// transitions, since a protocol needs to know when to resume, not only when to abort
-        /// (FR-RAW-051). Edge-triggered: never raised while the state is unchanged. (仅在状态变化时触发。)
+        /// (FR-RAW-051). Edge-triggered: never raised while the state is unchanged.
         /// </summary>
         public event EventHandler<BusStateChangedEventArgs>? StateChanged;
 
