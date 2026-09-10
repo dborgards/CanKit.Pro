@@ -39,6 +39,18 @@ updates:
           - "semantic-release"
           - "@semantic-release/*"
           - "conventional-changelog-*"
+    ignore:
+      # 10.x needs conventional-changelog-writer@9+, but semantic-release 25 still resolves
+      # writer ^8 through @semantic-release/commit-analyzer and release-notes-generator, so npm
+      # installs 8.4.0. Nothing catches the mismatch before a release: the preset still resolves,
+      # so PR CI and eng/verify-release-config.mjs both pass. It fails when generateNotes renders
+      # a real changelog on main -- "Missing helper: conventional-changelog-writer requires @9 or
+      # newer" -- which is how PR #2 broke the release after #15 and had to be reverted (c5bf3ce).
+      # Revisit when semantic-release ships a version whose plugins resolve writer@9; the bump
+      # then has to happen together with them and be checked with a real
+      # `npx semantic-release --dry-run --no-ci`, not just the resolvability check.
+      - dependency-name: "conventional-changelog-conventionalcommits"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: "/"
