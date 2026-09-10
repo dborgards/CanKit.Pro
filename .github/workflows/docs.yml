@@ -43,8 +43,13 @@ permissions:
   contents: read
 
 # One deployment at a time; queued runs are not cancelled so every push to main lands.
+#
+# Scoped per ref, not a bare "pages": GitHub keeps only one *pending* run per concurrency group
+# and cancels the previously pending one, so a constant group makes docs pull requests cancel
+# each other and queue behind main's deployments. On main `github.ref` is constant, so
+# deployments there stay serialised exactly as before.
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
