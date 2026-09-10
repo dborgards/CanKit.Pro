@@ -128,6 +128,14 @@ public sealed class ControllableBus : ICanBus
     /// <summary>Raises <see cref="FaultOccurred"/>, the signal a bus-off surfaces through.</summary>
     public void RaiseFault(Exception error) => FaultOccurred?.Invoke(this, error);
 
+    /// <summary>
+    /// Raises <see cref="ErrorFrameReceived"/> once, i.e. one error frame off the wire. A degraded
+    /// bus produces these in the thousands per second, which is what makes them worth driving from
+    /// a test at volume rather than one at a time.
+    /// </summary>
+    public void RaiseErrorFrame(ICanErrorInfo? info = null)
+        => ErrorFrameReceived?.Invoke(this, info ?? StubErrorInfo.Instance);
+
     // --- ICanBus: configuration, delegated to a real bus -------------------------------------
 
     public IBusRTOptionsConfigurator Options => _options;
@@ -208,10 +216,12 @@ public sealed class ControllableBus : ICanBus
 #pragma warning disable CS0067 // Never raised: nothing in CanKit.Pro subscribes to these.
     public event EventHandler<CanReceiveData>? FrameReceived;
 
-    public event EventHandler<ICanErrorInfo>? ErrorFrameReceived;
-
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 #pragma warning restore CS0067
+
+    // Raised by RaiseErrorFrame: BusStateMonitor subscribes to this as a low-latency hint that the
+    // controller's BusState may have moved, so it is not in the never-raised group above.
+    public event EventHandler<ICanErrorInfo>? ErrorFrameReceived;
 
     public event EventHandler<CanReceiveDataView>? FrameObserved;
 

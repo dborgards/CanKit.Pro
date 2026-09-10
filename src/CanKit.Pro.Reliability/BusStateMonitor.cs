@@ -43,10 +43,34 @@ namespace CanKit.Pro.Reliability
     /// <see cref="System.Threading.Timer"/> or a free-running thread -- this keeps the monitor
     /// inside the existing single-mailbox event-driven-actor model (FR-RAW-020..022) instead of
     /// reintroducing a busy-loop/free-running-timer anti-pattern. The two bus events are subscribed
-    /// <i>additionally</i>, purely as low-latency hints: each triggers an immediate out-of-band
+    /// <i>additionally</i>, purely as low-latency hints: they trigger an immediate out-of-band
     /// recheck (<see cref="IProtocolActor.Post"/>) so e.g. a <see cref="BusState.BusOff"/> is
     /// observed near-instantly instead of waiting up to one poll interval. The hint deliberately
     /// does not touch the poll timer; the self-rearming poll is the independent reliability floor.
+    /// </para>
+    /// <para>
+    /// <b>Hints are coalesced.</b> A bus-off or error-passive storm raises
+    /// <see cref="ICanBus.ErrorFrameReceived"/> far faster than any loop can drain it (thousands
+    /// per second on a shorted or badly terminated bus), so at most <b>one</b> un-run hint recheck
+    /// is ever outstanding in the mailbox: further hints arriving while it is queued are dropped
+    /// rather than posted. This is lossless with respect to what the monitor reports, because a
+    /// recheck is a <i>sample of a level</i> (<see cref="ICanBus.BusState"/>, a plain getter), not
+    /// the delivery of a queued event -- N back-to-back samples of an unchanged level yield exactly
+    /// what one sample yields. What is dropped is the redundant mailbox traffic, which would
+    /// otherwise starve the very protocol work the state change exists to abort. The gate is
+    /// released <i>before</i> the sample is taken, so a hint that races an in-flight recheck posts a
+    /// fresh one and the last hint of a storm is always followed by a sample taken after it.
+    /// </para>
+    /// <para>
+    /// <b>What coalescing does not promise:</b> the hints were never a transition log, and an error
+    /// frame is not a state transition. If the controller passes through ErrWarning and ErrPassive
+    /// on its way to BusOff faster than the loop samples, the intermediate levels are missed and
+    /// <see cref="StateChanged"/> reports one ErrActive -&gt; BusOff edge -- exactly as it already
+    /// does when the hints are unavailable and the poll alone drives sampling. Every edge that
+    /// <i>is</i> sampled is still reported individually and in order, with
+    /// <see cref="BusStateChangedEventArgs.Previous"/> chained to the last reported state, so a
+    /// subscriber never sees a gap or a re-ordering. Sampling granularity remains tunable the way
+    /// it always was: shorten <c>pollInterval</c>.
     /// </para>
     /// <para>
     /// <b>Loop-thread cost:</b> each poll tick reads <see cref="ICanBus.BusState"/> synchronously on
@@ -85,6 +109,11 @@ namespace CanKit.Pro.Reliability
         // loop (poll tick / hint recheck), read from any thread via CurrentState. Because the loop
         // is the single writer, it can trust its own last write without a lock.
         private int _stateRaw;
+
+        // Coalescing gate for hint-driven rechecks: 1 while a hint recheck is queued-but-not-yet-run.
+        // Written from the bus's event thread (claim) and from the actor loop (release), hence
+        // interlocked rather than a plain bool.
+        private int _recheckPending;
 
         private IDisposable? _pollHandle; // the currently scheduled poll tick; best-effort cancelled on Dispose
         private int _disposed;
@@ -191,18 +220,48 @@ namespace CanKit.Pro.Reliability
         // Latency optimization only: an immediate out-of-band recheck on the loop. Deliberately does
         // NOT rearm/reset the poll timer -- the self-rearming poll is independent and remains the
         // reliability floor; this merely shortens the observation latency of a transition.
+        //
+        // Runs on whatever thread the adapter raises its error/fault events from, i.e. the RX or
+        // driver thread, at error-frame rate. During a bus-off storm that is thousands of calls per
+        // second, so this method's only job is to be cheap and to keep the mailbox bounded.
         private void PostRecheck()
         {
             if (Volatile.Read(ref _disposed) != 0)
                 return;
+
+            // Coalesce (see the type's remarks): if a recheck is already queued and has not run
+            // yet, it has not sampled BusState yet either, so it will observe everything this hint
+            // could have caused. Posting a second one would add mailbox depth and no information.
+            if (Interlocked.CompareExchange(ref _recheckPending, 1, 0) != 0)
+                return;
+
             try
             {
-                _actor.Post(RecheckOnLoop);
+                _actor.Post(HintRecheckOnLoop);
             }
             catch (ObjectDisposedException)
             {
-                // Actor already disposed; the poll loop has (or will) stop on its own. Nothing to do.
+                // Actor already disposed; the poll loop has (or will) stop on its own. Release the
+                // gate anyway: nothing will run HintRecheckOnLoop to release it, and leaving it
+                // latched would silently suppress hints if the actor ever became usable again.
+                Volatile.Write(ref _recheckPending, 0);
             }
+        }
+
+        // The coalesced hint recheck, on the actor's loop. Releasing the gate *before* sampling is
+        // the whole correctness argument: a hint raised while this method is reading BusState (or
+        // while it is still sitting behind other mailbox work) then claims the gate again and posts
+        // a follow-up, so the final hint of a storm is always succeeded by a sample taken after it.
+        // Releasing afterwards would open a window in which a state change is hinted, dropped, and
+        // then only picked up by the next poll tick -- turning the hint's latency guarantee into a
+        // poll-interval one at exactly the moment it matters most.
+        private void HintRecheckOnLoop()
+        {
+            // Interlocked rather than Volatile.Write: this needs a full fence, so the BusState read
+            // inside RecheckOnLoop cannot be hoisted above the release and observe a pre-hint value
+            // that a racing hint then declines to re-post for.
+            Interlocked.Exchange(ref _recheckPending, 0);
+            RecheckOnLoop();
         }
 
         // The scheduled poll tick body. Structured so the next poll is re-armed even if the state
