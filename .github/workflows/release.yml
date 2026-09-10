@@ -1,8 +1,13 @@
 name: Release
 
+# Releases are cut by hand, not by merging. semantic-release aggregates every conventional
+# commit since the last tag, so a batch of fixes becomes one version instead of one patch
+# release per pull request -- and the version is known before it is published, because
+# `dry_run` (the default) prints what would be released without tagging or pushing.
+#
+# The trade-off is that `main` and nuget.org drift apart between releases. Cut one at the end
+# of a batch of work; nothing accumulates that the next run would not pick up.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -29,6 +34,8 @@ jobs:
     name: semantic-release
     runs-on: ubuntu-latest
     # A release must never publish something CI has not built and tested on this exact commit.
+    # The three-OS CI is required by the `main` branch ruleset, so anything on `main` has passed
+    # it; the Test step below re-runs the suite on the commit that is actually packed.
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -78,7 +85,7 @@ jobs:
       # then (via @semantic-release/exec) packs with exactly that version and pushes to nuget.org,
       # writes CHANGELOG.md back to main, tags vX.Y.Z and opens the GitHub Release.
       - name: Release
-        run: npx semantic-release ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+        run: npx semantic-release ${{ fromJSON(inputs.dry_run) && '--dry-run' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
