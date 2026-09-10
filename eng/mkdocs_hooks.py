@@ -1,7 +1,6 @@
 """MkDocs hooks for the CanKit.Pro website (wired up under `hooks:` in mkdocs.yml).
 
-Two jobs, both about the requirement ids (`FR-RAW-030`) and decision ids (`ADR-7`) that the XML
-documentation comments quote in prose:
+Three jobs:
 
 1. The SRS lists its requirements as table rows, and a table row has no heading, so nothing in the
    rendered page can be linked to. Every row whose first cell is a requirement id gets an
@@ -10,15 +9,17 @@ documentation comments quote in prose:
 2. On the generated API pages under `api/`, every requirement and decision id becomes a link to
    that anchor and to the matching `### ADR-n …` heading in the arc42 document. Ids that neither
    document defines (`ADR-12` at the time of writing) stay plain text rather than becoming a dead
-   link, and a range such as `FR-RAW-010..013` is linked as a whole to its first id.
+   link, and a range such as `FR-RAW-010..013` is linked as a whole to its first id. The same pass
+   also fixes the upstream references DefaultDocumentation cannot resolve. It renders any
+   `<see cref>` it does not know as a learn.microsoft.com URL, which is right for `System.*` and
+   wrong for CanKit: `CanKit.Abstractions.*` and `CanKit.Core.*` are pointed at the CanKit
+   repository instead, and CanKit.Pro's own non-public types — which have no page here — lose
+   their link and stay as text. Neither document is edited on disk; this happens to the markdown
+   on its way into the build.
 
-The same pass also fixes the upstream references DefaultDocumentation cannot resolve. It renders
-any `<see cref>` it does not know as a learn.microsoft.com URL, which is right for `System.*` and
-wrong for CanKit: `CanKit.Abstractions.*` and `CanKit.Core.*` are pointed at the CanKit repository
-instead, and CanKit.Pro's own non-public types — which have no page here — lose their link and
-stay as text.
-
-Neither document is edited on disk; this happens to the markdown on its way into the build.
+3. Those API pages are generated and gitignored, so they have no source in the repository. MkDocs
+   would still build an "edit this page" URL from `edit_uri` for them, which would 404 on GitHub.
+   Their edit URI is cleared so Material does not show the pencil.
 """
 
 from __future__ import annotations
@@ -97,6 +98,14 @@ def on_config(config):
             _decisions[match.group(1)] = slugify(text, "-")
 
     return config
+
+
+def on_files(files, config):
+    """Generated API pages are not in git, so they have no edit URL."""
+    for f in files:
+        if f.src_uri.startswith(API_PREFIX):
+            f.edit_uri = None
+    return files
 
 
 def on_page_markdown(markdown, page, config, files):
