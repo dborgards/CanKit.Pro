@@ -57,6 +57,16 @@
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
     <!--
+      Source-only: `compile` brings the polyfill sources in, `contentfiles` is how they are
+      delivered, and `build` supplies the .targets that sets the per-TFM DefineConstants deciding
+      which of them apply. The package adds `global using global::Polyfills;` itself, so the
+      extension-method polyfills need no using directive at any call site.
+    -->
+    <PackageReference Include="Polyfill">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>compile; build; analyzers; contentfiles</IncludeAssets>
+    </PackageReference>
+    <!--
       coverlet.collector 10.x ships build assets for net8.0 and newer only; there is nothing in it
       for a .NET Framework test host. Referencing it there would put an unusable collector on the
       net48 leg, so coverage stays a net10.0 concern — the net48 leg exists to execute the

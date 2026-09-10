@@ -13,7 +13,14 @@
   </PropertyGroup>
 
   <PropertyGroup Label="Language">
-    <LangVersion>12</LangVersion>
+    <!--
+      C# 14 rather than 12 because the Polyfill package's sources use extension members
+      (`extension(Byte) { ... }`), and those do not parse below 14. Nothing in this repository
+      relies on a 13/14 feature otherwise; raising the ceiling does not change how the existing
+      code compiles, and the language version is independent of the target frameworks, so the
+      netstandard2.0 assets are unaffected.
+    -->
+    <LangVersion>14</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
