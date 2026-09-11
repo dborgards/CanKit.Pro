@@ -1,11 +1,11 @@
 using System;
 using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen;
-using CanKit.Pro.RawCan;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.J1939;
 using CanKit.Pro.J1939Tp;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Uds;
 using FluentAssertions;
 using Xunit;
