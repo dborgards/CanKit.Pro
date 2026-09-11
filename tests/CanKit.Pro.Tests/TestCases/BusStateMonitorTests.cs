@@ -138,8 +138,12 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(BusState.ErrWarning, true)]
     [InlineData(BusState.ErrPassive, true)]
     [InlineData(BusState.BusOff, true)]
-    [InlineData(BusState.Unknown, false)]
-    public void IsDegraded_Is_True_For_Warning_Passive_And_BusOff(BusState state, bool expected)
+    // Unknown means "we could not determine the controller state", and answering a health
+    // question with "healthy" on the strength of no information is the one answer that can never
+    // be justified -- a caller told "healthy" proceeds as if a bus that may already be off were
+    // fine. None stays healthy: it is the "no error condition" reading, not an absence of one.
+    [InlineData(BusState.Unknown, true)]
+    public void IsDegraded_Is_True_For_Warning_Passive_BusOff_And_Unknown(BusState state, bool expected)
         => state.IsDegraded().Should().Be(expected);
 
     // --- Error-frame storms (issue #22) ------------------------------------------------------

@@ -355,6 +355,40 @@ public class ProtocolActorTests
     }
 
     [Fact]
+    public async Task Dispose_From_SynchronizationContext_Send_Failure_Does_Not_Wait_On_The_Loop()
+    {
+        // Regression: EnterCallbackScope used to wrap only the Send delegate, not the outer catch
+        // that reports a marshal failure. A BackgroundExceptionOccurred subscriber is then on the
+        // loop thread with IsOnCurrentActor clear, so Dispose joins the loop it is already on
+        // until _shutdownTimeout and reports a misleading TimeoutException.
+        var throwing = new AlwaysThrowingSynchronizationContext();
+        var actor = new ProtocolActor(
+            ActorExecutionMode.SynchronizationContext, throwing, timeSource: null, shutdownTimeout: TimeSpan.FromMilliseconds(250));
+        var seenOnActor = false;
+        Exception? timeout = null;
+        using var gate = new SemaphoreSlim(0);
+        actor.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is TimeoutException)
+            {
+                timeout = ex;
+                return;
+            }
+
+            seenOnActor = actor.IsOnCurrentActor;
+            actor.Dispose();
+            gate.Release();
+        };
+
+        actor.Post(() => { });
+
+        (await gate.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue(
+            "Dispose from a Send-failure handler must return promptly instead of waiting on its own loop");
+        seenOnActor.Should().BeTrue("the marshal-failure handler runs on the loop and must report as on-actor");
+        timeout.Should().BeNull("reentrant Dispose must skip the join, not time out");
+    }
+
+    [Fact]
     public async Task IsOnCurrentActor_Is_False_Off_Loop_And_True_Inside_Posted_Work()
     {
         // Regression: PR #30 review 3600429136/3600429144/3600429156 -- callers on the actor
@@ -392,6 +426,55 @@ public class ProtocolActorTests
         var observed = await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5)));
         observed.Should().BeSameAs(tcs.Task, "the scheduled callback must run within a few ms");
         (await tcs.Task).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task IsOnCurrentActor_Is_False_On_A_Pool_Thread_Started_From_Actor_Work()
+    {
+        // Regression (#19): the flag used to live in an AsyncLocal, which is captured into the
+        // ExecutionContext and therefore *flows* into every Task.Run and await continuation
+        // started from a callback -- so a thread-pool thread spawned by actor work reported
+        // "I am on the actor". Protocol layers start send tasks from actor context all over the
+        // place (IsoTpChannel, CanOpenNode, J1939TpChannel), and every one of them then took the
+        // run-inline branch of a public sync API on a second thread, mutating single-writer state
+        // concurrently -- the exact hazard FR-RAW-020/021 exist to rule out. The question the
+        // property answers is about the thread actually executing, so it must be false here.
+        using var actor = new ProtocolActor();
+        var seenOnPoolThread = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var seenInsideCallback = false;
+
+        actor.Post(() =>
+        {
+            seenInsideCallback = actor.IsOnCurrentActor;
+            // Fire-and-forget on purpose: waiting for it here would be a wait on the loop thread.
+            Task.Run(() => seenOnPoolThread.TrySetResult(actor.IsOnCurrentActor));
+        });
+
+        (await Task.WhenAny(seenOnPoolThread.Task, Task.Delay(TimeSpan.FromSeconds(5)))).Should().Be(seenOnPoolThread.Task);
+        (await seenOnPoolThread.Task).Should().BeFalse(
+            "a pool thread started from actor work is not the actor loop, however it was started");
+        seenInsideCallback.Should().BeTrue("the callback itself really is on the loop -- the flag must still be true there");
+    }
+
+    [Fact]
+    public async Task IsOnCurrentActor_Is_False_In_An_Await_Continuation_Started_From_Actor_Work()
+    {
+        // Same root cause as above, via the other ExecutionContext path: an async method started
+        // from a callback resumes on a pool thread after its first await, and the AsyncLocal
+        // flowed there too.
+        using var actor = new ProtocolActor();
+        var seenAfterAwait = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        actor.Post(() => _ = ObserveAfterAwaitAsync());
+
+        (await Task.WhenAny(seenAfterAwait.Task, Task.Delay(TimeSpan.FromSeconds(5)))).Should().Be(seenAfterAwait.Task);
+        (await seenAfterAwait.Task).Should().BeFalse("an await continuation is no longer on the loop thread");
+
+        async Task ObserveAfterAwaitAsync()
+        {
+            await Task.Yield();
+            seenAfterAwait.TrySetResult(actor.IsOnCurrentActor);
+        }
     }
 
     [Fact]

@@ -32,6 +32,14 @@ using var timeout = actor.Schedule(TimeSpan.FromMilliseconds(150), () => channel
   `Post`/`PostAsync`/`Schedule` never needs its own lock.
 - **Event-driven, not polling** (FR-RAW-022): the loop blocks on a semaphore for either new
   mailbox work or the next timer deadline, whichever comes first. An idle actor uses ~0% CPU.
+- **Timers are fair, even under bus load**: each pass processes a *snapshot* of the mailbox rather
+  than draining it to empty, so an RX reader posting one work item per frame on a saturated bus
+  cannot starve the timer list — every batch is followed by a due-timer check. Anything that
+  arrives mid-batch is picked up on the next pass, which is entered without waiting.
+- **Deadlines are measured on a monotonic clock**, never on the wall clock: `Stopwatch`
+  timestamps, so an NTP step, a DST change, or an operator setting the system clock cannot make
+  an armed timeout fire early, late, or all at once. A `TimeSpan` delay is elapsed time and is
+  measured as elapsed time.
 - **Background exceptions have exactly one channel** (FR-RAW-023): a throwing `Post`/`Schedule`
   item is caught by the loop and raised via `BackgroundExceptionOccurred` — never thrown on some
   unrelated caller thread, never lost as an unobserved task exception. `PostAsync` failures
@@ -48,7 +56,16 @@ using var timeout = actor.Schedule(TimeSpan.FromMilliseconds(150), () => channel
 Disposing an actor stops it from accepting new work (`Post`/`Schedule` throw
 `ObjectDisposedException`) but runs whatever was already queued to completion first, so a caller
 awaiting `PostAsync` right as `Dispose` happens still gets a real result instead of hanging.
-Not-yet-due `Schedule` callbacks are discarded, not fired.
+Not-yet-due `Schedule` callbacks are discarded, not fired. `Dispose` waits up to five seconds for
+the loop to actually finish; if a callback is still running when that elapses it returns anyway
+(so `Dispose` never becomes the thing that hangs) and reports a `TimeoutException` through
+`BackgroundExceptionOccurred` — a silent give-up would leave the caller unable to tell a clean
+shutdown from a loop still mutating state it believes it now owns.
+
+`IsOnCurrentActor` answers "is *this thread* currently running one of my callbacks?", which is
+what makes a public sync API able to run inline instead of dead-locking on its own loop. It is
+thread-scoped, so a `Task.Run` started from inside a callback correctly reports `false` — it is
+not on the actor and must not touch actor state inline.
 
 **`SynchronizationContext` mode caveat**: never call `Dispose()` synchronously from the actor's
 own target context thread (e.g. from inside a UI event handler on that same dispatcher) — like any

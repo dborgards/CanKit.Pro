@@ -8,8 +8,8 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.IsoTp;
-using CanKit.Pro.Uds;
 using CanKit.Pro.Tests.Infrastructure;
+using CanKit.Pro.Uds;
 using FluentAssertions;
 using Xunit;
 using IsoTpFactory = CanKit.Pro.IsoTp.IsoTp;
@@ -246,9 +246,10 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
                 dataFormatIdentifier: 0x00,
                 addressAndLengthFormatIdentifier: 0x11,
                 memoryAddress: new byte[] { 0x10 },
-                memorySize: new byte[] { (byte)payload.Length }, // sizeWidth=1 caps at 255, but
-                // the ECU only echoes width from ALFI; we simply need a well-formed 1-byte size
-                // for the wire encoding test (this test does not verify size semantics).
+                // sizeWidth=1 caps at 255, but the ECU only echoes width from ALFI; we simply
+                // need a well-formed 1-byte size for the wire encoding test (this test does not
+                // verify size semantics).
+                memorySize: new byte[] { (byte)payload.Length },
                 data: payload,
                 cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
 
