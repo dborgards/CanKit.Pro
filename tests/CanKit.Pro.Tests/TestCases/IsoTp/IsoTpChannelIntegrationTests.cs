@@ -411,7 +411,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
 
-        var channel = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
+        // `using` on top of the two explicit calls below: the point of this test is that Dispose
+        // is idempotent, so a third call at scope exit changes nothing -- but without it a
+        // ReceiveAsync that throws would leave the channel open for the rest of the run
+        // (CodeQL cs/dispose-not-called-on-throw).
+        using var channel = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
         var recvTask = channel.ReceiveAsync();
         // Idempotent dispose
         channel.Dispose();
@@ -795,7 +799,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             "the failure the bus layer reported must reach the caller unrewritten");
 
         // Gate free and _tx cleared: the very next send goes through end to end.
-        var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        // Owned rather than inline, so the timer it holds is released when the test ends and
+        // not when the finalizer gets round to it (CodeQL cs/local-not-disposed).
+        using var recvCts = new CancellationTokenSource(ShortTimeout);
+        var recvTask = receiver.ReceiveAsync(recvCts.Token);
         byte[] normal = { 0x11, 0x22, 0x33 };
         await sender.SendAsync(normal).WaitAsync(ShortTimeout);
         (await recvTask).Should().Equal(normal);
