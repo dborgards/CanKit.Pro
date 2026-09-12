@@ -145,6 +145,14 @@ jobs:
             echo "----- END $f"
           done
 
+      # Coverage was collected and then never looked at: the cobertura files rode along inside the
+      # test-results artifact, so the number existed but reading it meant downloading a zip. This
+      # puts it on the run's summary page. Linux only -- all three legs measure the same net10.0
+      # code, and three identical tables would be noise.
+      - name: Coverage summary
+        if: always() && runner.os == 'Linux'
+        run: python3 eng/coverage-summary.py artifacts/test-results >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -168,13 +176,18 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      # Proves the release job's `dotnet pack` will work, and that every package still carries a
-      # README, a license expression and symbols — before a tag exists to fix it in.
+      # Proves the release job's `dotnet pack` will work — before a tag exists to fix it in.
       - name: Pack
         run: dotnet pack CanKit.Pro.sln --configuration Release -p:Version=${{ needs.version.outputs.semver }} --output artifacts/nuget
 
       - name: List produced packages
         run: ls -l artifacts/nuget
+
+      # The claim this job used to make in a comment, now actually checked: every package carries
+      # a README, a license expression and a .snupkg, and there are as many of them as expected.
+      # A release breaks on exactly these, and by then the tag is already pushed.
+      - name: Verify package contents
+        run: python3 eng/verify-packages.py artifacts/nuget
 
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -225,8 +238,12 @@ jobs:
       # are the arbiter here; nothing in .editorconfig was changed to accommodate the fixes.
       #
       # Deliberately its own job rather than a step in build-test: the three OS legs are the
-      # required status checks on `main`, and a misplaced blank line has no business blocking a
-      # merge. This reports, it does not gate. Promote it to a required check if that turns out
-      # to be too weak.
+      # required status checks on `main`, and a misplaced blank line has no business failing the
+      # build legs.
+      #
+      # It is meant to gate, though. Code style is enforced here and only here --
+      # EnforceCodeStyleInBuild was considered and rejected, because two mechanisms for one rule
+      # eventually disagree. That makes this job the single arbiter, so it belongs in the required
+      # checks of the `main` ruleset (a repository setting, not something this file can declare).
       - name: Verify formatting
         run: dotnet format CanKit.Pro.sln --verify-no-changes --verbosity diagnostic

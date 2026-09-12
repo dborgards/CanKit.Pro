@@ -25,15 +25,21 @@ tag-prefix: '[vV]?'
 # configuration to make it impossible.
 next-version: 0.1.0
 
-# AssemblyVersion stays at major.minor.patch so a patch release does not force a binding redirect
-# on .NET Framework consumers. The exact build lands in FileVersion / InformationalVersion, which
-# is where a diagnostic tool looks anyway.
-assembly-versioning-scheme: MajorMinorPatch
-assembly-file-versioning-scheme: MajorMinorPatch
+# No assembly-versioning-scheme / assembly-file-versioning-scheme here. Those keys configure
+# GitVersion's MSBuild task, and this repository deliberately does not run one (see above), so
+# they described an intention that nothing read. The intention holds anyway: MSBuild derives
+# AssemblyVersion from Version as major.minor.patch, dropping prerelease and build metadata, so a
+# patch release still does not force a binding redirect on .NET Framework consumers -- and the
+# exact build lands in FileVersion / InformationalVersion, which is where a diagnostic tool looks.
 
 branches:
   main:
-    label: ''
-    increment: Patch
+    # `label: ci` rather than '': a CI build of main is not a release, and a bare `1.3.0+12` in an
+    # artifact list reads exactly like one. With the label it is `1.3.0-ci.12` and says so.
+    label: ci
+    # Minor, not Patch, while the work is heading for 1.3.0 -- otherwise every CI build of main
+    # calls itself 1.2.4 and points at a version that will never exist. See
+    # docs/decisions/0001-versioning-and-api-stability.md.
+    increment: Minor
   pull-request:
     label: pr
