@@ -33,11 +33,21 @@ namespace CanKit.Pro.RawCan
     /// source addresses, guarding on actor affinity — to recover a bit the driver had already set.
     /// </para>
     /// <para>
-    /// The gate can only drop what the adapter flags. An adapter that echoes without setting
+    /// <b>Two limits, both of which make the gate a convenience rather than a guarantee.</b>
+    /// First, it can only drop what the adapter flags: an adapter that echoes without setting
     /// <see cref="CanFrameEvent.IsEcho"/> — <c>CanKit.Adapter.Virtual</c> in
     /// <c>ChannelWorkMode.Echo</c> does — delivers its echo to every subscription regardless of
-    /// <c>includeEcho</c>. A layer that must not act on its own transmission therefore keeps its
-    /// own check as well; this is defence in depth, not a replacement.
+    /// <c>includeEcho</c>. Second, and more important, the flag is <b>host-scoped</b>: it says
+    /// something on this host transmitted the frame, not which of the possibly several protocol
+    /// instances sharing this service did. A sibling instance's traffic is flagged identically
+    /// to one's own.
+    /// </para>
+    /// <para>
+    /// So <c>includeEcho: false</c> suits a single consumer that owns its bus. A protocol layer
+    /// that may share a service — every one in this repository does, by documented design — asks
+    /// for echoes and identifies itself by something it actually owns: a J1939 source address,
+    /// a NAME, a CANopen node-id. That is not a workaround for a missing feature; the demux
+    /// genuinely cannot attribute a transmission to a local instance.
     /// </para>
     /// </remarks>
     public interface ICanBusService : IDisposable

@@ -140,9 +140,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // still allocation-light: CanFrameEvent is a readonly struct passed by ref via the
             // subscription's async enumerator (FR-RAW-010/011).
             //
-            // Echoes stay out (the default): on a ChannelWorkMode.Echo adapter every frame this
-            // node sends would otherwise arrive back here and be classified as peer traffic.
-            _subscription = _service.Subscribe(f => f.Frame.IsExtendedFrame);
+            // Echoes are asked for on purpose. `IsEcho` marks what this HOST transmitted, not
+            // what this NODE transmitted, and J1939Node.Open documents that several nodes with
+            // different NAME identities may share one service. Filtering on the host bit would
+            // drop a sibling node's Address Claim, so two local nodes contending for the same
+            // address would both believe they had won it without ever arbitrating their NAMEs.
+            //
+            // Self-identification stays where it can actually be done -- at the node, by NAME,
+            // in HandleIncomingAddressClaim.
+            _subscription = _service.Subscribe(f => f.Frame.IsExtendedFrame, includeEcho: true);
         }
         catch
         {

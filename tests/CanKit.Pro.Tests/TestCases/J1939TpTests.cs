@@ -46,6 +46,38 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         return buf;
     }
 
+    // Regression for #23: two channels sharing one service must still hear each other on a bus
+    // whose echoes *are* flagged.
+    //
+    // `J1939Tp.Open(ICanBusService, ...)` documents that "multiple channels with different source
+    // addresses may share the same service". On a flagging adapter every frame either channel
+    // sends is marked IsEcho — the flag identifies the host, not the channel — so withholding
+    // echoes cut the siblings off from each other entirely. The channels now opt in, and the
+    // existing `fields.SourceAddress == _sourceAddress` check in RunReaderAsync does the
+    // instance-level filtering the echo bit cannot.
+    [Fact]
+    public async Task Two_Channels_Sharing_One_Service_Still_Hear_Each_Other_On_A_Flagging_Echo_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(service, sourceAddress: 0x10, options: opts);
+        using var receiver = J1939TpFactory.Open(service, sourceAddress: 0x20, options: opts);
+
+        var payload = RandomPayload(100, seed: 20);
+
+        var receiveTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        await sender.SendBamAsync(0xFECBu, payload).WithTimeout(ShortTimeout);
+
+        var datagram = await receiveTask;
+        datagram.SourceAddress.Should().Be(
+            0x10,
+            "a sibling channel's BAM is peer traffic to this channel, even though the host echo "
+            + "flag marks it exactly like this channel's own transmissions");
+        datagram.Payload.Should().Equal(payload);
+    }
+
     // Regression for #23: a TP channel must never receive its own broadcast, even on an adapter
     // whose echoes are not flagged.
     //

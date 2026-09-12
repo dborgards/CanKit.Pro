@@ -48,6 +48,14 @@ namespace CanKit.Pro.RawCan
         /// True when the bus reported this frame as the local host's own transmit echo.
         /// </summary>
         /// <remarks>
+        /// <b>Host, not instance.</b> The bit means "something on this host transmitted this",
+        /// and nothing finer. Where several protocol instances share one
+        /// <see cref="ICanBusService"/> — which every protocol factory in this repository
+        /// documents as supported — a sibling instance's transmission is flagged exactly like
+        /// this one's own. Deciding "did *I* send this?" needs an instance-level identity the
+        /// demux does not have: a source address, a NAME, a node-id.
+        /// </remarks>
+        /// <remarks>
         /// Only ever true for a subscription that asked for echoes — see the <c>includeEcho</c>
         /// parameter on <see cref="ICanBusService.Subscribe(Func{CanFrameEvent, bool}, int?, bool)"/>.
         /// A subscription that did not ask never sees an echo at all, so a consumer that does not

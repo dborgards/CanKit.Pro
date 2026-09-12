@@ -119,11 +119,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 accCode: J1939Pgn.TpDt << 8,      // PF = 0xEB in bits 23..16
                 accMask: 0x00FF0000u,
                 idType: CanFilterIDType.Extend);
-            // Echoes stay out (the default): a bus in ChannelWorkMode.Echo replays our own TP
-            // frames, and treating one as peer traffic would open a session against ourselves.
-            // This is the first line of defence, not the only one -- see the source-address check
-            // in RunReaderAsync for why an unflagged echo still has to be caught downstream.
-            _subscription = _service.Subscribe(f => tpCmFilter.Matches(f.Frame) || tpDtFilter.Matches(f.Frame));
+            // Echoes are asked for on purpose. `IsEcho` says "this HOST transmitted it", not
+            // "this CHANNEL transmitted it", and J1939Tp.Open documents that several channels
+            // with different source addresses may share one service. Filtering on the host bit
+            // would therefore drop a sibling channel's BAM and connection-mode traffic, which is
+            // genuine peer traffic from this channel's point of view.
+            //
+            // The instance-level test is the source-address check in RunReaderAsync, which
+            // rejects only this channel's own SA. That check is now load-bearing twice over: for
+            // adapters that echo without flagging, and for telling a sibling apart from ourselves
+            // on adapters that do flag.
+            _subscription = _service.Subscribe(
+                f => tpCmFilter.Matches(f.Frame) || tpDtFilter.Matches(f.Frame),
+                includeEcho: true);
         }
         catch
         {

@@ -206,27 +206,27 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // We evaluate the actual routing in the actor since the RPDO table changes at
             // runtime, but pre-filtering at the subscription reduces per-frame delegate calls
             // on the demux side.
-            // Echoes are asked for, then narrowed to exactly one COB-ID -- see below. Letting
-            // them all through would route this node's own TPDOs, heartbeats and SDO responses
-            // back in as if a peer had sent them; letting none through breaks SYNC.
+            // Echoes are asked for on purpose, and not filtered further. `IsEcho` says "this
+            // HOST transmitted it", not "this NODE transmitted it", and CanOpen.OpenNode
+            // documents that several nodes with different node-ids may share one service to
+            // multiplex CANopen identities over one bus. Dropping host echoes would cut a local
+            // master off from a local slave -- their SDO transfers, PDOs, heartbeats and NMT
+            // commands are all genuine peer traffic to each other.
+            //
+            // It also keeps `ICanOpenNode.SyncReceived`'s promise ("either from a remote producer
+            // or from this node's own producer if echo is on"): HandleSync is the only path that
+            // raises it *and* emits the synchronous TPDOs -- ScheduleSyncProducerTick only puts
+            // the frame on the wire -- so a SYNC producer that never sees its own SYNC stops
+            // emitting its own synchronous TPDOs.
+            //
+            // What this does NOT do is filter out this node's own non-SYNC traffic. That matches
+            // the behaviour before echoes were ever gated; distinguishing self from sibling by
+            // node-id is a separate improvement, not something to bolt on here.
             _subscription = _service.Subscribe(f =>
             {
                 var frame = f.Frame;
                 if (frame.IsExtendedFrame) return false;
                 uint id = (uint)frame.ID;
-
-                // The one self-originated frame this node must still act on is its own SYNC.
-                // `ICanOpenNode.SyncReceived` promises delivery "either from a remote producer
-                // or from this node's own producer if echo is on", and HandleSync is the only
-                // path that raises it *and* emits the synchronous TPDOs -- ScheduleSyncProducerTick
-                // just puts the frame on the wire. So a node that is both SYNC producer and
-                // synchronous-TPDO producer stops emitting its own TPDOs if its echo is dropped.
-                //
-                // Narrowing by COB-ID is exact rather than approximate: a node only ever echoes
-                // what it transmitted, and the only SYNC it can transmit is one it produced
-                // itself. No other echo passes.
-                if (f.IsEcho) return id == CanOpenCobId.Sync;
-
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
                 return id == CanOpenCobId.NmtCommand || (id >= 0x080 && id <= 0x77F);
             }, includeEcho: true);
