@@ -60,8 +60,14 @@ staging branch would only add a place for the two to disagree.
 
 ## Commits and pull-request titles decide the release
 
-The pull request is squash-merged, so **its title becomes the commit that semantic-release
-reads**. It must be a [Conventional Commit](https://www.conventionalcommits.org/):
+Pull requests are merged with a merge commit, and **every commit on the branch is retained and
+analysed by semantic-release** — not only the pull-request title. `git log --first-parent main`
+shows `Merge pull request …` throughout; the merge commit's own subject is not a Conventional
+Commit and contributes nothing, so the branch commits are what decide the release.
+
+Write every commit as a [Conventional Commit](https://www.conventionalcommits.org/), and keep the
+pull-request title one as well — it is what reviewers read, and it is what would decide the
+release if the repository ever switches to squash merging:
 
 ```
 feat(rawcan): expose per-subscription drop counters      -> minor release
