@@ -87,12 +87,12 @@ namespace CanKit.Pro.RawCan
         }
 
         /// <inheritdoc />
-        public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
-            => AddSubscription(idFilter: null, predicate: predicate, bufferCapacity);
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => AddSubscription(idFilter: null, predicate: predicate, bufferCapacity, includeEcho);
 
         /// <inheritdoc />
-        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
-            => AddSubscription(idFilter: filter, predicate: null, bufferCapacity);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => AddSubscription(idFilter: filter, predicate: null, bufferCapacity, includeEcho);
 
         /// <inheritdoc />
         public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
@@ -117,13 +117,13 @@ namespace CanKit.Pro.RawCan
             return overlaps;
         }
 
-        private ISubscription AddSubscription(CanIdFilter? idFilter, Func<CanFrameView, bool>? predicate, int? bufferCapacity)
+        private ISubscription AddSubscription(CanIdFilter? idFilter, Func<CanFrameEvent, bool>? predicate, int? bufferCapacity, bool includeEcho)
         {
             var capacity = bufferCapacity ?? DefaultBufferCapacity;
             if (capacity <= 0)
                 throw new ArgumentOutOfRangeException(nameof(bufferCapacity), "Buffer capacity must be positive.");
 
-            var subscription = new Subscription(this, idFilter, predicate, capacity);
+            var subscription = new Subscription(this, idFilter, predicate, capacity, includeEcho);
             lock (_gate)
             {
                 if (_disposed != 0)
@@ -161,7 +161,17 @@ namespace CanKit.Pro.RawCan
             var subscriptions = _snapshot; // volatile read; no lock, no per-frame allocation
             if (subscriptions.Length == 0) return;
 
+            // All three facts travel together from here on. The demux used to forward only
+            // e.CanFrame and drop e.IsEcho and e.ReceiveTimestamp on the floor, so no subscriber
+            // could see either, however much it wanted to (#23). Reading them costs nothing: the
+            // event argument already carries them.
+            //
+            // This does not make the protocol layers' own self-traffic checks redundant -- the
+            // flag is host-scoped and not every adapter sets it. See the remarks on
+            // ICanBusService for why they are retained.
             var view = e.CanFrame;
+            var isEcho = e.IsEcho;
+            var receiveTimestamp = e.ReceiveTimestamp;
             foreach (var subscription in subscriptions)
             {
                 // A subscription's filter predicate is caller-supplied and may throw. Isolate each
@@ -173,7 +183,7 @@ namespace CanKit.Pro.RawCan
                 // of being silently swallowed.
                 try
                 {
-                    subscription.TryDeliver(view);
+                    subscription.TryDeliver(view, isEcho, receiveTimestamp);
                 }
                 catch (Exception ex)
                 {

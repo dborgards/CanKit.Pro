@@ -142,7 +142,7 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
         using var bus = Open(NewSession(), 0);
         using var service = new CanBusService(bus);
 
-        using var predicateSub = service.Subscribe(view => view.ID == 0x150); // would numerically overlap 'range' but is opaque
+        using var predicateSub = service.Subscribe(e => e.Frame.ID == 0x150); // would numerically overlap 'range' but is opaque
         using var range = service.Subscribe(CanIdFilter.Range(0x100, 0x1FF));
 
         service.FindOverlappingFilterSubscriptions().Should().BeEmpty();

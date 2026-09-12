@@ -206,13 +206,30 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // We evaluate the actual routing in the actor since the RPDO table changes at
             // runtime, but pre-filtering at the subscription reduces per-frame delegate calls
             // on the demux side.
+            // Echoes are asked for on purpose, and not filtered further. `IsEcho` says "this
+            // HOST transmitted it", not "this NODE transmitted it", and CanOpen.OpenNode
+            // documents that several nodes with different node-ids may share one service to
+            // multiplex CANopen identities over one bus. Dropping host echoes would cut a local
+            // master off from a local slave -- their SDO transfers, PDOs, heartbeats and NMT
+            // commands are all genuine peer traffic to each other.
+            //
+            // It also keeps `ICanOpenNode.SyncReceived`'s promise ("either from a remote producer
+            // or from this node's own producer if echo is on"): HandleSync is the only path that
+            // raises it *and* emits the synchronous TPDOs -- ScheduleSyncProducerTick only puts
+            // the frame on the wire -- so a SYNC producer that never sees its own SYNC stops
+            // emitting its own synchronous TPDOs.
+            //
+            // What this does NOT do is filter out this node's own non-SYNC traffic. That matches
+            // the behaviour before echoes were ever gated; distinguishing self from sibling by
+            // node-id is a separate improvement, not something to bolt on here.
             _subscription = _service.Subscribe(f =>
             {
-                if (f.IsExtendedFrame) return false;
-                uint id = (uint)f.ID;
+                var frame = f.Frame;
+                if (frame.IsExtendedFrame) return false;
+                uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
                 return id == CanOpenCobId.NmtCommand || (id >= 0x080 && id <= 0x77F);
-            });
+            }, includeEcho: true);
         }
         catch
         {
@@ -574,9 +591,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         try
         {
-            await foreach (var frame in _subscription.Frames.WithCancellation(_readerCts.Token)
+            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                var frame = frameEvent.Frame;
                 if (frame.IsExtendedFrame) continue;
                 uint id = (uint)frame.ID;
                 // Node-guarding (FR-CO-009) piggy-backs on the heartbeat COB-ID and uses a
@@ -1651,7 +1669,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// Only application writes count: bus-originated OD writes (SDO server download commit,
     /// RPDO unpack) run on the node's actor thread and are filtered out here via
     /// <c>ProtocolActor.IsOnCurrentActor</c>, so an RPDO mapped to the same entry as a
-    /// TPDO cannot produce bus echo loops.
+    /// TPDO cannot produce a feedback loop with the peer that sent it.
+    /// <para>
+    /// This is a provenance check, not a TX-echo check, and #23 did not remove it. The writes it
+    /// suppresses come from a <em>peer</em> — a real SDO download, a real RPDO — so the bus's
+    /// echo flag says nothing about them; what distinguishes them from an application write is
+    /// only that they are applied on the actor loop. The subscription opts into echoes, so it
+    /// closes no path into here at all: this node's own TPDO coming back on an echo-capable bus
+    /// and being unpacked as an RPDO is suppressed by this provenance check and by nothing else.
+    /// The check is sound now that #19 has
+    /// moved <c>IsOnCurrentActor</c> off <c>AsyncLocal</c> onto a thread-static, so a send task
+    /// started from actor work no longer reports true and no longer swallows a legitimate
+    /// application write.
+    /// </para>
     /// Load safety: the actor mailbox is intentionally unbounded, so this path must never
     /// post per write. A volatile snapshot of the mapped entries filters irrelevant writes
     /// with zero actor traffic, and relevant writes are coalesced into a bounded dirty set —
@@ -1662,7 +1692,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private void OnOdEntryWrittenForCoS(ushort index, byte subindex)
     {
         if (!_options.EnableChangeOfStateTpdo) return;
-        if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (echo guard)
+        if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (see remarks)
         if (Volatile.Read(ref _disposed) != 0) return;
 
         var key = CosKey(index, subindex);

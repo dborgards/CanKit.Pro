@@ -46,6 +46,75 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         return buf;
     }
 
+    // Regression for #23: two channels sharing one service must still hear each other on a bus
+    // whose echoes *are* flagged.
+    //
+    // `J1939Tp.Open(ICanBusService, ...)` documents that "multiple channels with different source
+    // addresses may share the same service". On a flagging adapter every frame either channel
+    // sends is marked IsEcho — the flag identifies the host, not the channel — so withholding
+    // echoes cut the siblings off from each other entirely. The channels now opt in, and the
+    // existing `fields.SourceAddress == _sourceAddress` check in RunReaderAsync does the
+    // instance-level filtering the echo bit cannot.
+    [Fact]
+    public async Task Two_Channels_Sharing_One_Service_Still_Hear_Each_Other_On_A_Flagging_Echo_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(service, sourceAddress: 0x10, options: opts);
+        using var receiver = J1939TpFactory.Open(service, sourceAddress: 0x20, options: opts);
+
+        var payload = RandomPayload(100, seed: 20);
+
+        var receiveTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        await sender.SendBamAsync(0xFECBu, payload).WithTimeout(ShortTimeout);
+
+        var datagram = await receiveTask;
+        datagram.SourceAddress.Should().Be(
+            0x10,
+            "a sibling channel's BAM is peer traffic to this channel, even though the host echo "
+            + "flag marks it exactly like this channel's own transmissions");
+        datagram.Payload.Should().Equal(payload);
+    }
+
+    // Regression for #23: a TP channel must never receive its own broadcast, even on an adapter
+    // whose echoes are not flagged.
+    //
+    // #23 gave subscriptions a real IsEcho bit and withheld echoes by default, and the
+    // source-address self-check in J1939TpChannel.RunReaderAsync was deleted as redundant. It is
+    // not: the echo gate can only drop what the adapter flags, and CanKit.Adapter.Virtual in
+    // ChannelWorkMode.Echo echoes without setting IsEcho (VirtualBusHub.Broadcast builds its
+    // CanReceiveData without it, and the remarks on ControllableBus record the same fact). Without
+    // the check, SendBamAsync consumed its own globally addressed BAM and DT frames and
+    // republished the outbound payload as an inbound datagram.
+    //
+    // Deliberately the real Virtual adapter and not ControllableBus: the whole point is the
+    // behaviour of an adapter that does not flag its echo, so substituting a double that does
+    // would test the opposite of what this pins.
+    [Fact]
+    public async Task Bam_Sender_On_An_Unflagged_Echo_Bus_Does_Not_Receive_Its_Own_Broadcast()
+    {
+        var session = NewSession();
+        using var bus = VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo);
+
+        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x11, options: opts);
+
+        var payload = RandomPayload(100, seed: 23);
+
+        // Start listening before sending: if the channel does route its own echo, the datagram
+        // shows up here rather than being missed by a late subscriber.
+        var selfReceive = sender.ReceiveAsync();
+        await sender.SendBamAsync(0xFECAu, payload).WithTimeout(ShortTimeout);
+
+        var settled = await Task.WhenAny(selfReceive, Task.Delay(TimeSpan.FromMilliseconds(500)));
+        settled.Should().NotBeSameAs(
+            selfReceive,
+            "a TP channel must not reassemble its own broadcast; the echo gate cannot drop what "
+            + "the Virtual adapter never flagged, so the source-address check has to catch it");
+    }
+
     // FR-TP-030 + FR-TP-032 + FR-TP-033: TP.BAM sender broadcasts a 100-byte PDU; the receiver
     // reassembles it identically from TP.CM(BAM) + TP.DT 1..15.
     [Fact]
@@ -1326,11 +1395,11 @@ internal sealed class RejectTpCmBusService : ICanBusService
         remove => _inner.BackgroundExceptionOccurred -= value;
     }
 
-    public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
-        => _inner.Subscribe(predicate, bufferCapacity);
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
 
-    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
-        => _inner.Subscribe(filter, bufferCapacity);
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(filter, bufferCapacity, includeEcho);
 
     public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();

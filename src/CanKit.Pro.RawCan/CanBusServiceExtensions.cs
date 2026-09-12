@@ -1,12 +1,11 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using CanKit.Abstractions.API.Can.Definitions;
 
 namespace CanKit.Pro.RawCan
 {
     /// <summary>
-    /// Callback-style convenience layer over <see cref="ICanBusService.Subscribe(Func{CanFrameView,bool}?,int?)"/>
+    /// Callback-style convenience layer over <see cref="ICanBusService.Subscribe(Func{CanFrameEvent,bool},int?,bool)"/>
     /// for callers who want "filter + handler" instead of driving the async-enumerable
     /// <see cref="ISubscription.Frames"/> stream themselves.
     /// </summary>
@@ -36,17 +35,22 @@ namespace CanKit.Pro.RawCan
         /// Bounded buffer capacity for the underlying subscription; null uses
         /// <see cref="CanBusService.DefaultBufferCapacity"/>.
         /// </param>
+        /// <param name="includeEcho">
+        /// Whether the callback also sees the local host's own transmit echoes; false by default,
+        /// for the reason given on <see cref="ICanBusService"/>.
+        /// </param>
         /// <returns>Disposing this stops the subscription and the background delivery task.</returns>
         public static IDisposable Subscribe(
             this ICanBusService service,
-            Action<CanFrameView> onNext,
-            Func<CanFrameView, bool>? predicate = null,
-            int? bufferCapacity = null)
+            Action<CanFrameEvent> onNext,
+            Func<CanFrameEvent, bool>? predicate = null,
+            int? bufferCapacity = null,
+            bool includeEcho = false)
         {
             if (service is null) throw new ArgumentNullException(nameof(service));
             if (onNext is null) throw new ArgumentNullException(nameof(onNext));
 
-            return new CallbackSubscription(service.Subscribe(predicate, bufferCapacity), service, onNext);
+            return new CallbackSubscription(service.Subscribe(predicate, bufferCapacity, includeEcho), service, onNext);
         }
 
         private sealed class CallbackSubscription : IDisposable
@@ -56,7 +60,7 @@ namespace CanKit.Pro.RawCan
             private readonly AsyncLocal<bool> _isOnPump = new();
             private int _disposed;
 
-            public CallbackSubscription(ISubscription subscription, ICanBusService service, Action<CanFrameView> onNext)
+            public CallbackSubscription(ISubscription subscription, ICanBusService service, Action<CanFrameEvent> onNext)
             {
                 _subscription = subscription;
                 _pumpTask = Task.Run(async () =>
@@ -66,7 +70,7 @@ namespace CanKit.Pro.RawCan
                     // inside it would deadlock until the timeout. Same reentrancy guard as
                     // ProtocolActor.Dispose / _isOnLoop.
                     _isOnPump.Value = true;
-                    await foreach (var frame in _subscription.Frames.ConfigureAwait(false))
+                    await foreach (var frameEvent in _subscription.Frames.ConfigureAwait(false))
                     {
                         // Completing the channel writer (Subscription.Dispose) does not drop
                         // items already buffered. Without these checks a self-dispose from
@@ -76,7 +80,7 @@ namespace CanKit.Pro.RawCan
 
                         try
                         {
-                            onNext(frame);
+                            onNext(frameEvent);
                         }
                         catch (Exception ex)
                         {

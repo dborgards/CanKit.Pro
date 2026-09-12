@@ -14,12 +14,24 @@ namespace CanKit.Pro.RawCan
                 "Second"})]
         public System.Collections.Generic.IReadOnlyList<System.ValueTuple<CanKit.Pro.RawCan.ISubscription, CanKit.Pro.RawCan.ISubscription>> FindOverlappingFilterSubscriptions() { }
         public System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmed(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default) { }
-        public CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default) { }
-        public CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Abstractions.API.Can.Definitions.CanFrameView, bool>? predicate = null, int? bufferCapacity = default) { }
+        public CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false) { }
+        public CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false) { }
     }
     public static class CanBusServiceExtensions
     {
-        public static System.IDisposable Subscribe(this CanKit.Pro.RawCan.ICanBusService service, System.Action<CanKit.Abstractions.API.Can.Definitions.CanFrameView> onNext, System.Func<CanKit.Abstractions.API.Can.Definitions.CanFrameView, bool>? predicate = null, int? bufferCapacity = default) { }
+        public static System.IDisposable Subscribe(this CanKit.Pro.RawCan.ICanBusService service, System.Action<CanKit.Pro.RawCan.CanFrameEvent> onNext, System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false) { }
+    }
+    public readonly struct CanFrameEvent : System.IEquatable<CanKit.Pro.RawCan.CanFrameEvent>
+    {
+        public CanFrameEvent(CanKit.Abstractions.API.Can.Definitions.CanFrameView frame, bool isEcho, System.TimeSpan receiveTimestamp) { }
+        public CanKit.Abstractions.API.Can.Definitions.CanFrameView Frame { get; }
+        public bool IsEcho { get; }
+        public System.TimeSpan ReceiveTimestamp { get; }
+        public bool Equals(CanKit.Pro.RawCan.CanFrameEvent other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public static bool operator !=(CanKit.Pro.RawCan.CanFrameEvent left, CanKit.Pro.RawCan.CanFrameEvent right) { }
+        public static bool operator ==(CanKit.Pro.RawCan.CanFrameEvent left, CanKit.Pro.RawCan.CanFrameEvent right) { }
     }
     public readonly struct CanIdFilter
     {
@@ -39,15 +51,15 @@ namespace CanKit.Pro.RawCan
                 "Second"})]
         System.Collections.Generic.IReadOnlyList<System.ValueTuple<CanKit.Pro.RawCan.ISubscription, CanKit.Pro.RawCan.ISubscription>> FindOverlappingFilterSubscriptions();
         System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmed(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default);
-        CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default);
-        CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Abstractions.API.Can.Definitions.CanFrameView, bool>? predicate = null, int? bufferCapacity = default);
+        CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false);
+        CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false);
     }
     public interface ISubscription : System.IDisposable
     {
-        System.Collections.Generic.IAsyncEnumerable<CanKit.Abstractions.API.Can.Definitions.CanFrameView> Frames { get; }
+        System.Collections.Generic.IAsyncEnumerable<CanKit.Pro.RawCan.CanFrameEvent> Frames { get; }
         void Reconfigure(CanKit.Pro.RawCan.CanIdFilter filter);
-        void Reconfigure(System.Func<CanKit.Abstractions.API.Can.Definitions.CanFrameView, bool>? predicate);
-        bool TryRead(out CanKit.Abstractions.API.Can.Definitions.CanFrameView frame);
+        void Reconfigure(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate);
+        bool TryRead(out CanKit.Pro.RawCan.CanFrameEvent frameEvent);
     }
     public static class ProtocolErrorCodes
     {
