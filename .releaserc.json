@@ -5,7 +5,7 @@
     ["@semantic-release/commit-analyzer", {
       "preset": "conventionalcommits",
       "releaseRules": [
-        { "breaking": true, "release": "major" },
+        { "breaking": true, "release": "minor" },
         { "type": "feat", "release": "minor" },
         { "type": "fix", "release": "patch" },
         { "type": "perf", "release": "patch" },
@@ -45,7 +45,8 @@
     }],
 
     ["@semantic-release/exec", {
-      "prepareCmd": "dotnet pack CanKit.Pro.sln --configuration Release -p:Version=${nextRelease.version} --output artifacts/nuget",
+      "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
+      "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version}",
       "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate"
     }],
 

@@ -6,6 +6,12 @@ checked and fired, and a **bus-state monitor** that pushes `ICanBus.BusState` tr
 protocol instance — both composed on top of `CanKit.Pro.Actor`'s single-mailbox loop, so there are
 no free-running timers, no busy loops, and no second background-exception channel.
 
+Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
+the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until it is
+tagged there is no listed version to install, so the `dotnet add package` line below resolves
+nothing and the withdrawn releases come back only on an exact version pin. The public surface
+can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
+
 This package depends only on `CanKit.Abstractions` (for `ICanBus`/`BusState`) and `CanKit.Pro.Actor` (for
 `IProtocolActor`). Every protocol instance already runs on a `ProtocolActor` (FR-RAW-020), so a
 deadline is not an independent standalone timer — it is scheduled through the actor's own

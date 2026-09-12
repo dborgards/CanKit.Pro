@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>Experimental Unified Diagnostic Services (ISO 14229-1) client for CanKit.Pro. Provides an async IUdsClient over IIsoTpChannel with the implemented service set (0x10 DiagnosticSessionControl, 0x11 ECUReset, 0x22 ReadDataByIdentifier, 0x27 SecurityAccess, 0x2E WriteDataByIdentifier, 0x31 RoutineControl, 0x34 RequestDownload, 0x35 RequestUpload, 0x36 TransferData, 0x37 RequestTransferExit, 0x3E TesterPresent), P2/P2* timing, NRC 0x78 responsePending handling and structured negative-response reporting.</Description>
+    <Description>Unified Diagnostic Services (ISO 14229-1) client for CanKit.Pro. Provides an async IUdsClient over IIsoTpChannel with the implemented service set (0x10 DiagnosticSessionControl, 0x11 ECUReset, 0x22 ReadDataByIdentifier, 0x27 SecurityAccess, 0x2E WriteDataByIdentifier, 0x31 RoutineControl, 0x34 RequestDownload, 0x35 RequestUpload, 0x36 TransferData, 0x37 RequestTransferExit, 0x3E TesterPresent), P2/P2* timing, NRC 0x78 responsePending handling and structured negative-response reporting.</Description>
     <PackageTags>$(PackageTags);UDS;ISO 14229;diagnostics</PackageTags>
   </PropertyGroup>
 

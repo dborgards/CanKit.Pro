@@ -22,7 +22,8 @@ needs and that people otherwise rebuild, slightly differently and slightly wrong
 
 ## Packages
 
-Published to nuget.org, versioned and released together.
+Versioned and released together to nuget.org — see [Status](#status) for which releases are
+currently available.
 
 **L2 — the raw-CAN service layer.**
 
@@ -44,6 +45,17 @@ Published to nuget.org, versioned and released together.
 | [`CanKit.Pro.Uds`](src/CanKit.Pro.Uds) | ISO 14229-1 client over ISO-TP: session control, security access, read/write by identifier, routine control, upload/download, P2/P2\* timing and 0x78 response-pending. |
 
 Everything targets `netstandard2.0` and `net10.0`.
+
+## Status
+
+The 1.0.0 – 1.2.3 releases are **withdrawn from nuget.org**: they were published as stable before the API
+had been reviewed against the specifications. **1.3.0 will be the first release whose API is
+stable**, and the surface can still change until it is tagged — see
+[Versioning](docs/decisions/0001-versioning-and-api-stability.md) for what that window is for.
+
+Which means there is **nothing to install from nuget.org until 1.3.0 ships**: the `dotnet add
+package` lines below have no listed version to resolve, and a withdrawn release comes back only
+on an exact version pin. Build from source in the meantime.
 
 ## Install
 

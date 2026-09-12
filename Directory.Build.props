@@ -24,7 +24,21 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
-    <AnalysisLevel>latest</AnalysisLevel>
+    <!--
+      A pinned level, not `latest`. With `latest`, the set of enabled analyzer rules changes with
+      the SDK, so the next SDK bump can introduce warnings nobody wrote code for. Combined with
+      TreatWarningsAsErrors below that turns an unrelated toolchain update into a red build.
+      Raising this is a deliberate edit that arrives in its own pull request.
+    -->
+    <AnalysisLevel>10.0</AnalysisLevel>
+    <!--
+      Warnings are errors in CI only. The solution builds clean, and this is what keeps it that
+      way; making it unconditional would instead break every local build with a half-written
+      method in it, which is how such a setting gets removed again a month later. The `format`
+      job covers code style separately — EnforceCodeStyleInBuild would only duplicate it, and
+      two mechanisms for one rule eventually disagree.
+    -->
+    <TreatWarningsAsErrors Condition="'$(CI)' == 'true'">true</TreatWarningsAsErrors>
     <!--
       CS1591 (missing XML comment) is reported per member; the public API is documented, but we do
       not want an incidental internal helper to break the build. `dotnet build -warnaserror` in a

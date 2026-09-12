@@ -1,0 +1,36 @@
+# Codecov configuration. Uploaded from the `build-test` job in .github/workflows/ci.yml.
+#
+# The point of this file is what it switches OFF. By default Codecov adds two status checks to
+# every pull request and fails them when coverage drops, which is a gate. The decision recorded
+# with the coverage work was to surface the number first and add a floor later, once it has
+# stopped moving -- a coverage gate in the middle of a bug-fix series blocks the very work that
+# raises coverage. So both checks are informational: they report, they never fail a build.
+#
+# Turning that into a real gate later is a two-line edit here: drop `informational` and set a
+# target. Nothing in the workflow has to change.
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# The pull request comment is the useful half, so it stays. `require_changes` keeps it quiet on
+# pull requests that do not move coverage at all -- documentation and CI changes, which is most
+# of what this repository has seen lately.
+comment:
+  layout: "condensed_header, diff, files"
+  require_changes: true
+
+# One flag, matching the workflow: coverage is collected on net10.0 only, and only on the Linux
+# leg. The net48 leg runs the same tests without a collector, because coverlet.collector ships no
+# .NET Framework assets (see tests/Directory.Build.props).
+flag_management:
+  default_rules:
+    statuses:
+      - type: project
+        informational: true

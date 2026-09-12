@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>Experimental, specification-compliant ISO 15765-2 (ISO-TP) implementation for CanKit.Pro: deterministic Single-/First-/Consecutive-/Flow-Control-frame codec, bounds-checked PCI parser and STmin helpers, plus an actor-driven runtime (IIsoTpChannel) that composes on top of the CanKit.Pro L2 services (RawCan demux, TX-confirm, Actor, Reliability deadlines) — no vendor-SDK dependency.</Description>
+    <Description>Specification-compliant ISO 15765-2 (ISO-TP) implementation for CanKit.Pro: deterministic Single-/First-/Consecutive-/Flow-Control-frame codec, bounds-checked PCI parser and STmin helpers, plus an actor-driven runtime (IIsoTpChannel) that composes on top of the CanKit.Pro L2 services (RawCan demux, TX-confirm, Actor, Reliability deadlines) — no vendor-SDK dependency.</Description>
     <PackageTags>$(PackageTags);ISO-TP;ISO 15765-2;codec;channel</PackageTags>
   </PropertyGroup>
 

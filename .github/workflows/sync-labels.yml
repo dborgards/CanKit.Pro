@@ -6,6 +6,8 @@ on:
     paths:
       - .github/labels.yml
       - .github/workflows/sync-labels.yml
+      # The script is part of the mechanism, so a fix to it has to be able to run itself.
+      - eng/sync-labels.py
   workflow_dispatch:
 
 permissions:
@@ -17,14 +19,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The next step pip-installs third-party code, and this job's GITHUB_TOKEN carries
+          # `issues: write`. Persisting it into .git/config would leave it readable to whatever
+          # that install runs. `gh` gets the token from GH_TOKEN in the step that needs it.
+          persist-credentials: false
+
+      # eng/sync-labels.py rather than micnncim/action-label-syncer: that action is unmaintained,
+      # and it held `issues: write` on this repository to do what amounts to three `gh label`
+      # calls in a loop. `gh` is preinstalled on the runner. PyYAML is pinned and installed
+      # explicitly instead of relying on whatever the runner image happens to ship.
+      #
+      # Labels removed from the manifest are removed from the repository, so the file stays the
+      # single source of truth instead of drifting from what the UI shows.
+      - name: Install PyYAML
+        run: python3 -m pip install --disable-pip-version-check pyyaml==6.0.2
 
       - name: Apply labels
-        uses: micnncim/action-label-syncer@v1
-        with:
-          manifest: .github/labels.yml
-          # Labels removed from the manifest are removed from the repository, so the file stays
-          # the single source of truth instead of drifting from what the UI shows.
-          prune: true
+        run: python3 eng/sync-labels.py .github/labels.yml
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}

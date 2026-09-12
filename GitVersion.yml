@@ -25,15 +25,36 @@ tag-prefix: '[vV]?'
 # configuration to make it impossible.
 next-version: 0.1.0
 
-# AssemblyVersion stays at major.minor.patch so a patch release does not force a binding redirect
-# on .NET Framework consumers. The exact build lands in FileVersion / InformationalVersion, which
-# is where a diagnostic tool looks anyway.
-assembly-versioning-scheme: MajorMinorPatch
-assembly-file-versioning-scheme: MajorMinorPatch
+# No assembly-versioning-scheme / assembly-file-versioning-scheme here. Those keys configure
+# GitVersion's MSBuild task, and this repository deliberately does not run one (see above), so
+# they configured nothing.
+#
+# The comment that used to sit on them claimed `MajorMinorPatch` meant "a patch release does not
+# force a binding redirect on .NET Framework consumers". That was wrong in both directions. MSBuild
+# derives AssemblyVersion from Version with the patch included (1.2.3 -> 1.2.3.0), dropping only
+# prerelease and build metadata -- and an AssemblyVersion that moves with the patch is exactly what
+# *does* change assembly identity and force a redirect. `MajorMinorPatch` never bought what the
+# comment credited it with, and neither does the MSBuild default that replaced it.
+#
+# So: this repository has no redirect-avoidance policy today, and describing one would be fiction.
+# Getting that property would take an explicit `<AssemblyVersion>$(VersionPrefix.Major).$(...)`
+# pinned to major.minor in Directory.Build.props -- a deliberate decision nobody has made. The
+# exact build lands in FileVersion / InformationalVersion either way, which is where a diagnostic
+# tool looks.
 
 branches:
   main:
-    label: ''
+    # `label: ci` rather than '': a CI build of main is not a release, and a bare `1.2.4+12` in an
+    # artifact list reads exactly like one. With the label it is `1.2.4-ci.12` and says so, which
+    # is the whole of what this needs to fix.
+    #
+    # Increment stays Patch. Raising it to Minor while the work heads for 1.3.0 would name CI
+    # artifacts after the version they are heading for -- but `increment` is unconditional, so it
+    # would go on producing 1.4.0-ci.N after 1.3.0 ships instead of 1.3.1-ci.N, and nothing would
+    # restore it. One temporary override with a machine-enforced expiry (breaking -> minor, in
+    # .releaserc.json) is a debt worth carrying; a second one, for nothing but the cosmetics of an
+    # artifact name, is not.
+    label: ci
     increment: Patch
   pull-request:
     label: pr
