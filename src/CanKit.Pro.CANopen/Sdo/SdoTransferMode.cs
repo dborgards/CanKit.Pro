@@ -5,27 +5,47 @@ namespace CanKit.Pro.CANopen.Sdo;
 /// <c>SdoDownloadAsync</c> APIs on <see cref="ICanOpenNode"/> should use for a single transfer.
 /// </summary>
 /// <remarks>
-/// <see cref="Auto"/> is the recommended default and preserves the historical behaviour of the
-/// public API for downloads: payloads up to four bytes go over the expedited codec
-/// (CiA 301 §7.2.4.3.3), larger payloads up to <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/>
-/// go over the segmented codec (CiA 301 §7.2.4.3.5..14), and download payloads at or above the
-/// threshold switch to block transfer (CiA 301 §7.2.4.3.15). Uploads cannot apply the Auto→Block
-/// heuristic because the payload length is unknown until the server replies — use
-/// <see cref="Block"/> explicitly for block upload. Explicit values force one specific codec:
-/// they are primarily intended for tests and for callers that need to exercise a particular wire
-/// encoding regardless of payload size.
+/// <para>
+/// <see cref="Auto"/> is the recommended default. The choice between the expedited codec
+/// (CiA 301 §7.2.4.3.3) and the segmented codec (CiA 301 §7.2.4.3.5..14) is <b>not</b> a caller
+/// decision — it follows from the payload length, exactly as CiA 301 prescribes:
+/// </para>
+/// <list type="bullet">
+///   <item><description><b>Download.</b> Payloads at or above
+///   <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> switch to block transfer
+///   (CiA 301 §7.2.4.3.15). <em>Below</em> that threshold the payload length picks the codec:
+///   1..4 bytes expedited, 5 bytes and up segmented. The threshold is tested first, so it bounds
+///   the expedited range too — the options permit a threshold of 1..4, and such a node sends even
+///   a one-byte payload by block transfer.</description></item>
+///   <item><description><b>Upload.</b> The payload length is unknown until the server replies,
+///   so the server dictates the codec: it answers the initiate with either an expedited or a
+///   segmented response and the client follows either transparently. <see cref="Auto"/>
+///   therefore cannot apply the block heuristic on upload — pass <see cref="Block"/> explicitly
+///   for a block upload.</description></item>
+/// </list>
+/// <para>
+/// <see cref="Block"/> is the only transport a caller can force, because it is the only one the
+/// client actually decides: it is negotiated in the initiate frame instead of being derived from
+/// a payload length that is either already known (download) or not yet known (upload).
+/// </para>
 /// </remarks>
 public enum SdoTransferMode
 {
-    /// <summary>Auto-select based on payload size and <see cref="CanOpenNodeOptions"/> thresholds.</summary>
+    /// <summary>
+    /// Select the transport from the payload length (download) or from the server's initiate
+    /// response (upload), using <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> as the
+    /// download block-transfer threshold.
+    /// </summary>
     Auto = 0,
 
-    /// <summary>Force the expedited codec (payloads 1..4 bytes only).</summary>
-    Expedited = 1,
-
-    /// <summary>Force the segmented codec.</summary>
-    Segmented = 2,
-
     /// <summary>Force block transfer (CiA 301 §7.2.4.3.15).</summary>
+    /// <remarks>
+    /// The value stays <c>3</c>, the gap left by the removed members notwithstanding. Renumbering
+    /// it to <c>1</c> would silently reuse the value <c>Expedited</c> carried in 1.2.x: an
+    /// already-compiled caller, or a persisted or transmitted numeric value, supplies the literal
+    /// <c>1</c> and would go from requesting a no-op hint to forcing block transfer — a real
+    /// change on the wire, and one that hangs against a peer with no block support. A compile
+    /// error is the loud failure this break wants; a gap in an enum costs nothing.
+    /// </remarks>
     Block = 3,
 }

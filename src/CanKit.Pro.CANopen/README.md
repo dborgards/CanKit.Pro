@@ -70,10 +70,12 @@ not find here:
 ### SDO block transfer
 
 `SdoDownloadAsync` auto-selects the block codec when the payload reaches
-`CanOpenNodeOptions.SdoBlockThresholdBytes` (default 128 bytes). `SdoUploadAsync` keeps the
-classic expedited/segmented path under `SdoTransferMode.Auto` (size unknown up front); pass
-`SdoTransferMode.Block` to force block upload. Callers can also force `Expedited` /
-`Segmented` / `Block` on either API. The block size advertised by this node is
+`CanOpenNodeOptions.SdoBlockThresholdBytes` (default 128 bytes). Below that threshold the
+payload length picks the codec, per CiA 301: 1..4 bytes go expedited, 5 bytes and up go
+segmented. `SdoUploadAsync` keeps the classic client under `SdoTransferMode.Auto` (the size is
+unknown up front, so the server's initiate response decides expedited vs. segmented); pass
+`SdoTransferMode.Block` to force block upload. `Block` is the only transport a caller can
+force — the expedited/segmented split is not selectable. The block size advertised by this node is
 `CanOpenNodeOptions.SdoBlockSize` (default 127; peers with a smaller window renegotiate
 downward). CRC-16/XMODEM is exchanged when both endpoints set the "cc" / "sc" bit
 (`SdoBlockCrcSupported`, default `true`).
@@ -133,6 +135,45 @@ CanKit.Pro.CANopen/
   Pdo/PdoMapping.cs          // mapping + transmission types
   Emcy/EmcyMessage.cs        // 8-byte encode/decode
 ```
+
+## Migrating from 1.2.x
+
+`SdoTransferMode.Expedited` and `SdoTransferMode.Segmented` are gone. `SdoTransferMode.Block`
+keeps its value `3` — the gap the removed members leave behind is deliberate, see below.
+
+Neither removed member ever reached the wire encoder, so **below
+`CanOpenNodeOptions.SdoBlockThresholdBytes`** dropping the argument sends exactly the same frames.
+At or above the threshold it does not — see "One behavioural difference" below, which is the only
+case in this migration that changes traffic:
+
+```csharp
+// before — below the block threshold, both of these produced identical traffic
+await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Expedited);
+await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Segmented);
+
+// after
+await node.SdoDownloadAsync(id, index, sub, data);
+```
+
+Below `CanOpenNodeOptions.SdoBlockThresholdBytes` the codec is picked from the payload length,
+per CiA 301: 1..4 bytes expedited, 5 and up segmented. The threshold is tested first and so bounds
+the expedited range as well — a node configured with a threshold of 1..4 sends even a one-byte
+payload by block transfer. On upload it is the server's initiate response that decides. `Block`
+remains, because it is the one transport the client genuinely negotiates rather than derives.
+
+**One behavioural difference.** At or above `CanOpenNodeOptions.SdoBlockThresholdBytes` (default
+128), a download that used to pass `Expedited` or `Segmented` bypassed block transfer as an
+undocumented side effect. It now uses block transfer like any other download of that size. If a
+peer cannot handle that, raise `SdoBlockThresholdBytes` on the node options rather than reaching
+for a mode argument.
+
+**Nothing to remap.** `Block` keeps its numeric value `3`, so a persisted or transmitted enum
+value still means what it meant. That is why the enum is left with a gap where `1` and `2` used
+to be: renumbering `Block` to `1` would have made it collide with the value `Expedited` carried
+in 1.2.x, and an already-compiled caller passing that literal would have gone from requesting a
+no-op hint to forcing block transfer — a silent change on the wire that hangs against a peer with
+no block support. Removing the members gives such a caller a compile error instead, which is the
+point of the break.
 
 ## Install
 
