@@ -9,10 +9,7 @@ namespace CanKit.Pro.RawCan
         public int SubscriptionCount { get; }
         public event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         public void Dispose() { }
-        [return: System.Runtime.CompilerServices.TupleElementNames(new string[] {
-                "First",
-                "Second"})]
-        public System.Collections.Generic.IReadOnlyList<System.ValueTuple<CanKit.Pro.RawCan.ISubscription, CanKit.Pro.RawCan.ISubscription>> FindOverlappingFilterSubscriptions() { }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.RawCan.FilterOverlap> FindOverlappingFilterSubscriptions() { }
         public System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmed(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default) { }
         public CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false) { }
         public CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false) { }
@@ -41,15 +38,21 @@ namespace CanKit.Pro.RawCan
         public static CanKit.Pro.RawCan.CanIdFilter Mask(uint accCode, uint accMask, CanKit.Abstractions.API.Common.Definitions.CanFilterIDType idType = 0) { }
         public static CanKit.Pro.RawCan.CanIdFilter Range(uint from, uint to, CanKit.Abstractions.API.Common.Definitions.CanFilterIDType idType = 0) { }
     }
+    public readonly struct FilterOverlap : System.IEquatable<CanKit.Pro.RawCan.FilterOverlap>
+    {
+        public FilterOverlap(CanKit.Pro.RawCan.ISubscription A, CanKit.Pro.RawCan.ISubscription B, uint LowestSharedId, uint HighestSharedId) { }
+        public CanKit.Pro.RawCan.ISubscription A { get; init; }
+        public CanKit.Pro.RawCan.ISubscription B { get; init; }
+        public uint HighestSharedId { get; init; }
+        public uint LowestSharedId { get; init; }
+        public void Deconstruct(out CanKit.Pro.RawCan.ISubscription a, out CanKit.Pro.RawCan.ISubscription b) { }
+    }
     public interface ICanBusService : System.IDisposable
     {
         CanKit.Abstractions.API.Can.ICanBus Bus { get; }
         int SubscriptionCount { get; }
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
-        [return: System.Runtime.CompilerServices.TupleElementNames(new string[] {
-                "First",
-                "Second"})]
-        System.Collections.Generic.IReadOnlyList<System.ValueTuple<CanKit.Pro.RawCan.ISubscription, CanKit.Pro.RawCan.ISubscription>> FindOverlappingFilterSubscriptions();
+        System.Collections.Generic.IReadOnlyList<CanKit.Pro.RawCan.FilterOverlap> FindOverlappingFilterSubscriptions();
         System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmed(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default);
         CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false);
         CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false);

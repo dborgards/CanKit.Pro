@@ -401,7 +401,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
             => inner.Subscribe(filter, bufferCapacity, includeEcho);
 
-        public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => inner.FindOverlappingFilterSubscriptions();
 
         public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)

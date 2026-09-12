@@ -146,8 +146,105 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
         var overlaps = service.FindOverlappingFilterSubscriptions();
 
         overlaps.Should().ContainSingle();
-        var pair = overlaps[0];
-        new[] { pair.First, pair.Second }.Should().BeEquivalentTo(new[] { a, b });
+        var overlap = overlaps[0];
+        new[] { overlap.A, overlap.B }.Should().BeEquivalentTo(new[] { a, b });
+
+        // The point of the named type over the old (First, Second) tuple: it can say *where* they
+        // collide, which is what someone looking at an unexpected overlap wants to know.
+        overlap.LowestSharedId.Should().Be(0x180);
+        overlap.HighestSharedId.Should().Be(0x1FF);
+
+        // The two subscriptions still destructure directly, for callers that only want the pair.
+        var (first, second) = overlap;
+        first.Should().BeSameAs(overlap.A);
+        second.Should().BeSameAs(overlap.B);
+    }
+
+    // Two acceptance-mask filters accept scattered ID sets, so the reported range is the inclusive
+    // hull: both bounds are shared, and every shared ID lies between them, but the IDs in between
+    // need not be.
+    [Fact]
+    public void An_Overlap_Between_Mask_Filters_Reports_The_Hull_Of_The_Shared_Ids()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+
+        // Shared IDs are exactly those with 0x100 set and 0x200 clear: 0x100..0x1FF and
+        // 0x500..0x5FF (bit 0x400 is unconstrained by either filter).
+        using var a = service.Subscribe(CanIdFilter.Mask(accCode: 0x100, accMask: 0x100));
+        using var b = service.Subscribe(CanIdFilter.Mask(accCode: 0x000, accMask: 0x200));
+
+        var overlap = service.FindOverlappingFilterSubscriptions().Should().ContainSingle().Subject;
+
+        overlap.LowestSharedId.Should().Be(0x100);
+        overlap.HighestSharedId.Should().Be(0x5FF);
+    }
+
+    // Overlaps and the shared-ID range are decided by a bit walk that never looks at an actual ID,
+    // and both now come out of one search. This checks that search against the definition: sweep
+    // the entire standard 11-bit ID space, ask Matches directly, and compare. 13 filters, every
+    // ordered pair, 2048 IDs each.
+    //
+    // Driven through the service rather than the filters, because the range is reported on
+    // FilterOverlap; Reconfigure re-points the same two subscriptions instead of opening 169 buses.
+    [Fact]
+    public void Overlap_And_Reported_Range_Agree_With_A_Brute_Force_Sweep_Of_The_Id_Space()
+    {
+        var filters = new[]
+        {
+            CanIdFilter.Range(0x000, 0x7FF),
+            CanIdFilter.Range(0x100, 0x1FF),
+            CanIdFilter.Range(0x180, 0x2FF),
+            CanIdFilter.Range(0x300, 0x3FF),
+            CanIdFilter.Range(0x000, 0x000),
+            CanIdFilter.Range(0x7FF, 0x7FF),
+            CanIdFilter.Mask(accCode: 0x000, accMask: 0x000), // constrains nothing: matches every ID
+            CanIdFilter.Mask(accCode: 0x100, accMask: 0x100),
+            CanIdFilter.Mask(accCode: 0x000, accMask: 0x200),
+            CanIdFilter.Mask(accCode: 0x123, accMask: 0x7FF), // exactly one ID
+            CanIdFilter.Mask(accCode: 0x100, accMask: 0x700),
+            CanIdFilter.Mask(accCode: 0x555, accMask: 0x555),
+            CanIdFilter.Mask(accCode: 0x040, accMask: 0x0C0),
+        };
+
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var subA = service.Subscribe(filters[0]);
+        using var subB = service.Subscribe(filters[0]);
+
+        for (var i = 0; i < filters.Length; i++)
+        {
+            for (var j = 0; j < filters.Length; j++)
+            {
+                var a = filters[i];
+                var b = filters[j];
+                subA.Reconfigure(a);
+                subB.Reconfigure(b);
+
+                uint? lowest = null;
+                uint? highest = null;
+                for (uint id = 0; id <= 0x7FF; id++)
+                {
+                    var view = new CanFrameView(CanFrameType.Can20, (int)id, ReadOnlyMemory<byte>.Empty, FrameFlags.None);
+                    if (!a.Matches(view) || !b.Matches(view)) continue;
+                    lowest ??= id;
+                    highest = id;
+                }
+
+                var overlaps = service.FindOverlappingFilterSubscriptions();
+                var because = $"filters[{i}] and filters[{j}]";
+
+                if (lowest is null)
+                {
+                    overlaps.Should().BeEmpty($"no ID matches both of {because}");
+                    continue;
+                }
+
+                overlaps.Should().ContainSingle(because);
+                overlaps[0].LowestSharedId.Should().Be(lowest.Value, $"lowest shared ID of {because}");
+                overlaps[0].HighestSharedId.Should().Be(highest!.Value, $"highest shared ID of {because}");
+            }
+        }
     }
 
     [Fact]

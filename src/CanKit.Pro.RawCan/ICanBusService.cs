@@ -122,13 +122,18 @@ namespace CanKit.Pro.RawCan
 
         /// <summary>
         /// Diagnostic: finds every pair of currently registered, still-undisposed
-        /// <see cref="CanIdFilter"/>-based subscriptions whose ID spaces overlap (FR-RAW-041,
-        /// "Should") -- helps catch misconfiguration when multiple protocol instances were meant
-        /// to have disjoint ID ranges but don't. Subscriptions registered via the generic
+        /// <see cref="CanIdFilter"/>-based subscriptions whose ID spaces overlap, and the range of
+        /// CAN IDs each pair shares (FR-RAW-041, "Should") -- helps catch misconfiguration when
+        /// multiple protocol instances were meant to have disjoint ID ranges but don't.
+        /// Subscriptions registered via the generic
         /// <see cref="Subscribe(Func{CanFrameEvent,bool}, int?, bool)"/> predicate overload are opaque
         /// and are not analyzable, so they are skipped.
         /// </summary>
-        IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions();
+        /// <returns>
+        /// One <see cref="FilterOverlap"/> per overlapping pair, each naming the two subscriptions
+        /// and the ID range on which they collide. Empty when no two filters share ID space.
+        /// </returns>
+        IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions();
 
         /// <summary>
         /// Sends <paramref name="frame"/> and asynchronously confirms it was actually sent, using
