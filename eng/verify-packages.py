@@ -57,7 +57,7 @@ def check(package: Path) -> list:
     return problems
 
 
-def main(directory: str) -> int:
+def main(directory: str, expected_version: str = '') -> int:
     packages = sorted(Path(directory).glob('*.nupkg'))
 
     if not packages:
@@ -67,6 +67,14 @@ def main(directory: str) -> int:
     failed = False
     for package in packages:
         problems = check(package)
+
+        # The release workflow packs in the `verify` job and hands the results to `release` as an
+        # artifact, so by the time semantic-release looks at them nothing has rebuilt them. This
+        # is what makes "the artifact belongs to the version about to be tagged" worth asserting
+        # rather than assuming.
+        if expected_version and not package.name.endswith(f'.{expected_version}.nupkg'):
+            problems.append(f'not packed at {expected_version}')
+
         if problems:
             failed = True
             print(f'FAIL  {package.name}')
@@ -86,6 +94,7 @@ def main(directory: str) -> int:
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        raise SystemExit('usage: verify-packages.py <directory with .nupkg files>')
-    sys.exit(main(sys.argv[1]))
+    if len(sys.argv) not in (2, 3):
+        raise SystemExit(
+            'usage: verify-packages.py <directory with .nupkg files> [expected version]')
+    sys.exit(main(sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else ''))

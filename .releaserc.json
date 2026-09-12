@@ -46,7 +46,7 @@
 
     ["@semantic-release/exec", {
       "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
-      "prepareCmd": "ls artifacts/nuget/*.${nextRelease.version}.nupkg",
+      "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version}",
       "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate"
     }],
 

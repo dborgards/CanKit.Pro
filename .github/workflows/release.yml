@@ -145,7 +145,12 @@ jobs:
     # `npm ci` still runs here, so an npm lifecycle script remains inside the grant. That is
     # unavoidable while semantic-release is the release driver. Restore, build, test and pack
     # do not: they happen in `verify` above, which has no OIDC grant and none of the publishing
-    # secrets. prepareCmd only checks the artifact is present for the version about to be tagged.
+    # secrets.
+    #
+    # prepareCmd re-checks what `verify` handed over -- eng/verify-packages.py against the
+    # downloaded artifact, with the version about to be tagged. Nine packages, each with a README,
+    # a license expression and a .snupkg, each stamped at that exact version. Asserting it here
+    # rather than trusting the artifact is the point: this is the last step before the tag.
     permissions:
       contents: read
       id-token: write        # request the OIDC token for NuGet Trusted Publishing

@@ -128,7 +128,7 @@ Each plugin runs in the order it appears in `.releaserc.json`, within each lifec
 analyze        →  nothing to release? stop here
 verifyRelease  →  refuse a version below 1.3.0 while the ADR window is open  (exec)
 prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
-               →  confirm artifacts/nuget/*.X.Y.Z.nupkg exist  (@semantic-release/exec, prepareCmd)
+               →  verify the nine packages `verify` packed     (@semantic-release/exec, prepareCmd)
                →  changelog committed and PUSHED to main       (@semantic-release/git)
    ↓
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
@@ -141,7 +141,13 @@ Two boundaries matter here.
 
 **Packing happens in `verify`, before any credential exists.** A packing failure therefore
 aborts the run having changed nothing on the remote: no tag, no commit, nothing published.
-`prepare` only checks that the artifact is present for the version about to be tagged.
+
+What `prepare` does instead is re-check the artifact it was handed: `eng/verify-packages.py` runs
+against the downloaded `.nupkg` files with the version about to be tagged, and fails unless all
+nine are there, each carries a README, a license expression and a `.snupkg`, and every one of
+them is stamped at exactly that version. It is the same script the CI pack job runs, so a package
+that would be rejected on a pull request is rejected here too — this time with a version to check
+against.
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
