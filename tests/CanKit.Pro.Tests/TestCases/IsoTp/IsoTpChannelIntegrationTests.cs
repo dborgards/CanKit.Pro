@@ -1327,6 +1327,40 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref fcCount).Should().Be(3);
     }
 
+    // Regression for #23: two reciprocal channels sharing one service must still hear each other
+    // on a bus whose echoes are flagged.
+    //
+    // `IsoTp.Open(ICanBusService, ...)` documents that channels with disjoint endpoints may share
+    // one service (FR-TP-018) — a tester and a simulated ECU in one process is the ordinary shape.
+    // On a flagging adapter every frame either channel sends carries IsEcho, because the flag
+    // marks the host and not the channel, so withholding echoes made the receiver miss the Single
+    // Frame entirely and the sender time out.
+    //
+    // Every other ISO-TP test here opens two separate buses, which is why none of them covered
+    // this: with two buses there is no host echo to mis-filter.
+    [Fact]
+    public async Task Reciprocal_Channels_Sharing_One_Service_Still_Exchange_On_A_Flagging_Echo_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        using var tester = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+        using var ecu = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0));
+
+        var request = new byte[] { 0x22, 0xF1, 0x90 };
+
+        using var receiveCts = new CancellationTokenSource(ShortTimeout);
+        var ecuReceive = ecu.ReceiveAsync(receiveCts.Token);
+        await tester.SendAsync(request);
+
+        (await ecuReceive).ToArray().Should().Equal(
+            request,
+            "the peer channel's request is genuine traffic even though the host echo flag marks "
+            + "it exactly like the tester's own transmissions");
+    }
+
     /// <summary>
     /// Test double: the first <see cref="ICanBusService.SendConfirmed"/> call throws the supplied
     /// exception instead of transmitting; every later call is forwarded to the inner service
@@ -1355,11 +1389,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             remove => _inner.BackgroundExceptionOccurred -= value;
         }
 
-        public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
-            => _inner.Subscribe(predicate, bufferCapacity);
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
 
-        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
-            => _inner.Subscribe(filter, bufferCapacity);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
 
         public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
@@ -1394,11 +1428,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             remove => _inner.BackgroundExceptionOccurred -= value;
         }
 
-        public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
-            => _inner.Subscribe(predicate, bufferCapacity);
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
 
-        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
-            => _inner.Subscribe(filter, bufferCapacity);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
 
         public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
@@ -1460,11 +1494,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             remove => _inner.BackgroundExceptionOccurred -= value;
         }
 
-        public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
-            => _inner.Subscribe(predicate, bufferCapacity);
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
 
-        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
-            => _inner.Subscribe(filter, bufferCapacity);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
 
         public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
@@ -1526,11 +1560,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             remove => _inner.BackgroundExceptionOccurred -= value;
         }
 
-        public ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null)
-            => _inner.Subscribe(predicate, bufferCapacity);
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
 
-        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null)
-            => _inner.Subscribe(filter, bufferCapacity);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
 
         public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();

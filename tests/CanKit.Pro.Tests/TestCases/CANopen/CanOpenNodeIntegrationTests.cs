@@ -905,6 +905,41 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         master.StopSyncProducer();
     }
 
+    // Regression for #23: a node that produces SYNC must still see its own SYNC on a bus whose
+    // echoes are flagged.
+    //
+    // `ICanOpenNode.SyncReceived` promises delivery "either from a remote producer or from this
+    // node's own producer if echo is on", and `HandleSync` is the only path that raises it and
+    // emits the synchronous TPDOs — `ScheduleSyncProducerTick` only transmits. #23's default of
+    // withholding echoes therefore silenced a node that is both SYNC producer and
+    // synchronous-TPDO producer. Nothing caught it: `Sync_Producer_TriggersReceiver` above
+    // asserts on the *remote* consumer, and the Virtual adapter does not flag its echoes, so on
+    // it the gate is a no-op and the old behaviour survives by accident.
+    //
+    // ControllableBus is used precisely because it *does* flag, which is what a real
+    // echo-capable adapter (SocketCAN, Kvaser, Vector) does and what makes the gate bite.
+    [Fact]
+    public async Task Sync_Producer_Still_Sees_Its_Own_Sync_On_A_Flagging_Echo_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var producer = CanOpen.OpenNode(bus, nodeId: 0x01);
+
+        int syncCount = 0;
+        var enough = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        producer.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncCount) >= 3) enough.TrySetResult(syncCount);
+        };
+
+        producer.StartSyncProducer(TimeSpan.FromMilliseconds(20));
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(
+            3,
+            "the SYNC producer's own echo is the only path that raises SyncReceived and emits "
+            + "synchronous TPDOs on the producing node");
+
+        producer.StopSyncProducer();
+    }
+
     // -----------------------------------------------------------------------------------------
     // FR-CO-011 — EMCY encode + receive event.
     // -----------------------------------------------------------------------------------------

@@ -119,7 +119,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 accCode: J1939Pgn.TpDt << 8,      // PF = 0xEB in bits 23..16
                 accMask: 0x00FF0000u,
                 idType: CanFilterIDType.Extend);
-            _subscription = _service.Subscribe(f => tpCmFilter.Matches(f) || tpDtFilter.Matches(f));
+            // Echoes are asked for on purpose. `IsEcho` says "this HOST transmitted it", not
+            // "this CHANNEL transmitted it", and J1939Tp.Open documents that several channels
+            // with different source addresses may share one service. Filtering on the host bit
+            // would therefore drop a sibling channel's BAM and connection-mode traffic, which is
+            // genuine peer traffic from this channel's point of view.
+            //
+            // The instance-level test is the source-address check in RunReaderAsync, which
+            // rejects only this channel's own SA. That check is now load-bearing twice over: for
+            // adapters that echo without flagging, and for telling a sibling apart from ourselves
+            // on adapters that do flag.
+            _subscription = _service.Subscribe(
+                f => tpCmFilter.Matches(f.Frame) || tpDtFilter.Matches(f.Frame),
+                includeEcho: true);
         }
         catch
         {
@@ -298,9 +310,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         try
         {
-            await foreach (var frame in _subscription.Frames.WithCancellation(_readerCts.Token)
+            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue; // J1939-TP is 29-bit only
                 var payload = frame.Data.ToArray();
                 if (payload.Length < 8) continue; // TP.CM / TP.DT are always 8 bytes on the wire
@@ -312,9 +325,28 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // Destination filter: BAM/CM directed at us (SA) or globally broadcast (0xFF).
                 if (destination != _sourceAddress && destination != J1939Pgn.GlobalAddress)
                     continue;
-                // Also skip anything we sent ourselves (a bus in Echo mode replays TX frames --
-                // handling our own SA as if a foreign peer sent it would spuriously open a
-                // session against ourselves).
+                // Second line of defence against our own transmissions, behind the
+                // subscription's echo gate. #23 gave subscriptions a real IsEcho bit and this
+                // check was removed as redundant -- which was wrong, and two review bots caught
+                // it: the gate is only as good as the adapter's flag, and an adapter may echo
+                // without setting it. The pinned CanKit Virtual adapter is exactly such an
+                // adapter. VirtualBusHub.Broadcast (v0.5.6) builds
+                //
+                //     new CanReceiveData(frame) { ReceiveTimestamp = TimeSpan.Zero }
+                //
+                // -- IsEcho defaults to false -- and then delivers that same unflagged record
+                // back to the sender when it is in ChannelWorkMode.Echo. docs/migration-from-legacy.md
+                // records the same fact from the other side: the fork had to patch IsEcho into
+                // the Virtual adapter for TxConfirmTests to match anything at all.
+                //
+                // Without this check, SendBamAsync on such an adapter consumes its own globally
+                // addressed BAM and DT frames, opens an RX session against itself, and republishes
+                // its outbound payload as an inbound datagram.
+                //
+                // The cost is the case named when this was deleted: a peer transmitting from our
+                // own SA is silently dropped here rather than reaching the session layer. That is
+                // an address collision, which J1939 address claim exists to resolve -- a real but
+                // strictly better failure than talking to ourselves.
                 if (fields.SourceAddress == _sourceAddress)
                     continue;
 
