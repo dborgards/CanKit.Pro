@@ -105,51 +105,124 @@ into a separate, internal-only one.
 
 ## What a release run does
 
-`.github/workflows/release.yml` runs on every push to `main`:
+`.github/workflows/release.yml` is **started by hand**, from the Actions tab: *Release → Run
+workflow*. It has no push trigger. The *dry run* input defaults to **checked**, so the safe thing
+is also the default — an accidental run analyses the commits and prints what it would do without
+tagging or publishing anything. Uncheck it to release for real.
 
 1. Checkout with `fetch-depth: 0` — semantic-release needs the full history to find the last
-   tag and the commits since it.
+   tag and the commits since it. No credential is persisted into `.git/config`; see
+   [Credentials](#credentials).
 2. Build, then **test**. This is the gate: nothing is tagged or published if the tests fail on
    this exact commit.
-3. `npx semantic-release`, which:
-   - analyses the commits and stops right there if none of them warrants a release;
-   - regenerates `CHANGELOG.md`;
-   - runs `dotnet pack -p:Version=X.Y.Z` (`@semantic-release/exec`);
-   - runs `dotnet nuget push … --skip-duplicate`;
-   - commits the changelog back to `main` as `chore(release): X.Y.Z [skip ci]`;
-   - creates the `vX.Y.Z` tag and the GitHub Release, with the `.nupkg` files attached.
+3. `NuGet/login` exchanges the run's OIDC token for a NuGet API key valid for one hour.
+4. `npx semantic-release`, which runs the steps below in this order.
 
-Ordering matters here: packing and pushing happen in `prepare`/`publish`, *before* the tag is
-created. A failed `dotnet nuget push` therefore aborts the run without leaving a tag that claims a
-release nobody can install.
+### The order the steps actually run in, and why it matters
+
+```
+analyze  →  nothing to release? stop here
+prepare  →  CHANGELOG.md regenerated
+         →  changelog committed and PUSHED to main   (@semantic-release/git)
+   ↓
+  TAG    →  vX.Y.Z created and pushed                (semantic-release core)
+   ↓
+publish  →  dotnet pack -p:Version=X.Y.Z             (@semantic-release/exec)
+         →  dotnet nuget push … --skip-duplicate     (@semantic-release/exec)
+         →  GitHub Release with the .nupkg attached  (@semantic-release/github)
+```
+
+**The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
+leaves behind:
+
+- the `chore(release): X.Y.Z [skip ci]` commit on `main`,
+- the `vX.Y.Z` tag,
+- **no packages on nuget.org** and no GitHub Release.
+
+And because the next run computes the version from the newest tag, it moves on to the version
+after that one. The failed release is skipped rather than retried. [Recovering a half-finished
+release](#recovering-a-half-finished-release) is the way out.
 
 The `[skip ci]` marker on the changelog commit suppresses every push-triggered workflow, so the
 website (`.github/workflows/docs.yml`) additionally listens for the Release workflow's completion
 and rebuilds right after a successful release. Without that, the changelog page would lag until
 the next unrelated documentation change.
 
-## Setup checklist
+## Recovering a half-finished release
 
-Needed once, in repository settings:
+There is no manual *versioning* — the version always comes from the commit history, and a
+hand-picked number is one nothing in the history explains. But a release that stopped between the
+tag and nuget.org has to be finished or undone by hand, because no rerun will do it.
 
-- **`NUGET_API_KEY`** — a repository secret. On nuget.org, scope the key to the glob
-  `CanKit.Pro.*` and enable *Push new packages and package versions*. The four IDs are unclaimed
-  at the time of writing, so the first successful release also reserves them.
-- **Actions may write to the repository** — Settings → Actions → General → Workflow permissions.
-  `@semantic-release/git` pushes the changelog commit.
-- **Branch protection on `main`, if enabled, must let that push through.** Either allow the
-  `github-actions[bot]` to bypass the rule, or drop `@semantic-release/git` from
-  `.releaserc.json` and accept that the changelog lives only in the GitHub Releases.
-- **The first release is `1.0.0`**, because semantic-release starts there when it finds no tags.
-  If you would rather stay pre-1.0 while the API settles, push a starting tag *before* the first
-  release run:
+First establish what actually landed: does the `vX.Y.Z` tag exist, is the `chore(release)` commit
+on `main`, are the packages on nuget.org, is there a GitHub Release?
 
-  ```bash
-  git tag v0.1.0 && git push origin v0.1.0
-  ```
+**Option A — finish the release from the tag.** Right when the packages are the only thing
+missing and the version is sound. The version is *read from the tag*, never invented:
 
-  Subsequent releases then continue from `0.1.x`. Note that under SemVer a breaking change still
-  moves `0.x` to `1.0.0`.
+```bash
+git fetch --tags
+git checkout vX.Y.Z
+dotnet pack CanKit.Pro.sln --configuration Release -p:Version=X.Y.Z --output artifacts/nuget
+dotnet nuget push "artifacts/nuget/*.nupkg" \
+  --source https://api.nuget.org/v3/index.json --api-key "$KEY" --skip-duplicate
+```
+
+`--skip-duplicate` makes this safe to repeat when some packages made it and others did not. The
+API key comes from a fresh `NuGet/login` run or a temporary key from nuget.org. Afterwards, create
+the GitHub Release for the tag by hand and attach the `.nupkg` files.
+
+**Option B — undo it and release again.** Right when the failure was in the build or the version
+is wrong. Delete the tag and the release commit, then rerun the workflow:
+
+```bash
+git push origin :refs/tags/vX.Y.Z          # remote tag
+git tag -d vX.Y.Z                          # local tag
+git revert <sha of the chore(release) commit>
+```
+
+Revert rather than force-push: `main` is protected, and rewriting it costs more than a revert
+commit that says what happened. semantic-release will then compute the same version again from
+the same commits — the changelog entry it regenerates supersedes the reverted one.
+
+Do **not** delete a version from nuget.org to "try again": nuget.org does not allow it, and
+unlisting leaves the version number consumed either way.
+
+## Credentials
+
+Two, and they do different jobs.
+
+**nuget.org — no stored key.** The release job requests an OIDC token from GitHub and exchanges
+it through `NuGet/login` for an API key that is valid for one hour (Trusted Publishing). Nothing
+long-lived is stored in the repository. This needs `id-token: write` on the workflow, and the
+nuget.org account name in the `NUGET_USER` secret. The trust relationship itself is configured on
+nuget.org, under the account's *Trusted Publishing* settings, and names this repository and
+workflow.
+
+**`main` — `RELEASE_TOKEN`.** A fine-grained PAT (Contents: read and write, scoped to this
+repository) from an account holding the repo-owner role. The default `GITHUB_TOKEN` cannot push
+to `main`: the ruleset requires a pull request and only bypasses for that role, which the Actions
+bot does not hold. `@semantic-release/git` needs the push for the changelog commit, and
+`@semantic-release/github` uses the same token to create the Release.
+
+The PAT is passed **only** in the `env:` of the release step. The checkout runs with
+`persist-credentials: false`, so it never reaches `.git/config` while `npm ci`, `dotnet restore`,
+`dotnet build` and `dotnet test` execute third-party code. The job's own `GITHUB_TOKEN` is
+restricted to `contents: read` plus `id-token: write`.
+
+A PAT expires. When a release run fails at the push or the Release step with a 403, check that
+first.
+
+### Setup, once
+
+- **`NUGET_USER`** and **`RELEASE_TOKEN`** as repository secrets.
+- **Trusted Publishing** configured on nuget.org for this repository and `release.yml`.
+- **The ruleset on `main`** must let the `RELEASE_TOKEN` identity push. That is the repo-owner
+  bypass, not a `github-actions[bot]` bypass — the bot is not what pushes.
+
+Historical note: the first release landed on `1.0.0` because semantic-release starts there when
+it finds no tag, and the `v0.1.0` seed tag this document used to recommend was never pushed. See
+[Versioning](decisions/0001-versioning-and-api-stability.md) for what was decided about that.
 
 ## Dry runs
 
@@ -184,6 +257,11 @@ dependency metadata matches what was actually tested.
 
 ## Manual release
 
-There isn't one, on purpose. If a release is stuck, fix the workflow rather than packing from a
-laptop: a manually pushed package has a version nothing in the history explains, and the next
-automated run will disagree with it.
+There is no manual *versioning*, on purpose. The version comes from the commit history; a
+hand-picked one is a number nothing explains, and the next automated run will disagree with it.
+If a release will not start, fix the workflow rather than packing from a laptop.
+
+That is not the same as having no way out of a release that stopped half-way. A tag that exists
+with no packages behind it cannot be fixed by rerunning anything —
+[Recovering a half-finished release](#recovering-a-half-finished-release) is the documented path,
+and the version there is read from the tag rather than chosen.
