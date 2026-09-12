@@ -24,7 +24,7 @@ without changing the public surface:
 
 | Issue | The fix that is actually right |
 | --- | --- |
-| [#23](https://github.com/dborgards/CanKit.Pro/issues/23) | Subscription items carry `IsEcho` and the bus timestamp, so the three hand-rolled echo workarounds in J1939, CANopen and the TP channel can go |
+| [#23](https://github.com/dborgards/CanKit.Pro/issues/23) | Subscription items carry `IsEcho` and the bus timestamp, and echoes are not delivered unless asked for, so the three hand-rolled echo workarounds in J1939, CANopen and the TP channel can go |
 | [#37](https://github.com/dborgards/CanKit.Pro/issues/37) | SPN extraction returns a value that can say "not available" or "error" instead of reporting `0xFFFF` as 8191.875 rpm |
 | [#44](https://github.com/dborgards/CanKit.Pro/issues/44) | `SdoTransferMode.Expedited` and `.Segmented` are removed, because nothing enforces them |
 | [#82](https://github.com/dborgards/CanKit.Pro/issues/82) | `FindOverlappingFilterSubscriptions()` is replaced by a named `FilterOverlap` type instead of a bare tuple pair |
@@ -111,18 +111,14 @@ allows, and the badges in `docs/packages/index.md` and `docs/index.md` will show
 
 ## Withdrawing 1.0.0 – 1.2.3
 
-Manual work on nuget.org, outside this repository. For each of the nine `CanKit.Pro.*` packages,
-for versions 1.0.0, 1.1.0, 1.2.0, 1.2.1, 1.2.2 and 1.2.3:
+**Done on 2026-09-12.** All six versions of the nine `CanKit.Pro.*` packages are deprecated and
+unlisted on nuget.org.
 
-- **Deprecate** with reason *Other* and the message:
+Both, not just one: unlisting is silent for someone who already depends on the package, while
+deprecation is what surfaces in their IDE and build log. Unlisting is what stops the versions
+appearing in search and resolving through version ranges.
 
-  > The 1.x releases were published as stable by mistake while the API was still under review.
-  > They are withdrawn. Use 1.3.0 or later.
-
-- **Unlist**, so the versions leave search results and stop resolving through version ranges.
-
-Deprecate as well as unlist: unlisting is silent for someone who already depends on the package,
-deprecation is what surfaces in their IDE and build log.
+nuget.org has no hard delete, so an exact pin still restores. That is as far as withdrawal goes.
 
 The git tags `v1.0.0` … `v1.2.3` stay. They are history, and GitVersion reads them to derive CI
 versions.
