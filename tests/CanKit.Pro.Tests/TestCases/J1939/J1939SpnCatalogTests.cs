@@ -24,7 +24,50 @@ public class J1939SpnCatalogTests
 
         var rpm = J1939SpnCatalog.Default.Extract(payload, 190);
 
-        rpm.Should().BeApproximately(2500.0, 0.01);
+        rpm.IsValid.Should().BeTrue();
+        rpm.Value.Should().BeApproximately(2500.0, 0.01);
+    }
+
+    [Fact]
+    public void Default_Catalog_Reports_NotAvailable_EngineSpeed_As_Indicator()
+    {
+        // An EEC1 frame from an ECU that does not have SPN 190: every bit set. The defect this
+        // guards (issue #37) reported 0xFFFF as 8191.875 rpm.
+        var payload = new byte[8];
+        for (int i = 0; i < payload.Length; i++) payload[i] = 0xFF;
+
+        var rpm = J1939SpnCatalog.Default.Extract(payload, 190);
+
+        rpm.Kind.Should().Be(J1939SpnValueKind.NotAvailable);
+        rpm.IsValid.Should().BeFalse();
+        rpm.Raw.Should().Be(0xFFFFUL);
+        var act = () => rpm.Value;
+        act.Should().Throw<InvalidOperationException>();
+        rpm.GetValueOrDefault().Should().Be(double.NaN);
+    }
+
+    [Fact]
+    public void Default_Catalog_Registers_Signed_Definitions()
+    {
+        // A vendor SPN declared as a signed SLOT: raw 0xFFFF is "not available" (leading byte
+        // 0xFF, sign bit set), while 0x8000 is the most negative measurement, not an indicator.
+        var catalog = new J1939SpnCatalog();
+        catalog.Register(new J1939SpnDefinition(
+            Spn: 4201, Name: "Vendor Steering Angle", Pgn: 0xFE01,
+            ByteOffset: 0, StartBit: 0, BitLength: 16, Resolution: 0.1, Offset: 0.0,
+            Unit: "deg", IsSigned: true));
+
+        catalog.TryGet(4201, out var definition).Should().BeTrue();
+        definition!.IsSigned.Should().BeTrue();
+
+        // -100 deg => raw -1000 => 0xFC18 two's complement. Leading byte 0xFC is *not* an
+        // indicator for a signed SPN — those sit at 0x7B..0x7F.
+        var negative = catalog.Extract(new byte[] { 0x18, 0xFC }, 4201);
+        negative.IsValid.Should().BeTrue();
+        negative.Value.Should().BeApproximately(-100.0, 0.001);
+
+        catalog.Extract(new byte[] { 0xFF, 0x7F }, 4201).Kind
+            .Should().Be(J1939SpnValueKind.NotAvailable);
     }
 
     [Fact]
@@ -33,19 +76,19 @@ public class J1939SpnCatalogTests
         // EEC1: SPN 513 Actual Engine Percent Torque = 40 % (raw 165 with -125 offset).
         var eec1 = new byte[8];
         eec1[2] = 165;
-        J1939SpnCatalog.Default.Extract(eec1, 513).Should().BeApproximately(40.0, 0.01);
+        J1939SpnCatalog.Default.Extract(eec1, 513).Value.Should().BeApproximately(40.0, 0.01);
 
         // EEC2: SPN 91 Accelerator Pedal Position 1 = 50 % (raw 125 at 0.4 %/bit).
         var eec2 = new byte[8];
         eec2[1] = 125;
-        J1939SpnCatalog.Default.Extract(eec2, 91).Should().BeApproximately(50.0, 0.01);
+        J1939SpnCatalog.Default.Extract(eec2, 91).Value.Should().BeApproximately(50.0, 0.01);
 
         // CCVS: SPN 84 Wheel-Based Vehicle Speed = 90 km/h (raw 90*256 LE at offset 1).
         var ccvs = new byte[8];
         var raw = (ushort)(90 * 256);
         ccvs[1] = (byte)(raw & 0xFF);
         ccvs[2] = (byte)(raw >> 8);
-        J1939SpnCatalog.Default.Extract(ccvs, 84).Should().BeApproximately(90.0, 0.01);
+        J1939SpnCatalog.Default.Extract(ccvs, 84).Value.Should().BeApproximately(90.0, 0.01);
     }
 
     [Fact]
@@ -58,7 +101,7 @@ public class J1939SpnCatalogTests
 
         // Raw field: 8 bits at startBit 4 of byte 0 => value bits are payload[0] >> 4.
         var payload = new byte[] { 0x50, 0x00 }; // raw = 5 => 2.5 bar
-        catalog.Extract(payload, 4200).Should().BeApproximately(2.5, 0.001);
+        catalog.Extract(payload, 4200).Value.Should().BeApproximately(2.5, 0.001);
     }
 
     [Fact]

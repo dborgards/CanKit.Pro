@@ -357,8 +357,10 @@ and the other CanKit adapters.
     node.MessageReceived += (_, msg) =>
     {
         if (msg.Pgn != 0xF004) return;                            // EEC1
-        double rpm = J1939Spn.Extract(msg.Payload.Span,          // SPN 190, engine speed
+        var speed = J1939Spn.Extract(msg.Payload.Span,           // SPN 190, engine speed
             byteOffset: 3, startBit: 0, bitLength: 16, resolution: 0.125, offset: 0.0);
+        // Not a double: 0xFFFF is J1939-71 "not available", not 8191.875 rpm.
+        if (speed.TryGetValue(out double rpm)) { /* use rpm */ }
     };
 
     await node.SendAsync(new J1939Message(0xF004, eec1, priority: 3));   // ≤ 8 bytes: one frame
