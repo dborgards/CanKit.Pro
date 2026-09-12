@@ -153,6 +153,25 @@ jobs:
         if: always() && runner.os == 'Linux'
         run: python3 eng/coverage-summary.py artifacts/test-results >> "$GITHUB_STEP_SUMMARY"
 
+      # Linux only, for the same reason as the summary above: all three legs measure the same
+      # net10.0 code, so three uploads would be three copies of one number.
+      #
+      # `fail_ci_if_error: false` on purpose. Codecov being unreachable, or a fork pull request
+      # having no access to the token, must not turn a green build red — the coverage number is
+      # here to be watched, and .github/codecov.yml keeps its checks informational to match.
+      - name: Upload coverage to Codecov
+        if: always() && runner.os == 'Linux'
+        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          # coverlet writes to artifacts/test-results/<guid>/coverage.cobertura.xml, so point the
+          # search at the parent and let it find the file rather than naming a path with a guid
+          # in it. `files` is not set: it takes explicit paths, and combining the two is
+          # contradictory.
+          directory: artifacts/test-results
+          flags: net10.0
+          fail_ci_if_error: false
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
