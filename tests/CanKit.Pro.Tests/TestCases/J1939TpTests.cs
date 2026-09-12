@@ -78,7 +78,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var settled = await Task.WhenAny(selfReceive, Task.Delay(TimeSpan.FromMilliseconds(500)));
         settled.Should().NotBeSameAs(
-            (Task)selfReceive,
+            selfReceive,
             "a TP channel must not reassemble its own broadcast; the echo gate cannot drop what "
             + "the Virtual adapter never flagged, so the source-address check has to catch it");
     }
