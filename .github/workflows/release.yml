@@ -39,19 +39,27 @@ jobs:
   # Split from `release` so that the OIDC token is not available while this runs.
   #
   # `id-token: write` lets any step in its job mint a GitHub OIDC token, and nuget.org's Trusted
-  # Publishing will exchange that token for a real publishing key. Restore, build and test execute
-  # MSBuild targets from every package the solution references; running them in the same job as
-  # the OIDC grant would put a publish capability within reach of all of it, whether or not
-  # `NuGet/login` has run yet. Here there is no such grant to reach for.
+  # Publishing will exchange that token for a real publishing key. Restore, build, test and pack
+  # execute MSBuild targets from every package the solution references; running them in the same
+  # job as the OIDC grant would put a publish capability within reach of all of it, whether or
+  # not `NuGet/login` has run yet. Here there is no such grant to reach for.
+  #
+  # Packing lives here too, not in `release`. A bare `dotnet pack` restores and builds, so it
+  # has to happen off the OIDC grant. The version is resolved first (same analyser the release
+  # job will use) so the assemblies are stamped before they are packed.
   verify:
-    name: build and test
+    name: build, test and pack
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The version step reads the full history the same way semantic-release does.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Setup .NET
@@ -68,46 +76,76 @@ jobs:
       - name: Install release tooling
         run: npm ci
 
+      # Same analyser the release job will run, without the GitHub/git plugins (those need a
+      # write token). Empty output means nothing to publish; build and test still run.
+      - name: Resolve next version
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(node eng/next-release-version.mjs)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -n "$version" ]; then
+            echo "Next release version: $version"
+          else
+            echo "No release pending"
+          fi
+
       # Before anything is built: the release configuration itself has to be sound. This is the
       # same check CI runs on pull requests, repeated here because a manual release can be started
       # from a commit no pull request ever built -- the release commit carries [skip ci].
+      # When a version was resolved, the 1.3.0 window guard sees it too.
       - name: Verify release configuration
-        run: node eng/verify-release-config.mjs
+        run: node eng/verify-release-config.mjs ${{ steps.version.outputs.version }}
 
       - name: Restore
         run: dotnet restore CanKit.Pro.sln
 
       - name: Build
-        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
+        run: |
+          extra=()
+          if [ -n "${{ steps.version.outputs.version }}" ]; then
+            extra+=(-p:Version=${{ steps.version.outputs.version }})
+          fi
+          dotnet build CanKit.Pro.sln --configuration Release --no-restore "${extra[@]}"
 
       # The gate: nothing is tagged or pushed to nuget.org unless the tests pass on this commit.
       # `release` needs this job, so a failure here stops the release before it starts.
       - name: Test
         run: dotnet test CanKit.Pro.sln --configuration Release --no-build
 
+      # --no-restore --no-build: restore and the versioned build already ran above. The nupkgs
+      # are handed to `release` as an artifact so that job never invokes MSBuild.
+      - name: Pack
+        if: steps.version.outputs.version != ''
+        run: >
+          dotnet pack CanKit.Pro.sln
+          --configuration Release
+          -p:Version=${{ steps.version.outputs.version }}
+          --output artifacts/nuget
+          --no-restore
+          --no-build
+
+      - name: Upload packages
+        if: steps.version.outputs.version != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/nuget/*.nupkg
+            artifacts/nuget/*.snupkg
+          if-no-files-found: error
+
   release:
     name: semantic-release
     needs: verify
     runs-on: ubuntu-latest
-    # The only job holding the OIDC grant. Be precise about what that grant still covers, because
-    # a comment that overstates it is worse than no comment:
+    # The only job holding the OIDC grant. It installs the release tooling, exchanges the token
+    # for a one-hour NuGet key, and runs semantic-release against packages `verify` already packed.
     #
-    #   * `npm ci` runs here, so an npm lifecycle script is inside the grant. Unavoidable while
-    #     semantic-release is the release driver.
-    #   * semantic-release's prepare step runs `dotnet pack` (.releaserc.json, prepareCmd), and a
-    #     bare `dotnet pack` restores and builds. So the MSBuild targets of every referenced
-    #     package execute inside the grant too.
-    #
-    # That second one cannot be moved to `verify`: packing has to stamp the version semantic
-    # -release computes, which is not known until after `verify` has finished. Passing a
-    # pre-built, unstamped output across would produce assemblies with the wrong version.
-    #
-    # What the split does remove is `dotnet test` -- the test code itself plus the test-only
-    # dependency graph (xunit, FluentAssertions, coverlet) -- and it moves the failure to before
-    # any credential exists. Removing the rest would mean taking the nuget push out of
-    # semantic-release and into a third job, which changes release semantics for a smaller gain
-    # than it sounds: the same packages, built by the same targets, would still have to be built
-    # somewhere.
+    # `npm ci` still runs here, so an npm lifecycle script remains inside the grant. That is
+    # unavoidable while semantic-release is the release driver. Restore, build, test and pack
+    # do not: they happen in `verify` above, which has no OIDC grant and none of the publishing
+    # secrets. prepareCmd only checks the artifact is present for the version about to be tagged.
     permissions:
       contents: read
       id-token: write        # request the OIDC token for NuGet Trusted Publishing
@@ -119,10 +157,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # No credential is written into .git/config. `npm ci`, `dotnet restore`, `dotnet build`
-          # and `dotnet test` all run third-party code in this job, and a PAT sitting in the
-          # working tree while they do is a credential one postinstall script away from leaving
-          # the runner. The repository is public, so the clone itself needs no token.
+          # No credential is written into .git/config. `npm ci` still runs third-party code in
+          # this job, and a PAT sitting in the working tree while it does is a credential one
+          # postinstall script away from leaving the runner. The repository is public, so the
+          # clone itself needs no token.
           #
           # semantic-release does not need one here either: it builds its own authenticated push
           # URL from the token it is given in the release step's `env`. That is where
@@ -145,6 +183,13 @@ jobs:
       - name: Install release tooling
         run: npm ci
 
+      - name: Download packed packages
+        if: needs.verify.outputs.version != ''
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: nuget-packages
+          path: artifacts/nuget
+
       # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
       # Requested right before the release step so it doesn't expire before the push happens.
       - name: NuGet login (OIDC -> temp API key)
@@ -154,8 +199,9 @@ jobs:
           user: ${{ secrets.NUGET_USER }}
 
       # semantic-release decides the version from the conventional commits since the last tag,
-      # then (via @semantic-release/exec) packs with exactly that version and pushes to nuget.org,
-      # writes CHANGELOG.md back to main, tags vX.Y.Z and opens the GitHub Release.
+      # then (via @semantic-release/exec) checks the packages `verify` packed at that version,
+      # pushes them to nuget.org, writes CHANGELOG.md back to main, tags vX.Y.Z and opens the
+      # GitHub Release.
       - name: Release
         run: npx semantic-release ${{ fromJSON(inputs.dry_run) && '--dry-run' || '' }}
         env:

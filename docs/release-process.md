@@ -93,9 +93,9 @@ from its first release.
 | `CanKit.Pro.Uds` | L4 — ISO 14229-1 | yes |
 
 `dotnet pack CanKit.Pro.sln` packs whichever projects don't set `IsPackable=false`, without
-needing a list of project names anywhere, which means the CI pack job and the
-`@semantic-release/exec` `prepareCmd` cannot drift apart — they run the same command over the
-same solution. The CI `pack` job prints `ls -l artifacts/nuget`, so a project that silently
+needing a list of project names anywhere, which means the CI pack job and the release
+workflow's `verify` job cannot drift apart — they run the same command over the same
+solution. The CI `pack` job prints `ls -l artifacts/nuget`, so a project that silently
 becomes packable shows up as a new file in that listing on the pull request that did it.
 
 `CanKit.Pro.Vendor`, the generic extension framework for a customer's confidential private
@@ -113,8 +113,10 @@ tagging or publishing anything. Uncheck it to release for real.
 1. Checkout with `fetch-depth: 0` — semantic-release needs the full history to find the last
    tag and the commits since it. No credential is persisted into `.git/config`; see
    [Credentials](#credentials).
-2. Build, then **test**. This is the gate: nothing is tagged or published if the tests fail on
-   this exact commit.
+2. Resolve the next version, then **build, test and pack** in `verify`. That job has no OIDC
+   grant and none of the publishing secrets: a bare `dotnet pack` restores and builds, so it
+   cannot run in the job that holds `id-token: write`. This is the gate — nothing is tagged
+   or published if the tests fail on this exact commit.
 3. `NuGet/login` exchanges the run's OIDC token for a NuGet API key valid for one hour.
 4. `npx semantic-release`, which runs the steps below in this order.
 
@@ -126,7 +128,7 @@ Each plugin runs in the order it appears in `.releaserc.json`, within each lifec
 analyze        →  nothing to release? stop here
 verifyRelease  →  refuse a version below 1.3.0 while the ADR window is open  (exec)
 prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
-               →  dotnet pack -p:Version=X.Y.Z                 (@semantic-release/exec, prepareCmd)
+               →  confirm artifacts/nuget/*.X.Y.Z.nupkg exist  (@semantic-release/exec, prepareCmd)
                →  changelog committed and PUSHED to main       (@semantic-release/git)
    ↓
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
@@ -137,8 +139,9 @@ publish        →  dotnet nuget push … --skip-duplicate         (@semantic-re
 
 Two boundaries matter here.
 
-**Packing happens in `prepare`, before the tag.** A packing failure therefore aborts the run
-having changed nothing on the remote: no tag, no commit, nothing published.
+**Packing happens in `verify`, before any credential exists.** A packing failure therefore
+aborts the run having changed nothing on the remote: no tag, no commit, nothing published.
+`prepare` only checks that the artifact is present for the version about to be tagged.
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
@@ -234,9 +237,10 @@ bot does not hold. `@semantic-release/git` needs the push for the changelog comm
 `@semantic-release/github` uses the same token to create the Release.
 
 The PAT is passed **only** in the `env:` of the release step. The checkout runs with
-`persist-credentials: false`, so it never reaches `.git/config` while `npm ci`, `dotnet restore`,
-`dotnet build` and `dotnet test` execute third-party code. The job's own `GITHUB_TOKEN` is
-restricted to `contents: read` plus `id-token: write`.
+`persist-credentials: false`, so it never reaches `.git/config` while `npm ci` executes
+third-party code. Restore, build, test and pack run in `verify`, which has neither the PAT
+nor `id-token: write`. The release job's own `GITHUB_TOKEN` is restricted to `contents: read`
+plus `id-token: write`.
 
 A PAT expires. When a release run fails at the push or the Release step with a 403, check that
 first.
