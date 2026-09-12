@@ -89,12 +89,25 @@ jobs:
     name: semantic-release
     needs: verify
     runs-on: ubuntu-latest
-    # The only job holding the OIDC grant, and it does the least: install the release tooling,
-    # exchange the token for a one-hour NuGet key, run semantic-release.
+    # The only job holding the OIDC grant. Be precise about what that grant still covers, because
+    # a comment that overstates it is worse than no comment:
     #
-    # `npm ci` still runs here, so an npm lifecycle script remains inside the grant. That is
-    # unavoidable while semantic-release is the release driver; what the split removes is the
-    # much larger surface of restore, build and test, which happens in `verify` above.
+    #   * `npm ci` runs here, so an npm lifecycle script is inside the grant. Unavoidable while
+    #     semantic-release is the release driver.
+    #   * semantic-release's prepare step runs `dotnet pack` (.releaserc.json, prepareCmd), and a
+    #     bare `dotnet pack` restores and builds. So the MSBuild targets of every referenced
+    #     package execute inside the grant too.
+    #
+    # That second one cannot be moved to `verify`: packing has to stamp the version semantic
+    # -release computes, which is not known until after `verify` has finished. Passing a
+    # pre-built, unstamped output across would produce assemblies with the wrong version.
+    #
+    # What the split does remove is `dotnet test` -- the test code itself plus the test-only
+    # dependency graph (xunit, FluentAssertions, coverlet) -- and it moves the failure to before
+    # any credential exists. Removing the rest would mean taking the nuget push out of
+    # semantic-release and into a third job, which changes release semantics for a smaller gain
+    # than it sounds: the same packages, built by the same targets, would still have to be built
+    # somewhere.
     permissions:
       contents: read
       id-token: write        # request the OIDC token for NuGet Trusted Publishing
