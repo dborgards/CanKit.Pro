@@ -195,7 +195,8 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
-      # Proves the release job's `dotnet pack` will work — before a tag exists to fix it in.
+      # Proves the packing the release workflow's `verify` job will do still works, on every pull
+      # request rather than only when someone cuts a release.
       - name: Pack
         run: dotnet pack CanKit.Pro.sln --configuration Release -p:Version=${{ needs.version.outputs.semver }} --output artifacts/nuget
 
@@ -204,7 +205,10 @@ jobs:
 
       # The claim this job used to make in a comment, now actually checked: every package carries
       # a README, a license expression and a .snupkg, and there are as many of them as expected.
-      # A release breaks on exactly these, and by then the tag is already pushed.
+      #
+      # The release workflow runs this same script again as `prepareCmd`, there with the version
+      # about to be tagged. Both run before the tag exists, so neither is the last line of defence
+      # — this one is simply the early one, on the pull request that would introduce the problem.
       - name: Verify package contents
         run: python3 eng/verify-packages.py artifacts/nuget
 

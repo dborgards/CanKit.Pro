@@ -122,10 +122,44 @@ allows, and the badges in `docs/packages/index.md` and `docs/index.md` will show
    [#82](https://github.com/dborgards/CanKit.Pro/issues/82) landed.** After the tag, none of them
    is possible without a major version.
 4. The API approval baselines reviewed as a whole and frozen.
-5. **`.releaserc.json` back to `{ "breaking": true, "release": "major" }`.** Without this, a real
-   breaking change later becomes a silent minor. `eng/verify-release-config.mjs` enforces it once
-   1.3.0 is in the changelog.
-6. Each package README states what is validated and what is not (software doubles vs. hardware).
+5. Each package README states what is validated and what is not (software doubles vs. hardware).
+
+### Immediately after the 1.3.0 release, not before
+
+**`.releaserc.json` back to `{ "breaking": true, "release": "major" }`.** Without it, a real
+breaking change later becomes a silent minor.
+
+This cannot be done in advance, and the ordering is worth spelling out because it looks like an
+oversight otherwise. `eng/verify-release-config.mjs` decides which rule is correct by reading
+`CHANGELOG.md`: while no 1.3-or-later release is recorded there, it *requires* `minor` and fails
+on `major`. The changelog only gains that entry during the release itself, written by
+semantic-release — which changes the changelog and nothing else, so it cannot flip the rule on
+its way past.
+
+So the sequence is: release 1.3.0 with the override in place, then flip it. The guard makes the
+gap self-closing rather than a thing to remember — from the moment 1.3.0 is in the changelog, the
+`validate release config` job fails on every pull request until the rule is restored, and no
+further release can be cut.
+
+### The first real test of the release pipeline is this release
+
+Nothing before it can be. `release.yml` runs only on `workflow_dispatch`, so no pull-request check
+touches it, and a dry run cannot stand in either: the version gate above refuses anything that is
+not 1.3.0 while the window is open, and until a `feat` commit lands the commit analyser computes a
+patch version. Verified on 2026-09-12 against `main` at `bd729e3`, where it computes `1.2.4`.
+
+What that leaves is a real ordering, not a gap to paper over:
+
+1. Phase 1 lands [#23](https://github.com/dborgards/CanKit.Pro/issues/23), which is a `feat` and
+   therefore moves the computed version to 1.3.0.
+2. From then on `Release → Run workflow` with the dry-run input checked exercises the whole path
+   — version resolution, build, test, pack, the artifact handover between jobs — without tagging,
+   publishing, or minting a NuGet credential.
+3. Cut 1.3.0 only after that dry run has been green at least once.
+
+Until step 1, the pipeline is unproven by construction. That is a deliberate consequence of the
+gate, not a defect in it: the gate is doing exactly what it was built to do, which is refuse to
+release before this checklist is done.
 
 ## Withdrawing 1.0.0 – 1.2.3
 

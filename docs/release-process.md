@@ -184,13 +184,15 @@ tag and nuget.org has to be finished or undone by hand, because no rerun will do
 First establish what actually landed: does the `vX.Y.Z` tag exist, is the `chore(release)` commit
 on `main`, are the packages on nuget.org, is there a GitHub Release?
 
-**Option A — finish the release from the tag.** Right when the packages are the only thing
-missing and the version is sound. The version is *read from the tag*, never invented:
+**Option A — finish the release from the artifact the failed run already built.** Right when the
+packages are the only thing missing and the version is sound.
+
+Take the `nuget-packages` artifact from the failed run (Actions → the run → Artifacts). Those are
+the exact files the `verify` job packed and `prepareCmd` checked; pushing them is finishing the
+release that stopped, not assembling a new one.
 
 ```bash
-git fetch --tags
-git checkout vX.Y.Z
-dotnet pack CanKit.Pro.sln --configuration Release -p:Version=X.Y.Z --output artifacts/nuget
+# download and unzip nuget-packages from the failed run into artifacts/nuget, then:
 dotnet nuget push "artifacts/nuget/*.nupkg" \
   --source https://api.nuget.org/v3/index.json --api-key "$KEY" --skip-duplicate
 ```
@@ -198,6 +200,20 @@ dotnet nuget push "artifacts/nuget/*.nupkg" \
 `--skip-duplicate` makes this safe to repeat when some packages made it and others did not. The
 API key comes from a fresh `NuGet/login` run or a temporary key from nuget.org. Afterwards, create
 the GitHub Release for the tag by hand and attach the `.nupkg` files.
+
+**Repacking from the tag is the fallback, and it is not equivalent.** Use it only if the artifact
+has expired or is otherwise gone:
+
+```bash
+git fetch --tags && git checkout vX.Y.Z
+dotnet pack CanKit.Pro.sln --configuration Release -p:Version=X.Y.Z --output artifacts/nuget
+```
+
+The tag points at semantic-release's changelog commit, which is *not* the commit `verify` built
+from — and `PublishRepositoryUrl` embeds the repository revision in the package. So a repack
+produces packages that differ from the ones that were checked, and if part of the batch already
+reached nuget.org, the published version ends up assembled from two different builds. Prefer the
+artifact; if you repack anyway, say so in the GitHub Release.
 
 **Option B — undo it and release again.** Right when the version is wrong, or the packages that
 landed have to be abandoned. Delete the tag, then revert the release commit through a pull
@@ -269,14 +285,35 @@ it finds no tag, and the `v0.1.0` seed tag this document used to recommend was n
 
 ## Dry runs
 
-Before merging, from the Actions tab: **Release → Run workflow**, leaving *dry run* checked. It
-prints the version it would pick and the release notes it would write, and touches nothing.
+From the Actions tab: **Release → Run workflow**, leaving *dry run* checked. It resolves the
+version, builds, tests and packs, and prints the release notes it would write — without tagging,
+publishing, or requesting a NuGet credential.
 
-Locally, the same thing without needing a token for anything but the GitHub plugin:
+!!! warning "A dry run cannot succeed before 1.3.0"
+
+    The `verify` job refuses any version that is not 1.3.0 while the pre-1.3.0 window is open, and
+    the commit analyser computes a patch version until a `feat` commit lands. So a dry run today
+    stops at the version gate, having proved only that version resolution works.
+
+    This is the gate doing its job, not a fault to route around: it refuses to release before the
+    checklist in [Versioning](decisions/0001-versioning-and-api-stability.md) is done, and a dry
+    run goes through the same gate as a real one on purpose. The first dry run that exercises the
+    whole path is the one taken once the version reaches 1.3.0, and 1.3.0 should not be cut until
+    that has been green.
+
+Locally, the same analysis without a token, and without the workflow's gates:
 
 ```bash
 npm ci
 npx semantic-release --dry-run --no-ci
+```
+
+`eng/next-release-version.mjs` is the narrower version of that, and the one the workflow uses: it
+loads only the commit analyser, so it needs no token and touches no remote. Run it to see the
+version a release would pick, on any branch:
+
+```bash
+node eng/next-release-version.mjs   # prints nothing when there is no release to make
 ```
 
 CI also runs `node eng/verify-release-config.mjs` on every pull request. That is not a dry run —
