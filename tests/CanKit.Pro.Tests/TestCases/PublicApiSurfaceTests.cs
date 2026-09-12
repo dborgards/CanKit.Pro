@@ -112,8 +112,9 @@ public class PublicApiSurfaceTests
         // API. TargetFrameworkAttribute sits in the same set and would move with the TFMs.
         IncludeAssemblyAttributes = false,
 
-        // The generator defaults to printing a record as a plain class. Two of the shipped types
-        // are records — J1939SpnDefinition and TxConfirmation — and record-ness is part of what
+        // The generator defaults to printing a record as a plain class. Three of the shipped
+        // types are records — J1939SpnDefinition, J1939SpnValue and TxConfirmation — and
+        // record-ness is part of what
         // they promise: value equality, `with` expressions, and for the positional one a
         // deconstruction that the class rendering would drop along with the primary constructor's
         // parameter list. Turning a record back into a class is a breaking change, so print it.

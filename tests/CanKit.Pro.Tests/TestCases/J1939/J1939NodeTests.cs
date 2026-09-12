@@ -151,9 +151,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var payload = new byte[8];
         // Byte 3 = 0x00, byte 4 = 0xFA (little-endian raw 64000).
         payload[3] = 0x00; payload[4] = 0xFA;
-        double engineSpeed = J1939Spn.Extract(payload, byteOffset: 3, startBit: 0,
+        var engineSpeed = J1939Spn.Extract(payload, byteOffset: 3, startBit: 0,
             bitLength: 16, resolution: 0.125, offset: 0.0);
-        engineSpeed.Should().BeApproximately(8000.0, 0.001);
+        engineSpeed.IsValid.Should().BeTrue();
+        engineSpeed.Value.Should().BeApproximately(8000.0, 0.001);
     }
 
     // Cross-byte-boundary 4-bit SPN with an offset (e.g. a temperature-style transform).
@@ -163,9 +164,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var payload = new byte[] { 0b1111_0000, 0b0000_1010 };
         // Field spans byte 0 bits 4..7 and byte 1 bits 0..3 = 8 bits, little-endian.
         // = ( (0b0000_1010 & 0x0F) << 4 ) | ( (0b1111_0000 >> 4) & 0x0F ) = 0xAF = 175.
-        double physical = J1939Spn.Extract(payload, byteOffset: 0, startBit: 4,
+        var physical = J1939Spn.Extract(payload, byteOffset: 0, startBit: 4,
             bitLength: 8, resolution: 1.0, offset: -40.0);
-        physical.Should().Be(175 - 40.0);
+        physical.Value.Should().Be(175 - 40.0);
     }
 
     // Round-trip via WriteRaw so encoders and decoders are consistent.

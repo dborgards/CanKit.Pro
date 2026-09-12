@@ -36,10 +36,15 @@ nodeB.MessageReceived += (_, msg) =>
     if (msg.Pgn == Eec1Pgn)
     {
         // SPN 190 (Engine Speed): 16 bits starting at byte offset 3, 0.125 rpm/bit, offset 0.
-        var engineRpm = J1939Spn.Extract(msg.Payload.Span, byteOffset: 3, startBit: 0,
+        // Extract returns a J1939SpnValue, not a double: 0xFFFF means the ECU does not have
+        // the parameter, and 0xFE00..0xFEFF means it knows its own reading is wrong.
+        var engineSpeed = J1939Spn.Extract(msg.Payload.Span, byteOffset: 3, startBit: 0,
             bitLength: 16, resolution: 0.125, offset: 0.0);
+        var reading = engineSpeed.TryGetValue(out var rpm)
+            ? $"{rpm:F1} rpm"
+            : engineSpeed.ToString();   // e.g. "NotAvailable (raw 0xFFFF)"
         Console.WriteLine($"PGN 0x{msg.Pgn:X4} from SA 0x{msg.SourceAddress:X2} " +
-                          $"({msg.Payload.Length} B): engine speed = {engineRpm:F1} rpm");
+                          $"({msg.Payload.Length} B): engine speed = {reading}");
     }
     else
     {

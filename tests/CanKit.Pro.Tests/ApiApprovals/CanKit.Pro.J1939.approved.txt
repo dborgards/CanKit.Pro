@@ -75,25 +75,29 @@ namespace CanKit.Pro.J1939
     }
     public static class J1939Spn
     {
-        public static double Extract(System.ReadOnlySpan<byte> payload, int byteOffset, int bitLength, double resolution, double offset) { }
-        public static double Extract(System.ReadOnlySpan<byte> payload, int byteOffset, int startBit, int bitLength, double resolution, double offset) { }
+        public static CanKit.Pro.J1939.J1939SpnValueKind Classify(ulong raw, int bitLength, bool isSigned = false) { }
+        public static CanKit.Pro.J1939.J1939SpnValue Extract(System.ReadOnlySpan<byte> payload, int byteOffset, int bitLength, double resolution, double offset, bool isSigned = false) { }
+        public static CanKit.Pro.J1939.J1939SpnValue Extract(System.ReadOnlySpan<byte> payload, int byteOffset, int startBit, int bitLength, double resolution, double offset, bool isSigned = false) { }
         public static ulong ExtractRaw(System.ReadOnlySpan<byte> payload, int byteOffset, int startBit, int bitLength) { }
+        public static long ExtractRawSigned(System.ReadOnlySpan<byte> payload, int byteOffset, int startBit, int bitLength) { }
+        public static CanKit.Pro.J1939.J1939SpnValue FromRaw(ulong raw, int bitLength, double resolution, double offset, bool isSigned = false) { }
         public static void WriteRaw(System.Span<byte> payload, int byteOffset, int startBit, int bitLength, ulong rawValue) { }
     }
     public sealed class J1939SpnCatalog : System.Collections.Generic.IEnumerable<CanKit.Pro.J1939.J1939SpnDefinition>, System.Collections.IEnumerable
     {
         public J1939SpnCatalog() { }
         public static CanKit.Pro.J1939.J1939SpnCatalog Default { get; }
-        public double Extract(System.ReadOnlySpan<byte> payload, int spn) { }
+        public CanKit.Pro.J1939.J1939SpnValue Extract(System.ReadOnlySpan<byte> payload, int spn) { }
         public System.Collections.Generic.IEnumerator<CanKit.Pro.J1939.J1939SpnDefinition> GetEnumerator() { }
         public CanKit.Pro.J1939.J1939SpnCatalog Register(CanKit.Pro.J1939.J1939SpnDefinition definition) { }
         public bool TryGet(int spn, out CanKit.Pro.J1939.J1939SpnDefinition? definition) { }
     }
     public sealed record J1939SpnDefinition : System.IEquatable<CanKit.Pro.J1939.J1939SpnDefinition>
     {
-        public J1939SpnDefinition(int Spn, string Name, uint Pgn, int ByteOffset, int StartBit, int BitLength, double Resolution, double Offset, string Unit) { }
+        public J1939SpnDefinition(int Spn, string Name, uint Pgn, int ByteOffset, int StartBit, int BitLength, double Resolution, double Offset, string Unit, bool IsSigned = false) { }
         public int BitLength { get; init; }
         public int ByteOffset { get; init; }
+        public bool IsSigned { get; init; }
         public string Name { get; init; }
         public double Offset { get; init; }
         public uint Pgn { get; init; }
@@ -101,6 +105,28 @@ namespace CanKit.Pro.J1939
         public int Spn { get; init; }
         public int StartBit { get; init; }
         public string Unit { get; init; }
-        public double Extract(System.ReadOnlySpan<byte> payload) { }
+        public CanKit.Pro.J1939.J1939SpnValue Extract(System.ReadOnlySpan<byte> payload) { }
+    }
+    public readonly struct J1939SpnValue : System.IEquatable<CanKit.Pro.J1939.J1939SpnValue>
+    {
+        public bool IsError { get; }
+        public bool IsNotAvailable { get; }
+        public bool IsValid { get; }
+        public CanKit.Pro.J1939.J1939SpnValueKind Kind { get; }
+        public ulong Raw { get; }
+        public double Value { get; }
+        public double GetValueOrDefault(double defaultValue = NaN) { }
+        public override string ToString() { }
+        public bool TryGetValue(out double value) { }
+        public static CanKit.Pro.J1939.J1939SpnValue FromIndicator(CanKit.Pro.J1939.J1939SpnValueKind kind, ulong raw) { }
+        public static CanKit.Pro.J1939.J1939SpnValue FromPhysical(ulong raw, double value) { }
+    }
+    public enum J1939SpnValueKind
+    {
+        NotAvailable = 0,
+        Valid = 1,
+        ParameterSpecific = 2,
+        Reserved = 3,
+        Error = 4,
     }
 }
