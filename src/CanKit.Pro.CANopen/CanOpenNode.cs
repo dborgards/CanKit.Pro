@@ -436,6 +436,42 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         CancellationToken cancellationToken)
         => SdoUploadAsync(serverNodeId, index, subindex, SdoTransferMode.Auto, cancellationToken);
 
+    /// <summary>
+    /// Rejects an <see cref="SdoTransferMode"/> value that is not a defined member.
+    /// </summary>
+    /// <remarks>
+    /// Both transfer entry points route "not <see cref="SdoTransferMode.Block"/>" to the classic
+    /// client, so an undefined value used to select a transport silently. That is the wrong
+    /// failure for a value that can only arrive from a bug: an assembly still compiled against
+    /// 1.2.x supplies the literal <c>1</c> or <c>2</c> for the removed <c>Expedited</c> and
+    /// <c>Segmented</c> members, and a caller following an out-of-date migration note could pass
+    /// the same. Throwing names the problem where it happens instead of leaving a wrong transport
+    /// to be diagnosed on the wire.
+    /// <para>
+    /// The message is careful not to say the removed members did nothing. They chose no codec,
+    /// but at or above <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> they suppressed
+    /// the <see cref="SdoTransferMode.Auto"/>-to-<see cref="SdoTransferMode.Block"/> switch. A
+    /// caller who was relying on that and merely drops the argument moves onto block transfer,
+    /// which is the one migration step that can hang against a peer without block support — so
+    /// the message names the threshold rather than only saying "drop it".
+    /// </para>
+    /// </remarks>
+    private static void ValidateTransferMode(SdoTransferMode mode, string paramName)
+    {
+        if (mode is not (SdoTransferMode.Auto or SdoTransferMode.Block))
+        {
+            throw new ArgumentOutOfRangeException(paramName, mode,
+                $"Unknown {nameof(SdoTransferMode)} value. Only {nameof(SdoTransferMode.Auto)} " +
+                $"and {nameof(SdoTransferMode.Block)} are defined. The removed Expedited (1) and " +
+                "Segmented (2) members never chose a codec -- that follows from the payload " +
+                "length -- so below CanOpenNodeOptions.SdoBlockThresholdBytes the argument can " +
+                "simply be dropped and the same frames go out. At or above the threshold they " +
+                "did have one effect: they suppressed the Auto-to-Block switch, so a download " +
+                "that relied on that must raise SdoBlockThresholdBytes to keep the classic " +
+                "transport rather than drop the argument alone.");
+        }
+    }
+
     /// <inheritdoc />
     public Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
@@ -443,6 +479,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(serverNodeId);
+        ValidateTransferMode(mode, nameof(mode));
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
@@ -454,11 +491,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
         else
         {
-            // For Auto uploads we do not know the size up front, so the segmented path is the
-            // conservative default; the SDO server chooses expedited-vs-segmented for us. The
-            // Auto → Block auto-switch is applied on the *download* path where we know the
-            // payload length. Explicit Expedited / Segmented also route through the classical
-            // client (segmented server responses handle both encodings transparently).
+            // For Auto uploads we do not know the size up front, so the classic client is the
+            // conservative default; the SDO server chooses expedited-vs-segmented for us and
+            // the client handles both response encodings transparently. The Auto → Block
+            // auto-switch is applied on the *download* path where we know the payload length.
             _actor.Post(() => BeginSdoUpload(serverNodeId, index, subindex, tcs));
         }
         return tcs.Task;
@@ -478,6 +514,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(serverNodeId);
+        ValidateTransferMode(mode, nameof(mode));
         if (data.Length == 0)
         {
             // The expedited encoding steals bit-pair "n" from the CS byte to advertise how many
@@ -501,9 +538,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // Auto-select rules (FR-CO-004):
         //   * Block was explicitly requested → always block.
         //   * Auto and payload ≥ SdoBlockThresholdBytes → block.
-        //   * Auto and payload < threshold → expedited / segmented via the classic client.
-        //   * Explicit Expedited / Segmented → classic client (segmented tolerates ≤4-byte
-        //     payloads through the same BuildDownloadInit fallback).
+        //   * Auto and payload < threshold → classic client, which picks expedited for 1..4
+        //     bytes and segmented above that in BuildDownloadInit. That split is dictated by
+        //     CiA 301 §7.2.4.3.3/§7.2.4.3.5 and is deliberately not caller-selectable.
         bool useBlock = mode == SdoTransferMode.Block
                         || (mode == SdoTransferMode.Auto && payload.Length >= _options.SdoBlockThresholdBytes);
         if (useBlock)
