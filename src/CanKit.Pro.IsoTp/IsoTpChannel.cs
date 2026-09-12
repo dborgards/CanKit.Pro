@@ -134,7 +134,17 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             var idFilter = CanIdFilter.Range(
                 _endpoint.RxCanId, _endpoint.RxCanId,
                 _endpoint.IsExtendedCanId ? CanFilterIDType.Extend : CanFilterIDType.Standard);
-            _subscription = _service.Subscribe(idFilter);
+            // Echoes are asked for on purpose. `IsEcho` marks what this HOST transmitted, not
+            // what this CHANNEL transmitted, and IsoTp.Open documents that channels with
+            // disjoint endpoints may share one service (FR-TP-018). Two reciprocal channels in
+            // one process -- a tester and a simulated ECU, the shape most of these tests use --
+            // are peers to each other, so filtering on the host bit would make the receiver miss
+            // the SF/FF entirely and the sender time out.
+            //
+            // The endpoint is the instance-level identity, and this filter already applies it: a
+            // channel transmits on TxCanId and accepts only RxCanId, so its own frames cannot
+            // match its own filter. No further self-check is needed here.
+            _subscription = _service.Subscribe(idFilter, includeEcho: true);
         }
         catch
         {

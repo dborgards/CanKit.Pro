@@ -138,7 +138,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
         // between "send has started" and "frame delivered on RX" — the two events are
         // resolved by memory ordering on the same subscription buffer instead of by a
         // TaskCompletionSource gate.
-        using var sub = _service.Subscribe(_responseFilter);
+        // includeEcho: the flag is host-scoped, so on a shared service a responding channel in
+        // this same process would otherwise be filtered out as if it were our own transmission.
+        // _responseFilter is the endpoint-level identity that keeps genuine self-traffic out.
+        using var sub = _service.Subscribe(_responseFilter, includeEcho: true);
         DrainBuffered(sub);
 
         await SendSingleFrameAsync(pdu, cancellationToken).ConfigureAwait(false);
@@ -186,7 +189,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        using var sub = _service.Subscribe(_responseFilter);
+        using var sub = _service.Subscribe(_responseFilter, includeEcho: true);
         return await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
     }
 
