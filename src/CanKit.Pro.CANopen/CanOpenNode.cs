@@ -437,11 +437,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
         else
         {
-            // For Auto uploads we do not know the size up front, so the segmented path is the
-            // conservative default; the SDO server chooses expedited-vs-segmented for us. The
-            // Auto → Block auto-switch is applied on the *download* path where we know the
-            // payload length. Explicit Expedited / Segmented also route through the classical
-            // client (segmented server responses handle both encodings transparently).
+            // For Auto uploads we do not know the size up front, so the classic client is the
+            // conservative default; the SDO server chooses expedited-vs-segmented for us and
+            // the client handles both response encodings transparently. The Auto → Block
+            // auto-switch is applied on the *download* path where we know the payload length.
             _actor.Post(() => BeginSdoUpload(serverNodeId, index, subindex, tcs));
         }
         return tcs.Task;
@@ -484,9 +483,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // Auto-select rules (FR-CO-004):
         //   * Block was explicitly requested → always block.
         //   * Auto and payload ≥ SdoBlockThresholdBytes → block.
-        //   * Auto and payload < threshold → expedited / segmented via the classic client.
-        //   * Explicit Expedited / Segmented → classic client (segmented tolerates ≤4-byte
-        //     payloads through the same BuildDownloadInit fallback).
+        //   * Auto and payload < threshold → classic client, which picks expedited for 1..4
+        //     bytes and segmented above that in BuildDownloadInit. That split is dictated by
+        //     CiA 301 §7.2.4.3.3/§7.2.4.3.5 and is deliberately not caller-selectable.
         bool useBlock = mode == SdoTransferMode.Block
                         || (mode == SdoTransferMode.Auto && payload.Length >= _options.SdoBlockThresholdBytes);
         if (useBlock)

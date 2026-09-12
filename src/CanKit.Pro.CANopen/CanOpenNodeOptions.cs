@@ -78,10 +78,12 @@ public sealed class CanOpenNodeOptions
 
     /// <summary>
     /// Auto-select threshold (bytes) at or above which the SDO client uses block transfer
-    /// (FR-CO-004 / CiA 301 §7.2.4.3.15) for an <see cref="Sdo.SdoTransferMode.Auto"/> upload or
-    /// download instead of the segmented protocol. Below the threshold the existing expedited /
-    /// segmented codecs are used. Callers can bypass the threshold by explicitly passing
-    /// <see cref="Sdo.SdoTransferMode.Block"/>. Defaults to 128 bytes.
+    /// (FR-CO-004 / CiA 301 §7.2.4.3.15) for an <see cref="Sdo.SdoTransferMode.Auto"/> download
+    /// instead of the segmented protocol. Below the threshold the payload length picks the
+    /// codec: expedited for 1..4 bytes, segmented above that. Uploads never auto-switch to block
+    /// because the length is unknown until the server replies; callers can bypass the threshold
+    /// in either direction by explicitly passing <see cref="Sdo.SdoTransferMode.Block"/>.
+    /// Defaults to 128 bytes.
     /// </summary>
     public int SdoBlockThresholdBytes { get; init; } = 128;
 
