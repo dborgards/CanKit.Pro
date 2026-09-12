@@ -1,7 +1,7 @@
 # CanKit.Pro.RawCan
 
 Raw-CAN service layer for [CanKit](https://github.com/pkuyo/CanKit): multi-protocol
-demultiplexing / subscriptions (arc42 §5.3, ADR-5; SRS FR-RAW-010..014) and a TX-confirm
+demultiplexing / subscriptions (arc42 §5.3, ADR-5; SRS FR-RAW-010..015) and a TX-confirm
 abstraction (arc42 §6.3, ADR-7; SRS FR-RAW-030..034).
 
 Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
@@ -26,11 +26,14 @@ using var service = new CanBusService(bus);
 using var isoTp = service.Subscribe(CanIdFilter.Range(0x700, 0x7FF));
 
 // Generic predicate when a range/mask is not enough.
-using var custom = service.Subscribe(view => view.IsExtendedFrame && view.Len == 8);
+using var custom = service.Subscribe(e => e.Frame.IsExtendedFrame && e.Frame.Len == 8);
 
-await foreach (var frame in isoTp.Frames.WithCancellation(token))
+await foreach (var e in isoTp.Frames.WithCancellation(token))
 {
-    // frame is a read-only CanFrameView (no ownership/disposal concerns)
+    // e.Frame            read-only CanFrameView, no ownership/disposal concerns, and it owns
+    //                    its payload -- valid after the adapter has released the RX lease
+    // e.IsEcho           the bus's own echo flag (see below)
+    // e.ReceiveTimestamp what the adapter recorded; zero on adapters that do not timestamp
 }
 ```
 
@@ -41,6 +44,42 @@ service unwinds all subscriptions and detaches from the bus (FR-RAW-012). Call
 runtime without recreating the subscription (FR-RAW-014); only frames observed after the call follow
 the new criterion. This layer is built purely on the public `ICanBus.FrameObserved` surface, so it
 works identically for every adapter.
+
+### Echoes
+
+A bus opened with `WorkMode == ChannelWorkMode.Echo` reports the host's own transmissions back
+through the same RX stream, flagged as echoes. **Subscriptions do not deliver them unless asked**:
+
+```csharp
+using var quiet = service.Subscribe();                     // peer traffic only (the default)
+using var trace = service.Subscribe(includeEcho: true);    // everything, e.Frame + e.IsEcho
+```
+
+Off by default because frames you sent are not frames you received: a J1939 node that treats its
+own Address Claim as a competitor's, or a CANopen node that acts on its own PDO, is broken only on
+the hardware that happens to echo. Where a subscription did not opt in, an echo is dropped before
+the filter runs, so it never reaches a caller-supplied predicate either.
+
+Two limits make this a convenience rather than a guarantee, and both matter:
+
+**The gate only drops what the adapter flags.** An adapter that echoes without setting `IsEcho`
+delivers its echo to every subscription no matter what `includeEcho` says — `CanKit.Adapter.Virtual`
+in `ChannelWorkMode.Echo` is such an adapter today.
+
+**`IsEcho` is host-scoped, not instance-scoped.** It means *something on this host sent this*, not
+*I sent this*. Several protocol instances may share one `ICanBusService` (every factory here
+documents that), and a sibling's transmission carries the same flag as your own. So a protocol
+layer that shares a service asks for echoes instead, and tells its own traffic apart by something
+it owns. `includeEcho: false` is for a single consumer that owns its bus, such as a monitor or a
+one-node application.
+
+How far each layer takes that differs, and this package does not promise it uniformly: J1939-TP
+rejects its own source address, J1939 rejects its own NAME on an Address Claim, and CANopen
+deliberately does not filter its own non-SYNC traffic by node-id — so a CANopen node on a flagging
+adapter still sees its own PDOs and heartbeats, exactly as it did before the echo gate existed.
+
+`SendConfirmed` is independent of this: it matches echoes on the bus event itself, so withholding
+them from subscribers does not affect TX confirmation.
 
 ## TX-Confirm
 
@@ -65,6 +104,29 @@ else
 Concurrent, byte-identical sends are matched to their own confirmation in FIFO order, never
 cross-matched (FR-RAW-031). The per-call timeout is configurable (FR-RAW-034); disposing the
 service cancels any outstanding `SendConfirmed` calls rather than leaving them to time out.
+
+## Migrating from 1.2.x
+
+Subscriptions used to yield a bare `CanFrameView`. They now yield a `CanFrameEvent` carrying the
+frame plus the two facts the bus already knew and the demux was discarding:
+
+```csharp
+// before
+using var sub = service.Subscribe(view => view.ID == 0x123);
+await foreach (var frame in sub.Frames) Use(frame.Data);
+
+// after
+using var sub = service.Subscribe(e => e.Frame.ID == 0x123);
+await foreach (var e in sub.Frames) Use(e.Frame.Data);
+```
+
+`TryRead` gains an `out CanFrameEvent`, and predicates and callbacks take `CanFrameEvent`. Reach
+the frame through `.Frame`.
+
+**On a bus not configured for echo, nothing else changes.** On an echo bus, a subscription now
+withholds host echoes unless it passes `includeEcho: true` — read the *Echoes* section above
+before choosing, in particular the part about the flag being host-scoped rather than
+instance-scoped.
 
 ## Install
 

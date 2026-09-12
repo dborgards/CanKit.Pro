@@ -59,8 +59,10 @@ using var tele = service.Subscribe(CanIdFilter.Range(0x100, 0x1FF));
 var tx = await service.SendConfirmed(
     CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 
-await foreach (var f in diag.Frames.WithCancellation(token))
-    Console.WriteLine($"0x{f.ID:X3} len={f.Len}");
+// Echoes are withheld unless a subscription asks for them, and every
+// item carries the bus's echo flag and receive timestamp.
+await foreach (var e in diag.Frames.WithCancellation(token))
+    Console.WriteLine($"0x{e.Frame.ID:X3} len={e.Frame.Len}");
 ```
 
 </div>
@@ -392,7 +394,7 @@ and the other CanKit adapters.
     using var isoTp = service.Subscribe(CanIdFilter.Range(0x700, 0x7FF));
 
     // Predicate when a range or acceptance mask is not enough.
-    using var extended = service.Subscribe(view => view.IsExtendedFrame);
+    using var extended = service.Subscribe(e => e.Frame.IsExtendedFrame);
 
     // Timeouts and bus health, on the protocol instance's own single-threaded loop.
     using var actor = new ProtocolActor();

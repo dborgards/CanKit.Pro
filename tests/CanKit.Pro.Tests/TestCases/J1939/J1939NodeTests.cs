@@ -11,6 +11,7 @@ using CanKit.Core;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939;
 using CanKit.Pro.J1939Tp;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -216,6 +217,47 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         ex.PreferredAddress.Should().Be((byte)0x50);
         loser.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
         loser.Address.Should().BeNull();
+    }
+
+    // Regression for #23: two nodes sharing one service must still arbitrate on a bus whose
+    // echoes are flagged.
+    //
+    // `J1939Node.Open(ICanBusService, ...)` documents that nodes with different NAME identities
+    // may share one service. On a flagging adapter every frame either node sends is marked
+    // IsEcho, because the flag identifies the host and not the node. Withholding echoes therefore
+    // hid each node's Address Claim from the other, and both would finish claiming the same
+    // address without `HasHigherClaimPriorityThan` ever being consulted — the wrong result on
+    // both nodes, with no error raised anywhere.
+    //
+    // The two-bus arbitration test above cannot catch that: with two buses there is no host echo.
+    [Fact]
+    public async Task Two_Nodes_Sharing_One_Service_Still_Arbitrate_On_A_Flagging_Echo_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        // Lower identity number ⇒ lower 64-bit NAME ⇒ higher claim priority (§4.4.3.2).
+        var winnerOpts = new J1939NodeOptions(Name(identity: 0x0000AA))
+        { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) };
+        var loserOpts = new J1939NodeOptions(Name(identity: 0x0000BB))
+        { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) };
+
+        using var winner = J1939Node.Open(service, winnerOpts);
+        using var loser = J1939Node.Open(service, loserOpts);
+
+        var winnerTask = winner.ClaimAddressAsync(0x50);
+        var loserTask = loser.ClaimAddressAsync(0x50);
+
+        await winnerTask.WithTimeout(ShortTimeout);
+        winner.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        winner.Address.Should().Be((byte)0x50);
+
+        Func<Task> act = () => loserTask.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939CannotClaimException>(
+            "the sibling's Address Claim is arbitration input even though the host echo flag "
+            + "marks it exactly like this node's own claim")).Which;
+        ex.PreferredAddress.Should().Be((byte)0x50);
+        loser.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
     }
 
     // ---------------------------------------------------------------------------------------

@@ -63,7 +63,7 @@ einen SRS-Nummernbereich auf:
 | arc42-Mnemonik | SRS-Nummernbereich | Thema (SRS §) | Baustein |
 |----------------|--------------------|---------------|----------|
 | `FR-RAW-OWN-*`, `FR-RAW-FRAME-*` | `FR-RAW-001..005` | Frame-Ownership-/Lifetime-Vertrag (§4.1.1) | `CanFrame`/`CanFrameView` (L1, vorhanden) + Ownership-Regeln (L2, NEU) |
-| `FR-RAW-DEMUX-*`, `FR-RAW-OBS-*`, `FR-RAW-SVC-*` | `FR-RAW-010..014` | Multi-Protokoll-Demultiplexing / Subscription (§4.1.2) | `ICanBusService` / `ISubscription` (L2, NEU) |
+| `FR-RAW-DEMUX-*`, `FR-RAW-OBS-*`, `FR-RAW-SVC-*` | `FR-RAW-010..015` | Multi-Protokoll-Demultiplexing / Subscription (§4.1.2) | `ICanBusService` / `ISubscription` (L2, NEU) |
 | `FR-RAW-ACTOR-*`, `FR-RAW-ASYNC-*` | `FR-RAW-020..024` | Threading-/Aktor-Modell pro Protokollinstanz (§4.1.3) | Protokollinstanz-Aktor/Scheduler (L2, NEU) |
 | `FR-RAW-TXC-*` | `FR-RAW-030..034` | TX-Bestätigungs-Abstraktion (§4.1.4) | TX-Confirm-Dienst (L2, NEU) |
 | `FR-RAW-ADDR-*` | `FR-RAW-040..041` | Adressierungs-/ID-Helfer (§4.1.5) | ID-Helfer (L2, NEU) |
@@ -427,7 +427,7 @@ flowchart TB
 | L2-Baustein | Lücke | Zweck | vorgesehene Schnittstelle | Erfüllt |
 |-------------|-------|-------|----------------------------|---------|
 | `ICanBusService` | – | Ein Dienst-Objekt pro `ICanBus`; hält Subscriptions, TX-Confirm, Aktoren. | `Subscribe(filter) → ISubscription`, `SendConfirmed(frame) → Task<TxConfirmation>` | `FR-RAW-SVC-*` |
-| Multi-Protokoll-Demux | (2) | Ein RX-Strom → N unabhängige gefilterte Consumer, **ohne** konkurrierendes `ReceiveAsync`. **Umgesetzt** im neuen Paket `CanKit.Pro.RawCan` (`ICanBusService`/`CanBusService` + `ISubscription`): je Subscription ein eigener bounded Drop-Oldest-Channel (FR-RAW-011), Fast-Path `CanIdFilter` (ID-Range/Maske) neben generischem `Func<CanFrameView,bool>` (FR-RAW-010/013), deterministisches Dispose (FR-RAW-012). Baut ausschließlich auf `ICanBus.FrameObserved`, kein Adapter-Eingriff. | `ICanBusService.Subscribe(filter) → ISubscription { IAsyncEnumerable<CanFrameView> Frames; }` | `FR-RAW-010..013` |
+| Multi-Protokoll-Demux | (2) | Ein RX-Strom → N unabhängige gefilterte Consumer, **ohne** konkurrierendes `ReceiveAsync`. **Umgesetzt** im neuen Paket `CanKit.Pro.RawCan` (`ICanBusService`/`CanBusService` + `ISubscription`): je Subscription ein eigener bounded Drop-Oldest-Channel (FR-RAW-011), Fast-Path `CanIdFilter` (ID-Range/Maske) neben generischem `Func<CanFrameEvent,bool>` (FR-RAW-010/013), deterministisches Dispose (FR-RAW-012). Das gelieferte Element ist `CanFrameEvent` = Frame + `IsEcho` + Empfangszeitstempel; Echos werden nur an Subscriptions ausgeliefert, die sie mit `includeEcho: true` angefordert haben (FR-RAW-015, [#23](https://github.com/dborgards/CanKit.Pro/issues/23)). Baut ausschließlich auf `ICanBus.FrameObserved`, kein Adapter-Eingriff. | `ICanBusService.Subscribe(filter, includeEcho) → ISubscription { IAsyncEnumerable<CanFrameEvent> Frames; }` | `FR-RAW-010..013`, `FR-RAW-015` |
 | Frame-Ownership-Vertrag | (1) | Verbindliche Lease-Regeln (siehe 8.1); verhindert Use-after-free/Double-Dispose. **Kernmechanik umgesetzt** (`OwnMemory`-Fix, `CanFrame.Duplicate`, Virtual-Hub-Broadcast per Kopie); ausstehend: TX-Lease für übrige L0-Adapter/ISO-TP-Scheduler. | Vertragsdoku + `OwnMemory`-Fix (Review §1.5) | `FR-RAW-OWN-*` |
 | TX-Confirm | (4) | Einheitliche „gesendet"-Bestätigung, egal ob Hardware-Echo vorhanden. **Umgesetzt** in `CanKit.Pro.RawCan` (`ICanBusService.SendConfirmed`): FIFO-Echo-Matching je (ID, Payload) für gleichzeitige inhaltsgleiche Sendevorgänge (FR-RAW-031), dokumentierte Treiber-Akzeptanz-Approximation ohne Echo (FR-RAW-032), beobachtbare Fehlschläge statt Hängen bei Timeout/BusOff/Ablehnung (FR-RAW-033), konfigurierbarer Timeout je Aufruf (FR-RAW-034). | `TxConfirmation { Confirmed; Timestamp; IsApproximated; FailureReason; }` | `FR-RAW-030..034` |
 | Adressierungs-Helfer | – | 11/29-bit, Extended/Mixed/NormalFixed (bislang nur als Einzelfall in `IsoTpEndpoint` vorhanden). **Umgesetzt** als eigenständiges, abhängigkeitsfreies Paket `CanKit.Pro.Addressing`: validierte 11-/29-Bit-ID-Prüfung (`CanIdRange`), allgemeine J1939-PGN/Priorität/PDU-Format/Quelladresse-Komposition/-Dekomposition (`J1939Id`/`J1939Fields`, FR-RAW-040) — verallgemeinert die zuvor auf eine feste Diagnose-PGN beschränkte 29-Bit-Konstruktion aus `IsoTpEndpoint.CreateNormalFixed`. Zusätzlich `CanIdFilter.Overlaps` sowie `ICanBusService.FindOverlappingFilterSubscriptions()` in `CanKit.Pro.RawCan` zur Erkennung überlappender Subscription-Filter (FR-RAW-041, Should). | ID-Bau/-Zerlegung, PGN/Prio-Helfer | `FR-RAW-ADDR-*` |
@@ -609,9 +609,9 @@ sequenceDiagram
         Loop->>Pipe: Publish(RX-Lease)
         Pipe->>Demux: Frame (Pipe besitzt Frame)
         Demux->>Demux: Match je Subscription (ID/Mask/Predicate)
-        Demux-->>IsoTp: CanFrameView (read-only)
-        Demux-->>J1939: CanFrameView (read-only)
-        Demux-->>CANopen: CanFrameView (read-only)
+        Demux-->>IsoTp: CanFrameEvent (Frame read-only + IsEcho + Zeitstempel)
+        Demux-->>J1939: CanFrameEvent (Frame read-only + IsEcho + Zeitstempel)
+        Demux-->>CANopen: CanFrameEvent (Frame read-only + IsEcho + Zeitstempel)
         Note over Demux: Frame wird erst nach<br/>letztem Consumer freigegeben
     end
 ```
