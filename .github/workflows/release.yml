@@ -21,26 +21,86 @@ concurrency:
 
 # Every write this workflow performs goes through RELEASE_TOKEN, not the default GITHUB_TOKEN:
 # the tag, the CHANGELOG commit and the GitHub Release are all created by semantic-release, which
-# is handed the PAT in the release step's `env`. So the job's own token needs nothing but read
-# access, plus the OIDC token for NuGet Trusted Publishing.
+# is handed the PAT in the release step's `env`. So the default token needs read access only.
 #
 # `issues`/`pull-requests: write` were doubly unnecessary -- .releaserc.json sets
 # `successComment: false` and `failComment: false`, so semantic-release does not comment at all.
+#
+# id-token is NOT granted here. It is granted on the `release` job alone, because a permission
+# applies to every step of a job and there is no way to scope it to one -- see that job.
 permissions:
   contents: read
-  id-token: write        # request the OIDC token for NuGet Trusted Publishing
 
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: true
 
 jobs:
+  # Split from `release` so that the OIDC token is not available while this runs.
+  #
+  # `id-token: write` lets any step in its job mint a GitHub OIDC token, and nuget.org's Trusted
+  # Publishing will exchange that token for a real publishing key. Restore, build and test execute
+  # MSBuild targets from every package the solution references; running them in the same job as
+  # the OIDC grant would put a publish capability within reach of all of it, whether or not
+  # `NuGet/login` has run yet. Here there is no such grant to reach for.
+  verify:
+    name: build and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install release tooling
+        run: npm ci
+
+      # Before anything is built: the release configuration itself has to be sound. This is the
+      # same check CI runs on pull requests, repeated here because a manual release can be started
+      # from a commit no pull request ever built -- the release commit carries [skip ci].
+      - name: Verify release configuration
+        run: node eng/verify-release-config.mjs
+
+      - name: Restore
+        run: dotnet restore CanKit.Pro.sln
+
+      - name: Build
+        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
+
+      # The gate: nothing is tagged or pushed to nuget.org unless the tests pass on this commit.
+      # `release` needs this job, so a failure here stops the release before it starts.
+      - name: Test
+        run: dotnet test CanKit.Pro.sln --configuration Release --no-build
+
   release:
     name: semantic-release
+    needs: verify
     runs-on: ubuntu-latest
+    # The only job holding the OIDC grant, and it does the least: install the release tooling,
+    # exchange the token for a one-hour NuGet key, run semantic-release.
+    #
+    # `npm ci` still runs here, so an npm lifecycle script remains inside the grant. That is
+    # unavoidable while semantic-release is the release driver; what the split removes is the
+    # much larger surface of restore, build and test, which happens in `verify` above.
+    permissions:
+      contents: read
+      id-token: write        # request the OIDC token for NuGet Trusted Publishing
     # A release must never publish something CI has not built and tested on this exact commit.
     # The three-OS CI is required by the `main` branch ruleset, so anything on `main` has passed
-    # it; the Test step below re-runs the suite on the commit that is actually packed.
+    # it; the `verify` job re-runs the suite on the commit that is actually packed.
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,16 +131,6 @@ jobs:
 
       - name: Install release tooling
         run: npm ci
-
-      - name: Restore
-        run: dotnet restore CanKit.Pro.sln
-
-      - name: Build
-        run: dotnet build CanKit.Pro.sln --configuration Release --no-restore
-
-      # The gate: nothing is tagged or pushed to nuget.org unless the tests pass on this commit.
-      - name: Test
-        run: dotnet test CanKit.Pro.sln --configuration Release --no-build
 
       # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
       # Requested right before the release step so it doesn't expire before the push happens.

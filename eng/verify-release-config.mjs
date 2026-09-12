@@ -40,7 +40,7 @@ if (!Array.isArray(config.branches) || config.branches.length === 0) {
   problems.push('branches must list at least one release branch');
 }
 
-// The temporary breaking -> minor override, and the guard that makes it temporary.
+// The temporary breaking -> minor override, and the guards that make it temporary.
 //
 // docs/decisions/0001-versioning-and-api-stability.md puts the public API in a window where
 // breaking changes are allowed, so that the four surface-level defects the review found can be
@@ -48,34 +48,71 @@ if (!Array.isArray(config.branches) || config.branches.length === 0) {
 // window is open. It has to go once 1.3.0 is out, or a real breaking change later becomes a
 // silent minor -- the same class of accident that produced the 1.x line in the first place.
 //
-// The changelog rather than `git tag` is the source of truth here: the release-config job checks
-// out shallow and without tags, and semantic-release writes the version into CHANGELOG.md as part
-// of the release it is asking about anyway.
+// The changelog rather than `git tag` is the source of truth: the release-config job checks out
+// shallow and without tags, and semantic-release writes the version into CHANGELOG.md as part of
+// the release it is asking about anyway.
+const ADR = 'docs/decisions/0001-versioning-and-api-stability.md';
+
+// Sortable ordinal for a major.minor pair; the patch level does not matter to these checks.
+const minorOrdinal = (major, minor) => Number(major) * 1000 + Number(minor);
+const FIRST_STABLE = minorOrdinal(1, 3);
+
+const changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
+const windowClosed = [...changelog.matchAll(/^#{1,3} \[?(\d+)\.(\d+)\.(\d+)/gm)]
+  .map(([, major, minor]) => minorOrdinal(major, minor))
+  .some((version) => version >= FIRST_STABLE);
+
 const analyzer = (config.plugins ?? [])
   .filter(Array.isArray)
   .find(([name]) => name === '@semantic-release/commit-analyzer')?.[1];
 
-const breakingRule = (analyzer?.releaseRules ?? []).find((rule) => rule.breaking === true);
+// `undefined` when no rule matches `breaking`, in which case the conventionalcommits preset's own
+// default (major) applies. That is right after 1.3.0 and wrong before it, so the two branches
+// below treat the missing rule differently rather than skipping the check.
+const breakingRelease = (analyzer?.releaseRules ?? [])
+  .find((rule) => rule.breaking === true)?.release;
 
-// Sortable ordinal for a major.minor pair; the patch level does not matter to this check.
-const minorOrdinal = (major, minor) => Number(major) * 1000 + Number(minor);
-
-if (breakingRule && breakingRule.release !== 'major') {
-  const changelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8');
-  const released = [...changelog.matchAll(/^#{1,3} \[?(\d+)\.(\d+)\.(\d+)/gm)]
-    .map(([, major, minor]) => minorOrdinal(major, minor));
-
-  if (released.some((version) => version >= minorOrdinal(1, 3))) {
+if (windowClosed) {
+  if (breakingRelease !== undefined && breakingRelease !== 'major') {
     problems.push(
-      `releaseRules still maps breaking changes to "${breakingRule.release}", but 1.3.0 has been ` +
-        'released. Restore { "breaking": true, "release": "major" } -- see ' +
-        'docs/decisions/0001-versioning-and-api-stability.md',
+      `releaseRules maps breaking changes to "${breakingRelease}", but 1.3.0 has been released. ` +
+        `Restore { "breaking": true, "release": "major" } -- see ${ADR}`,
     );
   } else {
-    console.log(
-      `ok       breaking -> ${breakingRule.release} (pre-1.3.0 window, see ` +
-        'docs/decisions/0001-versioning-and-api-stability.md)',
+    console.log('ok       breaking -> major (1.3.0 is out, the ADR window is closed)');
+  }
+} else if (breakingRelease !== 'minor') {
+  // Not just "anything but major": "patch" or false would let a breaking change ship under a
+  // bump that hides it, which the override exists to prevent as much as 2.0.0 does.
+  problems.push(
+    `releaseRules must map breaking changes to exactly "minor" until 1.3.0 is released, found ` +
+      `${breakingRelease === undefined ? 'no rule for `breaking`' : `"${breakingRelease}"`} ` +
+      `-- see ${ADR}`,
+  );
+} else {
+  console.log(`ok       breaking -> minor (pre-1.3.0 window, see ${ADR})`);
+}
+
+// Optional argument: the version semantic-release is about to publish. Wired up as the exec
+// plugin's verifyReleaseCmd, so this runs inside the release itself, where the number is known.
+//
+// The ADR rules out intermediate releases before the window closes -- otherwise a batch of plain
+// `fix:` commits publishes 1.2.4 and quietly contradicts "1.3.0 is the first stable release",
+// which the breaking -> minor override alone does nothing about.
+const requestedVersion = process.argv[2];
+
+if (requestedVersion) {
+  const parsed = /^(\d+)\.(\d+)\.(\d+)/.exec(requestedVersion);
+
+  if (!parsed) {
+    problems.push(`cannot parse the requested release version "${requestedVersion}"`);
+  } else if (!windowClosed && minorOrdinal(parsed[1], parsed[2]) < FIRST_STABLE) {
+    problems.push(
+      `refusing to release ${requestedVersion}: 1.3.0 is the first release this project makes, ` +
+        `and no release happens before the checklist in ${ADR} is done`,
     );
+  } else {
+    console.log(`ok       releasing ${requestedVersion}`);
   }
 }
 

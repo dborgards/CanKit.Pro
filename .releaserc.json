@@ -45,6 +45,7 @@
     }],
 
     ["@semantic-release/exec", {
+      "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
       "prepareCmd": "dotnet pack CanKit.Pro.sln --configuration Release -p:Version=${nextRelease.version} --output artifacts/nuget",
       "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate"
     }],

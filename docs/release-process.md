@@ -120,24 +120,37 @@ tagging or publishing anything. Uncheck it to release for real.
 
 ### The order the steps actually run in, and why it matters
 
+Each plugin runs in the order it appears in `.releaserc.json`, within each lifecycle step:
+
 ```
-analyze  →  nothing to release? stop here
-prepare  →  CHANGELOG.md regenerated
-         →  changelog committed and PUSHED to main   (@semantic-release/git)
+analyze        →  nothing to release? stop here
+verifyRelease  →  refuse a version below 1.3.0 while the ADR window is open  (exec)
+prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
+               →  dotnet pack -p:Version=X.Y.Z                 (@semantic-release/exec, prepareCmd)
+               →  changelog committed and PUSHED to main       (@semantic-release/git)
    ↓
-  TAG    →  vX.Y.Z created and pushed                (semantic-release core)
+  TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
    ↓
-publish  →  dotnet pack -p:Version=X.Y.Z             (@semantic-release/exec)
-         →  dotnet nuget push … --skip-duplicate     (@semantic-release/exec)
-         →  GitHub Release with the .nupkg attached  (@semantic-release/github)
+publish        →  dotnet nuget push … --skip-duplicate         (@semantic-release/exec, publishCmd)
+               →  GitHub Release with the .nupkg attached      (@semantic-release/github)
 ```
+
+Two boundaries matter here.
+
+**Packing happens in `prepare`, before the tag.** A packing failure therefore aborts the run
+having changed nothing on the remote: no tag, no commit, nothing published.
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
 
 - the `chore(release): X.Y.Z [skip ci]` commit on `main`,
 - the `vX.Y.Z` tag,
-- **no packages on nuget.org** and no GitHub Release.
+- **possibly some packages on nuget.org**, and no GitHub Release.
+
+That third point is the awkward one: `dotnet nuget push` walks the `.nupkg` files one at a time
+and is not atomic, so a failure part-way through can leave a subset of the nine packages
+published at that version. Check which package IDs actually landed before choosing a recovery
+route.
 
 And because the next run computes the version from the newest tag, it moves on to the version
 after that one. The failed release is skipped rather than retried. [Recovering a half-finished
@@ -172,18 +185,33 @@ dotnet nuget push "artifacts/nuget/*.nupkg" \
 API key comes from a fresh `NuGet/login` run or a temporary key from nuget.org. Afterwards, create
 the GitHub Release for the tag by hand and attach the `.nupkg` files.
 
-**Option B — undo it and release again.** Right when the failure was in the build or the version
-is wrong. Delete the tag and the release commit, then rerun the workflow:
+**Option B — undo it and release again.** Right when the version is wrong, or the packages that
+landed have to be abandoned. Delete the tag, then revert the release commit through a pull
+request:
 
 ```bash
 git push origin :refs/tags/vX.Y.Z          # remote tag
 git tag -d vX.Y.Z                          # local tag
+
+git switch -c revert/release-X.Y.Z origin/main
 git revert <sha of the chore(release) commit>
+git push -u origin revert/release-X.Y.Z    # then open and merge the pull request
 ```
 
-Revert rather than force-push: `main` is protected, and rewriting it costs more than a revert
-commit that says what happened. semantic-release will then compute the same version again from
-the same commits — the changelog entry it regenerates supersedes the reverted one.
+The revert has to reach `origin/main` before the next run: the workflow builds from the remote
+branch, so a revert sitting in a local clone changes nothing. And it goes through a pull request
+because `main` is protected — the same ruleset that made `RELEASE_TOKEN` necessary in the first
+place. Revert rather than force-push: rewriting `main` costs more than a commit that says what
+happened.
+
+semantic-release will then compute the same version again from the same commits — the changelog
+entry it regenerates supersedes the reverted one. Packages already pushed at that version stay
+published; `--skip-duplicate` lets the rerun past them, but they will not be rebuilt, so use
+Option A instead if their content matters.
+
+Note what Option B is *not* for: a failure in the build or the test step. Those run before
+semantic-release is invoked, so nothing has been tagged, committed or published. Fix the failure
+and start the workflow again — there is nothing to undo.
 
 Do **not** delete a version from nuget.org to "try again": nuget.org does not allow it, and
 unlisting leaves the version number consumed either way.

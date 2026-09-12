@@ -18,6 +18,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The next step pip-installs third-party code, and this job's GITHUB_TOKEN carries
+          # `issues: write`. Persisting it into .git/config would leave it readable to whatever
+          # that install runs. `gh` gets the token from GH_TOKEN in the step that needs it.
+          persist-credentials: false
 
       # eng/sync-labels.py rather than micnncim/action-label-syncer: that action is unmaintained,
       # and it held `issues: write` on this repository to do what amounts to three `gh label`

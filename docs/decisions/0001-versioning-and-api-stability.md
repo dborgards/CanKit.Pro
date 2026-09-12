@@ -55,13 +55,18 @@ is no major version scheduled that would ever remove them again.
 
 6. **No intermediate releases during the review series.** One release at the end. Cutting 1.3.0,
    1.4.0 and 1.5.0 each with breaks in them would dissolve the very statement this document
-   makes.
+   makes. Enforced rather than remembered: `eng/verify-release-config.mjs` runs as the exec
+   plugin's `verifyReleaseCmd` and aborts the release if the version semantic-release computed is
+   below 1.3.0 — a batch of plain `fix:` commits would otherwise publish 1.2.4 and quietly
+   contradict everything above.
 
 7. **The commit analyzer maps breaking changes to a minor bump for the duration.**
    `.releaserc.json` carries `{ "breaking": true, "release": "minor" }` so that a commit with a
    `!` or a `BREAKING CHANGE:` footer cannot silently publish 2.0.0. This is a temporary override
-   and is listed on the release checklist below. `eng/verify-release-config.mjs` fails the build
-   if the override is still in place once 1.3.0 has been released.
+   and is listed on the release checklist below. The same script enforces both ends of it: while
+   the window is open the mapping must be *exactly* `minor` (`patch` would hide a break as
+   effectively as `major` would over-announce it), and once 1.3.0 appears in the changelog it
+   must be back to `major`.
 
 ## Alternatives considered
 

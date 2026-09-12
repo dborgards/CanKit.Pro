@@ -34,12 +34,17 @@ next-version: 0.1.0
 
 branches:
   main:
-    # `label: ci` rather than '': a CI build of main is not a release, and a bare `1.3.0+12` in an
-    # artifact list reads exactly like one. With the label it is `1.3.0-ci.12` and says so.
+    # `label: ci` rather than '': a CI build of main is not a release, and a bare `1.2.4+12` in an
+    # artifact list reads exactly like one. With the label it is `1.2.4-ci.12` and says so, which
+    # is the whole of what this needs to fix.
+    #
+    # Increment stays Patch. Raising it to Minor while the work heads for 1.3.0 would name CI
+    # artifacts after the version they are heading for -- but `increment` is unconditional, so it
+    # would go on producing 1.4.0-ci.N after 1.3.0 ships instead of 1.3.1-ci.N, and nothing would
+    # restore it. One temporary override with a machine-enforced expiry (breaking -> minor, in
+    # .releaserc.json) is a debt worth carrying; a second one, for nothing but the cosmetics of an
+    # artifact name, is not.
     label: ci
-    # Minor, not Patch, while the work is heading for 1.3.0 -- otherwise every CI build of main
-    # calls itself 1.2.4 and points at a version that will never exist. See
-    # docs/decisions/0001-versioning-and-api-stability.md.
-    increment: Minor
+    increment: Patch
   pull-request:
     label: pr
