@@ -13,18 +13,21 @@ namespace CanKit.Pro.RawCan
     /// <c>CanReceiveDataView</c> — and the demux used to forward only the frame, discarding the
     /// other two before any subscriber could see them.
     /// <para>
-    /// That loss was not cosmetic. Three protocol layers had each rebuilt "is this my own
-    /// transmission?" from application data: J1939 compared the NAME in an Address Claim, CANopen
-    /// used an actor-affinity guard, and the J1939 transport compared source addresses. Each of
-    /// those is a heuristic over payload bytes standing in for a bit the driver had already told
-    /// us. <see cref="IsEcho"/> is that bit.
+    /// That loss was not cosmetic: the echo flag and the timestamp were simply unavailable above
+    /// the demux, however much a caller wanted them. What it is <em>not</em> is a replacement for
+    /// the self-traffic checks the protocol layers carry. <see cref="IsEcho"/> is host-scoped and
+    /// only as reliable as the adapter that sets it, so J1939 still compares NAMEs, the J1939
+    /// transport still compares source addresses, and CANopen's actor-provenance guard answers a
+    /// different question entirely (which thread applied an OD write, not which node sent a
+    /// frame). All three are retained deliberately — see the remarks on <see cref="IsEcho"/> for
+    /// why the flag cannot stand in for them.
     /// </para>
     /// <para>
-    /// A CanKit.Pro type rather than the upstream <c>CanReceiveDataView</c>: the payload of an
-    /// observed frame has to be copied before it is buffered (the adapter may return the RX lease
-    /// to its pool while a subscriber has not read it yet), and rebuilding an upstream event
-    /// payload around a copied frame would tie this package's public surface to a type it does
-    /// not own. <see cref="Frame"/> is that owned copy.
+    /// A CanKit.Pro type rather than the upstream <c>CanReceiveDataView</c>: the payload of a
+    /// buffered frame has to be copied (the adapter may return the RX lease to its pool while a
+    /// subscriber has not read it yet), and rebuilding an upstream event payload around a copied
+    /// frame would tie this package's public surface to a type it does not own. Note that the
+    /// copy is made for buffered events only — see <see cref="Frame"/> for the two lifetimes.
     /// </para>
     /// </remarks>
     public readonly struct CanFrameEvent : IEquatable<CanFrameEvent>
@@ -90,11 +93,30 @@ namespace CanKit.Pro.RawCan
         /// </summary>
         public TimeSpan ReceiveTimestamp { get; }
 
-        /// <inheritdoc />
+        /// <summary>
+        /// Value equality over the frame's kind, ID, flags and <em>payload bytes</em>, plus
+        /// <see cref="IsEcho"/> and <see cref="ReceiveTimestamp"/>.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not delegating to <see cref="CanFrameView"/>'s own equality. That type is
+        /// a record struct holding a <see cref="ReadOnlyMemory{T}"/>, whose generated comparison
+        /// tests the memory segment — the backing object, offset and length — rather than the
+        /// bytes. Since the demux allocates a fresh array per delivered frame, two events carrying
+        /// an identical frame to two subscriptions would otherwise never compare equal, which is
+        /// the opposite of what a caller writing <c>a == b</c> means.
+        /// <para>
+        /// The cost is that comparison is O(payload), up to 64 bytes for CAN FD. That is the right
+        /// trade for a type callers compare in assertions and deduplication, but it makes this a
+        /// poor dictionary key on a hot path.
+        /// </para>
+        /// </remarks>
         public bool Equals(CanFrameEvent other)
             => IsEcho == other.IsEcho
                && ReceiveTimestamp == other.ReceiveTimestamp
-               && Frame.Equals(other.Frame);
+               && Frame.FrameKind == other.Frame.FrameKind
+               && Frame.ID == other.Frame.ID
+               && Frame.Flags == other.Frame.Flags
+               && Frame.Data.Span.SequenceEqual(other.Frame.Data.Span);
 
         /// <inheritdoc />
         public override bool Equals(object? obj) => obj is CanFrameEvent other && Equals(other);
@@ -102,7 +124,13 @@ namespace CanKit.Pro.RawCan
         /// <inheritdoc />
         public override int GetHashCode()
         {
-            var hash = Frame.GetHashCode();
+            // Built from the same values Equals compares. The payload contributes its bytes, not
+            // its buffer identity, so equal frames hash equally however they were allocated.
+            var hash = ((int)Frame.FrameKind * 397) ^ Frame.ID;
+            hash = (hash * 397) ^ (int)Frame.Flags;
+            var data = Frame.Data.Span;
+            for (var i = 0; i < data.Length; i++)
+                hash = (hash * 31) ^ data[i];
             hash = (hash * 397) ^ IsEcho.GetHashCode();
             return (hash * 397) ^ ReceiveTimestamp.GetHashCode();
         }

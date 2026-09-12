@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -809,6 +810,61 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         DrainIds(quiet).Should().Equal(0x601);
         DrainIds(loud).Should().Equal(0x600, 0x601);
+    }
+
+    // CanFrameEvent equality must compare payload *bytes*, not which array holds them.
+    //
+    // CanFrameView is a record struct over a ReadOnlyMemory<byte>, and its generated equality
+    // tests the memory segment rather than the contents. Delegating to it looked harmless and was
+    // not: TryDeliver allocates a fresh array per delivered frame, so the same frame fanned out to
+    // two subscriptions produced two events that compared unequal — the opposite of what `a == b`
+    // means for a value type.
+    [Fact]
+    public void Two_Subscriptions_Receiving_The_Same_Frame_Produce_Equal_Events()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var first = service.Subscribe();
+        using var second = service.Subscribe();
+
+        bus.RaiseObserved(
+            CanFrame.Classic(0x123, new byte[] { 1, 2, 3, 4 }),
+            isEcho: false,
+            receiveTimestamp: TimeSpan.FromMilliseconds(7));
+
+        first.TryRead(out var a).Should().BeTrue();
+        second.TryRead(out var b).Should().BeTrue();
+
+        // Distinct buffers by construction -- that is exactly the case that used to break.
+        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
+        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
+        ReferenceEquals(segA.Array, segB.Array).Should().BeFalse(
+            "each subscription buffers its own copy");
+
+        a.Should().Be(b);
+        (a == b).Should().BeTrue();
+        a.GetHashCode().Should().Be(b.GetHashCode(), "equal values must hash equally");
+    }
+
+    // ... and events that differ in any compared component are not equal.
+    [Fact]
+    public void Events_Differing_In_Payload_Echo_Or_Timestamp_Are_Not_Equal()
+    {
+        var frame = new CanFrameView(
+            CanFrameType.Can20, 0x123, new byte[] { 1, 2, 3 }, FrameFlags.None);
+        var baseline = new CanFrameEvent(frame, isEcho: false, TimeSpan.FromMilliseconds(5));
+
+        var otherPayload = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x123, new byte[] { 1, 2, 4 }, FrameFlags.None),
+            isEcho: false, TimeSpan.FromMilliseconds(5));
+        var otherId = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x124, new byte[] { 1, 2, 3 }, FrameFlags.None),
+            isEcho: false, TimeSpan.FromMilliseconds(5));
+
+        baseline.Should().NotBe(otherPayload, "payload bytes are compared");
+        baseline.Should().NotBe(otherId);
+        baseline.Should().NotBe(new CanFrameEvent(frame, isEcho: true, TimeSpan.FromMilliseconds(5)));
+        baseline.Should().NotBe(new CanFrameEvent(frame, isEcho: false, TimeSpan.FromMilliseconds(6)));
     }
 
     // SendConfirmed's echo matching (FR-RAW-031) reads the bus event directly, not a subscription,

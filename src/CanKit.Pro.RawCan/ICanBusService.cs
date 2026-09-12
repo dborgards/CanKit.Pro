@@ -29,8 +29,9 @@ namespace CanKit.Pro.RawCan
     /// protocol layer sends are not frames it received: a J1939 node that treats its own Address
     /// Claim as a competitor's, or a CANopen node that acts on its own PDO, is broken in a way
     /// that only shows up on hardware that happens to echo. Before this flag existed each of those
-    /// layers had rebuilt "is this mine?" out of application data — comparing NAMEs, comparing
-    /// source addresses, guarding on actor affinity — to recover a bit the driver had already set.
+    /// layers each carried their own answer to "is this mine?" — comparing NAMEs, comparing source
+    /// addresses, guarding on actor affinity. Those checks are still there and still needed; what
+    /// changed is that the flag and the timestamp are now available to a caller who wants them.
     /// </para>
     /// <para>
     /// <b>Two limits, both of which make the gate a convenience rather than a guarantee.</b>
@@ -45,9 +46,16 @@ namespace CanKit.Pro.RawCan
     /// <para>
     /// So <c>includeEcho: false</c> suits a single consumer that owns its bus. A protocol layer
     /// that may share a service — every one in this repository does, by documented design — asks
-    /// for echoes and identifies itself by something it actually owns: a J1939 source address,
-    /// a NAME, a CANopen node-id. That is not a workaround for a missing feature; the demux
-    /// genuinely cannot attribute a transmission to a local instance.
+    /// for echoes instead, and must then tell its own traffic apart by something it actually
+    /// owns. That is not a workaround for a missing feature: the demux genuinely cannot attribute
+    /// a transmission to a local instance.
+    /// </para>
+    /// <para>
+    /// How far each layer takes that is a per-layer decision, not a guarantee this interface
+    /// makes. The J1939 transport rejects its own source address, and J1939 rejects its own NAME
+    /// on an Address Claim. CANopen deliberately does not filter its own non-SYNC traffic by
+    /// node-id — the state that predates the echo gate — so a CANopen node on a flagging adapter
+    /// still observes its own PDOs and heartbeats.
     /// </para>
     /// </remarks>
     public interface ICanBusService : IDisposable

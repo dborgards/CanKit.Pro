@@ -81,7 +81,9 @@ that echoes without setting it delivers the echo anyway (`CanKit.Adapter.Virtual
 `ChannelWorkMode.Echo` is one). And `IsEcho` is *host-scoped*: it means something on this host sent
 the frame, not that **you** sent it — so if you run several protocol instances over one service,
 withholding echoes also withholds your siblings' traffic. That is why the protocol layers in this
-repository opt in and identify themselves by source address, NAME or node-id instead.
+repository opt in and then apply their own check where they need one — J1939-TP on its source
+address, J1939 on its NAME. CANopen opts in without filtering its own non-SYNC traffic, so a
+CANopen node on a flagging adapter does see its own PDOs and heartbeats.
 
 If two instances were meant to have disjoint ID spaces, you can check rather than hope:
 

@@ -69,9 +69,14 @@ in `ChannelWorkMode.Echo` is such an adapter today.
 **`IsEcho` is host-scoped, not instance-scoped.** It means *something on this host sent this*, not
 *I sent this*. Several protocol instances may share one `ICanBusService` (every factory here
 documents that), and a sibling's transmission carries the same flag as your own. So a protocol
-layer that shares a service asks for echoes and identifies itself by something it owns — a J1939
-source address, a NAME, a CANopen node-id. `includeEcho: false` is for a single consumer that owns
-its bus, such as a monitor or a one-node application.
+layer that shares a service asks for echoes instead, and tells its own traffic apart by something
+it owns. `includeEcho: false` is for a single consumer that owns its bus, such as a monitor or a
+one-node application.
+
+How far each layer takes that differs, and this package does not promise it uniformly: J1939-TP
+rejects its own source address, J1939 rejects its own NAME on an Address Claim, and CANopen
+deliberately does not filter its own non-SYNC traffic by node-id — so a CANopen node on a flagging
+adapter still sees its own PDOs and heartbeats, exactly as it did before the echo gate existed.
 
 `SendConfirmed` is independent of this: it matches echoes on the bus event itself, so withholding
 them from subscribers does not affect TX confirmation.

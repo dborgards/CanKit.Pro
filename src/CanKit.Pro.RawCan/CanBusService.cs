@@ -162,10 +162,13 @@ namespace CanKit.Pro.RawCan
             if (subscriptions.Length == 0) return;
 
             // All three facts travel together from here on. The demux used to forward only
-            // e.CanFrame and drop e.IsEcho and e.ReceiveTimestamp on the floor, which is what
-            // pushed J1939, CANopen and the J1939 transport into each reconstructing "is this my
-            // own transmission?" from application data (#23). Reading them costs nothing: the
+            // e.CanFrame and drop e.IsEcho and e.ReceiveTimestamp on the floor, so no subscriber
+            // could see either, however much it wanted to (#23). Reading them costs nothing: the
             // event argument already carries them.
+            //
+            // This does not make the protocol layers' own self-traffic checks redundant -- the
+            // flag is host-scoped and not every adapter sets it. See the remarks on
+            // ICanBusService for why they are retained.
             var view = e.CanFrame;
             var isEcho = e.IsEcho;
             var receiveTimestamp = e.ReceiveTimestamp;
