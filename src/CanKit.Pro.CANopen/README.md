@@ -141,11 +141,13 @@ CanKit.Pro.CANopen/
 `SdoTransferMode.Expedited` and `SdoTransferMode.Segmented` are gone. `SdoTransferMode.Block`
 keeps its value `3` — the gap the removed members leave behind is deliberate, see below.
 
-Neither removed member ever reached the wire encoder, so dropping the argument sends exactly the
-same frames:
+Neither removed member ever reached the wire encoder, so **below
+`CanOpenNodeOptions.SdoBlockThresholdBytes`** dropping the argument sends exactly the same frames.
+At or above the threshold it does not — see "One behavioural difference" below, which is the only
+case in this migration that changes traffic:
 
 ```csharp
-// before — both of these produced identical traffic
+// before — below the block threshold, both of these produced identical traffic
 await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Expedited);
 await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Segmented);
 
