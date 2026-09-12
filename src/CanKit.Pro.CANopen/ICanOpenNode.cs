@@ -134,19 +134,20 @@ public interface ICanOpenNode : IDisposable
     // -----------------------------------------------------------------------------------------
 
     /// <summary>Reads an object from <paramref name="serverNodeId"/>'s OD using
-    /// <see cref="SdoTransferMode.Auto"/> (expedited / segmented; size is unknown up front so
-    /// Auto does not select block upload — pass <see cref="SdoTransferMode.Block"/> explicitly).
+    /// <see cref="SdoTransferMode.Auto"/> (the server's initiate response decides expedited vs.
+    /// segmented; the size is unknown up front so Auto does not select block upload — pass
+    /// <see cref="SdoTransferMode.Block"/> explicitly).
     /// Source-compatible overload for callers that pass a positional
     /// <see cref="CancellationToken"/>.</summary>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         CancellationToken cancellationToken);
 
     /// <summary>Reads an object from <paramref name="serverNodeId"/>'s OD.
-    /// <see cref="SdoTransferMode.Auto"/> uses the classic expedited/segmented path because the
-    /// payload length is unknown until the server replies; pass
-    /// <see cref="SdoTransferMode.Block"/> to force block transfer (CiA 301 §7.2.4.3.15).
-    /// Explicit <see cref="SdoTransferMode.Expedited"/> / <see cref="SdoTransferMode.Segmented"/>
-    /// also route through the classic client (FR-CO-002 / FR-CO-003 / FR-CO-004).</summary>
+    /// <see cref="SdoTransferMode.Auto"/> uses the classic client because the payload length is
+    /// unknown until the server replies — whether that reply is expedited or segmented is the
+    /// server's choice and is handled transparently. Pass <see cref="SdoTransferMode.Block"/> to
+    /// force block transfer (CiA 301 §7.2.4.3.15).
+    /// (FR-CO-002 / FR-CO-003 / FR-CO-004).</summary>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
         CancellationToken cancellationToken = default);
@@ -158,10 +159,15 @@ public interface ICanOpenNode : IDisposable
         ReadOnlyMemory<byte> data,
         CancellationToken cancellationToken);
 
-    /// <summary>Writes an object to <paramref name="serverNodeId"/>'s OD. Auto-selects the
-    /// transport by <paramref name="data"/> length (expedited / segmented / block per
-    /// <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/>); an explicit
-    /// <paramref name="mode"/> forces one codec.</summary>
+    /// <summary>Writes an object to <paramref name="serverNodeId"/>'s OD.
+    /// <see cref="SdoTransferMode.Auto"/> selects the transport from the <paramref name="data"/>
+    /// length: at or above <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> block transfer,
+    /// and below it the CiA 301 split — 1..4 bytes expedited, 5 bytes and up segmented. The
+    /// threshold is checked first, so it also decides the expedited range: a threshold of 1..4
+    /// (which the options permit) sends a short payload by block transfer rather than expedited.
+    /// Pass
+    /// <see cref="SdoTransferMode.Block"/> to force block transfer below that threshold; the
+    /// expedited/segmented split itself is dictated by CiA 301 and is not selectable.</summary>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,
