@@ -88,9 +88,15 @@ CANopen node on a flagging adapter does see its own PDOs and heartbeats.
 If two instances were meant to have disjoint ID spaces, you can check rather than hope:
 
 ```csharp
-foreach (var (first, second) in service.FindOverlappingFilterSubscriptions())
-    logger.Warning("Overlapping subscriptions: {A} and {B}", first, second);
+foreach (var overlap in service.FindOverlappingFilterSubscriptions())
+    logger.Warning("Overlapping subscriptions {A} and {B}, sharing IDs 0x{Low:X}..0x{High:X}",
+        overlap.A, overlap.B, overlap.LowestSharedId, overlap.HighestSharedId);
 ```
+
+Each result is a `FilterOverlap`: the two subscriptions that share ID space — the relation is
+symmetric, so `A` and `B` say nothing beyond registration order — and the range they share. For two
+range filters every ID in between is shared as well; for acceptance-code/mask filters the bounds are
+a hull around a scattered set. If you only want the pair, it destructures: `var (a, b) = overlap;`.
 
 ## Did the frame actually go out?
 

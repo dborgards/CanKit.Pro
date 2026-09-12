@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -147,6 +148,102 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.TransmitCount.Should().Be(n);
     }
 
+    // FR-RAW-031/033: a pending send that has already been resolved -- here by cancellation, in
+    // the field usually by its own timeout -- must leave the echo FIFO at the moment it is
+    // resolved. While it stayed there it was the oldest entry for its key, so the *next*
+    // byte-identical send lost its echo to it and timed out too: one timeout cascading into the
+    // next.
+    //
+    // The setup is what makes this deterministic instead of a race against a pool thread. The
+    // first send is resolved from inside the second send's Transmit, i.e. on the transmitting
+    // thread while CanBusService still holds its pending-send lock. The first send's own async
+    // cleanup wants that same lock, so it cannot run until this Transmit returns -- by which time
+    // the second send's echo has already been matched, inside the same call. If the resolution
+    // path does not unlink the entry itself, the expired entry is therefore *guaranteed*, not
+    // merely likely, to be the FIFO head when that echo arrives.
+    [Fact]
+    public async Task Echo_Bus_Does_Not_Let_A_Resolved_Send_Consume_A_Later_Identical_Echo()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+
+        var frame = CanFrame.Classic(0x600, new byte[] { 7, 7 });
+        using var cancelFirst = new CancellationTokenSource();
+
+        // The first send stays pending: its echo never comes back.
+        sender.EchoAcceptedFrames = false;
+        var first = service.SendConfirmed(frame, TimeSpan.FromSeconds(30), cancelFirst.Token);
+        sender.TransmitCount.Should().Be(1,
+            "SendConfirmed registers the pending entry and transmits before it awaits anything");
+
+        sender.EchoAcceptedFrames = true;
+        sender.OnTransmitting = _ => cancelFirst.Cancel();
+
+        var second = await service.SendConfirmed(frame, ShortTimeout);
+
+        second.Confirmed.Should().BeTrue(
+            "the echo belongs to the only send still waiting for one, not to the cancelled entry");
+        second.IsApproximated.Should().BeFalse();
+        second.FailureReason.Should().Be(TxConfirmFailureReason.None);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+    }
+
+    // FR-RAW-031: the echo is matched on what identifies the frame, not on its ID alone. A
+    // standard 0x100 and an extended 0x100 carrying the same payload are two different frames on
+    // the wire; keyed on the ID alone they share one FIFO, so the extended frame's echo confirms
+    // whichever of the two was sent first and the other waits for an echo that has already been
+    // consumed.
+    [Fact]
+    public async Task Echo_Bus_Does_Not_Confirm_A_Standard_Send_From_An_Extended_Echo_With_The_Same_Id()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+        sender.EchoAcceptedFrames = false; // every echo in this test is delivered by hand
+
+        var payload = new byte[] { 0xAB };
+        var standard = service.SendConfirmed(CanFrame.Classic(0x100, payload), TimeSpan.FromSeconds(30));
+        var extended = service.SendConfirmed(
+            CanFrame.Classic(0x100, payload, isExtendedFrame: true), TimeSpan.FromSeconds(30));
+        sender.TransmitCount.Should().Be(2);
+
+        sender.RaiseObserved(CanFrame.Classic(0x100, payload, isExtendedFrame: true), isEcho: true);
+
+        var completed = await Task.WhenAny(standard, extended).WaitAsync(ShortTimeout);
+        completed.Should().BeSameAs(extended, "an extended-ID echo confirms the extended-ID send");
+        (await completed).Confirmed.Should().BeTrue();
+        standard.IsCompleted.Should().BeFalse("no echo for the standard-ID frame has arrived yet");
+
+        service.Dispose(); // resolves the send left outstanding on purpose
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => standard);
+    }
+
+    // FR-RAW-031, the same point for the frame kind: a Classic and a CAN-FD frame with the same ID
+    // and the same payload bytes are not interchangeable, and one's echo must not confirm the
+    // other.
+    [Fact]
+    public async Task Echo_Bus_Does_Not_Confirm_A_Classic_Send_From_A_Can_Fd_Echo_With_The_Same_Id()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+        sender.EchoAcceptedFrames = false;
+
+        var payload = new byte[] { 0xAB };
+        var classic = service.SendConfirmed(CanFrame.Classic(0x100, payload), TimeSpan.FromSeconds(30));
+        var fd = service.SendConfirmed(CanFrame.Fd(0x100, payload), TimeSpan.FromSeconds(30));
+        sender.TransmitCount.Should().Be(2);
+
+        sender.RaiseObserved(CanFrame.Fd(0x100, payload), isEcho: true);
+
+        var completed = await Task.WhenAny(classic, fd).WaitAsync(ShortTimeout);
+        completed.Should().BeSameAs(fd, "a CAN-FD echo confirms the CAN-FD send");
+        (await completed).Confirmed.Should().BeTrue();
+        classic.IsCompleted.Should().BeFalse("no echo for the Classic frame has arrived yet");
+
+        service.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => classic);
+    }
+
     // FR-RAW-033: a send whose echo will never arrive fails observably (Confirmed = false,
     // FailureReason = Timeout) within the configured timeout, not an indefinite hang.
     [Fact]
@@ -280,5 +377,46 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff);
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
             "the BusOff path must resolve the confirmation immediately, not via the 30 s timeout");
+    }
+
+    // Echo matching runs for every echo frame the adapter reports while any send is outstanding,
+    // and it used to copy that frame's payload into the lookup key just to ask whether anything
+    // was waiting for it. The key never leaves the lookup, so it can borrow the payload instead.
+    //
+    // Measured rather than asserted structurally, because "does not allocate" is precisely the
+    // claim: the frames below deliberately do not match the outstanding send, so every one of them
+    // takes the full lookup path. GetAllocatedBytesForCurrentThread is exact for this thread, and
+    // RaiseObserved delivers synchronously on it, so the only noise is the fixed per-call cost of
+    // raising the event -- far below the 64-byte payload a copy would add each time.
+    [Fact]
+    public async Task Echo_Lookup_Does_Not_Copy_The_Payload_Of_Every_Echo_Frame()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+        sender.EchoAcceptedFrames = false;
+
+        // One outstanding send, so the lookup is actually reached (with none, OnFrameObserved
+        // short-circuits before building a key at all).
+        var outstanding = service.SendConfirmed(CanFrame.Classic(0x111, new byte[] { 1 }),
+            TimeSpan.FromSeconds(30));
+
+        // A 64-byte payload on an ID nothing is waiting for: reached, hashed, compared, no match.
+        var unmatched = CanFrame.Fd(0x222, new byte[64]);
+
+        const int warmup = 50;
+        const int measured = 500;
+        for (var i = 0; i < warmup; i++) sender.RaiseObserved(unmatched, isEcho: true);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < measured; i++) sender.RaiseObserved(unmatched, isEcho: true);
+        var perFrame = (GC.GetAllocatedBytesForCurrentThread() - before) / (double)measured;
+
+        perFrame.Should().BeLessThan(64,
+            "the lookup key must borrow the echo payload rather than copy it");
+
+        outstanding.IsCompleted.Should().BeFalse("none of those echoes matched the pending send");
+
+        service.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => outstanding);
     }
 }

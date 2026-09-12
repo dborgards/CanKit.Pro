@@ -42,8 +42,10 @@ namespace CanKit.Pro.RawCan
         // holding _hubsGate while delivering.
         private volatile Subscription[] _snapshot = Array.Empty<Subscription>();
 
-        // Pending SendConfirmed calls awaiting an echo match, keyed by (ID, payload) so multiple
-        // concurrent byte-identical sends are matched FIFO instead of crashing/cross-matching
+        // Pending SendConfirmed calls awaiting an echo match, keyed by everything that identifies
+        // the frame on the wire (see PendingKey) so multiple concurrent identical sends are matched
+        // FIFO instead of crashing/cross-matching, and two sends that merely *look* alike -- a
+        // standard and an extended 0x100 with the same payload -- do not share one FIFO at all
         // (FR-RAW-031). Guarded by its own lock, separate from _gate, so TX-confirm churn never
         // contends with subscription registry churn (and vice versa).
         private readonly object _pendingGate = new();
@@ -95,13 +97,13 @@ namespace CanKit.Pro.RawCan
             => AddSubscription(idFilter: filter, predicate: null, bufferCapacity, includeEcho);
 
         /// <inheritdoc />
-        public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         {
             // Snapshot read, same lock-free discipline as the dispatch hot path -- this is a
             // diagnostic call, not something exercised per-frame, but there's no reason to take
             // _gate for a read when the existing snapshot already gives a consistent view.
             var subscriptions = _snapshot;
-            var overlaps = new List<(ISubscription, ISubscription)>();
+            var overlaps = new List<FilterOverlap>();
 
             for (var i = 0; i < subscriptions.Length; i++)
             {
@@ -109,8 +111,8 @@ namespace CanKit.Pro.RawCan
                 for (var j = i + 1; j < subscriptions.Length; j++)
                 {
                     if (subscriptions[j].IsDisposed || subscriptions[j].IdFilter is not { } filterJ) continue;
-                    if (filterI.Overlaps(filterJ))
-                        overlaps.Add((subscriptions[i], subscriptions[j]));
+                    if (filterI.TryGetSharedIdRange(filterJ, out var lowest, out var highest))
+                        overlaps.Add(new FilterOverlap(subscriptions[i], subscriptions[j], lowest, highest));
                 }
             }
 
@@ -172,6 +174,15 @@ namespace CanKit.Pro.RawCan
             var view = e.CanFrame;
             var isEcho = e.IsEcho;
             var receiveTimestamp = e.ReceiveTimestamp;
+
+            // One owned payload copy per *frame*, created by the first subscription that actually
+            // buffers it and reused by every later one, instead of one copy per matching
+            // subscription. The copy exists because the view aliases the adapter's RX lease (see
+            // Subscription.TryDeliver); nothing about that reason is per-subscriber, and what the
+            // subscribers get handed is a ReadOnlyMemory they may only read. A frame nobody
+            // matches still allocates nothing at all.
+            byte[]? ownedPayload = null;
+
             foreach (var subscription in subscriptions)
             {
                 // A subscription's filter predicate is caller-supplied and may throw. Isolate each
@@ -183,7 +194,7 @@ namespace CanKit.Pro.RawCan
                 // of being silently swallowed.
                 try
                 {
-                    subscription.TryDeliver(view, isEcho, receiveTimestamp);
+                    subscription.TryDeliver(view, isEcho, receiveTimestamp, ref ownedPayload);
                 }
                 catch (Exception ex)
                 {
@@ -298,7 +309,7 @@ namespace CanKit.Pro.RawCan
 
         private async Task<TxConfirmation> SendWithEchoConfirmAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            var pending = new PendingSend(new PendingKey(frame.ID, frame.Data));
+            var pending = new PendingSend(PendingKey.ForPendingSend(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
 
             int accepted;
             try
@@ -320,6 +331,15 @@ namespace CanKit.Pro.RawCan
                 // enqueue step (Transmit is expected to be a fast, non-blocking enqueue, same
                 // assumption every other caller of ICanBus.Transmit already makes), never across
                 // the echo wait, so unrelated sends are not serialized against each other.
+                //
+                // A review finding (#53) asked for Transmit to move out of this lock, so that a
+                // blocking vendor driver cannot stall the adapter's RX thread in TryMatchEcho. It
+                // is deliberately not done: the atomicity above is the whole reason the FIFO order
+                // means anything, an echo-mode adapter re-enters this lock from inside Transmit
+                // anyway, and no driver that blocks in Transmit could be used with this service in
+                // any case -- the same call is on the dispatch path of every other consumer of
+                // ICanBus. If one ever has to be, the fix is a queue in front of the driver, not a
+                // pending list whose order no longer matches the wire.
                 lock (_pendingGate)
                 {
                     if (_pendingDisposed)
@@ -353,13 +373,29 @@ namespace CanKit.Pro.RawCan
             }
         }
 
-        private static async Task<TxConfirmation> WaitForPendingAsync(PendingSend pending, TimeSpan timeout, CancellationToken cancellationToken)
+        private async Task<TxConfirmation> WaitForPendingAsync(PendingSend pending, TimeSpan timeout, CancellationToken cancellationToken)
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             // Registration fires on whichever comes first: caller cancellation or our own timeout.
             using var registration = timeoutCts.Token.Register(static state =>
             {
-                var (p, ct) = ((PendingSend, CancellationToken))state!;
+                var (service, p, ct) = ((CanBusService, PendingSend, CancellationToken))state!;
+
+                // Unlink *before* completing, and here rather than in SendWithEchoConfirmAsync's
+                // `finally`. The Tcs completes its awaiter asynchronously
+                // (RunContinuationsAsynchronously), so that `finally` runs a scheduling turn later
+                // on a pool thread; until it did, this expired entry stayed the FIFO head for its
+                // key and swallowed the echo of the next byte-identical send, turning one timeout
+                // into a cascade of them. Unlinking under _pendingGate before the Tcs is completed
+                // closes that window entirely: from the instant this entry is resolved it is no
+                // longer matchable. The `finally` stays as the cleanup for every path that does not
+                // pass through here (rejection, an exception out of Transmit).
+                //
+                // Monitor is reentrant, so this is safe even when the cancellation is triggered
+                // from a thread that already holds _pendingGate (a caller cancelling from inside a
+                // subscription predicate while a synchronous echo is being dispatched, say).
+                service.RemovePending(p);
+
                 if (ct.IsCancellationRequested)
                 {
                     p.Tcs.TrySetCanceled(ct);
@@ -374,7 +410,7 @@ namespace CanKit.Pro.RawCan
                         FailureReason = TxConfirmFailureReason.Timeout,
                     });
                 }
-            }, (pending, cancellationToken));
+            }, (this, pending, cancellationToken));
 
             timeoutCts.CancelAfter(timeout);
             return await pending.Tcs.Task.ConfigureAwait(false);
@@ -413,17 +449,43 @@ namespace CanKit.Pro.RawCan
 
         private void TryMatchEcho(in CanFrameView echoView)
         {
-            var key = new PendingKey(echoView.ID, echoView.Data);
+            // Aliases the echo frame's payload rather than copying it: this runs for every echo
+            // frame the adapter reports, and the key is dropped again before the lock is released.
+            var key = PendingKey.ForEchoLookup(echoView.ID, echoView.Data, echoView.Flags, echoView.FrameKind);
             PendingSend? matched = null;
 
             lock (_pendingGate)
             {
-                if (_pending.TryGetValue(key, out var list) && list.First is { } node)
+                if (_pending.TryGetValue(key, out var list))
                 {
-                    matched = node.Value;
-                    list.RemoveFirst(); // FIFO: oldest pending send for this key matches first
-                    matched.Node = null;
-                    Interlocked.Decrement(ref _pendingCount);
+                    // FIFO: the oldest pending send for this key matches first -- but only if it is
+                    // still waiting. An entry whose Tcs is already completed has been resolved by
+                    // some other path and can no longer consume anything; matching it would silently
+                    // drop this echo (TrySetResult no-ops on a completed Tcs) and leave the send it
+                    // actually belonged to waiting for an echo that has already come and gone.
+                    //
+                    // Every resolution path unlinks under this same lock before it completes the
+                    // Tcs, so a completed entry should not be reachable here at all. This stays as
+                    // the second guard for that invariant -- and, because it unlinks what it skips,
+                    // it also stops such an entry from blocking the FIFO for every later echo
+                    // instead of only for this one.
+                    for (var node = list.First; node is not null;)
+                    {
+                        var next = node.Next;
+                        var candidate = node.Value;
+
+                        list.Remove(node);
+                        candidate.Node = null;
+                        Interlocked.Decrement(ref _pendingCount);
+
+                        if (!candidate.Tcs.Task.IsCompleted)
+                        {
+                            matched = candidate;
+                            break;
+                        }
+
+                        node = next;
+                    }
 
                     if (list.Count == 0)
                         _pending.Remove(key);

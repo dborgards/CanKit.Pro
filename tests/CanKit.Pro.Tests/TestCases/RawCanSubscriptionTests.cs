@@ -323,6 +323,93 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         await secondReceived.Task.WaitAsync(ShortTimeout);
     }
 
+    // The fault channel above is an *event on ICanBusService*, and only the type declaring an
+    // event can raise it -- so for any implementation other than CanBusService the extension has
+    // no way to report a failing handler, and used to drop it. onError is that way.
+    [Fact]
+    public async Task Callback_Subscribe_Reports_A_Handler_Failure_Through_OnError_For_A_Foreign_Service()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var inner = new CanBusService(receiver);
+        using var service = new ForeignCanBusService(inner);
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+
+        using var subscription = service.Subscribe(
+            _ =>
+            {
+                if (Interlocked.Increment(ref calls) == 1) throw new InvalidOperationException("boom");
+                secondReceived.TrySetResult(true);
+            },
+            onError: ex => observed.TrySetResult(ex));
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        var ex = await observed.Task.WaitAsync(ShortTimeout);
+        ex.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Be("boom");
+
+        // Still isolated per frame, exactly as with the service's own fault channel.
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 2 }));
+        await secondReceived.Task.WaitAsync(ShortTimeout);
+    }
+
+    // With onError given it is the single destination: the caller said where these belong, and a
+    // report arriving twice through two channels is its own kind of surprise.
+    [Fact]
+    public async Task Callback_Subscribe_OnError_Takes_Precedence_Over_The_Service_Fault_Event()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var throughEvent = 0;
+        service.BackgroundExceptionOccurred += (_, _) => Interlocked.Increment(ref throughEvent);
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = service.Subscribe(
+            _ => throw new InvalidOperationException("boom"),
+            onError: ex => observed.TrySetResult(ex));
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        await observed.Task.WaitAsync(ShortTimeout);
+
+        await Task.Delay(100); // give a second, wrong report time to arrive
+        Volatile.Read(ref throughEvent).Should().Be(0, "onError is the destination the caller chose");
+    }
+
+    // An ICanBusService that is not a CanBusService: everything forwarded, so the only thing that
+    // differs from using the concrete service is that its fault event is not ours to raise.
+    private sealed class ForeignCanBusService(ICanBusService inner) : ICanBusService
+    {
+        public ICanBus Bus => inner.Bus;
+
+        public int SubscriptionCount => inner.SubscriptionCount;
+
+        // Never raised: this fake has no faults of its own, and the point of the test above is
+        // precisely that CanBusServiceExtensions cannot raise it either.
+#pragma warning disable CS0067
+        public event EventHandler<Exception>? BackgroundExceptionOccurred;
+#pragma warning restore CS0067
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => inner.SendConfirmed(frame, timeout, cancellationToken);
+
+        public void Dispose() { /* the inner service is owned by the test */ }
+    }
+
     // FR-RAW-012: creating and disposing N subscriptions leaves no entries in the service registry.
     [Fact]
     public void Disposing_Subscriptions_Leaves_No_Registry_Entries()
@@ -812,13 +899,67 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         DrainIds(loud).Should().Equal(0x600, 0x601);
     }
 
+    // The payload copy that shields a buffered frame from the adapter's RX lease is made once per
+    // *frame*, not once per matching subscription: the reason for it -- the lease may be disposed
+    // before anyone reads -- is a property of the frame, and what a subscriber receives is a
+    // read-only view either way. With n subscriptions matching, this is n-1 array allocations and
+    // copies per frame that no longer happen on the dispatch hot path.
+    [Fact]
+    public void Two_Subscriptions_Receiving_The_Same_Frame_Share_One_Payload_Copy()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var first = service.Subscribe();
+        using var second = service.Subscribe();
+
+        var source = new byte[] { 1, 2, 3, 4 };
+        bus.RaiseObserved(CanFrame.Classic(0x123, source), isEcho: false);
+
+        first.TryRead(out var a).Should().BeTrue();
+        second.TryRead(out var b).Should().BeTrue();
+
+        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
+        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
+        ReferenceEquals(segA.Array, segB.Array).Should().BeTrue(
+            "one copy per frame is shared by every subscription that buffers it");
+
+        // Still a copy, not the caller's own array: that is the whole point of making one.
+        ReferenceEquals(segA.Array, source).Should().BeFalse(
+            "the buffered payload must not alias the frame the adapter handed out");
+        a.Frame.Data.ToArray().Should().Equal(source);
+    }
+
     // CanFrameEvent equality must compare payload *bytes*, not which array holds them.
     //
     // CanFrameView is a record struct over a ReadOnlyMemory<byte>, and its generated equality
     // tests the memory segment rather than the contents. Delegating to it looked harmless and was
-    // not: TryDeliver allocates a fresh array per delivered frame, so the same frame fanned out to
-    // two subscriptions produced two events that compared unequal — the opposite of what `a == b`
-    // means for a value type.
+    // not: two events describing the same frame over two different arrays compared unequal — the
+    // opposite of what `a == b` means for a value type. The events are built here rather than
+    // drained from two subscriptions (which is how the bug was originally found) so that the
+    // distinct-buffer case stays covered no matter how many copies the demux makes.
+    [Fact]
+    public void Events_Over_Distinct_Buffers_With_Equal_Bytes_Are_Equal()
+    {
+        var timestamp = TimeSpan.FromMilliseconds(7);
+        var a = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x123, new byte[] { 1, 2, 3, 4 }, FrameFlags.None),
+            isEcho: false, timestamp);
+        var b = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x123, new byte[] { 1, 2, 3, 4 }, FrameFlags.None),
+            isEcho: false, timestamp);
+
+        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
+        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
+        ReferenceEquals(segA.Array, segB.Array).Should().BeFalse(
+            "distinct buffers by construction -- that is exactly the case that used to break");
+
+        a.Should().Be(b);
+        (a == b).Should().BeTrue();
+        a.GetHashCode().Should().Be(b.GetHashCode(), "equal values must hash equally");
+    }
+
+    // ... and the same frame fanned out to two subscriptions still produces equal events, which is
+    // how the equality bug above surfaced in the first place.
     [Fact]
     public void Two_Subscriptions_Receiving_The_Same_Frame_Produce_Equal_Events()
     {
@@ -834,12 +975,6 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         first.TryRead(out var a).Should().BeTrue();
         second.TryRead(out var b).Should().BeTrue();
-
-        // Distinct buffers by construction -- that is exactly the case that used to break.
-        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
-        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
-        ReferenceEquals(segA.Array, segB.Array).Should().BeFalse(
-            "each subscription buffers its own copy");
 
         a.Should().Be(b);
         (a == b).Should().BeTrue();

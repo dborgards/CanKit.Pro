@@ -58,7 +58,8 @@ J1939Name.CompareClaimPriority(name, sameName); // 0; lower unsigned NAME wins a
 `CanKit.Pro.RawCan`'s `CanIdFilter` also gained an `Overlaps(CanIdFilter other)` method and
 `ICanBusService.FindOverlappingFilterSubscriptions()` (FR-RAW-041, Should): a diagnostic to catch
 misconfigured protocol instances whose ID-range/mask subscriptions were meant to be disjoint but
-overlap.
+overlap. Each hit comes back as a `FilterOverlap` naming the two subscriptions and the range of CAN
+IDs they share, so the report says where the collision is and not only that there is one.
 
 ## Install
 

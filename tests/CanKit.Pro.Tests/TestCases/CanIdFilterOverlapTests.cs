@@ -83,40 +83,54 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
         overlappingMask.Overlaps(range).Should().BeTrue("overlap must be symmetric regardless of argument order");
     }
 
+    // An acceptance mask may reach above the ID space: those bits are then required to be *zero*,
+    // which every real CAN ID already satisfies, so the filter stays perfectly usable. Only a
+    // filter that requires an out-of-space bit to be one is impossible, and that one is rejected
+    // at construction (see the tests below).
     [Fact]
-    public void Range_And_Mask_Filters_Honor_Acceptance_Mask_Bits_Above_The_29Bit_Id_Space()
+    public void A_Mask_Reaching_Above_The_Id_Space_Still_Overlaps_A_Range_It_Shares_Ids_With()
     {
-        // No real CAN ID ever has bit 29 set (IDs are at most 29 bits wide), so a mask that
-        // requires bit 29 to be 1 can never actually be satisfied by any ID -- including every ID
-        // in 'range'. The range/mask overlap check must honor that acceptance-mask bit even though
-        // it falls outside the bits a valid range bound can vary over.
         var range = CanIdFilter.Range(0x100, 0x10F, CanFilterIDType.Extend);
-        var unsatisfiableMask = CanIdFilter.Mask(accCode: 0x20000100, accMask: 0x20000700, idType: CanFilterIDType.Extend);
+        var mask = CanIdFilter.Mask(accCode: 0x100, accMask: 0x20000700, idType: CanFilterIDType.Extend);
 
-        range.Overlaps(unsatisfiableMask).Should().BeFalse();
-        unsatisfiableMask.Overlaps(range).Should().BeFalse("overlap must be symmetric regardless of argument order");
+        range.Overlaps(mask).Should().BeTrue();
+        mask.Overlaps(range).Should().BeTrue("overlap must be symmetric regardless of argument order");
+    }
+
+    // A filter outside its own ID space never matched anything and reported nothing, which made a
+    // forgotten idType (a 29-bit ID left on the Standard default) as good as invisible. Both
+    // factories reject it instead. Matches() only ever sees IDs already clipped to the space, so
+    // there is no reading under which such a filter could have been meant.
+    [Fact]
+    public void Range_Rejects_Bounds_Outside_The_Standard_11Bit_Space()
+    {
+        var forgottenIdType = () => CanIdFilter.Range(0x18FEF100, 0x18FEF1FF);
+        forgottenIdType.Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("*Extend*", "the message must name the fix, not just the fault");
+
+        var upperBoundEscapes = () => CanIdFilter.Range(0x7F0, 0x900);
+        upperBoundEscapes.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
-    public void Range_Filters_Whose_Numeric_Overlap_Lies_Entirely_Above_The_Standard_11Bit_Space_Do_Not_Overlap()
+    public void Range_Rejects_Bounds_Outside_The_Extended_29Bit_Space()
     {
-        // [0x7F0, 0x900] and [0x800, 0x810] intersect numerically, but Matches() only ever sees
-        // 11-bit standard IDs (<= 0x7FF), so no standard frame can ever match the second filter.
-        var a = CanIdFilter.Range(0x7F0, 0x900);
-        var b = CanIdFilter.Range(0x800, 0x810);
+        var act = () => CanIdFilter.Range(0x1FFFFFF0, 0x20000100, CanFilterIDType.Extend);
+        act.Should().Throw<ArgumentOutOfRangeException>();
 
-        a.Overlaps(b).Should().BeFalse();
-        b.Overlaps(a).Should().BeFalse("overlap must be symmetric regardless of argument order");
+        var entirelyOutside = () => CanIdFilter.Range(0x20000000, 0x20000010, CanFilterIDType.Extend);
+        entirelyOutside.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
-    public void Range_Filters_Whose_Numeric_Overlap_Lies_Entirely_Above_The_Extended_29Bit_Space_Do_Not_Overlap()
+    public void Mask_Rejects_A_Code_Requiring_A_Bit_Outside_The_Id_Space()
     {
-        var a = CanIdFilter.Range(0x1FFFFFF0, 0x20000100, CanFilterIDType.Extend);
-        var b = CanIdFilter.Range(0x20000000, 0x20000010, CanFilterIDType.Extend);
+        // Bit 29 set in both code and mask: no CAN ID has that bit, so nothing could ever match.
+        var extended = () => CanIdFilter.Mask(accCode: 0x20000100, accMask: 0x20000700, idType: CanFilterIDType.Extend);
+        extended.Should().Throw<ArgumentOutOfRangeException>();
 
-        a.Overlaps(b).Should().BeFalse();
-        b.Overlaps(a).Should().BeFalse("overlap must be symmetric regardless of argument order");
+        var standard = () => CanIdFilter.Mask(accCode: 0x18FEF100, accMask: 0x1FFFFF00);
+        standard.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
@@ -132,8 +146,105 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
         var overlaps = service.FindOverlappingFilterSubscriptions();
 
         overlaps.Should().ContainSingle();
-        var pair = overlaps[0];
-        new[] { pair.First, pair.Second }.Should().BeEquivalentTo(new[] { a, b });
+        var overlap = overlaps[0];
+        new[] { overlap.A, overlap.B }.Should().BeEquivalentTo(new[] { a, b });
+
+        // The point of the named type over the old (First, Second) tuple: it can say *where* they
+        // collide, which is what someone looking at an unexpected overlap wants to know.
+        overlap.LowestSharedId.Should().Be(0x180);
+        overlap.HighestSharedId.Should().Be(0x1FF);
+
+        // The two subscriptions still destructure directly, for callers that only want the pair.
+        var (first, second) = overlap;
+        first.Should().BeSameAs(overlap.A);
+        second.Should().BeSameAs(overlap.B);
+    }
+
+    // Two acceptance-mask filters accept scattered ID sets, so the reported range is the inclusive
+    // hull: both bounds are shared, and every shared ID lies between them, but the IDs in between
+    // need not be.
+    [Fact]
+    public void An_Overlap_Between_Mask_Filters_Reports_The_Hull_Of_The_Shared_Ids()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+
+        // Shared IDs are exactly those with 0x100 set and 0x200 clear: 0x100..0x1FF and
+        // 0x500..0x5FF (bit 0x400 is unconstrained by either filter).
+        using var a = service.Subscribe(CanIdFilter.Mask(accCode: 0x100, accMask: 0x100));
+        using var b = service.Subscribe(CanIdFilter.Mask(accCode: 0x000, accMask: 0x200));
+
+        var overlap = service.FindOverlappingFilterSubscriptions().Should().ContainSingle().Subject;
+
+        overlap.LowestSharedId.Should().Be(0x100);
+        overlap.HighestSharedId.Should().Be(0x5FF);
+    }
+
+    // Overlaps and the shared-ID range are decided by a bit walk that never looks at an actual ID,
+    // and both now come out of one search. This checks that search against the definition: sweep
+    // the entire standard 11-bit ID space, ask Matches directly, and compare. 13 filters, every
+    // ordered pair, 2048 IDs each.
+    //
+    // Driven through the service rather than the filters, because the range is reported on
+    // FilterOverlap; Reconfigure re-points the same two subscriptions instead of opening 169 buses.
+    [Fact]
+    public void Overlap_And_Reported_Range_Agree_With_A_Brute_Force_Sweep_Of_The_Id_Space()
+    {
+        var filters = new[]
+        {
+            CanIdFilter.Range(0x000, 0x7FF),
+            CanIdFilter.Range(0x100, 0x1FF),
+            CanIdFilter.Range(0x180, 0x2FF),
+            CanIdFilter.Range(0x300, 0x3FF),
+            CanIdFilter.Range(0x000, 0x000),
+            CanIdFilter.Range(0x7FF, 0x7FF),
+            CanIdFilter.Mask(accCode: 0x000, accMask: 0x000), // constrains nothing: matches every ID
+            CanIdFilter.Mask(accCode: 0x100, accMask: 0x100),
+            CanIdFilter.Mask(accCode: 0x000, accMask: 0x200),
+            CanIdFilter.Mask(accCode: 0x123, accMask: 0x7FF), // exactly one ID
+            CanIdFilter.Mask(accCode: 0x100, accMask: 0x700),
+            CanIdFilter.Mask(accCode: 0x555, accMask: 0x555),
+            CanIdFilter.Mask(accCode: 0x040, accMask: 0x0C0),
+        };
+
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var subA = service.Subscribe(filters[0]);
+        using var subB = service.Subscribe(filters[0]);
+
+        for (var i = 0; i < filters.Length; i++)
+        {
+            for (var j = 0; j < filters.Length; j++)
+            {
+                var a = filters[i];
+                var b = filters[j];
+                subA.Reconfigure(a);
+                subB.Reconfigure(b);
+
+                uint? lowest = null;
+                uint? highest = null;
+                for (uint id = 0; id <= 0x7FF; id++)
+                {
+                    var view = new CanFrameView(CanFrameType.Can20, (int)id, ReadOnlyMemory<byte>.Empty, FrameFlags.None);
+                    if (!a.Matches(view) || !b.Matches(view)) continue;
+                    lowest ??= id;
+                    highest = id;
+                }
+
+                var overlaps = service.FindOverlappingFilterSubscriptions();
+                var because = $"filters[{i}] and filters[{j}]";
+
+                if (lowest is null)
+                {
+                    overlaps.Should().BeEmpty($"no ID matches both of {because}");
+                    continue;
+                }
+
+                overlaps.Should().ContainSingle(because);
+                overlaps[0].LowestSharedId.Should().Be(lowest.Value, $"lowest shared ID of {because}");
+                overlaps[0].HighestSharedId.Should().Be(highest!.Value, $"highest shared ID of {because}");
+            }
+        }
     }
 
     [Fact]

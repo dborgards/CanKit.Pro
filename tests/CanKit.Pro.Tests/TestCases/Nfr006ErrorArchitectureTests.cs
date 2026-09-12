@@ -77,4 +77,37 @@ public class Nfr006ErrorArchitectureTests
         (new CanOpenTransportException("x"))
             .ErrorCode.Should().Be(CanKitErrorCode.TransportOperationFailed);
     }
+
+    // ProtocolErrorCodes deliberately occupies CanKitErrorCode 6002..6005, continuing the 6000
+    // range CanKit reserves for transport and protocol errors but does not populate past 6001.
+    // docs/upstream-candidates.md explains why: the numbers are the ones an upstream adoption of
+    // these four codes would produce, so adopting them there deletes that file and changes nothing
+    // else.
+    //
+    // What makes that a bet rather than a plan is that CanKit could define one of those numbers
+    // for something of its own. Nothing would break loudly if it did -- ProtocolTimeout would
+    // simply start rendering an unrelated upstream name, and two different failures would compare
+    // equal. This is the tripwire: it fails on the CanKit bump that claims one of them, while it
+    // is still a one-line version change under review rather than a mystery in a released package.
+    [Fact]
+    public void The_Borrowed_Protocol_Error_Codes_Are_Still_Unclaimed_Upstream()
+    {
+        var borrowed = new[]
+        {
+            ProtocolErrorCodes.ProtocolTimeout,
+            ProtocolErrorCodes.ProtocolPeerAbort,
+            ProtocolErrorCodes.ProtocolNegativeResponse,
+            ProtocolErrorCodes.AddressClaimFailed,
+        };
+
+        foreach (var code in borrowed)
+        {
+            Enum.IsDefined(typeof(CanKitErrorCode), code).Should().BeFalse(
+                $"CanKitErrorCode {(int)code} is claimed by the CanKit version this build pins, so " +
+                "ProtocolErrorCodes now collides with it. Either upstream adopted these four codes " +
+                "-- in which case ProtocolErrorCodes and docs/upstream-candidates.md § 1 go away and " +
+                "callers switch to the enum members -- or it took the number for something else, and " +
+                "these four move to a range it does not use.");
+        }
+    }
 }
