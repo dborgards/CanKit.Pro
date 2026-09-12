@@ -33,15 +33,33 @@ namespace CanKit.Pro.RawCan
         private const FrameFlags IdentityFlags = FrameFlags.Ext | FrameFlags.Rtr | FrameFlags.Error;
 
         private readonly int _id;
-        private readonly byte[] _payload;
+        private readonly ReadOnlyMemory<byte> _payload;
         private readonly FrameFlags _flags;
         private readonly CanFrameType _frameKind;
         private readonly int _hash;
 
-        public PendingKey(int id, ReadOnlyMemory<byte> payload, FrameFlags flags, CanFrameType frameKind)
+        /// <summary>
+        /// Key for an entry that is about to be stored: it copies the payload, because the caller's
+        /// frame -- and on the RX side the adapter's lease behind it -- may be reused or disposed
+        /// long before the entry is matched.
+        /// </summary>
+        public static PendingKey ForPendingSend(int id, ReadOnlyMemory<byte> payload, FrameFlags flags, CanFrameType frameKind)
+            => new(id, payload.ToArray(), flags, frameKind);
+
+        /// <summary>
+        /// Key for looking one up, which aliases <paramref name="payload"/> instead of copying it:
+        /// every echo frame would otherwise cost an array allocation on the dispatch hot path just
+        /// to ask a question. Safe only because the key never leaves the lookup — it is used to
+        /// probe the dictionary and then dropped, never stored, so it cannot outlive the frame it
+        /// borrows from.
+        /// </summary>
+        public static PendingKey ForEchoLookup(int id, ReadOnlyMemory<byte> payload, FrameFlags flags, CanFrameType frameKind)
+            => new(id, payload, flags, frameKind);
+
+        private PendingKey(int id, ReadOnlyMemory<byte> payload, FrameFlags flags, CanFrameType frameKind)
         {
             _id = id;
-            _payload = payload.ToArray();
+            _payload = payload;
             _flags = flags & IdentityFlags;
             _frameKind = frameKind;
 
@@ -53,7 +71,7 @@ namespace CanKit.Pro.RawCan
                 hash = hash * 31 + _id;
                 hash = hash * 31 + (int)_flags;
                 hash = hash * 31 + (int)_frameKind;
-                foreach (var b in _payload)
+                foreach (var b in _payload.Span)
                     hash = hash * 31 + b;
                 _hash = hash;
             }
@@ -63,7 +81,7 @@ namespace CanKit.Pro.RawCan
             => _id == other._id
                && _flags == other._flags
                && _frameKind == other._frameKind
-               && _payload.AsSpan().SequenceEqual(other._payload);
+               && _payload.Span.SequenceEqual(other._payload.Span);
 
         public override bool Equals(object? obj) => obj is PendingKey other && Equals(other);
 

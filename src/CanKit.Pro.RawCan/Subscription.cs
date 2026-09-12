@@ -126,6 +126,14 @@ namespace CanKit.Pro.RawCan
         /// here would require a larger API change.
         /// </para>
         /// <para>
+        /// That copy is made once per frame, not once per subscription:
+        /// <paramref name="ownedPayload"/> carries it across the service's dispatch loop, and the
+        /// first subscription that buffers the frame is the one that creates it. Every matching
+        /// subscription therefore hands its reader the same array, exposed — as always — as a
+        /// <see cref="ReadOnlyMemory{T}"/> that a subscriber may read but not write. A frame no
+        /// subscription accepts still allocates nothing.
+        /// </para>
+        /// <para>
         /// The predicate is deliberately handed the *aliasing* event rather than the copy, so a
         /// rejected frame costs no allocation at all — the copy is made only once the frame is
         /// known to be going into the buffer. Both carry the same <see cref="CanFrameEvent.IsEcho"/>
@@ -133,7 +141,14 @@ namespace CanKit.Pro.RawCan
         /// payload, which is why the predicate must not retain what it is given.
         /// </para>
         /// </remarks>
-        internal void TryDeliver(in CanFrameView view, bool isEcho, TimeSpan receiveTimestamp)
+        /// <param name="view">The observed frame, aliasing the adapter's RX lease.</param>
+        /// <param name="isEcho">Whether the bus reported this frame as the host's own echo.</param>
+        /// <param name="receiveTimestamp">The adapter's receive timestamp for this frame.</param>
+        /// <param name="ownedPayload">
+        /// The service-owned copy of this frame's payload, shared across one dispatch of one
+        /// frame. Null until some subscription accepts the frame; set by whichever does so first.
+        /// </param>
+        internal void TryDeliver(in CanFrameView view, bool isEcho, TimeSpan receiveTimestamp, ref byte[]? ownedPayload)
         {
             if (isEcho && !_includeEcho) return;
 
@@ -148,7 +163,8 @@ namespace CanKit.Pro.RawCan
                 return;
             }
 
-            var owned = new CanFrameView(view.FrameKind, view.ID, view.Data.ToArray(), view.Flags);
+            ownedPayload ??= view.Data.ToArray();
+            var owned = new CanFrameView(view.FrameKind, view.ID, ownedPayload, view.Flags);
             _channel.Writer.TryWrite(new CanFrameEvent(owned, isEcho, receiveTimestamp));
         }
 

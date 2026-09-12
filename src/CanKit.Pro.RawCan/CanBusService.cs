@@ -174,6 +174,15 @@ namespace CanKit.Pro.RawCan
             var view = e.CanFrame;
             var isEcho = e.IsEcho;
             var receiveTimestamp = e.ReceiveTimestamp;
+
+            // One owned payload copy per *frame*, created by the first subscription that actually
+            // buffers it and reused by every later one, instead of one copy per matching
+            // subscription. The copy exists because the view aliases the adapter's RX lease (see
+            // Subscription.TryDeliver); nothing about that reason is per-subscriber, and what the
+            // subscribers get handed is a ReadOnlyMemory they may only read. A frame nobody
+            // matches still allocates nothing at all.
+            byte[]? ownedPayload = null;
+
             foreach (var subscription in subscriptions)
             {
                 // A subscription's filter predicate is caller-supplied and may throw. Isolate each
@@ -185,7 +194,7 @@ namespace CanKit.Pro.RawCan
                 // of being silently swallowed.
                 try
                 {
-                    subscription.TryDeliver(view, isEcho, receiveTimestamp);
+                    subscription.TryDeliver(view, isEcho, receiveTimestamp, ref ownedPayload);
                 }
                 catch (Exception ex)
                 {
@@ -300,7 +309,7 @@ namespace CanKit.Pro.RawCan
 
         private async Task<TxConfirmation> SendWithEchoConfirmAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            var pending = new PendingSend(new PendingKey(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
+            var pending = new PendingSend(PendingKey.ForPendingSend(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
 
             int accepted;
             try
@@ -431,7 +440,9 @@ namespace CanKit.Pro.RawCan
 
         private void TryMatchEcho(in CanFrameView echoView)
         {
-            var key = new PendingKey(echoView.ID, echoView.Data, echoView.Flags, echoView.FrameKind);
+            // Aliases the echo frame's payload rather than copying it: this runs for every echo
+            // frame the adapter reports, and the key is dropped again before the lock is released.
+            var key = PendingKey.ForEchoLookup(echoView.ID, echoView.Data, echoView.Flags, echoView.FrameKind);
             PendingSend? matched = null;
 
             lock (_pendingGate)

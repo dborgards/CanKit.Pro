@@ -378,4 +378,45 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
             "the BusOff path must resolve the confirmation immediately, not via the 30 s timeout");
     }
+
+    // Echo matching runs for every echo frame the adapter reports while any send is outstanding,
+    // and it used to copy that frame's payload into the lookup key just to ask whether anything
+    // was waiting for it. The key never leaves the lookup, so it can borrow the payload instead.
+    //
+    // Measured rather than asserted structurally, because "does not allocate" is precisely the
+    // claim: the frames below deliberately do not match the outstanding send, so every one of them
+    // takes the full lookup path. GetAllocatedBytesForCurrentThread is exact for this thread, and
+    // RaiseObserved delivers synchronously on it, so the only noise is the fixed per-call cost of
+    // raising the event -- far below the 64-byte payload a copy would add each time.
+    [Fact]
+    public async Task Echo_Lookup_Does_Not_Copy_The_Payload_Of_Every_Echo_Frame()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+        sender.EchoAcceptedFrames = false;
+
+        // One outstanding send, so the lookup is actually reached (with none, OnFrameObserved
+        // short-circuits before building a key at all).
+        var outstanding = service.SendConfirmed(CanFrame.Classic(0x111, new byte[] { 1 }),
+            TimeSpan.FromSeconds(30));
+
+        // A 64-byte payload on an ID nothing is waiting for: reached, hashed, compared, no match.
+        var unmatched = CanFrame.Fd(0x222, new byte[64]);
+
+        const int warmup = 50;
+        const int measured = 500;
+        for (var i = 0; i < warmup; i++) sender.RaiseObserved(unmatched, isEcho: true);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < measured; i++) sender.RaiseObserved(unmatched, isEcho: true);
+        var perFrame = (GC.GetAllocatedBytesForCurrentThread() - before) / (double)measured;
+
+        perFrame.Should().BeLessThan(64,
+            "the lookup key must borrow the echo payload rather than copy it");
+
+        outstanding.IsCompleted.Should().BeFalse("none of those echoes matched the pending send");
+
+        service.Dispose();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => outstanding);
+    }
 }

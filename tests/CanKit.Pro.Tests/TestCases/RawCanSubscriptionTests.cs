@@ -812,13 +812,67 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         DrainIds(loud).Should().Equal(0x600, 0x601);
     }
 
+    // The payload copy that shields a buffered frame from the adapter's RX lease is made once per
+    // *frame*, not once per matching subscription: the reason for it -- the lease may be disposed
+    // before anyone reads -- is a property of the frame, and what a subscriber receives is a
+    // read-only view either way. With n subscriptions matching, this is n-1 array allocations and
+    // copies per frame that no longer happen on the dispatch hot path.
+    [Fact]
+    public void Two_Subscriptions_Receiving_The_Same_Frame_Share_One_Payload_Copy()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var first = service.Subscribe();
+        using var second = service.Subscribe();
+
+        var source = new byte[] { 1, 2, 3, 4 };
+        bus.RaiseObserved(CanFrame.Classic(0x123, source), isEcho: false);
+
+        first.TryRead(out var a).Should().BeTrue();
+        second.TryRead(out var b).Should().BeTrue();
+
+        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
+        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
+        ReferenceEquals(segA.Array, segB.Array).Should().BeTrue(
+            "one copy per frame is shared by every subscription that buffers it");
+
+        // Still a copy, not the caller's own array: that is the whole point of making one.
+        ReferenceEquals(segA.Array, source).Should().BeFalse(
+            "the buffered payload must not alias the frame the adapter handed out");
+        a.Frame.Data.ToArray().Should().Equal(source);
+    }
+
     // CanFrameEvent equality must compare payload *bytes*, not which array holds them.
     //
     // CanFrameView is a record struct over a ReadOnlyMemory<byte>, and its generated equality
     // tests the memory segment rather than the contents. Delegating to it looked harmless and was
-    // not: TryDeliver allocates a fresh array per delivered frame, so the same frame fanned out to
-    // two subscriptions produced two events that compared unequal — the opposite of what `a == b`
-    // means for a value type.
+    // not: two events describing the same frame over two different arrays compared unequal — the
+    // opposite of what `a == b` means for a value type. The events are built here rather than
+    // drained from two subscriptions (which is how the bug was originally found) so that the
+    // distinct-buffer case stays covered no matter how many copies the demux makes.
+    [Fact]
+    public void Events_Over_Distinct_Buffers_With_Equal_Bytes_Are_Equal()
+    {
+        var timestamp = TimeSpan.FromMilliseconds(7);
+        var a = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x123, new byte[] { 1, 2, 3, 4 }, FrameFlags.None),
+            isEcho: false, timestamp);
+        var b = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x123, new byte[] { 1, 2, 3, 4 }, FrameFlags.None),
+            isEcho: false, timestamp);
+
+        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
+        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
+        ReferenceEquals(segA.Array, segB.Array).Should().BeFalse(
+            "distinct buffers by construction -- that is exactly the case that used to break");
+
+        a.Should().Be(b);
+        (a == b).Should().BeTrue();
+        a.GetHashCode().Should().Be(b.GetHashCode(), "equal values must hash equally");
+    }
+
+    // ... and the same frame fanned out to two subscriptions still produces equal events, which is
+    // how the equality bug above surfaced in the first place.
     [Fact]
     public void Two_Subscriptions_Receiving_The_Same_Frame_Produce_Equal_Events()
     {
@@ -834,12 +888,6 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         first.TryRead(out var a).Should().BeTrue();
         second.TryRead(out var b).Should().BeTrue();
-
-        // Distinct buffers by construction -- that is exactly the case that used to break.
-        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
-        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
-        ReferenceEquals(segA.Array, segB.Array).Should().BeFalse(
-            "each subscription buffers its own copy");
 
         a.Should().Be(b);
         (a == b).Should().BeTrue();

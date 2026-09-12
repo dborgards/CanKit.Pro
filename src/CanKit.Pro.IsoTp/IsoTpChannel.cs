@@ -352,9 +352,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 .ConfigureAwait(false))
             {
                 var frame = frameEvent.Frame;
-                // Copy defensively: CanFrameView.Data may reference a reused buffer once we
-                // hand control back to the subscription, and the RX state machine will keep the
-                // payload alive across await points via the reassembly buffer.
+                // Not the hazard the previous comment described: the subscription already hands
+                // out a payload it owns, so nothing the adapter does can corrupt it. What it hands
+                // out is one array shared by every subscription that matched the frame, and it is
+                // a ReadOnlyMemory<byte> while the state machine below wants a byte[] it keeps
+                // across await points -- so this stays a copy, now as this channel's private
+                // buffer rather than as protection against the RX lease.
                 var payload = frame.Data.ToArray();
                 var addrExt = _endpoint.UsesAddressExtension;
                 // Endpoint uses an address-extension byte and the first byte does not match:
