@@ -19,9 +19,9 @@ namespace CanKit.Pro.RawCan
             public static readonly FilterCriteria AcceptAll = new(null, null);
 
             public CanIdFilter? IdFilter { get; }
-            public Func<CanFrameView, bool>? Predicate { get; }
+            public Func<CanFrameEvent, bool>? Predicate { get; }
 
-            public FilterCriteria(CanIdFilter? idFilter, Func<CanFrameView, bool>? predicate)
+            public FilterCriteria(CanIdFilter? idFilter, Func<CanFrameEvent, bool>? predicate)
             {
                 IdFilter = idFilter;
                 Predicate = predicate;
@@ -29,7 +29,12 @@ namespace CanKit.Pro.RawCan
         }
 
         private readonly CanBusService _service;
-        private readonly Channel<CanFrameView> _channel;
+        private readonly Channel<CanFrameEvent> _channel;
+
+        // Fixed at Subscribe time and never reconfigurable: "do I want to see my own
+        // transmissions?" is a property of what the subscriber *is*, not of which IDs it happens
+        // to be interested in right now, and every Reconfigure would otherwise have to restate it.
+        private readonly bool _includeEcho;
 
         // Swapped atomically on Reconfigure (FR-RAW-014); volatile read on the dispatch hot path.
         private volatile FilterCriteria _criteria;
@@ -56,10 +61,12 @@ namespace CanKit.Pro.RawCan
         internal Subscription(
             CanBusService service,
             CanIdFilter? idFilter,
-            Func<CanFrameView, bool>? predicate,
-            int capacity)
+            Func<CanFrameEvent, bool>? predicate,
+            int capacity,
+            bool includeEcho)
         {
             _service = service;
+            _includeEcho = includeEcho;
             _criteria = idFilter is { } filter
                 ? new FilterCriteria(filter, null)
                 : predicate is { } p
@@ -68,7 +75,7 @@ namespace CanKit.Pro.RawCan
 
             // Bounded + DropOldest gives the same non-blocking fan-out semantics AsyncFramePipe
             // uses for the L1 RX pipe (src/core/CanKit.Core/Utils/AsyncFramePipe.cs). We use a
-            // local Channel rather than AsyncFramePipe<CanFrameView> so Dispose can Complete the
+            // local Channel rather than AsyncFramePipe<CanFrameEvent> so Dispose can Complete the
             // writer and end the async enumerator deterministically (FR-RAW-012) — AsyncFramePipe
             // does not expose graceful completion.
             var options = new BoundedChannelOptions(capacity)
@@ -77,7 +84,7 @@ namespace CanKit.Pro.RawCan
                 SingleWriter = false,
                 FullMode = BoundedChannelFullMode.DropOldest,
             };
-            _channel = Channel.CreateBounded<CanFrameView>(options);
+            _channel = Channel.CreateBounded<CanFrameEvent>(options);
         }
 
         /// <inheritdoc />
@@ -88,7 +95,7 @@ namespace CanKit.Pro.RawCan
         }
 
         /// <inheritdoc />
-        public void Reconfigure(Func<CanFrameView, bool>? predicate)
+        public void Reconfigure(Func<CanFrameEvent, bool>? predicate)
         {
             ThrowIfDisposed();
             Interlocked.Exchange(
@@ -104,6 +111,10 @@ namespace CanKit.Pro.RawCan
         /// returns false, so a racing dispatch after removal is harmless.
         /// </summary>
         /// <remarks>
+        /// The echo gate comes first, before any filter runs: a subscription that did not opt in
+        /// must not even have its predicate called with an echo, or a caller-supplied predicate
+        /// would become a place where an echo can still cause a side effect.
+        /// <para>
         /// <paramref name="view"/> aliases the payload memory of the adapter's own (disposable)
         /// RX-lease frame: <c>ICanBus.FrameObserved</c> fires before that frame is handed to the
         /// bus's L1 <c>AsyncFramePipe</c>, which may later dispose it (pool return / reuse) —
@@ -113,36 +124,48 @@ namespace CanKit.Pro.RawCan
         /// deliberate small per-matched-frame allocation: <see cref="CanFrameView"/> has no
         /// disposal/ownership contract of its own for callers to release a pooled copy, so pooling
         /// here would require a larger API change.
+        /// </para>
+        /// <para>
+        /// The predicate is deliberately handed the *aliasing* event rather than the copy, so a
+        /// rejected frame costs no allocation at all — the copy is made only once the frame is
+        /// known to be going into the buffer. Both carry the same <see cref="CanFrameEvent.IsEcho"/>
+        /// and <see cref="CanFrameEvent.ReceiveTimestamp"/>; they differ only in who owns the
+        /// payload, which is why the predicate must not retain what it is given.
+        /// </para>
         /// </remarks>
-        internal void TryDeliver(in CanFrameView view)
+        internal void TryDeliver(in CanFrameView view, bool isEcho, TimeSpan receiveTimestamp)
         {
+            if (isEcho && !_includeEcho) return;
+
             var criteria = _criteria;
             if (criteria.IdFilter is { } filter)
             {
                 if (!filter.Matches(view)) return;
             }
-            else if (criteria.Predicate is { } predicate && !predicate(view))
+            else if (criteria.Predicate is { } predicate
+                     && !predicate(new CanFrameEvent(view, isEcho, receiveTimestamp)))
             {
                 return;
             }
 
             var owned = new CanFrameView(view.FrameKind, view.ID, view.Data.ToArray(), view.Flags);
-            _channel.Writer.TryWrite(owned);
+            _channel.Writer.TryWrite(new CanFrameEvent(owned, isEcho, receiveTimestamp));
         }
 
-        public IAsyncEnumerable<CanFrameView> Frames => ReadAsync();
+        /// <inheritdoc/>
+        public IAsyncEnumerable<CanFrameEvent> Frames => ReadAsync();
 
         /// <inheritdoc/>
-        public bool TryRead(out CanFrameView frame) => _channel.Reader.TryRead(out frame);
+        public bool TryRead(out CanFrameEvent frameEvent) => _channel.Reader.TryRead(out frameEvent);
 
-        private async IAsyncEnumerable<CanFrameView> ReadAsync(
+        private async IAsyncEnumerable<CanFrameEvent> ReadAsync(
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             var reader = _channel.Reader;
             while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                while (reader.TryRead(out var view))
-                    yield return view;
+                while (reader.TryRead(out var frameEvent))
+                    yield return frameEvent;
             }
         }
 

@@ -51,17 +51,30 @@ using var service = new CanBusService(bus);
 using var isoTp = service.Subscribe(CanIdFilter.Range(0x700, 0x7FF));
 
 // Predicate when a range or acceptance mask is not enough.
-using var errors = service.Subscribe(view => view.IsErrorFrame);
+using var errors = service.Subscribe(e => e.Frame.IsErrorFrame);
 
-await foreach (var frame in isoTp.Frames.WithCancellation(token))
+// Opt in where you want to see your own transmissions come back -- a bus monitor, say.
+using var trace = service.Subscribe(includeEcho: true);
+
+await foreach (var e in isoTp.Frames.WithCancellation(token))
 {
-    // CanFrameView: read-only, no ownership, safe to keep past this iteration.
+    // e.Frame            -- CanFrameView: read-only, no ownership, safe to keep past this
+    //                       iteration (the demux copies the payload before buffering it).
+    // e.IsEcho           -- the bus's own flag; always false unless you asked for echoes.
+    // e.ReceiveTimestamp -- what the adapter recorded, zero on adapters that do not timestamp.
 }
 ```
 
 Each subscription has its own bounded, drop-oldest buffer, so a slow consumer drops its own frames
 instead of blocking everyone else. Disposing a subscription deregisters it and completes its
 stream; disposing the service unwinds all of them and detaches from the bus.
+
+**Echoes are not delivered unless you ask.** On a bus configured for echo
+(`WorkMode == ChannelWorkMode.Echo`) the adapter reports your own transmissions back through the
+same RX stream. Frames you sent are not frames you received, and a protocol layer that confuses
+the two misbehaves only on the hardware that happens to echo — so the default is off, per
+subscription, and `includeEcho: true` is a deliberate choice. `SendConfirmed` is unaffected either
+way: it matches echoes on the bus event itself, not through a subscription.
 
 If two instances were meant to have disjoint ID spaces, you can check rather than hope:
 

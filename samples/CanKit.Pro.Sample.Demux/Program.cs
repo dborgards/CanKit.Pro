@@ -59,9 +59,14 @@ static async Task Print(string label, ISubscription subscription, CancellationTo
 {
     try
     {
-        await foreach (var frame in subscription.Frames.WithCancellation(token))
+        await foreach (var frameEvent in subscription.Frames.WithCancellation(token))
         {
-            Console.WriteLine($"[{label}] 0x{frame.ID:X3} len={frame.Len}");
+            var frame = frameEvent.Frame;
+            // Echoes are excluded by default, so `IsEcho` is false for everything printed here;
+            // it is shown to make the shape of the delivered item visible in the sample.
+            Console.WriteLine(
+                $"[{label}] 0x{frame.ID:X3} len={frame.Len} echo={frameEvent.IsEcho} " +
+                $"t={frameEvent.ReceiveTimestamp.TotalMilliseconds:F1}ms");
         }
     }
     catch (OperationCanceledException)

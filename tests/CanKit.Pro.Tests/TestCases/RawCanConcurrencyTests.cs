@@ -81,14 +81,14 @@ public class RawCanConcurrencyTests : IClassFixture<VirtualAdapterFixture>
                 var myId = w % 2 == 0 ? 0x100 : 0x200;
                 for (var i = 0; i < 25; i++)
                 {
-                    using var sub = service.Subscribe(f => f.ID == myId);
+                    using var sub = service.Subscribe(f => f.Frame.ID == myId);
                     // Drain briefly, then dispose mid-stream (the churn under test).
                     using var readCts = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
                     try
                     {
-                        await foreach (var frame in sub.Frames.WithCancellation(readCts.Token))
+                        await foreach (var frameEvent in sub.Frames.WithCancellation(readCts.Token))
                         {
-                            frame.ID.Should().Be(myId,
+                            frameEvent.Frame.ID.Should().Be(myId,
                                 "a subscription must only ever observe its own filter's frames");
                         }
                     }

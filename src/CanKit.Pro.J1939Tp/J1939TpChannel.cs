@@ -119,7 +119,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 accCode: J1939Pgn.TpDt << 8,      // PF = 0xEB in bits 23..16
                 accMask: 0x00FF0000u,
                 idType: CanFilterIDType.Extend);
-            _subscription = _service.Subscribe(f => tpCmFilter.Matches(f) || tpDtFilter.Matches(f));
+            // Echoes stay out (the default): a bus in ChannelWorkMode.Echo replays our own TP
+            // frames, and treating one as peer traffic would open a session against ourselves.
+            _subscription = _service.Subscribe(f => tpCmFilter.Matches(f.Frame) || tpDtFilter.Matches(f.Frame));
         }
         catch
         {
@@ -298,9 +300,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         try
         {
-            await foreach (var frame in _subscription.Frames.WithCancellation(_readerCts.Token)
+            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue; // J1939-TP is 29-bit only
                 var payload = frame.Data.ToArray();
                 if (payload.Length < 8) continue; // TP.CM / TP.DT are always 8 bytes on the wire
@@ -312,12 +315,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // Destination filter: BAM/CM directed at us (SA) or globally broadcast (0xFF).
                 if (destination != _sourceAddress && destination != J1939Pgn.GlobalAddress)
                     continue;
-                // Also skip anything we sent ourselves (a bus in Echo mode replays TX frames --
-                // handling our own SA as if a foreign peer sent it would spuriously open a
-                // session against ourselves).
-                if (fields.SourceAddress == _sourceAddress)
-                    continue;
-
+                // No source-address self-check here any more. It used to stand in for the echo
+                // flag the demux was discarding (#23); now the subscription simply does not
+                // deliver echoes. What the check additionally suppressed -- a peer transmitting
+                // from our own SA -- is an address collision that J1939 address claim exists to
+                // resolve, not something a transport channel should silently drop.
                 var pgn = fields.Pgn;
                 var sa = fields.SourceAddress;
                 var da = destination;

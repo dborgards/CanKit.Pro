@@ -260,9 +260,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         try
         {
-            await foreach (var frame in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
+            await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frame, out var response))
+                if (TryParseFunctionalResponse(frameEvent.Frame, out var response))
                     responses.Add(response!);
             }
         }
@@ -280,9 +280,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
             // drain whatever was already buffered. Dispose is idempotent with the caller's
             // `using`.
             sub.Dispose();
-            while (sub.TryRead(out var frame))
+            while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frame, out var response))
+                if (TryParseFunctionalResponse(frameEvent.Frame, out var response))
                     responses.Add(response!);
             }
         }

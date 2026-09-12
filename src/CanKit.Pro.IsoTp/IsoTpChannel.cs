@@ -338,9 +338,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         try
         {
-            await foreach (var frame in _subscription.Frames.WithCancellation(_readerCts.Token)
+            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                var frame = frameEvent.Frame;
                 // Copy defensively: CanFrameView.Data may reference a reused buffer once we
                 // hand control back to the subscription, and the RX state machine will keep the
                 // payload alive across await points via the reassembly buffer.

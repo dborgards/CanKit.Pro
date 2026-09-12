@@ -1,7 +1,7 @@
 # CanKit.Pro.RawCan
 
 Raw-CAN service layer for [CanKit](https://github.com/pkuyo/CanKit): multi-protocol
-demultiplexing / subscriptions (arc42 §5.3, ADR-5; SRS FR-RAW-010..014) and a TX-confirm
+demultiplexing / subscriptions (arc42 §5.3, ADR-5; SRS FR-RAW-010..015) and a TX-confirm
 abstraction (arc42 §6.3, ADR-7; SRS FR-RAW-030..034).
 
 Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
@@ -26,11 +26,14 @@ using var service = new CanBusService(bus);
 using var isoTp = service.Subscribe(CanIdFilter.Range(0x700, 0x7FF));
 
 // Generic predicate when a range/mask is not enough.
-using var custom = service.Subscribe(view => view.IsExtendedFrame && view.Len == 8);
+using var custom = service.Subscribe(e => e.Frame.IsExtendedFrame && e.Frame.Len == 8);
 
-await foreach (var frame in isoTp.Frames.WithCancellation(token))
+await foreach (var e in isoTp.Frames.WithCancellation(token))
 {
-    // frame is a read-only CanFrameView (no ownership/disposal concerns)
+    // e.Frame            read-only CanFrameView, no ownership/disposal concerns, and it owns
+    //                    its payload -- valid after the adapter has released the RX lease
+    // e.IsEcho           the bus's own echo flag (see below)
+    // e.ReceiveTimestamp what the adapter recorded; zero on adapters that do not timestamp
 }
 ```
 
@@ -41,6 +44,24 @@ service unwinds all subscriptions and detaches from the bus (FR-RAW-012). Call
 runtime without recreating the subscription (FR-RAW-014); only frames observed after the call follow
 the new criterion. This layer is built purely on the public `ICanBus.FrameObserved` surface, so it
 works identically for every adapter.
+
+### Echoes
+
+A bus opened with `WorkMode == ChannelWorkMode.Echo` reports the host's own transmissions back
+through the same RX stream, flagged as echoes. **Subscriptions do not deliver them unless asked**:
+
+```csharp
+using var quiet = service.Subscribe();                     // peer traffic only (the default)
+using var trace = service.Subscribe(includeEcho: true);    // everything, e.Frame + e.IsEcho
+```
+
+Off by default because frames you sent are not frames you received: a J1939 node that treats its
+own Address Claim as a competitor's, or a CANopen node that acts on its own PDO, is broken only on
+the hardware that happens to echo. Where a subscription did not opt in, an echo is dropped before
+the filter runs, so it never reaches a caller-supplied predicate either.
+
+`SendConfirmed` is independent of this: it matches echoes on the bus event itself, so withholding
+them from subscribers does not affect TX confirmation.
 
 ## TX-Confirm
 

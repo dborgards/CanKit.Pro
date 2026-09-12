@@ -21,6 +21,17 @@ namespace CanKit.Pro.RawCan
     /// concerns), so it works identically for every adapter with no per-adapter changes.
     /// Disposing the service unwinds all outstanding subscriptions and detaches its handler from
     /// the underlying bus (FR-RAW-012). Dispose is idempotent.
+    /// <para>
+    /// <b>Echoes.</b> When the bus is configured for echo (<c>WorkMode == ChannelWorkMode.Echo</c>)
+    /// it reports the host's own transmissions back through the same RX stream, flagged as such.
+    /// A subscription receives them only if it asked for them, and the flag rides along on every
+    /// delivered <see cref="CanFrameEvent"/> either way. The default is off because the frames a
+    /// protocol layer sends are not frames it received: a J1939 node that treats its own Address
+    /// Claim as a competitor's, or a CANopen node that acts on its own PDO, is broken in a way
+    /// that only shows up on hardware that happens to echo. Before this flag existed each of those
+    /// layers had rebuilt "is this mine?" out of application data — comparing NAMEs, comparing
+    /// source addresses, guarding on actor affinity — to recover a bit the driver had already set.
+    /// </para>
     /// </remarks>
     public interface ICanBusService : IDisposable
     {
@@ -50,13 +61,24 @@ namespace CanKit.Pro.RawCan
         /// <paramref name="predicate"/> returns true; a null predicate accepts all frames
         /// (FR-RAW-010).
         /// </summary>
-        /// <param name="predicate">Per-frame filter, or null to accept all frames.</param>
+        /// <param name="predicate">
+        /// Per-frame filter, or null to accept all frames. Runs on the bus's dispatch thread
+        /// before the payload is copied, so the <see cref="CanFrameEvent.Frame"/> it inspects
+        /// aliases the adapter's RX lease and must not be retained beyond the call. It is never
+        /// offered an echo unless <paramref name="includeEcho"/> is set.
+        /// </param>
         /// <param name="bufferCapacity">
         /// Bounded buffer capacity for this subscription; null uses
         /// <see cref="CanBusService.DefaultBufferCapacity"/>. When the buffer is full the oldest
         /// buffered frame is dropped so dispatch never blocks (FR-RAW-011).
         /// </param>
-        ISubscription Subscribe(Func<CanFrameView, bool>? predicate = null, int? bufferCapacity = null);
+        /// <param name="includeEcho">
+        /// Whether this subscription also receives the local host's own transmit echoes. Defaults
+        /// to <c>false</c>: a protocol layer that sees its own transmissions come back as if they
+        /// were peer traffic misbehaves in ways that are tedious to diagnose, so opting in is a
+        /// decision the caller makes deliberately (see the remarks below).
+        /// </param>
+        ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false);
 
         /// <summary>
         /// Registers a subscription using the allocation-free ID-range/mask fast path
@@ -67,14 +89,18 @@ namespace CanKit.Pro.RawCan
         /// Bounded buffer capacity for this subscription; null uses
         /// <see cref="CanBusService.DefaultBufferCapacity"/>.
         /// </param>
-        ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null);
+        /// <param name="includeEcho">
+        /// Whether this subscription also receives the local host's own transmit echoes; false by
+        /// default. See the predicate overload above.
+        /// </param>
+        ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false);
 
         /// <summary>
         /// Diagnostic: finds every pair of currently registered, still-undisposed
         /// <see cref="CanIdFilter"/>-based subscriptions whose ID spaces overlap (FR-RAW-041,
         /// "Should") -- helps catch misconfiguration when multiple protocol instances were meant
         /// to have disjoint ID ranges but don't. Subscriptions registered via the generic
-        /// <see cref="Subscribe(Func{CanFrameView,bool}, int?)"/> predicate overload are opaque
+        /// <see cref="Subscribe(Func{CanFrameEvent,bool}, int?, bool)"/> predicate overload are opaque
         /// and are not analyzable, so they are skipped.
         /// </summary>
         IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions();

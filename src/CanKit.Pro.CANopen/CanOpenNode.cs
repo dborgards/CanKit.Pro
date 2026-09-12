@@ -206,10 +206,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // We evaluate the actual routing in the actor since the RPDO table changes at
             // runtime, but pre-filtering at the subscription reduces per-frame delegate calls
             // on the demux side.
+            // Echoes stay out (the default): on a ChannelWorkMode.Echo bus this node's own
+            // TPDOs, heartbeats and SDO responses would otherwise come back on exactly the
+            // COB-IDs this filter accepts, and be routed as if a peer had sent them.
             _subscription = _service.Subscribe(f =>
             {
-                if (f.IsExtendedFrame) return false;
-                uint id = (uint)f.ID;
+                var frame = f.Frame;
+                if (frame.IsExtendedFrame) return false;
+                uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
                 return id == CanOpenCobId.NmtCommand || (id >= 0x080 && id <= 0x77F);
             });
@@ -575,9 +579,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         try
         {
-            await foreach (var frame in _subscription.Frames.WithCancellation(_readerCts.Token)
+            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                var frame = frameEvent.Frame;
                 if (frame.IsExtendedFrame) continue;
                 uint id = (uint)frame.ID;
                 // Node-guarding (FR-CO-009) piggy-backs on the heartbeat COB-ID and uses a
@@ -1652,7 +1657,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// Only application writes count: bus-originated OD writes (SDO server download commit,
     /// RPDO unpack) run on the node's actor thread and are filtered out here via
     /// <c>ProtocolActor.IsOnCurrentActor</c>, so an RPDO mapped to the same entry as a
-    /// TPDO cannot produce bus echo loops.
+    /// TPDO cannot produce a feedback loop with the peer that sent it.
+    /// <para>
+    /// This is a provenance check, not a TX-echo check, and #23 did not remove it. The writes it
+    /// suppresses come from a <em>peer</em> — a real SDO download, a real RPDO — so the bus's
+    /// echo flag says nothing about them; what distinguishes them from an application write is
+    /// only that they are applied on the actor loop. (Excluding echoes at the subscription does
+    /// close a second, narrower path into here: this node's own TPDO coming back on an
+    /// echo-capable bus and being unpacked as an RPDO.) The check is sound now that #19 has
+    /// moved <c>IsOnCurrentActor</c> off <c>AsyncLocal</c> onto a thread-static, so a send task
+    /// started from actor work no longer reports true and no longer swallows a legitimate
+    /// application write.
+    /// </para>
     /// Load safety: the actor mailbox is intentionally unbounded, so this path must never
     /// post per write. A volatile snapshot of the mapped entries filters irrelevant writes
     /// with zero actor traffic, and relevant writes are coalesced into a bounded dirty set —
@@ -1663,7 +1679,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private void OnOdEntryWrittenForCoS(ushort index, byte subindex)
     {
         if (!_options.EnableChangeOfStateTpdo) return;
-        if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (echo guard)
+        if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (see remarks)
         if (Volatile.Read(ref _disposed) != 0) return;
 
         var key = CosKey(index, subindex);

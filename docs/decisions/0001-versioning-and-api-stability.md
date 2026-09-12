@@ -24,7 +24,7 @@ without changing the public surface:
 
 | Issue | The fix that is actually right |
 | --- | --- |
-| [#23](https://github.com/dborgards/CanKit.Pro/issues/23) | Subscription items carry `IsEcho` and the bus timestamp, and echoes are not delivered unless asked for, so the three hand-rolled echo workarounds in J1939, CANopen and the TP channel can go |
+| [#23](https://github.com/dborgards/CanKit.Pro/issues/23) | Subscription items carry `IsEcho` and the bus timestamp, and echoes are not delivered unless asked for, so the layers above stop reconstructing "is this mine?" from application data |
 | [#37](https://github.com/dborgards/CanKit.Pro/issues/37) | SPN extraction returns a value that can say "not available" or "error" instead of reporting `0xFFFF` as 8191.875 rpm |
 | [#44](https://github.com/dborgards/CanKit.Pro/issues/44) | `SdoTransferMode.Expedited` and `.Segmented` are removed, because nothing enforces them |
 | [#82](https://github.com/dborgards/CanKit.Pro/issues/82) | `FindOverlappingFilterSubscriptions()` is replaced by a named `FilterOverlap` type instead of a bare tuple pair |

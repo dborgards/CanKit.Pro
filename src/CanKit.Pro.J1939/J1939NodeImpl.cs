@@ -137,9 +137,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             // Subscribe to every extended-ID frame and classify on the actor loop. A single
             // predicate-less subscription is simpler than three overlapping mask filters and
-            // still allocation-light: CanFrameView is a readonly struct passed by ref via the
+            // still allocation-light: CanFrameEvent is a readonly struct passed by ref via the
             // subscription's async enumerator (FR-RAW-010/011).
-            _subscription = _service.Subscribe(f => f.IsExtendedFrame);
+            //
+            // Echoes stay out (the default): on a ChannelWorkMode.Echo adapter every frame this
+            // node sends would otherwise arrive back here and be classified as peer traffic.
+            _subscription = _service.Subscribe(f => f.Frame.IsExtendedFrame);
         }
         catch
         {
@@ -433,10 +436,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
         if (payload.Length < 8) return; // malformed
         var peerName = J1939Name.Decompose(BitConverter.ToUInt64(payload, 0));
 
-        // Own transmit echo (or an identical NAME on the bus) must not be treated as a losing
-        // peer — equal NAME fails HasHigherClaimPriorityThan and would re-announce forever on
-        // ChannelWorkMode.Echo adapters (Bugbot 3600783801). CanFrameView has no IsEcho bit,
-        // so NAME equality is the reliable local-TX filter for Address Claim.
+        // A frame carrying our own NAME cannot be a claim we have to arbitrate against: equal
+        // NAME fails HasHigherClaimPriorityThan in both directions, so both parties would take
+        // the "peer loses, re-announce" branch below and re-announce at each other forever.
+        //
+        // This used to double as the local-TX filter, because the demux dropped the bus's echo
+        // flag and NAME equality was the only way to recognise our own transmission (#23,
+        // Bugbot 3600783801). That job is gone: the subscription above excludes echoes outright.
+        // What is left is the case the workaround was standing in front of — two nodes genuinely
+        // configured with the same NAME, which SAE J1939-81 §4.4.3 does not permit. We cannot
+        // win against such a peer and must not fight it, so the claim is ignored.
         if (peerName.Value == _name.Value) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
@@ -786,9 +795,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         try
         {
-            await foreach (var frame in _subscription.Frames.WithCancellation(_readerCts.Token)
+            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                // The subscription does not deliver echoes, so everything reaching this loop is
+                // genuine bus traffic from a peer.
+                var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue;
                 var fields = J1939Id.Decompose((uint)frame.ID);
                 // Skip TP traffic — the shared J1939-TP channel demuxes those separately.
