@@ -436,6 +436,30 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         CancellationToken cancellationToken)
         => SdoUploadAsync(serverNodeId, index, subindex, SdoTransferMode.Auto, cancellationToken);
 
+    /// <summary>
+    /// Rejects an <see cref="SdoTransferMode"/> value that is not a defined member.
+    /// </summary>
+    /// <remarks>
+    /// Both transfer entry points route "not <see cref="SdoTransferMode.Block"/>" to the classic
+    /// client, so an undefined value used to select a transport silently. That is the wrong
+    /// failure for a value that can only arrive from a bug: an assembly still compiled against
+    /// 1.2.x supplies the literal <c>1</c> or <c>2</c> for the removed <c>Expedited</c> and
+    /// <c>Segmented</c> members, and a caller following an out-of-date migration note could pass
+    /// the same. Throwing names the problem where it happens instead of leaving a wrong transport
+    /// to be diagnosed on the wire.
+    /// </remarks>
+    private static void ValidateTransferMode(SdoTransferMode mode, string paramName)
+    {
+        if (mode is not (SdoTransferMode.Auto or SdoTransferMode.Block))
+        {
+            throw new ArgumentOutOfRangeException(paramName, mode,
+                $"Unknown {nameof(SdoTransferMode)} value. Only {nameof(SdoTransferMode.Auto)} " +
+                $"and {nameof(SdoTransferMode.Block)} are defined; the removed Expedited (1) and " +
+                "Segmented (2) members had no effect on the wire and their argument should simply " +
+                "be dropped.");
+        }
+    }
+
     /// <inheritdoc />
     public Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
@@ -443,6 +467,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(serverNodeId);
+        ValidateTransferMode(mode, nameof(mode));
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
@@ -477,6 +502,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(serverNodeId);
+        ValidateTransferMode(mode, nameof(mode));
         if (data.Length == 0)
         {
             // The expedited encoding steals bit-pair "n" from the CS byte to advertise how many

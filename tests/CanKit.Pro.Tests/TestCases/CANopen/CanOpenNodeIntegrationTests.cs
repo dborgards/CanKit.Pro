@@ -56,6 +56,35 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         raw.Should().Equal(0x91, 0x01, 0x03, 0x00); // little-endian U32
     }
 
+    // The removed Expedited (1) and Segmented (2) members left their numeric values behind. An
+    // assembly still compiled against 1.2.x supplies those literals, and so would a caller
+    // following an out-of-date migration note. Both entry points route "not Block" to the classic
+    // client, so such a value used to pick a transport silently — the wrong failure for an
+    // argument that can only arrive from a bug. It must throw instead.
+    [Theory]
+    [InlineData(1)]   // the value Expedited carried in 1.2.x
+    [InlineData(2)]   // the value Segmented carried in 1.2.x
+    [InlineData(99)]  // never defined at all
+    public void Sdo_Transfer_With_An_Undefined_Mode_Throws_Rather_Than_Picking_A_Transport(int rawMode)
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+
+        var mode = (SdoTransferMode)rawMode;
+
+        // Deliberately Action rather than the async overload: the rejection must happen
+        // synchronously, before a Task is handed back, so it cannot be missed by a caller that
+        // never awaits.
+        Action upload = () => _ = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x1000,
+            subindex: 0x00, mode);
+        Action download = () => _ = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2000,
+            subindex: 0x00, new byte[] { 0x01 }, mode);
+
+        upload.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("mode");
+        download.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("mode");
+    }
+
     [Fact]
     public async Task Sdo_Expedited_Download_UpdatesServerOd()
     {
