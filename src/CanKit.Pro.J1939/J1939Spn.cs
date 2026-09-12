@@ -110,6 +110,17 @@ public static class J1939Spn
     /// signed field narrower than a byte — J1939-71 defines no indicator codes there, and
     /// inventing some would report real measurements as missing.
     /// </para>
+    /// <para>
+    /// Because the leading group is a fixed size per width class, the indicator <em>fraction</em>
+    /// of the range is whatever the tabulated width of that class already spends: about 2% for a
+    /// byte or wider, five sixteenths for 4..7 bits, and one half for 2..3 bits. That last one is
+    /// the widest reading here — a <b>3-bit</b> field classifies raw 4..7 as indicators, so a
+    /// parameter genuinely carrying eight states would see half of them reported as "no reading".
+    /// Scaling by value instead of by leading group would cost such a field two states rather
+    /// than four; J1939-71 tabulates neither, and the choice is open as issue #99. Every width
+    /// above, inferred ones included, is pinned by known-answer tests so it cannot drift
+    /// silently.
+    /// </para>
     /// </remarks>
     public static J1939SpnValueKind Classify(ulong raw, int bitLength, bool isSigned = false)
     {

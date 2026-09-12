@@ -91,6 +91,46 @@ public class J1939SpnIndicatorTests
     public void Classify_Unsigned_NonTabulatedWidths(ulong raw, int bitLength, J1939SpnValueKind expected)
         => J1939Spn.Classify(raw, bitLength).Should().Be(expected);
 
+    // The sub-byte widths J1939-71 does not tabulate, pinned so the inferred rule cannot drift
+    // silently. The leading group stays the same size across a class — 4 bits for a 4..7-bit
+    // field, 2 bits for a 2..3-bit one — so each band widens with the field and the indicator
+    // *fraction* of the range is what the tabulated width of that class already spends: five
+    // sixteenths for 4..7 bits, one half for 2..3 bits.
+    [Theory]
+    // 5 bits: bands of 2 raw counts. 0..21 measure, 22..31 indicate.
+    [InlineData(21UL, 5, J1939SpnValueKind.Valid)]
+    [InlineData(22UL, 5, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(23UL, 5, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(24UL, 5, J1939SpnValueKind.Reserved)]
+    [InlineData(27UL, 5, J1939SpnValueKind.Reserved)]
+    [InlineData(28UL, 5, J1939SpnValueKind.Error)]
+    [InlineData(29UL, 5, J1939SpnValueKind.Error)]
+    [InlineData(30UL, 5, J1939SpnValueKind.NotAvailable)]
+    [InlineData(31UL, 5, J1939SpnValueKind.NotAvailable)]
+    // 6 bits: bands of 4.
+    [InlineData(43UL, 6, J1939SpnValueKind.Valid)]
+    [InlineData(44UL, 6, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(56UL, 6, J1939SpnValueKind.Error)]
+    [InlineData(60UL, 6, J1939SpnValueKind.NotAvailable)]
+    [InlineData(63UL, 6, J1939SpnValueKind.NotAvailable)]
+    // 7 bits: bands of 8.
+    [InlineData(87UL, 7, J1939SpnValueKind.Valid)]
+    [InlineData(88UL, 7, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(112UL, 7, J1939SpnValueKind.Error)]
+    [InlineData(120UL, 7, J1939SpnValueKind.NotAvailable)]
+    [InlineData(127UL, 7, J1939SpnValueKind.NotAvailable)]
+    // 3 bits: the 2-bit table scaled up, so bands of 2 and no reserved or parameter-specific
+    // band at all — the 2-bit table has none. This is the widest reading of any width here:
+    // half the value space indicates. See the remarks on J1939Spn.Classify and issue #99.
+    [InlineData(0UL, 3, J1939SpnValueKind.Valid)]
+    [InlineData(3UL, 3, J1939SpnValueKind.Valid)]
+    [InlineData(4UL, 3, J1939SpnValueKind.Error)]
+    [InlineData(5UL, 3, J1939SpnValueKind.Error)]
+    [InlineData(6UL, 3, J1939SpnValueKind.NotAvailable)]
+    [InlineData(7UL, 3, J1939SpnValueKind.NotAvailable)]
+    public void Classify_Unsigned_NonTabulatedSubByteWidths(ulong raw, int bitLength, J1939SpnValueKind expected)
+        => J1939Spn.Classify(raw, bitLength).Should().Be(expected);
+
     // -------------------------------------------------------------------------------------
     // Signed: the same codes sit at the top of the *signed* range, i.e. with the sign bit
     // clear. Everything with the sign bit set is a measurement.
