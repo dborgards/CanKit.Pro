@@ -136,6 +136,35 @@ CanKit.Pro.CANopen/
   Emcy/EmcyMessage.cs        // 8-byte encode/decode
 ```
 
+## Migrating from 1.2.x
+
+`SdoTransferMode.Expedited` and `SdoTransferMode.Segmented` are gone, and
+`SdoTransferMode.Block` changes value from `3` to `1`.
+
+Neither removed member ever reached the wire encoder, so dropping the argument sends exactly the
+same frames:
+
+```csharp
+// before — both of these produced identical traffic
+await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Expedited);
+await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Segmented);
+
+// after
+await node.SdoDownloadAsync(id, index, sub, data);
+```
+
+The codec is picked from the payload length, per CiA 301: 1..4 bytes expedited, 5 and up
+segmented. On upload it is the server's initiate response that decides. `Block` remains, because
+it is the one transport the client genuinely negotiates rather than derives.
+
+**One behavioural difference.** At or above `CanOpenNodeOptions.SdoBlockThresholdBytes` (default
+128), a download that used to pass `Expedited` or `Segmented` bypassed block transfer as an
+undocumented side effect. It now uses block transfer like any other download of that size. If a
+peer cannot handle that, raise `SdoBlockThresholdBytes` on the node options rather than reaching
+for a mode argument.
+
+Callers that persisted or transmitted the numeric enum value must remap `3` to `1`.
+
 ## Install
 
 ```bash
