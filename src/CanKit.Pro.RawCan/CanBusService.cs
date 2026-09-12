@@ -331,6 +331,15 @@ namespace CanKit.Pro.RawCan
                 // enqueue step (Transmit is expected to be a fast, non-blocking enqueue, same
                 // assumption every other caller of ICanBus.Transmit already makes), never across
                 // the echo wait, so unrelated sends are not serialized against each other.
+                //
+                // A review finding (#53) asked for Transmit to move out of this lock, so that a
+                // blocking vendor driver cannot stall the adapter's RX thread in TryMatchEcho. It
+                // is deliberately not done: the atomicity above is the whole reason the FIFO order
+                // means anything, an echo-mode adapter re-enters this lock from inside Transmit
+                // anyway, and no driver that blocks in Transmit could be used with this service in
+                // any case -- the same call is on the dispatch path of every other consumer of
+                // ICanBus. If one ever has to be, the fix is a queue in front of the driver, not a
+                // pending list whose order no longer matches the wire.
                 lock (_pendingGate)
                 {
                     if (_pendingDisposed)
