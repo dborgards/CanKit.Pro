@@ -1675,9 +1675,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// This is a provenance check, not a TX-echo check, and #23 did not remove it. The writes it
     /// suppresses come from a <em>peer</em> — a real SDO download, a real RPDO — so the bus's
     /// echo flag says nothing about them; what distinguishes them from an application write is
-    /// only that they are applied on the actor loop. (Excluding echoes at the subscription does
-    /// close a second, narrower path into here: this node's own TPDO coming back on an
-    /// echo-capable bus and being unpacked as an RPDO.) The check is sound now that #19 has
+    /// only that they are applied on the actor loop. The subscription opts into echoes, so it
+    /// closes no path into here at all: this node's own TPDO coming back on an echo-capable bus
+    /// and being unpacked as an RPDO is suppressed by this provenance check and by nothing else.
+    /// The check is sound now that #19 has
     /// moved <c>IsOnCurrentActor</c> off <c>AsyncLocal</c> onto a thread-static, so a send task
     /// started from actor work no longer reports true and no longer swallows a legitimate
     /// application write.

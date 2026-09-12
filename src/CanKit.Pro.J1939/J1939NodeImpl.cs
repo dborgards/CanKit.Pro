@@ -446,12 +446,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // NAME fails HasHigherClaimPriorityThan in both directions, so both parties would take
         // the "peer loses, re-announce" branch below and re-announce at each other forever.
         //
-        // This used to double as the local-TX filter, because the demux dropped the bus's echo
-        // flag and NAME equality was the only way to recognise our own transmission (#23,
-        // Bugbot 3600783801). That job is gone: the subscription above excludes echoes outright.
-        // What is left is the case the workaround was standing in front of — two nodes genuinely
-        // configured with the same NAME, which SAE J1939-81 §4.4.3 does not permit. We cannot
-        // win against such a peer and must not fight it, so the claim is ignored.
+        // It also remains this node's local-TX filter, and #23 did not change that. The
+        // subscription opts into echoes (it must -- the echo bit marks the host, not the node, so
+        // filtering on it would swallow a sibling node's claim), which means this node's own
+        // Address Claim still arrives here on a flagging adapter. NAME equality is what stops it
+        // being arbitrated against (#23, Bugbot 3600783801).
+        //
+        // So one line covers two cases: our own claim coming back, and two nodes genuinely
+        // configured with the same NAME, which SAE J1939-81 §4.4.3 does not permit. We cannot win
+        // against such a peer and must not fight it, so the claim is ignored either way. Do not
+        // remove this on the assumption that the echo gate handles the first case.
         if (peerName.Value == _name.Value) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
@@ -804,8 +808,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
             await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
-                // The subscription does not deliver echoes, so everything reaching this loop is
-                // genuine bus traffic from a peer.
+                // The subscription opts into echoes, so this loop sees host echoes as well as
+                // peer traffic; `frameEvent.IsEcho` distinguishes them. Nothing here filters on
+                // source address, which is why a node on a flagging adapter also observes its own
+                // application PGNs -- the behaviour that predates the echo gate entirely, tracked
+                // as #95. Address Claim is the exception: HandleIncomingAddressClaim filters by
+                // NAME.
                 var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue;
                 var fields = J1939Id.Decompose((uint)frame.ID);

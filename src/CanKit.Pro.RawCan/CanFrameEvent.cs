@@ -40,8 +40,20 @@ namespace CanKit.Pro.RawCan
             ReceiveTimestamp = receiveTimestamp;
         }
 
-        /// <summary>The frame. Owns its payload buffer, so it stays valid after the adapter has
-        /// released the RX lease it was observed from.</summary>
+        /// <summary>The frame.</summary>
+        /// <remarks>
+        /// <b>Two lifetimes, depending on where you received this event.</b> An event read from
+        /// <see cref="ISubscription.Frames"/> or <see cref="ISubscription.TryRead"/> owns its
+        /// payload buffer and stays valid indefinitely — the demux copies the payload before
+        /// buffering it, precisely so the adapter may release the RX lease meanwhile.
+        /// <para>
+        /// An event handed to a <b>subscription predicate</b> does not. The predicate runs on the
+        /// dispatch thread before the copy is made, so its <see cref="Frame"/> aliases the
+        /// adapter's RX lease and must not be retained past the call — a rejected frame is never
+        /// copied at all, which is what keeps filtering allocation-free. Inspect it, return, and
+        /// keep nothing.
+        /// </para>
+        /// </remarks>
         public CanFrameView Frame { get; }
 
         /// <summary>

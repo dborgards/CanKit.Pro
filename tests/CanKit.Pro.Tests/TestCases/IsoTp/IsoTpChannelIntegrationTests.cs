@@ -1351,7 +1351,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         var request = new byte[] { 0x22, 0xF1, 0x90 };
 
-        var ecuReceive = ecu.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        using var receiveCts = new CancellationTokenSource(ShortTimeout);
+        var ecuReceive = ecu.ReceiveAsync(receiveCts.Token);
         await tester.SendAsync(request);
 
         (await ecuReceive).ToArray().Should().Equal(
