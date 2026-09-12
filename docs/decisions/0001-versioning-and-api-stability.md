@@ -53,6 +53,19 @@ is no major version scheduled that would ever remove them again.
    what has been validated and what has not; it is not a stability claim, and it does not
    contradict the version.
 
+   This has to answer to **CON-004** in the [SRS](../requirements/SRS-CanKit.Pro.md), which
+   requires an L3/L4 package to be marked experimental or excluded from packing *while it is
+   functionally incomplete*. That constraint stands; what changes is how it is met. The word in
+   the `<Description>` was doing the job badly — it said "do not rely on this" beside a version
+   number that said the opposite, and only on three of the nine packages. In its place: every
+   package README carries the same status block naming the withdrawn releases and the pre-1.3.0
+   window, and the release itself is gated on the checklist below. A reader now learns the same
+   thing from a consistent source instead of from prose contradicted by the version.
+
+   The arc42 entries that call ISO-TP experimental (`§2.2`, and the risk register at the end)
+   record the state at the 2026-07-14 review, when `IsoTp.Open` still threw
+   `NotImplementedException`. They are history, not live constraints, and are left as written.
+
 6. **No intermediate releases during the review series.** One release at the end. Cutting 1.3.0,
    1.4.0 and 1.5.0 each with breaks in them would dissolve the very statement this document
    makes. Enforced rather than remembered: `eng/verify-release-config.mjs` runs as the exec

@@ -55,6 +55,18 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      # `workflow_dispatch` lets the operator pick any branch, and this workflow ends in a job
+      # holding the OIDC grant and the PAT while it runs config and plugin code from the chosen
+      # ref. semantic-release's own `branches` list would refuse to *publish* from anywhere but
+      # main -- but by then the credentials already exist in the job. So the main-only contract is
+      # enforced here, before anything is checked out, and it fails loudly rather than skipping a
+      # job and reporting success.
+      - name: Refuse to run off main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error title=Wrong branch::Releases run from main only. This run is on ${{ github.ref }}."
+          exit 1
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -138,6 +150,10 @@ jobs:
   release:
     name: semantic-release
     needs: verify
+    # Defence in depth. `verify` already fails the run off main, and this job needs it, so this
+    # condition should never be the thing that stops anything. It is here because this is the job
+    # that holds the credentials: the guard belongs on the door it protects, not only upstream.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # The only job holding the OIDC grant. It installs the release tooling, exchanges the token
     # for a one-hour NuGet key, and runs semantic-release against packages `verify` already packed.
@@ -197,7 +213,14 @@ jobs:
 
       # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
       # Requested right before the release step so it doesn't expire before the push happens.
+      #
+      # Skipped on a dry run. A dry run publishes nothing, so minting a live publishing key for it
+      # buys nothing and costs a real credential sitting in the environment of a Node process
+      # running third-party plugins. Since `dry_run` defaults to true, the common case now never
+      # obtains one. `NUGET_API_KEY` is then empty, which is harmless: publishCmd does not run in
+      # a dry run either.
       - name: NuGet login (OIDC -> temp API key)
+        if: ${{ !fromJSON(inputs.dry_run) }}
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget_login
         with:

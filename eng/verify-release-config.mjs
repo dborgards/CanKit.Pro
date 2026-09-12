@@ -106,7 +106,11 @@ if (requestedVersion) {
 
   if (!parsed) {
     problems.push(`cannot parse the requested release version "${requestedVersion}"`);
-  } else if (!windowClosed && minorOrdinal(parsed[1], parsed[2]) < FIRST_STABLE) {
+  } else if (!windowClosed && requestedVersion !== '1.3.0') {
+    // Exactly 1.3.0, not "1.3.0 or above". The ADR says 1.3.0 is the first release this project
+    // makes; 1.4.0 or 2.0.0 arriving before it would satisfy a >= check while breaking the
+    // statement the check exists to defend. Whatever produced such a number -- a stray tag, a
+    // mis-set override -- is worth stopping for.
     problems.push(
       `refusing to release ${requestedVersion}: 1.3.0 is the first release this project makes, ` +
         `and no release happens before the checklist in ${ADR} is done`,

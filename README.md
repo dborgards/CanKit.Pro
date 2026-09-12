@@ -48,7 +48,7 @@ Everything targets `netstandard2.0` and `net10.0`.
 
 ## Status
 
-The 1.x releases are **withdrawn from nuget.org**: they were published as stable before the API
+The 1.0.0 – 1.2.3 releases are **withdrawn from nuget.org**: they were published as stable before the API
 had been reviewed against the specifications. **1.3.0 will be the first release whose API is
 stable**, and the surface can still change until it is tagged — see
 [Versioning](docs/decisions/0001-versioning-and-api-stability.md) for what that window is for.

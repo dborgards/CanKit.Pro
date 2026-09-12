@@ -5,7 +5,7 @@ directly on top of `CanKit.Pro.IsoTp`'s `IIsoTpChannel`, so anything that speaks
 (virtual loopback, PCAN, SocketCAN, Vector, Kvaser, ZLG, ControlCAN, ...) can be driven with
 the same client.
 
-Status: the 1.x releases are **withdrawn from nuget.org** — they were published as stable before
+Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
 the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until then the
 public surface can still change, `SendRawAsync`, the timing options and the NRC-mapping types
 most of all. See

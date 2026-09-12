@@ -1,5 +1,10 @@
 # CanKit.Pro.CANopen
 
+Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
+the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until then the
+public surface can still change. See
+[Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
+
 **CANopen (CiA 301)** node implementation for CanKit.Pro. Provides an in-process
 `ICanOpenNode` that combines a local Object Dictionary, an SDO server + client, an NMT slave
 state machine with a heartbeat producer/consumer, a SYNC producer/consumer, structured EMCY

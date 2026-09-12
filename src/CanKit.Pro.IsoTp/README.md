@@ -11,7 +11,7 @@ ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com/pkuyo/CanKit
    Overflow) and enforces N_As/N_Bs/N_Cr timers, reassembles inbound PDUs (SN-checked), and delivers
    them via `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived`.
 
-Status: the 1.x releases are **withdrawn from nuget.org** — they were published as stable before
+Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
 the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until then the
 public surface can still change. See
 [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
@@ -130,7 +130,7 @@ and deliberately avoids the following defects:
     escape headers (bugbot 3594958440 / 3594958445).
 
 Status: codec plus runtime channel, both shipped. See the note at the top of this file on the
-withdrawn 1.x releases.
+withdrawn 1.0.0 – 1.2.3 releases.
 
 ## Install
 

@@ -27,10 +27,20 @@ next-version: 0.1.0
 
 # No assembly-versioning-scheme / assembly-file-versioning-scheme here. Those keys configure
 # GitVersion's MSBuild task, and this repository deliberately does not run one (see above), so
-# they described an intention that nothing read. The intention holds anyway: MSBuild derives
-# AssemblyVersion from Version as major.minor.patch, dropping prerelease and build metadata, so a
-# patch release still does not force a binding redirect on .NET Framework consumers -- and the
-# exact build lands in FileVersion / InformationalVersion, which is where a diagnostic tool looks.
+# they configured nothing.
+#
+# The comment that used to sit on them claimed `MajorMinorPatch` meant "a patch release does not
+# force a binding redirect on .NET Framework consumers". That was wrong in both directions. MSBuild
+# derives AssemblyVersion from Version with the patch included (1.2.3 -> 1.2.3.0), dropping only
+# prerelease and build metadata -- and an AssemblyVersion that moves with the patch is exactly what
+# *does* change assembly identity and force a redirect. `MajorMinorPatch` never bought what the
+# comment credited it with, and neither does the MSBuild default that replaced it.
+#
+# So: this repository has no redirect-avoidance policy today, and describing one would be fiction.
+# Getting that property would take an explicit `<AssemblyVersion>$(VersionPrefix.Major).$(...)`
+# pinned to major.minor in Directory.Build.props -- a deliberate decision nobody has made. The
+# exact build lands in FileVersion / InformationalVersion either way, which is where a diagnostic
+# tool looks.
 
 branches:
   main:
