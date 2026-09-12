@@ -19,7 +19,7 @@ namespace CanKit.Pro.RawCan
     }
     public static class CanBusServiceExtensions
     {
-        public static System.IDisposable Subscribe(this CanKit.Pro.RawCan.ICanBusService service, System.Action<CanKit.Pro.RawCan.CanFrameEvent> onNext, System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false) { }
+        public static System.IDisposable Subscribe(this CanKit.Pro.RawCan.ICanBusService service, System.Action<CanKit.Pro.RawCan.CanFrameEvent> onNext, System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false, System.Action<System.Exception>? onError = null) { }
     }
     public readonly struct CanFrameEvent : System.IEquatable<CanKit.Pro.RawCan.CanFrameEvent>
     {

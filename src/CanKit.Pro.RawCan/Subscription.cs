@@ -87,20 +87,25 @@ namespace CanKit.Pro.RawCan
             _channel = Channel.CreateBounded<CanFrameEvent>(options);
         }
 
+        // A plain assignment to a volatile field, not Interlocked.Exchange: the whole criteria
+        // object is swapped in one reference write, no caller reads the previous value, and the
+        // dispatch path only ever reads. Volatile is exactly the guarantee that buys -- the write
+        // is atomic and cannot be reordered past what the new criteria object was built from
+        // (FR-RAW-014). Interlocked said the same thing while implying a compare-and-swap that
+        // never existed.
+
         /// <inheritdoc />
         public void Reconfigure(CanIdFilter filter)
         {
             ThrowIfDisposed();
-            Interlocked.Exchange(ref _criteria, new FilterCriteria(filter, null));
+            _criteria = new FilterCriteria(filter, null);
         }
 
         /// <inheritdoc />
         public void Reconfigure(Func<CanFrameEvent, bool>? predicate)
         {
             ThrowIfDisposed();
-            Interlocked.Exchange(
-                ref _criteria,
-                predicate is null ? FilterCriteria.AcceptAll : new FilterCriteria(null, predicate));
+            _criteria = predicate is null ? FilterCriteria.AcceptAll : new FilterCriteria(null, predicate);
         }
 
         /// <summary>

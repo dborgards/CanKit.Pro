@@ -323,6 +323,93 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         await secondReceived.Task.WaitAsync(ShortTimeout);
     }
 
+    // The fault channel above is an *event on ICanBusService*, and only the type declaring an
+    // event can raise it -- so for any implementation other than CanBusService the extension has
+    // no way to report a failing handler, and used to drop it. onError is that way.
+    [Fact]
+    public async Task Callback_Subscribe_Reports_A_Handler_Failure_Through_OnError_For_A_Foreign_Service()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var inner = new CanBusService(receiver);
+        using var service = new ForeignCanBusService(inner);
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var calls = 0;
+
+        using var subscription = service.Subscribe(
+            _ =>
+            {
+                if (Interlocked.Increment(ref calls) == 1) throw new InvalidOperationException("boom");
+                secondReceived.TrySetResult(true);
+            },
+            onError: ex => observed.TrySetResult(ex));
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        var ex = await observed.Task.WaitAsync(ShortTimeout);
+        ex.Should().BeOfType<InvalidOperationException>().Which.Message.Should().Be("boom");
+
+        // Still isolated per frame, exactly as with the service's own fault channel.
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 2 }));
+        await secondReceived.Task.WaitAsync(ShortTimeout);
+    }
+
+    // With onError given it is the single destination: the caller said where these belong, and a
+    // report arriving twice through two channels is its own kind of surprise.
+    [Fact]
+    public async Task Callback_Subscribe_OnError_Takes_Precedence_Over_The_Service_Fault_Event()
+    {
+        var session = NewSession();
+        using var sender = Open(session, 0);
+        using var receiver = Open(session, 1);
+        using var service = new CanBusService(receiver);
+
+        var throughEvent = 0;
+        service.BackgroundExceptionOccurred += (_, _) => Interlocked.Increment(ref throughEvent);
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = service.Subscribe(
+            _ => throw new InvalidOperationException("boom"),
+            onError: ex => observed.TrySetResult(ex));
+
+        sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
+        await observed.Task.WaitAsync(ShortTimeout);
+
+        await Task.Delay(100); // give a second, wrong report time to arrive
+        Volatile.Read(ref throughEvent).Should().Be(0, "onError is the destination the caller chose");
+    }
+
+    // An ICanBusService that is not a CanBusService: everything forwarded, so the only thing that
+    // differs from using the concrete service is that its fault event is not ours to raise.
+    private sealed class ForeignCanBusService(ICanBusService inner) : ICanBusService
+    {
+        public ICanBus Bus => inner.Bus;
+
+        public int SubscriptionCount => inner.SubscriptionCount;
+
+        // Never raised: this fake has no faults of its own, and the point of the test above is
+        // precisely that CanBusServiceExtensions cannot raise it either.
+#pragma warning disable CS0067
+        public event EventHandler<Exception>? BackgroundExceptionOccurred;
+#pragma warning restore CS0067
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
+            => inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => inner.SendConfirmed(frame, timeout, cancellationToken);
+
+        public void Dispose() { /* the inner service is owned by the test */ }
+    }
+
     // FR-RAW-012: creating and disposing N subscriptions leaves no entries in the service registry.
     [Fact]
     public void Disposing_Subscriptions_Leaves_No_Registry_Entries()
