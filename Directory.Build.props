@@ -35,7 +35,7 @@
       Warnings are errors in CI only. The solution builds clean, and this is what keeps it that
       way; making it unconditional would instead break every local build with a half-written
       method in it, which is how such a setting gets removed again a month later. The `format`
-      job covers code style separately -- EnforceCodeStyleInBuild would only duplicate it, and
+      job covers code style separately — EnforceCodeStyleInBuild would only duplicate it, and
       two mechanisms for one rule eventually disagree.
     -->
     <TreatWarningsAsErrors Condition="'$(CI)' == 'true'">true</TreatWarningsAsErrors>
