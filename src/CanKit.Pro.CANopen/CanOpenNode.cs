@@ -447,6 +447,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// <c>Segmented</c> members, and a caller following an out-of-date migration note could pass
     /// the same. Throwing names the problem where it happens instead of leaving a wrong transport
     /// to be diagnosed on the wire.
+    /// <para>
+    /// The message is careful not to say the removed members did nothing. They chose no codec,
+    /// but at or above <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> they suppressed
+    /// the <see cref="SdoTransferMode.Auto"/>-to-<see cref="SdoTransferMode.Block"/> switch. A
+    /// caller who was relying on that and merely drops the argument moves onto block transfer,
+    /// which is the one migration step that can hang against a peer without block support — so
+    /// the message names the threshold rather than only saying "drop it".
+    /// </para>
     /// </remarks>
     private static void ValidateTransferMode(SdoTransferMode mode, string paramName)
     {
@@ -454,9 +462,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             throw new ArgumentOutOfRangeException(paramName, mode,
                 $"Unknown {nameof(SdoTransferMode)} value. Only {nameof(SdoTransferMode.Auto)} " +
-                $"and {nameof(SdoTransferMode.Block)} are defined; the removed Expedited (1) and " +
-                "Segmented (2) members had no effect on the wire and their argument should simply " +
-                "be dropped.");
+                $"and {nameof(SdoTransferMode.Block)} are defined. The removed Expedited (1) and " +
+                "Segmented (2) members never chose a codec -- that follows from the payload " +
+                "length -- so below CanOpenNodeOptions.SdoBlockThresholdBytes the argument can " +
+                "simply be dropped and the same frames go out. At or above the threshold they " +
+                "did have one effect: they suppressed the Auto-to-Block switch, so a download " +
+                "that relied on that must raise SdoBlockThresholdBytes to keep the classic " +
+                "transport rather than drop the argument alone.");
         }
     }
 
