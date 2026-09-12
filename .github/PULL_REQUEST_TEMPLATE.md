@@ -5,8 +5,12 @@
 ## Type of change
 
 <!--
-The PR title must be a Conventional Commit, because the merge commit is what semantic-release
-reads to decide the next version and write the changelog. Examples:
+Every commit on the branch must be a Conventional Commit, and so must the PR title.
+
+Pull requests land as merge commits and every branch commit is retained, so semantic-release
+analyses all of them -- a `docs:` title does not stop a `feat:` commit inside from publishing a
+release. A breaking change needs its `BREAKING CHANGE:` footer in the *commit message*, where the
+analyser reads it; the PR body is not analysed. See CONTRIBUTING.md. Examples:
 
   feat(rawcan): expose per-subscription drop counters
   fix(actor): stop Dispose from deadlocking on the loop thread
