@@ -53,9 +53,13 @@ namespace CanKit.Pro.RawCan
         /// A subscription that did not ask never sees an echo at all, so a consumer that does not
         /// care about the distinction does not have to check this.
         /// <para>
-        /// What the flag means is the adapter's business, not this package's: a bus that cannot
-        /// distinguish an echo reports every frame as non-echo, which is the same view a caller
-        /// had before this field existed.
+        /// <b>The flag is the adapter's, and not every adapter sets it.</b> An adapter that
+        /// cannot distinguish an echo — or simply does not bother — reports every frame as
+        /// non-echo, and then <c>includeEcho: false</c> has nothing to filter on and the echo is
+        /// delivered like any other frame. <c>CanKit.Adapter.Virtual</c> in
+        /// <c>ChannelWorkMode.Echo</c> is exactly that case today. So a protocol layer for which
+        /// acting on its own transmission would be harmful must still carry its own check; the
+        /// echo gate is a first line of defence, not a guarantee.
         /// </para>
         /// </remarks>
         public bool IsEcho { get; }

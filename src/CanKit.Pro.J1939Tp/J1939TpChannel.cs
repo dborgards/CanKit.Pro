@@ -121,6 +121,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 idType: CanFilterIDType.Extend);
             // Echoes stay out (the default): a bus in ChannelWorkMode.Echo replays our own TP
             // frames, and treating one as peer traffic would open a session against ourselves.
+            // This is the first line of defence, not the only one -- see the source-address check
+            // in RunReaderAsync for why an unflagged echo still has to be caught downstream.
             _subscription = _service.Subscribe(f => tpCmFilter.Matches(f.Frame) || tpDtFilter.Matches(f.Frame));
         }
         catch
@@ -315,11 +317,31 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // Destination filter: BAM/CM directed at us (SA) or globally broadcast (0xFF).
                 if (destination != _sourceAddress && destination != J1939Pgn.GlobalAddress)
                     continue;
-                // No source-address self-check here any more. It used to stand in for the echo
-                // flag the demux was discarding (#23); now the subscription simply does not
-                // deliver echoes. What the check additionally suppressed -- a peer transmitting
-                // from our own SA -- is an address collision that J1939 address claim exists to
-                // resolve, not something a transport channel should silently drop.
+                // Second line of defence against our own transmissions, behind the
+                // subscription's echo gate. #23 gave subscriptions a real IsEcho bit and this
+                // check was removed as redundant -- which was wrong, and two review bots caught
+                // it: the gate is only as good as the adapter's flag, and an adapter may echo
+                // without setting it. The pinned CanKit Virtual adapter is exactly such an
+                // adapter. VirtualBusHub.Broadcast (v0.5.6) builds
+                //
+                //     new CanReceiveData(frame) { ReceiveTimestamp = TimeSpan.Zero }
+                //
+                // -- IsEcho defaults to false -- and then delivers that same unflagged record
+                // back to the sender when it is in ChannelWorkMode.Echo. docs/migration-from-legacy.md
+                // records the same fact from the other side: the fork had to patch IsEcho into
+                // the Virtual adapter for TxConfirmTests to match anything at all.
+                //
+                // Without this check, SendBamAsync on such an adapter consumes its own globally
+                // addressed BAM and DT frames, opens an RX session against itself, and republishes
+                // its outbound payload as an inbound datagram.
+                //
+                // The cost is the case named when this was deleted: a peer transmitting from our
+                // own SA is silently dropped here rather than reaching the session layer. That is
+                // an address collision, which J1939 address claim exists to resolve -- a real but
+                // strictly better failure than talking to ourselves.
+                if (fields.SourceAddress == _sourceAddress)
+                    continue;
+
                 var pgn = fields.Pgn;
                 var sa = fields.SourceAddress;
                 var da = destination;

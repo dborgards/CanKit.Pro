@@ -76,6 +76,11 @@ the two misbehaves only on the hardware that happens to echo — so the default 
 subscription, and `includeEcho: true` is a deliberate choice. `SendConfirmed` is unaffected either
 way: it matches echoes on the bus event itself, not through a subscription.
 
+One caveat worth knowing before you rely on it: the gate filters on the flag the adapter sets, and
+an adapter that echoes without setting it delivers the echo anyway. `CanKit.Adapter.Virtual` in
+`ChannelWorkMode.Echo` is one. If acting on your own transmission would be harmful, keep a check
+of your own as well.
+
 If two instances were meant to have disjoint ID spaces, you can check rather than hope:
 
 ```csharp

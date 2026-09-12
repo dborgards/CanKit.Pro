@@ -32,6 +32,13 @@ namespace CanKit.Pro.RawCan
     /// layers had rebuilt "is this mine?" out of application data — comparing NAMEs, comparing
     /// source addresses, guarding on actor affinity — to recover a bit the driver had already set.
     /// </para>
+    /// <para>
+    /// The gate can only drop what the adapter flags. An adapter that echoes without setting
+    /// <see cref="CanFrameEvent.IsEcho"/> — <c>CanKit.Adapter.Virtual</c> in
+    /// <c>ChannelWorkMode.Echo</c> does — delivers its echo to every subscription regardless of
+    /// <c>includeEcho</c>. A layer that must not act on its own transmission therefore keeps its
+    /// own check as well; this is defence in depth, not a replacement.
+    /// </para>
     /// </remarks>
     public interface ICanBusService : IDisposable
     {

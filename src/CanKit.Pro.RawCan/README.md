@@ -60,6 +60,12 @@ own Address Claim as a competitor's, or a CANopen node that acts on its own PDO,
 the hardware that happens to echo. Where a subscription did not opt in, an echo is dropped before
 the filter runs, so it never reaches a caller-supplied predicate either.
 
+**The gate is only as good as the adapter's flag.** An adapter that echoes without setting
+`IsEcho` delivers its echo to every subscription no matter what `includeEcho` says —
+`CanKit.Adapter.Virtual` in `ChannelWorkMode.Echo` is such an adapter today. A protocol layer for
+which acting on its own transmission would be harmful keeps its own check too (J1939-TP compares
+source addresses, J1939 compares NAMEs). Treat the gate as a first line of defence.
+
 `SendConfirmed` is independent of this: it matches echoes on the bus event itself, so withholding
 them from subscribers does not affect TX confirmation.
 
