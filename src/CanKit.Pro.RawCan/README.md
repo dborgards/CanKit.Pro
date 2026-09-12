@@ -105,6 +105,29 @@ Concurrent, byte-identical sends are matched to their own confirmation in FIFO o
 cross-matched (FR-RAW-031). The per-call timeout is configurable (FR-RAW-034); disposing the
 service cancels any outstanding `SendConfirmed` calls rather than leaving them to time out.
 
+## Migrating from 1.2.x
+
+Subscriptions used to yield a bare `CanFrameView`. They now yield a `CanFrameEvent` carrying the
+frame plus the two facts the bus already knew and the demux was discarding:
+
+```csharp
+// before
+using var sub = service.Subscribe(view => view.ID == 0x123);
+await foreach (var frame in sub.Frames) Use(frame.Data);
+
+// after
+using var sub = service.Subscribe(e => e.Frame.ID == 0x123);
+await foreach (var e in sub.Frames) Use(e.Frame.Data);
+```
+
+`TryRead` gains an `out CanFrameEvent`, and predicates and callbacks take `CanFrameEvent`. Reach
+the frame through `.Frame`.
+
+**On a bus not configured for echo, nothing else changes.** On an echo bus, a subscription now
+withholds host echoes unless it passes `includeEcho: true` — read the *Echoes* section above
+before choosing, in particular the part about the flag being host-scoped rather than
+instance-scoped.
+
 ## Install
 
 ```bash
