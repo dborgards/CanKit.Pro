@@ -19,10 +19,15 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+# Every write this workflow performs goes through RELEASE_TOKEN, not the default GITHUB_TOKEN:
+# the tag, the CHANGELOG commit and the GitHub Release are all created by semantic-release, which
+# is handed the PAT in the release step's `env`. So the job's own token needs nothing but read
+# access, plus the OIDC token for NuGet Trusted Publishing.
+#
+# `issues`/`pull-requests: write` were doubly unnecessary -- .releaserc.json sets
+# `successComment: false` and `failComment: false`, so semantic-release does not comment at all.
 permissions:
-  contents: write        # create the tag, the GitHub Release, and commit the regenerated CHANGELOG
-  issues: write          # semantic-release comments on released issues
-  pull-requests: write   # ... and on released pull requests
+  contents: read
   id-token: write        # request the OIDC token for NuGet Trusted Publishing
 
 env:
@@ -38,24 +43,28 @@ jobs:
     # it; the Test step below re-runs the suite on the commit that is actually packed.
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          persist-credentials: true
-          # The default GITHUB_TOKEN cannot push to main: the branch ruleset requires a pull
-          # request and only bypasses for the repo-owner role, which the Actions bot token does
-          # not hold. RELEASE_TOKEN is a fine-grained PAT scoped to this repo (Contents: R/W)
-          # from an account that does hold that role, so @semantic-release/git's push and
-          # @semantic-release/github's release creation (below) both go through as that identity.
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # No credential is written into .git/config. `npm ci`, `dotnet restore`, `dotnet build`
+          # and `dotnet test` all run third-party code in this job, and a PAT sitting in the
+          # working tree while they do is a credential one postinstall script away from leaving
+          # the runner. The repository is public, so the clone itself needs no token.
+          #
+          # semantic-release does not need one here either: it builds its own authenticated push
+          # URL from the token it is given in the release step's `env`. That is where
+          # RELEASE_TOKEN -- a fine-grained PAT scoped to this repo (Contents: R/W) from an
+          # account holding the repo-owner role, which the ruleset on `main` bypasses for --
+          # enters, and nowhere else.
+          persist-credentials: false
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v6
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 10.0.x
 
       - name: Setup Node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -76,7 +85,7 @@ jobs:
       # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
       # Requested right before the release step so it doesn't expire before the push happens.
       - name: NuGet login (OIDC -> temp API key)
-        uses: NuGet/login@v1
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget_login
         with:
           user: ${{ secrets.NUGET_USER }}
