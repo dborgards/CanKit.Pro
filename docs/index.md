@@ -34,6 +34,12 @@ designed once instead of improvised in every stack.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](https://github.com/dborgards/CanKit.Pro/blob/main/LICENSE)
 </div>
 
+!!! warning "Nothing to install from nuget.org right now"
+
+    1.0.0 – 1.2.3 are withdrawn, and 1.3.0 is not out yet, so the version badge above reads from
+    a feed with no listed release and `dotnet add package` has nothing to resolve. Build from
+    source until 1.3.0 ships. See [Versioning](decisions/0001-versioning-and-api-stability.md).
+
 </div>
 <div class="ck-hero__code" markdown>
 

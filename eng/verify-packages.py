@@ -23,7 +23,12 @@ from pathlib import Path
 EXPECTED_PACKAGE_COUNT = 9
 
 
-def check(package: Path) -> list:
+def local_name(node) -> str:
+    """Tag name without its namespace; the .nuspec schema URI moves with the schema version."""
+    return node.tag.rpartition('}')[2]
+
+
+def check(package: Path, expected_version: str = '') -> list:
     problems = []
 
     with zipfile.ZipFile(package) as archive:
@@ -37,12 +42,22 @@ def check(package: Path) -> list:
             problems.append('no .nuspec')
         else:
             nuspec = ElementTree.fromstring(archive.read(nuspec_name))
+
+            # The filename is not the published version -- `dotnet nuget push` publishes what the
+            # .nuspec says. A renamed or stale .nupkg would satisfy a filename check and then land
+            # on nuget.org under a different version than the one being tagged.
+            if expected_version:
+                declared = next(
+                    ((node.text or '').strip() for node in nuspec.iter()
+                     if local_name(node) == 'version'), None)
+                if declared is None:
+                    problems.append('no <version> in the .nuspec')
+                elif declared != expected_version:
+                    problems.append(
+                        f'.nuspec declares {declared}, expected {expected_version}')
             # The .nuspec is namespaced and the namespace URI moves with the schema version, so
             # match on the local tag name instead of hard-coding it.
-            license_nodes = [
-                node for node in nuspec.iter()
-                if node.tag.rpartition('}')[2] == 'license'
-            ]
+            license_nodes = [node for node in nuspec.iter() if local_name(node) == 'license']
             if not license_nodes:
                 problems.append('no <license> in the .nuspec')
             elif license_nodes[0].get('type') != 'expression':
@@ -66,14 +81,14 @@ def main(directory: str, expected_version: str = '') -> int:
 
     failed = False
     for package in packages:
-        problems = check(package)
+        problems = check(package, expected_version)
 
-        # The release workflow packs in the `verify` job and hands the results to `release` as an
-        # artifact, so by the time semantic-release looks at them nothing has rebuilt them. This
-        # is what makes "the artifact belongs to the version about to be tagged" worth asserting
-        # rather than assuming.
+        # Filename as well as .nuspec: the two disagreeing is itself the signal that something
+        # renamed or reused an artifact. The release workflow packs in `verify` and hands the
+        # results to `release` as an artifact, so nothing rebuilds them in between -- which is
+        # what makes this worth asserting rather than assuming.
         if expected_version and not package.name.endswith(f'.{expected_version}.nupkg'):
-            problems.append(f'not packed at {expected_version}')
+            problems.append(f'filename is not {expected_version}')
 
         if problems:
             failed = True

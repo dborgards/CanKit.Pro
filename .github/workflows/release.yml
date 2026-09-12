@@ -214,13 +214,20 @@ jobs:
       # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
       # Requested right before the release step so it doesn't expire before the push happens.
       #
-      # Skipped on a dry run. A dry run publishes nothing, so minting a live publishing key for it
-      # buys nothing and costs a real credential sitting in the environment of a Node process
-      # running third-party plugins. Since `dry_run` defaults to true, the common case now never
-      # obtains one. `NUGET_API_KEY` is then empty, which is harmless: publishCmd does not run in
-      # a dry run either.
+      # Two conditions, and neither is redundant.
+      #
+      # Not on a dry run: it publishes nothing, so minting a live key for it costs a real
+      # credential in the environment of a Node process running third-party plugins and buys
+      # nothing. `dry_run` defaults to true, so this is the common case.
+      #
+      # Not when `verify` found no release either: a real dispatch on a commit range with nothing
+      # releasable would otherwise mint a key, hand it over, and have semantic-release conclude
+      # there is nothing to do. The credential should not exist for a run that was never going to
+      # publish.
+      #
+      # `NUGET_API_KEY` is then empty, which is harmless: publishCmd does not run in either case.
       - name: NuGet login (OIDC -> temp API key)
-        if: ${{ !fromJSON(inputs.dry_run) }}
+        if: ${{ !fromJSON(inputs.dry_run) && needs.verify.outputs.version != '' }}
         uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: nuget_login
         with:

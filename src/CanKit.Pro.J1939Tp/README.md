@@ -2,6 +2,12 @@
 
 SAE J1939-21 Transport Protocol (TP) for CanKit.Pro. Implements both flavors of the J1939-21 §5.10 transport service:
 
+Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
+the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until it is
+tagged there is no listed version to install, so the `dotnet add package` line below resolves
+nothing and the withdrawn releases come back only on an exact version pin. The public surface
+can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
+
 - **TP.BAM** (Broadcast Announce Message) — one sender pushes an up-to-1785-byte PDU to every node on the bus, no acknowledgement (FR-TP-030).
 - **TP.CM** (Connection Mode: RTS / CTS / EndOfMsgAck / Connection Abort) — point-to-point, with block-size negotiation and end-of-message acknowledgement (FR-TP-031).
 

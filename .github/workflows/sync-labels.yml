@@ -6,6 +6,8 @@ on:
     paths:
       - .github/labels.yml
       - .github/workflows/sync-labels.yml
+      # The script is part of the mechanism, so a fix to it has to be able to run itself.
+      - eng/sync-labels.py
   workflow_dispatch:
 
 permissions:

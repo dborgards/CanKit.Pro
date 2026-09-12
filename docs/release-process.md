@@ -7,9 +7,14 @@ number, and nobody decides by hand what the next one is.
  conventional commits on main
             │
             ▼
-   semantic-release ─── decides X.Y.Z ──┬── writes CHANGELOG.md, commits it back to main
-   (.releaserc.json)                    ├── tags vX.Y.Z, opens the GitHub Release
-                                        └── dotnet pack -p:Version=X.Y.Z ─► nuget.org
+   the `verify` job ──── asks the commit analyser for X.Y.Z
+   (no credentials)  └── builds, tests and packs at that version ──┐
+            │                                                      │
+            ▼                                                  .nupkg
+   semantic-release ─── writes CHANGELOG.md, commits it to main    │
+   (.releaserc.json)  ── tags vX.Y.Z                               │
+   (the only job with ── pushes the packages it was handed ◄───────┘
+    publishing rights)   and opens the GitHub Release ─► nuget.org
 
  every other build
             │

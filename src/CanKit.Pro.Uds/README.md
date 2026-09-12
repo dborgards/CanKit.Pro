@@ -6,9 +6,11 @@ directly on top of `CanKit.Pro.IsoTp`'s `IIsoTpChannel`, so anything that speaks
 the same client.
 
 Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
-the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until then the
-public surface can still change, `SendRawAsync`, the timing options and the NRC-mapping types
-most of all. See
+the API had been reviewed. **1.3.0 will be the first release whose API is stable**. Until it is
+tagged there is no listed version to install, so the `dotnet add package` line below resolves
+nothing and the withdrawn releases come back only on an exact version pin. The
+public surface can still change until then — `SendRawAsync`, the timing options and the
+NRC-mapping types most of all. See
 [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
 ## Service coverage (SRS FR-UDS-001..012)

@@ -53,6 +53,10 @@ had been reviewed against the specifications. **1.3.0 will be the first release 
 stable**, and the surface can still change until it is tagged — see
 [Versioning](docs/decisions/0001-versioning-and-api-stability.md) for what that window is for.
 
+Which means there is **nothing to install from nuget.org until 1.3.0 ships**: the `dotnet add
+package` lines below have no listed version to resolve, and a withdrawn release comes back only
+on an exact version pin. Build from source in the meantime.
+
 ## Install
 
 ```bash
