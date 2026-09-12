@@ -8,10 +8,20 @@
   `CanBusService.cs` cost more review than they save, and the second one inherits a conflict.
   Issues in different packages get their own PR and can run in parallel.
 - Branch from `main` as `feat/…`, `fix/…`, `docs/…` (see `CONTRIBUTING.md` § Branching).
-- The repository **squash-merges**, so the pull-request *title* becomes the commit
-  semantic-release reads. It must be a Conventional Commit. A breaking change needs the `!` in
-  the title **and** a `BREAKING CHANGE:` footer — and the footer has to survive the squash, so
-  put it in the pull-request body, not only in a commit message.
+- **Every commit on the branch decides the release, not the pull-request title.** As practised,
+  pull requests land as two-parent merge commits (`git log --first-parent main` shows
+  `Merge pull request …` throughout) and every branch commit is retained, so semantic-release
+  analyses all of them. Consequences worth internalising:
+  - Write *each* commit as a Conventional Commit, not just the title. A `docs:`-titled pull
+    request containing one `feat:` commit publishes a minor release.
+  - A breaking change needs the `!` and a `BREAKING CHANGE:` footer **in the commit message**,
+    where the analyser reads it. Putting it only in the pull-request body does nothing.
+  - Keep the title a valid Conventional Commit anyway: it is what reviewers read, and it is what
+    a squash merge would use if the strategy is ever changed.
+
+  `CONTRIBUTING.md` claimed the opposite until this file was written; both now describe the
+  history. If the intent is squash merging, that belongs in the repository settings, and both
+  texts want revisiting.
 - Fill in `.github/PULL_REQUEST_TEMPLATE.md`. Tick a checklist box only for something actually
   run.
 
