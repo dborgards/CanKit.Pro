@@ -61,9 +61,25 @@ namespace CanKit.Pro.RawCan
         /// <param name="from">Minimum ID, inclusive.</param>
         /// <param name="to">Maximum ID, inclusive.</param>
         /// <param name="idType">Standard or extended ID space.</param>
+        /// <exception cref="ArgumentException"><paramref name="to"/> is below <paramref name="from"/>.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">
+        /// A bound lies outside <paramref name="idType"/>'s ID space (0x7FF for standard,
+        /// 0x1FFFFFFF for extended). Such a filter can never match anything, because
+        /// <see cref="Matches"/> only ever sees IDs already clipped to that space — the usual
+        /// cause is a 29-bit ID passed without <see cref="CanFilterIDType.Extend"/>.
+        /// </exception>
         public static CanIdFilter Range(uint from, uint to, CanFilterIDType idType = CanFilterIDType.Standard)
         {
             if (to < from) throw new ArgumentException("'to' must be greater than or equal to 'from'.", nameof(to));
+
+            // Fail loudly rather than never matching. A filter built from an out-of-space bound --
+            // Range(0x18FEF100, ...) with the idType forgotten is the canonical one -- silently
+            // accepted no frames and reported nothing, which is the most expensive way for this
+            // kind of mistake to be found.
+            var maxId = MaxId(idType);
+            if (from > maxId) throw OutOfIdSpace(nameof(from), from, idType, maxId);
+            if (to > maxId) throw OutOfIdSpace(nameof(to), to, idType, maxId);
+
             return new CanIdFilter(Kind.Range, from, to, idType);
         }
 
@@ -74,8 +90,33 @@ namespace CanKit.Pro.RawCan
         /// <param name="accCode">Acceptance code.</param>
         /// <param name="accMask">Acceptance mask; only the set bits are compared.</param>
         /// <param name="idType">Standard or extended ID space.</param>
+        /// <exception cref="ArgumentOutOfRangeException">
+        /// The pair requires a bit outside <paramref name="idType"/>'s ID space to be set --
+        /// <c>(accCode &amp; accMask)</c> reaches above 0x7FF (standard) or 0x1FFFFFFF (extended).
+        /// No real CAN ID has those bits set, so the filter could never match. A mask that reaches
+        /// above the ID space is fine on its own: it then merely requires those bits to be zero,
+        /// which every ID already satisfies.
+        /// </exception>
         public static CanIdFilter Mask(uint accCode, uint accMask, CanFilterIDType idType = CanFilterIDType.Standard)
-            => new CanIdFilter(Kind.Mask, accCode, accMask, idType);
+        {
+            var maxId = MaxId(idType);
+            var required = accCode & accMask;
+            if ((required & ~maxId) != 0)
+                throw new ArgumentOutOfRangeException(nameof(accCode), accCode,
+                    $"This filter requires ID bits outside the {idType} ID space to be set " +
+                    $"(accCode & accMask = 0x{required:X}, the space ends at 0x{maxId:X}), so no frame could ever " +
+                    "match it. Pass CanFilterIDType.Extend for a 29-bit ID.");
+
+            return new CanIdFilter(Kind.Mask, accCode, accMask, idType);
+        }
+
+        private static uint MaxId(CanFilterIDType idType)
+            => idType == CanFilterIDType.Extend ? ID_EXT_MASK : ID_STD_MASK;
+
+        private static ArgumentOutOfRangeException OutOfIdSpace(string paramName, uint value, CanFilterIDType idType, uint maxId)
+            => new(paramName, value,
+                $"0x{value:X} is outside the {idType} ID space (0x0..0x{maxId:X}), so no frame could ever match " +
+                "this filter. Pass CanFilterIDType.Extend for a 29-bit ID.");
 
         /// <summary>
         /// Returns true when <paramref name="frame"/> matches this filter.
@@ -109,7 +150,13 @@ namespace CanKit.Pro.RawCan
             // otherwise a range/mask that reaches past 0x7FF (standard) or 0x1FFFFFFF (extended)
             // can be reported as overlapping another filter purely on the out-of-space portion,
             // which no real frame could ever match.
-            var maxId = IdType == CanFilterIDType.Extend ? ID_EXT_MASK : ID_STD_MASK;
+            //
+            // Range and Mask now reject the inputs that made this load-bearing, so the clipping
+            // below and the full-width walk in RangeIntersectsMask are the second line of defence
+            // rather than the first. They are kept deliberately: they are what makes this correct
+            // independently of the factories, and an acceptance mask reaching above the ID space
+            // is still perfectly legal (it constrains those bits to zero, which every ID meets).
+            var maxId = MaxId(IdType);
 
             return (_kind, other._kind) switch
             {

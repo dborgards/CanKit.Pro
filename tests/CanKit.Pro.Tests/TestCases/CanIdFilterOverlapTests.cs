@@ -83,40 +83,54 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
         overlappingMask.Overlaps(range).Should().BeTrue("overlap must be symmetric regardless of argument order");
     }
 
+    // An acceptance mask may reach above the ID space: those bits are then required to be *zero*,
+    // which every real CAN ID already satisfies, so the filter stays perfectly usable. Only a
+    // filter that requires an out-of-space bit to be one is impossible, and that one is rejected
+    // at construction (see the tests below).
     [Fact]
-    public void Range_And_Mask_Filters_Honor_Acceptance_Mask_Bits_Above_The_29Bit_Id_Space()
+    public void A_Mask_Reaching_Above_The_Id_Space_Still_Overlaps_A_Range_It_Shares_Ids_With()
     {
-        // No real CAN ID ever has bit 29 set (IDs are at most 29 bits wide), so a mask that
-        // requires bit 29 to be 1 can never actually be satisfied by any ID -- including every ID
-        // in 'range'. The range/mask overlap check must honor that acceptance-mask bit even though
-        // it falls outside the bits a valid range bound can vary over.
         var range = CanIdFilter.Range(0x100, 0x10F, CanFilterIDType.Extend);
-        var unsatisfiableMask = CanIdFilter.Mask(accCode: 0x20000100, accMask: 0x20000700, idType: CanFilterIDType.Extend);
+        var mask = CanIdFilter.Mask(accCode: 0x100, accMask: 0x20000700, idType: CanFilterIDType.Extend);
 
-        range.Overlaps(unsatisfiableMask).Should().BeFalse();
-        unsatisfiableMask.Overlaps(range).Should().BeFalse("overlap must be symmetric regardless of argument order");
+        range.Overlaps(mask).Should().BeTrue();
+        mask.Overlaps(range).Should().BeTrue("overlap must be symmetric regardless of argument order");
+    }
+
+    // A filter outside its own ID space never matched anything and reported nothing, which made a
+    // forgotten idType (a 29-bit ID left on the Standard default) as good as invisible. Both
+    // factories reject it instead. Matches() only ever sees IDs already clipped to the space, so
+    // there is no reading under which such a filter could have been meant.
+    [Fact]
+    public void Range_Rejects_Bounds_Outside_The_Standard_11Bit_Space()
+    {
+        var forgottenIdType = () => CanIdFilter.Range(0x18FEF100, 0x18FEF1FF);
+        forgottenIdType.Should().Throw<ArgumentOutOfRangeException>()
+            .WithMessage("*Extend*", "the message must name the fix, not just the fault");
+
+        var upperBoundEscapes = () => CanIdFilter.Range(0x7F0, 0x900);
+        upperBoundEscapes.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
-    public void Range_Filters_Whose_Numeric_Overlap_Lies_Entirely_Above_The_Standard_11Bit_Space_Do_Not_Overlap()
+    public void Range_Rejects_Bounds_Outside_The_Extended_29Bit_Space()
     {
-        // [0x7F0, 0x900] and [0x800, 0x810] intersect numerically, but Matches() only ever sees
-        // 11-bit standard IDs (<= 0x7FF), so no standard frame can ever match the second filter.
-        var a = CanIdFilter.Range(0x7F0, 0x900);
-        var b = CanIdFilter.Range(0x800, 0x810);
+        var act = () => CanIdFilter.Range(0x1FFFFFF0, 0x20000100, CanFilterIDType.Extend);
+        act.Should().Throw<ArgumentOutOfRangeException>();
 
-        a.Overlaps(b).Should().BeFalse();
-        b.Overlaps(a).Should().BeFalse("overlap must be symmetric regardless of argument order");
+        var entirelyOutside = () => CanIdFilter.Range(0x20000000, 0x20000010, CanFilterIDType.Extend);
+        entirelyOutside.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
-    public void Range_Filters_Whose_Numeric_Overlap_Lies_Entirely_Above_The_Extended_29Bit_Space_Do_Not_Overlap()
+    public void Mask_Rejects_A_Code_Requiring_A_Bit_Outside_The_Id_Space()
     {
-        var a = CanIdFilter.Range(0x1FFFFFF0, 0x20000100, CanFilterIDType.Extend);
-        var b = CanIdFilter.Range(0x20000000, 0x20000010, CanFilterIDType.Extend);
+        // Bit 29 set in both code and mask: no CAN ID has that bit, so nothing could ever match.
+        var extended = () => CanIdFilter.Mask(accCode: 0x20000100, accMask: 0x20000700, idType: CanFilterIDType.Extend);
+        extended.Should().Throw<ArgumentOutOfRangeException>();
 
-        a.Overlaps(b).Should().BeFalse();
-        b.Overlaps(a).Should().BeFalse("overlap must be symmetric regardless of argument order");
+        var standard = () => CanIdFilter.Mask(accCode: 0x18FEF100, accMask: 0x1FFFFF00);
+        standard.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
