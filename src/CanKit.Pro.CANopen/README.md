@@ -1,6 +1,6 @@
 # CanKit.Pro.CANopen
 
-Experimental **CANopen (CiA 301)** node implementation for CanKit.Pro. Provides an in-process
+**CANopen (CiA 301)** node implementation for CanKit.Pro. Provides an in-process
 `ICanOpenNode` that combines a local Object Dictionary, an SDO server + client, an NMT slave
 state machine with a heartbeat producer/consumer, a SYNC producer/consumer, structured EMCY
 encoding and static TPDO/RPDO mapping — all composed on the CanKit.Pro L2 pipeline

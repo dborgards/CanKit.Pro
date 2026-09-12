@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>Experimental CANopen (CiA 301) node implementation for CanKit.Pro. Provides an in-process ICanOpenNode with a local Object Dictionary (FR-CO-001), SDO expedited/segmented/block transfers (FR-CO-002/003/004), static TPDO/RPDO mapping with event/timer/SYNC triggers (FR-CO-005/006), an NMT master with heartbeat producer/consumer (FR-CO-007/008), node-guarding consumer/producer (FR-CO-009), SYNC producer/consumer (FR-CO-010) and EMCY encode/decode (FR-CO-011), all composed on the L2 ICanBusService demux (FR-CO-012).</Description>
+    <Description>CANopen (CiA 301) node implementation for CanKit.Pro. Provides an in-process ICanOpenNode with a local Object Dictionary (FR-CO-001), SDO expedited/segmented/block transfers (FR-CO-002/003/004), static TPDO/RPDO mapping with event/timer/SYNC triggers (FR-CO-005/006), an NMT master with heartbeat producer/consumer (FR-CO-007/008), node-guarding consumer/producer (FR-CO-009), SYNC producer/consumer (FR-CO-010) and EMCY encode/decode (FR-CO-011), all composed on the L2 ICanBusService demux (FR-CO-012).</Description>
     <PackageTags>$(PackageTags);CANopen;CiA 301</PackageTags>
   </PropertyGroup>
 

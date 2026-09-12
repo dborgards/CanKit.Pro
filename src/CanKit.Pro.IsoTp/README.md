@@ -1,6 +1,6 @@
 # CanKit.Pro.IsoTp
 
-Experimental ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com/pkuyo/CanKit)
+ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com/pkuyo/CanKit)
 (CanKit.Pro). The package now ships **two halves**:
 
 1. **Codec** — deterministic, side-effect-free builders and parsers for the four ISO-TP PCI frame
@@ -11,8 +11,11 @@ Experimental ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com
    Overflow) and enforces N_As/N_Bs/N_Cr timers, reassembles inbound PDUs (SN-checked), and delivers
    them via `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived`.
 
-Published on nuget.org since 1.2.0. CAN-FD long-payload cases still get the least coverage of
-the two halves.
+Status: the 1.x releases are **withdrawn from nuget.org** — they were published as stable before
+the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until then the
+public surface can still change. See
+[Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
+CAN-FD long-payload cases still get the least coverage of the two halves.
 
 ## Scope
 
@@ -126,7 +129,8 @@ and deliberately avoids the following defects:
     on classic CAN those bit-patterns are invalid and are rejected instead of being mis-parsed as
     escape headers (bugbot 3594958440 / 3594958445).
 
-Status: published (1.2.x); codec plus runtime channel.
+Status: codec plus runtime channel, both shipped. See the note at the top of this file on the
+withdrawn 1.x releases.
 
 ## Install
 

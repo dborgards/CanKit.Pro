@@ -8,6 +8,13 @@ description: The nine CanKit.Pro packages, what layer each one lives on, and wha
 Nine packages, one version number, released together to nuget.org. Take only the layers you need:
 an ISO-TP application pulls in five of them, a plain demultiplexer one.
 
+!!! warning "The 1.x releases are withdrawn"
+
+    1.0.0 through 1.2.3 were published as stable before the API had been reviewed against the
+    specifications, and are unlisted and deprecated on nuget.org. **1.3.0 will be the first
+    release whose API is stable**; until it is tagged, the public surface can still change. See
+    [Versioning](../decisions/0001-versioning-and-api-stability.md).
+
 Everything targets `netstandard2.0` and `net10.0`, so .NET Framework 4.6.2+, .NET 8 and .NET 10
 all work. Every package depends on `CanKit.Abstractions` where it touches a bus and on nothing
 vendor-specific anywhere.

@@ -27,6 +27,14 @@ Conventional Commits since the last tag: a `fix` bumps the patch, a `feat` the m
 `BREAKING CHANGE:` footer the major. It then writes the changelog, creates the tag, publishes the
 GitHub Release and pushes the packages. It only runs on `main`.
 
+!!! note "Until 1.3.0, a breaking change bumps the minor"
+
+    `.releaserc.json` currently maps `breaking` to a **minor** release, so that the API
+    corrections on the way to 1.3.0 cannot publish 2.0.0 by accident. This is temporary and is
+    on the release checklist in
+    [Versioning](decisions/0001-versioning-and-api-stability.md);
+    `eng/verify-release-config.mjs` fails the build if the override outlives 1.3.0.
+
 **GitVersion** answers *"what version is this commit?"* — for builds that are not releases. A
 pull-request build or a CI artifact from `main` between releases gets a real, ordered SemVer
 derived from the tags semantic-release already wrote, instead of `0.0.0` or a hand-maintained

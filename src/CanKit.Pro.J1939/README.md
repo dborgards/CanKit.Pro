@@ -88,7 +88,10 @@ node.MessageReceived += (_, msg) =>
 
 ## Status
 
-Published on nuget.org since 1.2.0.
+The 1.x releases are **withdrawn from nuget.org** — they were published as stable before the API
+had been reviewed. **1.3.0 will be the first release whose API is stable**; until then the public
+surface can still change. See
+[Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
 ## Install
 

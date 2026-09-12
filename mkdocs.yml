@@ -176,6 +176,7 @@ nav:
   - Development:
       - Contributing: contributing.md
       - Release process: release-process.md
+      - Versioning and API stability: decisions/0001-versioning-and-api-stability.md
       - Changelog: changelog.md
       - Licensing: licensing.md
       - Migration from CanKit.Pro.legacy: migration-from-legacy.md
