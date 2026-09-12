@@ -70,6 +70,34 @@ public class J1939SpnCatalogTests
             .Should().Be(J1939SpnValueKind.NotAvailable);
     }
 
+    // A definition is not only an extraction recipe — it is how a caller labels a reading in a
+    // UI or a log. Those descriptive members had no assertion at all, so a catalog entry could
+    // carry the wrong PGN or unit and every decode test would still pass.
+    [Fact]
+    public void A_Catalog_Definition_Describes_The_Parameter_As_Well_As_Decoding_It()
+    {
+        J1939SpnCatalog.Default.TryGet(190, out var engineSpeed).Should().BeTrue();
+
+        engineSpeed!.Spn.Should().Be(190);
+        engineSpeed.Name.Should().NotBeNullOrWhiteSpace();
+        engineSpeed.Pgn.Should().Be(0xF004);          // EEC1
+        engineSpeed.Unit.Should().Be("rpm");
+        engineSpeed.BitLength.Should().Be(16);
+        engineSpeed.Resolution.Should().Be(0.125);
+        engineSpeed.IsSigned.Should().BeFalse();      // SPN 190 is an unsigned SLOT
+
+        // The same three descriptive members survive a round trip through Register.
+        var catalog = new J1939SpnCatalog();
+        catalog.Register(new J1939SpnDefinition(
+            Spn: 4202, Name: "Vendor Coolant Level", Pgn: 0xFE02,
+            ByteOffset: 0, StartBit: 0, BitLength: 8, Resolution: 0.4, Offset: 0.0, Unit: "%"));
+
+        catalog.TryGet(4202, out var vendor).Should().BeTrue();
+        vendor!.Name.Should().Be("Vendor Coolant Level");
+        vendor.Pgn.Should().Be(0xFE02u);
+        vendor.Unit.Should().Be("%");
+    }
+
     [Fact]
     public void Default_Catalog_Decodes_Torque_And_Pedal_And_VehicleSpeed()
     {

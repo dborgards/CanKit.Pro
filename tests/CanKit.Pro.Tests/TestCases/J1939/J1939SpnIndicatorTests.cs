@@ -354,6 +354,42 @@ public class J1939SpnIndicatorTests
         default(J1939SpnValue).IsValid.Should().BeFalse();
     }
 
+    // The non-throwing accessors were only asserted on the indicator side, where they report
+    // "no reading". Their measurement side is the path almost every caller takes, and nothing
+    // pinned it: a TryGetValue that returned false for a real measurement, or a
+    // GetValueOrDefault that handed back NaN for one, would have passed the suite.
+    [Fact]
+    public void The_NonThrowing_Accessors_Return_The_Measurement_When_There_Is_One()
+    {
+        var speed = J1939Spn.Extract(new byte[] { 0x00, 0xFA }, byteOffset: 0, startBit: 0,
+            bitLength: 16, resolution: 0.125, offset: 0.0);
+
+        speed.IsValid.Should().BeTrue();
+        speed.IsNotAvailable.Should().BeFalse();
+        speed.IsError.Should().BeFalse();
+
+        speed.TryGetValue(out double rpm).Should().BeTrue();
+        rpm.Should().BeApproximately(8000.0, 0.001);
+
+        // The supplied default is ignored for a measurement -- it is not a fallback that wins.
+        speed.GetValueOrDefault().Should().BeApproximately(8000.0, 0.001);
+        speed.GetValueOrDefault(-1.0).Should().BeApproximately(8000.0, 0.001);
+    }
+
+    // FromIndicator has two guards. The Valid one is covered below; this is the other, which
+    // catches a kind outside the defined range -- a cast integer, or a member added later
+    // without updating the check.
+    [Theory]
+    [InlineData(5)]
+    [InlineData(99)]
+    [InlineData(-1)]
+    public void FromIndicator_Rejects_A_Kind_Outside_The_Defined_Range(int rawKind)
+    {
+        var act = () => J1939SpnValue.FromIndicator((J1939SpnValueKind)rawKind, 0xFF);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("kind");
+    }
+
     [Fact]
     public void J1939SpnValue_Factories_And_Equality()
     {
