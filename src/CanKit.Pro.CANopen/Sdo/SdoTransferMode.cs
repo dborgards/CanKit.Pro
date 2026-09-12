@@ -11,11 +11,12 @@ namespace CanKit.Pro.CANopen.Sdo;
 /// decision — it follows from the payload length, exactly as CiA 301 prescribes:
 /// </para>
 /// <list type="bullet">
-///   <item><description><b>Download.</b> Payloads of 1..4 bytes use the expedited codec,
-///   payloads from 5 bytes up to (but excluding)
-///   <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> use the segmented codec, and
-///   payloads at or above that threshold switch to block transfer
-///   (CiA 301 §7.2.4.3.15).</description></item>
+///   <item><description><b>Download.</b> Payloads at or above
+///   <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> switch to block transfer
+///   (CiA 301 §7.2.4.3.15). <em>Below</em> that threshold the payload length picks the codec:
+///   1..4 bytes expedited, 5 bytes and up segmented. The threshold is tested first, so it bounds
+///   the expedited range too — the options permit a threshold of 1..4, and such a node sends even
+///   a one-byte payload by block transfer.</description></item>
 ///   <item><description><b>Upload.</b> The payload length is unknown until the server replies,
 ///   so the server dictates the codec: it answers the initiate with either an expedited or a
 ///   segmented response and the client follows either transparently. <see cref="Auto"/>
@@ -38,5 +39,13 @@ public enum SdoTransferMode
     Auto = 0,
 
     /// <summary>Force block transfer (CiA 301 §7.2.4.3.15).</summary>
-    Block = 1,
+    /// <remarks>
+    /// The value stays <c>3</c>, the gap left by the removed members notwithstanding. Renumbering
+    /// it to <c>1</c> would silently reuse the value <c>Expedited</c> carried in 1.2.x: an
+    /// already-compiled caller, or a persisted or transmitted numeric value, supplies the literal
+    /// <c>1</c> and would go from requesting a no-op hint to forcing block transfer — a real
+    /// change on the wire, and one that hangs against a peer with no block support. A compile
+    /// error is the loud failure this break wants; a gap in an enum costs nothing.
+    /// </remarks>
+    Block = 3,
 }

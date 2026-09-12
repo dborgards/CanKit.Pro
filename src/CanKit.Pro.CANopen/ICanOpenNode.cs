@@ -161,8 +161,11 @@ public interface ICanOpenNode : IDisposable
 
     /// <summary>Writes an object to <paramref name="serverNodeId"/>'s OD.
     /// <see cref="SdoTransferMode.Auto"/> selects the transport from the <paramref name="data"/>
-    /// length: 1..4 bytes expedited, 5 bytes and up segmented, and at or above
-    /// <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> block transfer. Pass
+    /// length: at or above <see cref="CanOpenNodeOptions.SdoBlockThresholdBytes"/> block transfer,
+    /// and below it the CiA 301 split — 1..4 bytes expedited, 5 bytes and up segmented. The
+    /// threshold is checked first, so it also decides the expedited range: a threshold of 1..4
+    /// (which the options permit) sends a short payload by block transfer rather than expedited.
+    /// Pass
     /// <see cref="SdoTransferMode.Block"/> to force block transfer below that threshold; the
     /// expedited/segmented split itself is dictated by CiA 301 and is not selectable.</summary>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,

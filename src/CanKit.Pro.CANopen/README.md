@@ -138,8 +138,8 @@ CanKit.Pro.CANopen/
 
 ## Migrating from 1.2.x
 
-`SdoTransferMode.Expedited` and `SdoTransferMode.Segmented` are gone, and
-`SdoTransferMode.Block` changes value from `3` to `1`.
+`SdoTransferMode.Expedited` and `SdoTransferMode.Segmented` are gone. `SdoTransferMode.Block`
+keeps its value `3` — the gap the removed members leave behind is deliberate, see below.
 
 Neither removed member ever reached the wire encoder, so dropping the argument sends exactly the
 same frames:
@@ -153,9 +153,11 @@ await node.SdoDownloadAsync(id, index, sub, data, mode: SdoTransferMode.Segmente
 await node.SdoDownloadAsync(id, index, sub, data);
 ```
 
-The codec is picked from the payload length, per CiA 301: 1..4 bytes expedited, 5 and up
-segmented. On upload it is the server's initiate response that decides. `Block` remains, because
-it is the one transport the client genuinely negotiates rather than derives.
+Below `CanOpenNodeOptions.SdoBlockThresholdBytes` the codec is picked from the payload length,
+per CiA 301: 1..4 bytes expedited, 5 and up segmented. The threshold is tested first and so bounds
+the expedited range as well — a node configured with a threshold of 1..4 sends even a one-byte
+payload by block transfer. On upload it is the server's initiate response that decides. `Block`
+remains, because it is the one transport the client genuinely negotiates rather than derives.
 
 **One behavioural difference.** At or above `CanOpenNodeOptions.SdoBlockThresholdBytes` (default
 128), a download that used to pass `Expedited` or `Segmented` bypassed block transfer as an
@@ -163,7 +165,13 @@ undocumented side effect. It now uses block transfer like any other download of 
 peer cannot handle that, raise `SdoBlockThresholdBytes` on the node options rather than reaching
 for a mode argument.
 
-Callers that persisted or transmitted the numeric enum value must remap `3` to `1`.
+**Nothing to remap.** `Block` keeps its numeric value `3`, so a persisted or transmitted enum
+value still means what it meant. That is why the enum is left with a gap where `1` and `2` used
+to be: renumbering `Block` to `1` would have made it collide with the value `Expedited` carried
+in 1.2.x, and an already-compiled caller passing that literal would have gone from requesting a
+no-op hint to forcing block transfer — a silent change on the wire that hangs against a peer with
+no block support. Removing the members gives such a caller a compile error instead, which is the
+point of the break.
 
 ## Install
 

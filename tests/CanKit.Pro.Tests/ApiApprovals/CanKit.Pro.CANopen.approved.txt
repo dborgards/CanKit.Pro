@@ -278,6 +278,6 @@ namespace CanKit.Pro.CANopen.Sdo
     public enum SdoTransferMode
     {
         Auto = 0,
-        Block = 1,
+        Block = 3,
     }
 }
