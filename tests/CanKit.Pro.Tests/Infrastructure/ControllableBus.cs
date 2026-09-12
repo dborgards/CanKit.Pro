@@ -115,6 +115,19 @@ public sealed class ControllableBus : ICanBus
     /// </summary>
     public DeferredEchoQueue DeferredEchoes { get; }
 
+    /// <summary>
+    /// Invoked for every accepted transmit, on the transmitting thread, after the frame is
+    /// counted and before its echo is raised or parked.
+    /// </summary>
+    /// <remarks>
+    /// The point of the hook is *where* it runs, not that it runs: <c>CanBusService</c> transmits
+    /// while holding its pending-send lock, so anything done here happens with that lock held and
+    /// with the transmitting send already registered. That is what lets a test act on the pending
+    /// list at an instant no other thread can change it — a background continuation that wants the
+    /// same lock simply waits until this returns — instead of racing one.
+    /// </remarks>
+    public Action<CanFrame>? OnTransmitting { get; set; }
+
     /// <summary>Number of frames handed to <see cref="Transmit(in CanFrame)"/>.</summary>
     public int TransmitCount => Volatile.Read(ref _transmitCount);
 
@@ -154,6 +167,8 @@ public sealed class ControllableBus : ICanBus
     {
         Interlocked.Increment(ref _transmitCount);
         if (!AcceptTransmit) return 0;
+
+        OnTransmitting?.Invoke(frame);
 
         if (EchoAcceptedFrames)
         {
