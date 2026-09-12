@@ -24,7 +24,7 @@ without changing the public surface:
 
 | Issue | The fix that is actually right |
 | --- | --- |
-| [#23](https://github.com/dborgards/CanKit.Pro/issues/23) | Subscription items carry `IsEcho` and the bus timestamp, and echoes are not delivered unless asked for, so the three hand-rolled echo workarounds in J1939, CANopen and the TP channel can go |
+| [#23](https://github.com/dborgards/CanKit.Pro/issues/23) | Subscription items carry `IsEcho` and the bus timestamp instead of a bare frame, and a subscription chooses whether host echoes reach it |
 | [#37](https://github.com/dborgards/CanKit.Pro/issues/37) | SPN extraction returns a value that can say "not available" or "error" instead of reporting `0xFFFF` as 8191.875 rpm |
 | [#44](https://github.com/dborgards/CanKit.Pro/issues/44) | `SdoTransferMode.Expedited` and `.Segmented` are removed, because nothing enforces them |
 | [#82](https://github.com/dborgards/CanKit.Pro/issues/82) | `FindOverlappingFilterSubscriptions()` is replaced by a named `FilterOverlap` type instead of a bare tuple pair |
@@ -150,14 +150,17 @@ patch version. Verified on 2026-09-12 against `main` at `bd729e3`, where it comp
 
 What that leaves is a real ordering, not a gap to paper over:
 
-1. Phase 1 lands [#23](https://github.com/dborgards/CanKit.Pro/issues/23), which is a `feat` and
-   therefore moves the computed version to 1.3.0.
+1. ~~Phase 1 lands [#23](https://github.com/dborgards/CanKit.Pro/issues/23), which is a `feat` and
+   therefore moves the computed version to 1.3.0.~~ **Done.** With #23 on the branch the commit
+   analyser computes 1.3.0, and `eng/verify-release-config.mjs 1.3.0` passes where the same script
+   still refuses 1.2.4.
 2. From then on `Release → Run workflow` with the dry-run input checked exercises the whole path
    — version resolution, build, test, pack, the artifact handover between jobs — without tagging,
-   publishing, or minting a NuGet credential.
+   publishing, or minting a NuGet credential. **Possible from the merge of #23 onward**, since a
+   dispatch from `main` runs `main`'s workflow against `main`'s commits.
 3. Cut 1.3.0 only after that dry run has been green at least once.
 
-Until step 1, the pipeline is unproven by construction. That is a deliberate consequence of the
+Until step 1, the pipeline was unproven by construction. That was a deliberate consequence of the
 gate, not a defect in it: the gate is doing exactly what it was built to do, which is refuse to
 release before this checklist is done.
 

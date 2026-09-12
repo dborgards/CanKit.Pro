@@ -120,10 +120,14 @@ public sealed class ControllableBus : ICanBus
 
     private int _transmitCount;
 
-    /// <summary>Raises <see cref="FrameObserved"/> for <paramref name="frame"/>.</summary>
-    public void RaiseObserved(in CanFrame frame, bool isEcho)
+    /// <summary>
+    /// Raises <see cref="FrameObserved"/> for <paramref name="frame"/>. The default
+    /// <paramref name="receiveTimestamp"/> of zero is what an adapter that does not timestamp
+    /// reports; pass a real value where a test asserts the timestamp reaches the subscriber.
+    /// </summary>
+    public void RaiseObserved(in CanFrame frame, bool isEcho, TimeSpan receiveTimestamp = default)
         => FrameObserved?.Invoke(this, new CanReceiveDataView(
-            new CanReceiveData(frame) { ReceiveTimestamp = TimeSpan.Zero, IsEcho = isEcho }));
+            new CanReceiveData(frame) { ReceiveTimestamp = receiveTimestamp, IsEcho = isEcho }));
 
     /// <summary>Raises <see cref="FaultOccurred"/>, the signal a bus-off surfaces through.</summary>
     public void RaiseFault(Exception error) => FaultOccurred?.Invoke(this, error);

@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -33,16 +34,26 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
     // Drains up to `count` frames from a subscription, giving up after `timeout`. Delivery on the
     // Virtual hub is synchronous inside Transmit, so a short timeout only guards against a hang if
     // something is broken; the happy path returns as soon as `count` frames are read.
+    //
+    // Projects away the CanFrameEvent envelope, because most tests here assert on IDs and
+    // payloads only; the echo/timestamp tests use DrainEvents below instead.
     private static async Task<List<CanFrameView>> Drain(ISubscription sub, int count, TimeSpan timeout)
     {
-        var result = new List<CanFrameView>();
+        var events = await DrainEvents(sub, count, timeout);
+        return events.Select(e => e.Frame).ToList();
+    }
+
+    // As Drain, but keeps the whole CanFrameEvent -- IsEcho and ReceiveTimestamp included.
+    private static async Task<List<CanFrameEvent>> DrainEvents(ISubscription sub, int count, TimeSpan timeout)
+    {
+        var result = new List<CanFrameEvent>();
         if (count <= 0) return result;
         using var cts = new CancellationTokenSource(timeout);
         try
         {
-            await foreach (var frame in sub.Frames.WithCancellation(cts.Token))
+            await foreach (var frameEvent in sub.Frames.WithCancellation(cts.Token))
             {
-                result.Add(frame);
+                result.Add(frameEvent);
                 if (result.Count >= count) break;
             }
         }
@@ -60,7 +71,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
     private static List<int> DrainIds(ISubscription sub)
     {
         var ids = new List<int>();
-        while (sub.TryRead(out var frame)) ids.Add(frame.ID);
+        while (sub.TryRead(out var frameEvent)) ids.Add(frameEvent.Frame.ID);
         return ids;
     }
 
@@ -137,15 +148,15 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         var received = new List<int>();
         var lastReceived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var subscription = service.Subscribe(
-            frame =>
+            frameEvent =>
             {
                 lock (received)
                 {
-                    received.Add(frame.ID);
+                    received.Add(frameEvent.Frame.ID);
                     if (received.Count >= 2) lastReceived.TrySetResult(true);
                 }
             },
-            predicate: f => f.ID == 0x123);
+            predicate: f => f.Frame.ID == 0x123);
 
         sender.Transmit(CanFrame.Classic(0x123, new byte[] { 1 }));
         sender.Transmit(CanFrame.Classic(0x456, new byte[] { 2 })); // filtered out
@@ -379,14 +390,14 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         // Predicate replaces the ID filter outright: 0x200 now matches and 0x100 no longer does,
         // which an "and-ed on top of the old filter" implementation could not produce.
-        sub.Reconfigure(f => f.ID >= 0x200);
+        sub.Reconfigure(f => f.Frame.ID >= 0x200);
 
         bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 3 }), isEcho: false);
         bus.RaiseObserved(CanFrame.Classic(0x201, new byte[] { 4 }), isEcho: false);
         DrainIds(sub).Should().Equal(0x201);
 
         // null is documented as "accept all", so both of the above must now arrive.
-        sub.Reconfigure((Func<CanFrameView, bool>?)null);
+        sub.Reconfigure((Func<CanFrameEvent, bool>?)null);
 
         bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 5 }), isEcho: false);
         bus.RaiseObserved(CanFrame.Classic(0x201, new byte[] { 6 }), isEcho: false);
@@ -406,7 +417,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         sub.Dispose();
 
         var byFilter = () => sub.Reconfigure(CanIdFilter.Range(0x100, 0x1FF, CanFilterIDType.Standard));
-        var byPredicate = () => sub.Reconfigure(f => f.ID == 0x100);
+        var byPredicate = () => sub.Reconfigure(f => f.Frame.ID == 0x100);
 
         byFilter.Should().Throw<ObjectDisposedException>();
         byPredicate.Should().Throw<ObjectDisposedException>();
@@ -451,17 +462,17 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         using var sub = service.Subscribe();
 
         sub.TryRead(out var nothing).Should().BeFalse("nothing has been delivered yet");
-        nothing.Should().Be(default(CanFrameView));
+        nothing.Should().Be(default(CanFrameEvent));
 
         bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 1 }), isEcho: false);
         bus.RaiseObserved(CanFrame.Classic(0x101, new byte[] { 2 }), isEcho: false);
 
         sub.TryRead(out var first).Should().BeTrue();
-        first.ID.Should().Be(0x100);
-        first.Data.ToArray().Should().Equal(new byte[] { 1 });
+        first.Frame.ID.Should().Be(0x100);
+        first.Frame.Data.ToArray().Should().Equal(new byte[] { 1 });
 
         sub.TryRead(out var second).Should().BeTrue("TryRead consumes, so the next call sees the next frame");
-        second.ID.Should().Be(0x101);
+        second.Frame.ID.Should().Be(0x101);
 
         sub.TryRead(out _).Should().BeFalse("both buffered frames have been consumed");
     }
@@ -643,5 +654,237 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         // Delivery isolation still holds alongside the fault channel.
         var healthyFrames = await Drain(healthy, 1, ShortTimeout);
         healthyFrames.Select(f => f.ID).Should().Equal(0x100);
+    }
+
+    // =============================================================================================
+    // #23 -- the subscription element carries the bus's echo flag and receive timestamp, and
+    // echoes are withheld unless the subscriber asked for them.
+    //
+    // ControllableBus rather than the Virtual adapter throughout: these assertions are about what
+    // the demux does with the CanReceiveDataView it is handed, so the test has to be the one that
+    // decides what IsEcho and ReceiveTimestamp are on it.
+    // =============================================================================================
+
+    // FR-RAW-010: the default subscription is echo-free. Before #23 the demux dropped the bus's
+    // echo flag, so every subscriber saw its own transmissions arrive as if a peer had sent them --
+    // which is what drove J1939, CANopen and the J1939 transport to each rebuild "is this mine?"
+    // out of application data.
+    [Fact]
+    public void Subscription_Does_Not_Deliver_Echoes_By_Default()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe();
+
+        bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 1 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x101, new byte[] { 2 }), isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic(0x102, new byte[] { 3 }), isEcho: false);
+
+        DrainIds(sub).Should().Equal(0x100, 0x102);
+    }
+
+    // ... and opting in gets them, flagged, interleaved in arrival order with the received frames
+    // rather than on a separate channel.
+    [Fact]
+    public void Subscription_With_IncludeEcho_Receives_Echoes_Marked_As_Such()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe(includeEcho: true);
+
+        bus.RaiseObserved(CanFrame.Classic(0x100, new byte[] { 1 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x101, new byte[] { 2 }), isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic(0x102, new byte[] { 3 }), isEcho: false);
+
+        var events = new List<CanFrameEvent>();
+        while (sub.TryRead(out var e)) events.Add(e);
+
+        events.Select(e => e.Frame.ID).Should().Equal(0x100, 0x101, 0x102);
+        events.Select(e => e.IsEcho).Should().Equal(false, true, false);
+    }
+
+    // The echo choice is per subscription, not per service: one service, two subscriptions, two
+    // different views of the same frame.
+    [Fact]
+    public void IncludeEcho_Is_Decided_Per_Subscription()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var quiet = service.Subscribe();
+        using var loud = service.Subscribe(includeEcho: true);
+
+        bus.RaiseObserved(CanFrame.Classic(0x200, new byte[] { 1 }), isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic(0x201, new byte[] { 2 }), isEcho: false);
+
+        DrainIds(quiet).Should().Equal(0x201);
+        DrainIds(loud).Should().Equal(0x200, 0x201);
+    }
+
+    // The echo gate runs before the filter, so an echo never reaches a caller-supplied predicate
+    // either. A predicate is arbitrary user code -- letting an echo run it would put the side
+    // effect back exactly where withholding the frame was supposed to prevent it.
+    [Fact]
+    public void Echo_Is_Never_Offered_To_A_Predicate_That_Did_Not_Opt_In()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var seenByPredicate = new List<int>();
+        using var sub = service.Subscribe(e =>
+        {
+            lock (seenByPredicate) seenByPredicate.Add(e.Frame.ID);
+            return true;
+        });
+
+        bus.RaiseObserved(CanFrame.Classic(0x300, new byte[] { 1 }), isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic(0x301, new byte[] { 2 }), isEcho: false);
+
+        lock (seenByPredicate) seenByPredicate.Should().Equal(0x301);
+        DrainIds(sub).Should().Equal(0x301);
+    }
+
+    // An opted-in predicate does see the flag, and can filter on it.
+    [Fact]
+    public void An_Opted_In_Predicate_Can_Filter_On_IsEcho()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe(e => e.IsEcho, includeEcho: true);
+
+        bus.RaiseObserved(CanFrame.Classic(0x400, new byte[] { 1 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x401, new byte[] { 2 }), isEcho: true);
+
+        DrainIds(sub).Should().Equal(0x401);
+    }
+
+    // FR-RAW-010: the bus's own receive timestamp reaches the subscriber unmodified. The demux
+    // used to discard it, leaving no way to order frames by when the adapter saw them.
+    [Fact]
+    public void Receive_Timestamp_Reaches_The_Subscriber_Unmodified()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe();
+
+        var first = TimeSpan.FromMilliseconds(12.5);
+        var second = TimeSpan.FromMilliseconds(37.25);
+        bus.RaiseObserved(CanFrame.Classic(0x500, new byte[] { 1 }), isEcho: false, receiveTimestamp: first);
+        bus.RaiseObserved(CanFrame.Classic(0x501, new byte[] { 2 }), isEcho: false, receiveTimestamp: second);
+
+        var events = new List<CanFrameEvent>();
+        while (sub.TryRead(out var e)) events.Add(e);
+
+        events.Select(e => e.ReceiveTimestamp).Should().Equal(first, second);
+    }
+
+    // An adapter that does not timestamp reports zero, which must arrive as zero rather than as
+    // something the demux invented (a capture time of its own would look like data and be wrong).
+    [Fact]
+    public void An_Untimestamped_Adapter_Yields_A_Zero_Timestamp()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe();
+
+        bus.RaiseObserved(CanFrame.Classic(0x502, new byte[] { 1 }), isEcho: false);
+
+        sub.TryRead(out var only).Should().BeTrue();
+        only.ReceiveTimestamp.Should().Be(TimeSpan.Zero);
+    }
+
+    // Reconfiguring the filter must not silently re-open the echo gate: includeEcho is fixed at
+    // Subscribe time and is not part of what Reconfigure replaces.
+    [Fact]
+    public void Reconfigure_Does_Not_Change_The_Echo_Choice()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var quiet = service.Subscribe();
+        using var loud = service.Subscribe(includeEcho: true);
+
+        quiet.Reconfigure(CanIdFilter.Range(0x600, 0x6FF, CanFilterIDType.Standard));
+        loud.Reconfigure(CanIdFilter.Range(0x600, 0x6FF, CanFilterIDType.Standard));
+
+        bus.RaiseObserved(CanFrame.Classic(0x600, new byte[] { 1 }), isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic(0x601, new byte[] { 2 }), isEcho: false);
+
+        DrainIds(quiet).Should().Equal(0x601);
+        DrainIds(loud).Should().Equal(0x600, 0x601);
+    }
+
+    // CanFrameEvent equality must compare payload *bytes*, not which array holds them.
+    //
+    // CanFrameView is a record struct over a ReadOnlyMemory<byte>, and its generated equality
+    // tests the memory segment rather than the contents. Delegating to it looked harmless and was
+    // not: TryDeliver allocates a fresh array per delivered frame, so the same frame fanned out to
+    // two subscriptions produced two events that compared unequal — the opposite of what `a == b`
+    // means for a value type.
+    [Fact]
+    public void Two_Subscriptions_Receiving_The_Same_Frame_Produce_Equal_Events()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var first = service.Subscribe();
+        using var second = service.Subscribe();
+
+        bus.RaiseObserved(
+            CanFrame.Classic(0x123, new byte[] { 1, 2, 3, 4 }),
+            isEcho: false,
+            receiveTimestamp: TimeSpan.FromMilliseconds(7));
+
+        first.TryRead(out var a).Should().BeTrue();
+        second.TryRead(out var b).Should().BeTrue();
+
+        // Distinct buffers by construction -- that is exactly the case that used to break.
+        MemoryMarshal.TryGetArray(a.Frame.Data, out var segA).Should().BeTrue();
+        MemoryMarshal.TryGetArray(b.Frame.Data, out var segB).Should().BeTrue();
+        ReferenceEquals(segA.Array, segB.Array).Should().BeFalse(
+            "each subscription buffers its own copy");
+
+        a.Should().Be(b);
+        (a == b).Should().BeTrue();
+        a.GetHashCode().Should().Be(b.GetHashCode(), "equal values must hash equally");
+    }
+
+    // ... and events that differ in any compared component are not equal.
+    [Fact]
+    public void Events_Differing_In_Payload_Echo_Or_Timestamp_Are_Not_Equal()
+    {
+        var frame = new CanFrameView(
+            CanFrameType.Can20, 0x123, new byte[] { 1, 2, 3 }, FrameFlags.None);
+        var baseline = new CanFrameEvent(frame, isEcho: false, TimeSpan.FromMilliseconds(5));
+
+        var otherPayload = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x123, new byte[] { 1, 2, 4 }, FrameFlags.None),
+            isEcho: false, TimeSpan.FromMilliseconds(5));
+        var otherId = new CanFrameEvent(
+            new CanFrameView(CanFrameType.Can20, 0x124, new byte[] { 1, 2, 3 }, FrameFlags.None),
+            isEcho: false, TimeSpan.FromMilliseconds(5));
+
+        baseline.Should().NotBe(otherPayload, "payload bytes are compared");
+        baseline.Should().NotBe(otherId);
+        baseline.Should().NotBe(new CanFrameEvent(frame, isEcho: true, TimeSpan.FromMilliseconds(5)));
+        baseline.Should().NotBe(new CanFrameEvent(frame, isEcho: false, TimeSpan.FromMilliseconds(6)));
+    }
+
+    // SendConfirmed's echo matching (FR-RAW-031) reads the bus event directly, not a subscription,
+    // so withholding echoes from subscribers must not disturb it. Worth pinning: the two paths sit
+    // in the same OnFrameObserved and it would be easy to gate both on one flag.
+    [Fact]
+    public async Task Withholding_Echoes_From_Subscribers_Does_Not_Break_SendConfirmed()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sub = service.Subscribe(); // default: no echoes
+
+        var confirmation = await service.SendConfirmed(
+            CanFrame.Classic(0x700, new byte[] { 1, 2, 3 }),
+            TimeSpan.FromSeconds(2));
+
+        confirmation.Confirmed.Should().BeTrue();
+        confirmation.IsApproximated.Should().BeFalse("the bus is echo-capable, so this is a real echo match");
+
+        // ... and the subscriber still did not see the echo that confirmed it.
+        DrainIds(sub).Should().BeEmpty();
     }
 }

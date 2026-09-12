@@ -18,7 +18,7 @@ Review `docs/reviews/2026-07-14-deep-code-review.md`)
 >
 > | Anforderungen | Umgesetzt in |
 > |---------------|--------------|
-> | `FR-RAW-010..014` (Demux/Subscriptions), `FR-RAW-030..034` (TX-Confirm) | `CanKit.Pro.RawCan` |
+> | `FR-RAW-010..015` (Demux/Subscriptions), `FR-RAW-030..034` (TX-Confirm) | `CanKit.Pro.RawCan` |
 > | `FR-RAW-020..024` (Threading/Aktor-Modell) | `CanKit.Pro.Actor` |
 > | `FR-RAW-040..041` (Adressierung, Filter-Overlap) | `CanKit.Pro.Addressing` + `CanKit.Pro.RawCan` |
 > | `FR-RAW-050..051` (Deadlines, Bus-State) | `CanKit.Pro.Reliability` |
@@ -177,6 +177,7 @@ Hintergrund: Heute können mehrere Protokollinstanzen (z. B. ISO-TP + CANopen) n
 | FR-RAW-012 | Das System MUSS eine geordnete Ab-/Wiederanmeldung von Subscriptions (Dispose-Pattern) unterstützen, sodass beendete Protokollinstanzen (z. B. ISO-TP-Kanal geschlossen) keine Ressourcen (Threads, Puffer, Hub-Einträge) hinterlassen. | Must | Unit-Test: N Subscriptions erzeugen und disposen, danach Ressourcenzähler (Handles/Threads) unverändert gegenüber Ausgangszustand. | Review §2.4 (Virtual: `VirtualBusHub._hubs` Leak als Negativbeispiel) |
 | FR-RAW-013 | Das System SOLLTE eine Standard-Demultiplex-Strategie für den häufigen Fall „ein 11/29-Bit-CAN-ID-Bereich pro Protokollinstanz“ bereitstellen (Fast-Path ohne generisches Prädikat), um Overhead bei hoher Busfrequenz zu vermeiden. | Should | Performance-Test: Durchsatzvergleich ID-Bereichsfilter vs. generisches Prädikat bei ≥ 1000 Frames/s. | NFR-Performance, Abschnitt 5.1 |
 | FR-RAW-014 | Das System KANN dem Protokollentwickler erlauben, Subscriptions zur Laufzeit umzukonfigurieren (Filterkriterien ändern), ohne die Subscription neu zu erzeugen. | Could | Unit-Test: Filterkriterium zur Laufzeit ändern, nachfolgende Frames folgen neuem Kriterium. | — |
+| FR-RAW-015 | Das System MUSS jedem Subscription-Element die vom Bus gemeldete Echo-Kennzeichnung und den vom Adapter erfassten Empfangszeitstempel mitgeben, und es MUSS Echo-Frames nur an Subscriptions ausliefern, die dies ausdrücklich angefordert haben (Standard: keine Echos). | Must | Unit-Test: Bus meldet Empfangs- und Echo-Frame; Standard-Subscription erhält nur den Empfangsframe, `includeEcho: true` erhält beide mit korrektem `IsEcho`; Zeitstempel erreicht den Subscriber unverändert. | [#23](https://github.com/dborgards/CanKit.Pro/issues/23) (Review-Befund Q5) |
 
 #### 4.1.3 Threading-/Aktor-Modell pro Protokollinstanz
 
@@ -369,7 +370,7 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 | Anforderung(en) | Architektur-Baustein (L0–L4) | Verifikation |
 |---|---|---|
 | FR-RAW-001..005 | L2 – *Frame-Ownership-Vertrag* (geplant), aufbauend auf L1 `CanFrame`/`CanFrameView` (`src/core/CanKit.Abstractions/API/Can/Definitions/CanFrame.cs`) | Unit-Test, Virtual-Loopback-Integrationstest |
-| FR-RAW-010..014 | L2 – *Demultiplex-Hub/Subscription-Manager* (umgesetzt in `CanKit.Pro.RawCan`), aufbauend auf L1 `ICanBus.FrameObserved` (`src/core/CanKit.Abstractions/API/Can/ICanBus.cs`) | Virtual-Loopback-Integrationstest, Lasttest |
+| FR-RAW-010..015 | L2 – *Demultiplex-Hub/Subscription-Manager* (umgesetzt in `CanKit.Pro.RawCan`), aufbauend auf L1 `ICanBus.FrameObserved` (`src/core/CanKit.Abstractions/API/Can/ICanBus.cs`) | Virtual-Loopback-Integrationstest, Lasttest |
 | FR-RAW-020..024 | L2 – *Protokollinstanz-Aktor/Scheduler* (umgesetzt als eigenständiges `CanKit.Pro.Actor`, `IProtocolActor`/`ProtocolActor`); Referenzimplementierung noch **nicht** umgestellt in L3 `IsoTpScheduler` (`src/transports/CanKit.Transport.IsoTp/IsoTpScheduler.cs`, funktional defekt, s. Review §1.1) | Stress-/Nebenläufigkeitstest |
 | FR-RAW-030..034 | L2 – *TX-Confirm-Abstraktion* (umgesetzt in `CanKit.Pro.RawCan`), aufbauend auf L1 `CanFeature.Echo`, `ITransceiver.Transmit` | Virtual-Loopback-Integrationstest (mit/ohne Echo) |
 | FR-RAW-040..041 | L2 – *Adressierungs-Helfer* (umgesetzt als eigenständiges `CanKit.Pro.Addressing`: `CanIdRange`, `J1939Id`/`J1939Fields`; FR-RAW-041 als `CanIdFilter.Overlaps`/`ICanBusService.FindOverlappingFilterSubscriptions()` in `CanKit.Pro.RawCan`) | Unit-Test |
