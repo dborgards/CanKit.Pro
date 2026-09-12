@@ -49,8 +49,10 @@ public class J1939SpnCatalogTests
     [Fact]
     public void Default_Catalog_Registers_Signed_Definitions()
     {
-        // A vendor SPN declared as a signed SLOT: raw 0xFFFF is "not available" (leading byte
-        // 0xFF, sign bit set), while 0x8000 is the most negative measurement, not an indicator.
+        // A vendor SPN declared as a signed SLOT. The indicator codes move with the sign: they
+        // sit at the top of the *signed* range, so 0x7FFF is "not available" and 0xFFFF is an
+        // ordinary -1 — the opposite of the unsigned rule. 0x8000 is the most negative
+        // measurement, not an indicator.
         var catalog = new J1939SpnCatalog();
         catalog.Register(new J1939SpnDefinition(
             Spn: 4201, Name: "Vendor Steering Angle", Pgn: 0xFE01,
@@ -68,6 +70,13 @@ public class J1939SpnCatalogTests
 
         catalog.Extract(new byte[] { 0xFF, 0x7F }, 4201).Kind
             .Should().Be(J1939SpnValueKind.NotAvailable);
+
+        // And the pattern that *would* be "not available" on an unsigned SPN is just -1 here.
+        // This is the exact confusion the signed rule invites, so it is pinned rather than
+        // only described: raw 0xFFFF -> -1 -> -0.1 deg at 0.1 deg/bit.
+        var minusOne = catalog.Extract(new byte[] { 0xFF, 0xFF }, 4201);
+        minusOne.IsValid.Should().BeTrue();
+        minusOne.Value.Should().BeApproximately(-0.1, 0.0001);
     }
 
     // A definition is not only an extraction recipe — it is how a caller labels a reading in a

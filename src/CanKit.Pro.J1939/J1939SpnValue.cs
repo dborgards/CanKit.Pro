@@ -14,8 +14,11 @@ namespace CanKit.Pro.J1939;
 public enum J1939SpnValueKind
 {
     /// <summary>
-    /// The transmitting ECU does not have the parameter, or was not asked for it (all raw bits
-    /// set — <c>0xFF</c> for one byte, <c>0xFF00</c>..<c>0xFFFF</c> for two, and so on).
+    /// The transmitting ECU does not have the parameter, or was not asked for it. Unsigned: all
+    /// raw bits set — <c>0xFF</c> for one byte, <c>0xFF00</c>..<c>0xFFFF</c> for two, and so on.
+    /// <b>Signed SLOTs differ:</b> the code sits at the top of the <em>signed</em> range with the
+    /// sign bit clear (<c>0x7F</c>, <c>0x7F00</c>..<c>0x7FFF</c>, …), and an all-bits-set field is
+    /// then an ordinary <c>-1</c> measurement, not an indicator.
     /// </summary>
     NotAvailable = 0,
 
@@ -23,20 +26,21 @@ public enum J1939SpnValueKind
     Valid = 1,
 
     /// <summary>
-    /// The "parameter specific indicator" code (<c>0xFB</c> leading byte): its meaning is defined
-    /// by the individual SPN, not by J1939-71, so it cannot be scaled into a physical value here.
+    /// The "parameter specific indicator" code (<c>0xFB</c> leading byte, or <c>0x7B</c> for a
+    /// signed SLOT): its meaning is defined by the individual SPN, not by J1939-71, so it cannot
+    /// be scaled into a physical value here.
     /// </summary>
     ParameterSpecific = 2,
 
     /// <summary>
-    /// Reserved for future indicator bits (<c>0xFC</c>..<c>0xFD</c> leading byte). Not a
-    /// measurement.
+    /// Reserved for future indicator bits (<c>0xFC</c>..<c>0xFD</c> leading byte, or
+    /// <c>0x7C</c>..<c>0x7D</c> for a signed SLOT). Not a measurement.
     /// </summary>
     Reserved = 3,
 
     /// <summary>
     /// The transmitting ECU has the parameter but detected an error in it (<c>0xFE</c> leading
-    /// byte).
+    /// byte, or <c>0x7E</c> for a signed SLOT).
     /// </summary>
     Error = 4,
 }
@@ -81,7 +85,11 @@ public readonly record struct J1939SpnValue
     /// <summary>True when the field carries a real measurement.</summary>
     public bool IsValid => Kind == J1939SpnValueKind.Valid;
 
-    /// <summary>True when the sending ECU does not have this parameter (all bits set).</summary>
+    /// <summary>
+    /// True when the sending ECU does not have this parameter — all bits set for an unsigned
+    /// SPN, or the sign-bit-clear <c>0x7F…</c> range for a signed one. See
+    /// <see cref="J1939SpnValueKind.NotAvailable"/>.
+    /// </summary>
     public bool IsNotAvailable => Kind == J1939SpnValueKind.NotAvailable;
 
     /// <summary>True when the sending ECU reported an error for this parameter.</summary>
