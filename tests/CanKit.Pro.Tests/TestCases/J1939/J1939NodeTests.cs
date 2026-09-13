@@ -1168,7 +1168,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // ~15.6 ms default timer granularity on Windows, and short enough to gather the
         // samples in under two seconds.
         var period = TimeSpan.FromMilliseconds(120);
-        const int requiredSamples = 10;
+        // 22, not 10. The bound below is undercut by however late the run's first emission was,
+        // divided by the number of *measured* gaps -- see the assertion for why that is the error
+        // term that matters. Note the two subtractions: 22 emissions give 21 gaps, and trimming
+        // the warm-up leaves 20. Ten samples would divide a 240 ms cold start by nine and lose
+        // 27 ms of a 120 ms period; twenty measured gaps divide it by twenty, which is what the
+        // 10 % allowance below is worth. This is the knob that makes the assertion sound, so it
+        // is not a free parameter.
+        const int requiredSamples = 22;
         var payload = new byte[] { 0x11, 0x22, 0x33, 0x44 };
         var message = new J1939Message(targetPgn, payload, priority: 6, destinationAddress: 0xFF);
 
@@ -1178,7 +1185,12 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
             // Collect until we have enough samples for a stable mean, or bail out with a
             // clear failure message if the schedule never fires.
-            var deadline = Stopwatch.GetTimestamp() + (long)(ShortTimeout.TotalSeconds * Stopwatch.Frequency);
+            // Not ShortTimeout: 21 samples at 120 ms need 2.5 s even when nothing is dropped, and
+            // a loaded runner coalescing to 2x or 3x the period needs several times that. Four
+            // times the nominal run is generous enough not to fail for being slow, and still
+            // bounds the rate from above -- the one direction the assertion below does not cover.
+            var collectBudget = TimeSpan.FromMilliseconds(period.TotalMilliseconds * requiredSamples * 4);
+            var deadline = Stopwatch.GetTimestamp() + (long)(collectBudget.TotalSeconds * Stopwatch.Frequency);
             while (true)
             {
                 int count;
@@ -1187,7 +1199,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 if (Stopwatch.GetTimestamp() >= deadline)
                     throw new TimeoutException(
                         $"Expected at least {requiredSamples} periodic emissions within " +
-                        $"{ShortTimeout.TotalSeconds}s; observed {count}.");
+                        $"{collectBudget.TotalSeconds:F1}s; observed {count}.");
                 await Task.Delay(20);
             }
         }
@@ -1212,37 +1224,45 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         for (int i = 1; i < snapshot.Count; i++)
             gaps.Add((snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency);
 
-        // Never faster than requested -- as the median gap, not the mean.
+        // Never faster than requested, as the mean gap over a warm-up-trimmed sample.
         //
-        // The mean is not safe here, and the reason is the same lateness that killed the
-        // per-gap floor. Each emission lands on its own grid slot but late by however long the
-        // host stalled, and a run that *starts* late gives that time back inside the measured
-        // window: a first tick 239 ms behind its 120 ms slot makes Reschedule skip the missed
-        // anchor, the second emission follows ~1 ms later, and eight punctual gaps after it
-        // average to 106.8 ms. Every one of those emissions came from the documented
-        // fixed-rate coalescing scheduler, and a mean bound rejects the run anyway, because a
-        // single collapsed gap moves a nine-sample mean by a ninth of a period.
+        // Three statistics have been tried here and the first two were chosen by intuition; this
+        // one is chosen by its error term, which is the only way to size it honestly.
         //
-        // The median does not care: a minority of collapsed gaps cannot move it, dropped ticks
-        // only ever push gaps to 2x or 3x the period and so move it away from the bound, and a
-        // schedule genuinely running fast moves *every* gap and takes the median with it. The
-        // original version of this test already read the median for the robustness half of that
-        // argument; what was wrong with it was the upper bound it paired with -- 1.6x a period,
-        // which coalescing legitimately exceeds by design. Dropping the upper bound was the fix;
-        // dropping the median with it was an over-correction, corrected here.
-        var ordered = new List<double>(gaps);
-        ordered.Sort();
-        var medianGap = ordered.Count % 2 == 1
-            ? ordered[ordered.Count / 2]
-            : (ordered[(ordered.Count / 2) - 1] + ordered[ordered.Count / 2]) / 2d;
+        // Every emission lands on its own grid slot, late by however long the host stalled:
+        // t(i) = slot(i) * period + late(i). Summing the gaps telescopes, so
+        //
+        //     mean gap = (slots spanned / gaps) * period + (late(last) - late(first)) / gaps
+        //
+        // The first term is at least the period, because slots are distinct. The second is the
+        // whole problem, and it is bounded by the *number of gaps* -- nothing else. That rules
+        // out both earlier attempts:
+        //
+        //   * The plain mean over nine gaps divides a cold start by nine. A first tick 239 ms
+        //     late leaves a mean of 106.8 ms against this bound, from a scheduler doing exactly
+        //     what it documents.
+        //   * The median has no such error term to shrink, which looked like an advantage and is
+        //     not: it is sensitive to the shape of the jitter instead of its size. On a real
+        //     macOS runner the gaps came out 83, 132, 73, 173, 67, 188, 62, 105, 185 -- mean
+        //     118.7 ms, so the rate was right to within 1 % -- and the median was 105 ms, because
+        //     an odd number of alternating gaps has one more short than long. It failed a
+        //     perfectly good run.
+        //
+        // So: trim the first gap, which is the only one measured from a cold schedule, and take
+        // the mean of the rest. Twenty measured gaps hold the residual endpoint term under a
+        // tenth of a period for any swing below 20 x 12 ms = 240 ms between the second emission's
+        // lateness and the last one's -- which is exactly the worst cold start observed here, and
+        // an order of magnitude beyond the jitter a loaded runner has otherwise produced.
+        // Oscillation cancels in a mean by construction, so the case above passes.
+        var measured = gaps.GetRange(1, gaps.Count - 1);
+        var meanGap = measured.Sum() / measured.Count;
 
-        // One-sided on purpose: load can only lengthen gaps, so there is no honest upper bound
-        // to pair with this one. The collection loop above bounds the rate from above instead,
-        // by requiring requiredSamples emissions inside ShortTimeout.
-        medianGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
-            $"median gap ({medianGap:F0} ms) must not undercut the configured period "
-            + $"({targetMs:F0} ms); observed gaps: "
-            + string.Join(", ", gaps.ConvertAll(g => $"{g:F0}")));
+        // One-sided on purpose: load can only lengthen gaps, so there is no honest upper bound to
+        // pair with this one. The collection loop bounds the rate from above instead.
+        meanGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
+            $"mean gap over {measured.Count} samples ({meanGap:F0} ms, first gap discarded as "
+            + $"warm-up) must not undercut the configured period ({targetMs:F0} ms); "
+            + "observed gaps: " + string.Join(", ", gaps.ConvertAll(g => $"{g:F0}")));
     }
 
     // ---------------------------------------------------------------------------------------
