@@ -88,8 +88,14 @@ an XML comment is illegal and once made every project fail to load, i.e. every C
 Scope is decided by **causality, not by which files the diff opened**. A change that breaks
 existing behaviour is caught by a regression test in a file it never touched — that failure is
 the branch's, and "I did not edit that file" is not a defence. The question to answer is whether
-the failure reproduces on the base revision: if it does not, the branch caused it and it is work
-now.
+the failure reproduces on the base revision: if it does not, the branch caused it, and it is
+closed **in this pull request** — not filed as a follow-up.
+
+Filing it is the move that turns a five-minute fix into debt. It is also strictly worse than
+fixing it, because the option expires: once the branch is merged the defect can no longer be
+closed where it was introduced, and what was a diff someone still had in their head becomes an
+archaeology exercise on `main` with nobody's name on it. A follow-up issue for your own
+regression is a promise to pay later at a higher price.
 
 What the answer *is* out of scope is everything the tooling merely surfaces along the way — a
 test that fails on the base revision too, a coverage row from elsewhere, a bot finding about
@@ -103,8 +109,9 @@ is for findings on the pull request's *own* content. Reading it any wider makes 
 rule mean nothing.
 
 The same applies to review findings, in that order: **causality first, then urgency.** A finding
-about something this branch caused is this task's work however small it looks — that is the rule
-above, and a review does not create an exception to it. The second question is only reached for a
+about something this branch caused is closed here however small it looks, and a review does not
+create an exception to the rule above — "it is only a P2" is the same deferral as "I will file
+it", reached by a different route. The second question is only reached for a
 finding the branch did not cause, and there a correct finding is still not automatically this
 task's work: a bot can be right about a real defect that belongs in a ticket rather than in the
 change being reviewed. Read the other way round, urgency alone would let a valid regression this
