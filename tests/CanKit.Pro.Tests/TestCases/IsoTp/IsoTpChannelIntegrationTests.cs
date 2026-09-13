@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -113,6 +114,92 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             "the PDU arrived before the deliberate {0} collection delay, so the stamp must be "
             + "that much older than the read — a stamp taken at delivery would read ~0",
             collectionDelay);
+    }
+
+    // --------------------------------------------------------------------------------
+    // #112 — an ICanBusService that does not stamp its events still yields usable arrival
+    // times. IsoTp.Open(ICanBusService, …) is public, so an event carrying no host stamp is
+    // reachable from outside this repository; a zero read as a timestamp would mean
+    // "infinitely old" and make every deadline reject every PDU.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task Unstamped_Events_From_A_Foreign_Bus_Service_Fall_Back_To_Now()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new UnstampingBusService();
+        using var channel = IsoTpFactory.Open(service, ep, FastOptions());
+
+        var before = Stopwatch.GetTimestamp();
+
+        // Single Frame, Normal addressing: low nibble of byte 0 is the length.
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x03, 0xAA, 0xBB, 0xCC }, FrameFlags.None));
+
+        var received = await channel.ReceiveWithArrivalAsync(CancellationToken.None)
+            .WaitAsync(ShortTimeout);
+        var after = Stopwatch.GetTimestamp();
+
+        received.Pdu.Should().Equal(new byte[] { 0xAA, 0xBB, 0xCC });
+        received.ArrivalTimestamp.Should().BeInRange(before, after,
+            "an unstamped event must be treated as having arrived now, not at tick zero");
+    }
+
+    /// <summary>
+    /// The smallest <see cref="ICanBusService"/> that an ISO-TP channel will run on, delivering
+    /// events built without a host arrival stamp — what any implementation outside this
+    /// repository would produce.
+    /// </summary>
+    private sealed class UnstampingBusService : ICanBusService
+    {
+        private readonly Channel<CanFrameEvent> _frames =
+            Channel.CreateUnbounded<CanFrameEvent>();
+
+        public void Deliver(CanFrameView frame) => _frames.Writer.TryWrite(
+            new CanFrameEvent(frame, isEcho: false, TimeSpan.Zero));
+
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 1;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add { }
+            remove { }
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null,
+            int? bufferCapacity = null, bool includeEcho = false)
+            => new Sub(_frames);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => new Sub(_frames);
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => Array.Empty<FilterOverlap>();
+
+        public void Dispose() => _frames.Writer.TryComplete();
+
+        private sealed class Sub : ISubscription
+        {
+            private readonly Channel<CanFrameEvent> _frames;
+            public Sub(Channel<CanFrameEvent> frames) => _frames = frames;
+
+            public IAsyncEnumerable<CanFrameEvent> Frames => _frames.Reader.ReadAllAsync();
+
+            public bool TryRead(out CanFrameEvent frameEvent)
+                => _frames.Reader.TryRead(out frameEvent);
+
+            public void Reconfigure(CanIdFilter filter) { }
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
+
+            public void Dispose() { }
+        }
     }
 
     // --------------------------------------------------------------------------------
