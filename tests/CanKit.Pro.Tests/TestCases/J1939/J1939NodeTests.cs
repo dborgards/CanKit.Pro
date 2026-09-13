@@ -626,12 +626,36 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // from later committing the address. Before the fix, the cancellation registration only
     // called TrySetCanceled on the returned task; OnClaimAnnounceElapsed still fired and
     // moved ClaimState to Claimed, silently contradicting the observed cancellation.
+    //
+    // Two details decide whether this test can still see that regression, and both are easy
+    // to get wrong (this one did, twice -- once by polling, once by cancelling too early):
+    //
+    //   * WHEN to cancel. BeginClaimRound publishes Claiming *before* it registers the pending
+    //     claim, and the arbitration deadline is armed later still, by
+    //     OnClaimAnnounceTxConfirmed once the announcement is confirmed on the wire. That
+    //     method returns early if the claim task is already completed -- so cancelling on the
+    //     Claiming transition means no deadline is ever armed, OnClaimAnnounceElapsed never
+    //     runs, and there is nothing left to commit the address. The test would pass against
+    //     the very regression it exists for. So the cancel waits for the announcement frame
+    //     itself, observed on a spectator bus: that is the event whose confirmation arms the
+    //     window, and it cannot be reached before the pending claim is registered.
+    //
+    //   * WHAT to assert. `NotBe(Claimed)` is satisfied by a node wedged in Claiming, which is
+    //     exactly what a missing teardown leaves behind if the deadline never armed. The
+    //     terminal state after a cancel inside the window is NotClaimed, so that is what is
+    //     asserted -- it catches the regression through the state machine even on a run where
+    //     the sequencing above lost its race, rather than relying on the timer having fired.
+    //
+    // Verified by restoring the regression (dropping both the teardown post and the
+    // already-completed guard in OnClaimAnnounceElapsed): this test fails, as the version
+    // before the timing rework did.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task ClaimAddressAsync_CancelDuringArbitration_TearsDownPendingClaim()
     {
         var session = NewSession();
         using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // spectator: sees the announcement on the wire
 
         // Long arbitration window so the test can cancel comfortably in the middle. 500 ms is
         // well above the actor scheduling jitter we need to observe.
@@ -641,31 +665,24 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         };
         using var node = J1939Node.Open(busA, opts);
 
-        // Wait for the transition into Claiming on the node's own event rather than by
-        // polling. The poll this replaces was `for (i < 20) await Task.Delay(10)` followed by
-        // an assertion that the state is still Claiming -- a 200 ms nominal budget bounded by
-        // nothing, inside a 500 ms window. On a stalled runner those twenty hops overrun the
-        // window, the arbitration timer commits the address exactly as documented, and the
-        // test reports the product's correct behaviour as a defect. It did (#92, macOS).
-        //
-        // The event fires *at* the transition, so cancellation is issued at the start of the
-        // arbitration window instead of an unknown distance into it. That does not make the
-        // window infinite -- a half-second stall between the signal and the cancel reaching
-        // the actor would still miss it -- but it no longer needs the runner to be fast, only
-        // to not stall for the whole window inside three statements.
-        var claiming = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnClaimChanged(object? _, J1939ClaimEventArgs e)
+        // The announcement leaving the bus is the signal that the arbitration window is about
+        // to be armed -- see the note above on why the Claiming transition is too early and a
+        // bounded poll loop is too late (the poll this replaces gave itself twenty
+        // Task.Delay(10) hops inside a 500 ms window and overran it on a loaded runner, #92).
+        var announced = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
         {
-            if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult(true);
-        }
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == 0x33)
+                announced.TrySetResult(true);
+        };
 
-        node.AddressClaimChanged += OnClaimChanged;
-        try
         {
             using var cts = new CancellationTokenSource();
             var claimTask = node.ClaimAddressAsync(0x33, cts.Token);
 
-            await claiming.Task.WithTimeout(ShortTimeout);
+            await announced.Task.WithTimeout(ShortTimeout);
 
             cts.Cancel();
 
@@ -679,18 +696,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             // fired.
             await Task.Delay(700);
 
-            // The node MUST NOT have silently committed to the cancelled address.
-            node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
+            // NotClaimed specifically, not merely "not Claimed": a missing teardown leaves the
+            // node wedged in Claiming, which NotBe(Claimed) would wave through. This is the
+            // assertion that catches the regression whether or not the deadline was armed.
+            node.ClaimState.Should().Be(J1939ClaimState.NotClaimed);
             node.Address.Should().BeNull();
 
             // A fresh claim must still work (i.e. teardown left the state machine consistent).
             await node.ClaimAddressAsync(0x44).WithTimeout(ShortTimeout);
             node.ClaimState.Should().Be(J1939ClaimState.Claimed);
             node.Address.Should().Be((byte)0x44);
-        }
-        finally
-        {
-            node.AddressClaimChanged -= OnClaimChanged;
         }
     }
 
@@ -1197,23 +1212,22 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         for (int i = 1; i < snapshot.Count; i++)
             gaps.Add((snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency);
 
-        // No bursting. Rounding to slots rather than comparing raw milliseconds is what makes
-        // this survive a loaded runner: an emission observed late next to one observed on time
-        // compresses their gap without the scheduler having done anything, and under an 8x CPU
-        // overload that produced gaps of 69 and 76 ms against a 120 ms period. Those round to
-        // one slot; a scheduler that queued its skipped ticks and released them back to back
-        // rounds to zero, which no amount of jitter can produce.
-        for (var i = 0; i < gaps.Count; i++)
-        {
-            var slots = Math.Round(gaps[i] / targetMs, MidpointRounding.AwayFromZero);
-            slots.Should().BeGreaterOrEqualTo(1,
-                $"gap {i + 1} ({gaps[i]:F0} ms) must be at least one period ({targetMs:F0} ms): "
-                + "coalesced ticks must advance the anchor, not burst out");
-        }
-
-        // Never faster than requested. Load can only lengthen gaps -- a dropped tick moves an
-        // emission to the next slot -- so a mean below the period means the schedule is
-        // running fast, which no runner can cause. The 10 % allowance absorbs the endpoint
+        // Never faster than requested, taken over the whole run rather than per gap.
+        //
+        // A per-gap floor is tempting and wrong, which cost two iterations to establish. Each
+        // emission lands on its own grid slot, but *late* by however long the host stalled, so
+        // a late emission followed by a punctual one closes the distance between them: when a
+        // tick fires 200 ms behind its slot, Reschedule anchors the next one only 40 ms later,
+        // and the two frames are 40 ms apart with the scheduler having done exactly the right
+        // thing. Measured under an 8x CPU overload -- a 32 ms gap against a 120 ms period, and
+        // 69 and 76 ms ones before that. None of them is a burst.
+        //
+        // What lateness cannot do is manufacture extra emissions: distinct slots are one
+        // period apart, so over n samples the mean gap is at least a period no matter how the
+        // host schedules them. That makes this the strongest statement here that is actually
+        // true of the implementation -- and it is enough on its own, since a schedule that
+        // bursts, or runs at the wrong rate, drags the mean down (each of those mutations was
+        // checked against exactly this assertion). The 10 % allowance absorbs the endpoint
         // jitter of the span the mean is taken over, nothing more.
         var meanGap = gaps.Sum() / gaps.Count;
         meanGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
