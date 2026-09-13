@@ -191,8 +191,10 @@ Entfernen der doppelten Angabe, damit es nichts mehr zu synchronisieren gibt.
 ## Die Sorte Fehler, die zweimal identisch auftrat
 
 Zwei Korrekturen gingen beim Mergen verloren: `9b5248f` und `9f172d6` verpassten #104, `8ebced1`
-verpasste #107. Beide Male hatte ich den neuen Head gemeldet und mich danach schlafen gelegt;
-beide Male mergte der Maintainer den Stand, den er kannte. Die Lücke liegt zwischen Push und
+verpasste #107. Die drei Commits sind von `main` aus nicht erreichbar — sie liegen nur noch auf
+den Spitzen ihrer Branches, was genau das ist, was hier „verloren" heißt; die dauerhafte Quelle
+sind die beiden PR-Verläufe. Beide Male hatte ich den neuen Head gemeldet und mich danach
+schlafen gelegt; beide Male mergte der Maintainer den Stand, den er kannte. Die Lücke liegt zwischen Push und
 Merge, nicht zwischen den Beteiligten — eine Meldung im Chat schließt sie nicht.
 
 Vereinbart wurde deshalb ein Zustandssignal statt eines Vorsatzes: **„FERTIG — mergebar"** wird

@@ -47,10 +47,11 @@
   in re-triggers the reviewers against a new head, so re-check afterwards instead of assuming the
   earlier pass still holds.
 - **"FERTIG — mergebar" is what says a branch is finished. A status message is not.** Twice a
-  correction was pushed shortly before a merge, announced here, and merged past anyway
-  (`9b5248f` and `9f172d6` with #104, `8ebced1` with #107). The gap is between the push and the
-  merge, not between the people, so promptness cannot close it — only a state that says *no
-  further push is coming*.
+  correction was pushed shortly before a merge, announced here, and merged past anyway — #104
+  lost two and #107 lost one, and their pull-request timelines are the durable record, since the
+  commits themselves never entered `main`. The gap is between the push and the merge, not
+  between the people, so promptness cannot close it — only a state that says *no further push is
+  coming*.
 
   So say those words, literally, and only once every thread is closed and every check this
   branch is answerable for is green. A leg red for a failure the branch did not cause does not
@@ -209,8 +210,10 @@ available at the time.
   history, and writing it from memory put two wrong entries into one three-item list: a finding
   credited to a review that had not made it, and a pair of sentences offered as a contradiction
   when the commit that resolved them had explicitly classified them as *not* one — and that
-  entry was not the review's either. Cite the commit instead of paraphrasing it, and read the
-  commit before citing it.
+  entry was not the review's either. Cite the record instead of paraphrasing it, and read the
+  record before citing it — the commit where it is reachable from `main`, and the pull request
+  or issue where it is not, because a hash that only lives on a branch tip stops resolving the
+  day that branch is deleted.
 - **A fallback does not finish the task.** When an API call fails and the work goes somewhere
   else — an answer posted as a plain comment because the review thread rejected the reply — the
   task is done only once the original path is retried. A resolved review thread containing no
