@@ -197,6 +197,7 @@ Merge, nicht zwischen den Beteiligten — eine Meldung im Chat schließt sie nic
 
 Vereinbart wurde deshalb ein Zustandssignal statt eines Vorsatzes: **„FERTIG — mergebar"** wird
 erst geschrieben, wenn keine Pushes mehr kommen, und danach wird der Branch nicht mehr angefasst.
+Die Regel steht in `CLAUDE.md` § *Pull requests*; was hier steht, ist nur, woher sie kommt.
 
 ## Was nicht verallgemeinerbar ist
 
@@ -242,7 +243,6 @@ Ausnahme für Probleme, die der PR selbst verursacht hat. Genau die wurde verwor
   Läufe, weil sie auf dem Branch nicht aktiviert ist. Gefunden beim Prüfen eines Codex-Befunds,
   nicht beim Suchen. Ein Schutz, der nur dekorativ ist, ist schlechter als keiner — der Fall, für
   den er gebaut wurde, ist bereits eingetreten (#85).
-- **Die Konvention „FERTIG — mergebar"** steht noch nicht in `CLAUDE.md`.
 - **Nach dem 1.3.0-Release** — der veraltete `Block 3→1 / remap`-Hinweis in `CHANGELOG.md` und im
   Release-Text (vermerkt auf #44). Das ist der einzige Rest, der direkt aus Fehler #2 stammt und
   den kein Issue automatisch erledigt.
