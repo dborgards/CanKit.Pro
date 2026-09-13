@@ -59,20 +59,27 @@
   breath, with what is failing and where it is recorded, so the merge decision is made on the
   facts rather than on a green tick.
 
-  Afterwards the branch is frozen. A finding that arrives later still gets its answer in the
-  thread, because the rule above does not lapse; what waits is the *push*, which becomes a
-  decision for the maintainer — put as a question with options, per § *Decisions that belong to
-  the maintainer*, not as a fix that quietly races their merge.
+  Afterwards the branch is frozen, and the signal describes a state rather than an intention —
+  so **anything that falsifies that state revokes it, at the moment it happens**. A finding
+  arriving opens a thread, which makes "every thread is closed" false there and then: say the
+  signal is withdrawn, before investigating and before knowing whether a fix is even needed.
+  Waiting until a push is authorised would leave the maintainer holding a signal that stopped
+  being true when the comment landed, and they can merge on it during the investigation or after
+  a finding that needed no code at all.
 
-  If that push is authorised, it **revokes the signal**. Say so when you push, and say
-  "FERTIG — mergebar" again only once the new head's checks and threads have settled. Without
-  that, the old signal outlives the head it described and the maintainer can merge a commit
-  whose verification has not finished — which is the original race, re-entered through the
-  procedure meant to prevent it.
+  A push revokes it likewise, and the push itself is never yours to decide after the signal: it
+  becomes a question with options for the maintainer, per § *Decisions that belong to the
+  maintainer*, not a fix that quietly races their merge. The finding still gets its answer in
+  the thread either way — the rule above does not lapse.
 
-  Editing the pull-request description is not a push and does not revoke the signal; it usually
-  needs doing, because a description written mid-branch goes stale exactly as the branch's own
-  text does — see § *Before claiming something is true*.
+  Say "FERTIG — mergebar" again once the state is true again: threads closed, and any new head's
+  checks settled. Re-issuing it costs a sentence; a signal that outlives the state it described
+  is the original race, re-entered through the procedure meant to prevent it.
+
+  Editing the pull-request description is the one thing that does not revoke it, because it
+  changes no thread and no head. It usually needs doing, because a description written
+  mid-branch goes stale exactly as the branch's own text does — see § *Before claiming something
+  is true*.
 - Branch from `main` as `feat/…`, `fix/…`, `docs/…` (see `CONTRIBUTING.md` § Branching).
 - **Every commit on the branch decides the release, not the pull-request title.** As practised,
   pull requests land as two-parent merge commits (`git log --first-parent main` shows
