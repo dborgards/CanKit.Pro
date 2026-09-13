@@ -23,8 +23,8 @@ Geschlossen: #23, #24, #37, #44, #53, #82. Neu und dokumentiert: #92, #94, #95, 
 
 Die letzten drei Pull Requests (#104, #107, #108) sind selbst Gegenstand dieser Retro: sie tragen
 die Regeln, und ihr Verlauf hat den Befund geliefert, der weiter unten unter *Der Befund, der erst
-am Ende sichtbar wurde* steht. Der Review dieses Dokuments (#109) hat denselben Befund noch zweimal
-bestätigt und ist dort mit aufgenommen.
+am Ende sichtbar wurde* steht. Der Review dieses Dokuments (#109) hat denselben Befund mehrfach
+bestätigt; die Fälle stehen dort einzeln.
 
 Inhaltlich trägt das. Zwei Defekte kamen heraus, die ohne diese Welle geblieben wären — einer im
 Produktivcode, einer in der Suite:
@@ -38,10 +38,9 @@ Produktivcode, einer in der Suite:
   in der Behauptung des Tests, nicht im Produktivcode — die Suite meldete dauerhaft einen Bug, den
   es nicht gab, und verdeckte damit, was sie sonst hätte melden können.
 
-Der Preis: elf Einträge in der Chronologie unten, und weil deren letzter vier Widersprüche
-zusammenfasst, vierzehn einzeln korrigierte Fehlbehauptungen. Dreimal musste der Maintainer
-nachfassen, und zweimal ging eine Korrektur beim Mergen verloren, weil sie kurz vor dem Merge
-gepusht wurde.
+Der Preis: jede Zeile der Chronologie unten ist eine öffentlich korrigierte Fehlbehauptung, die
+letzte fasst mehrere zusammen. Dreimal musste der Maintainer nachfassen, und zweimal ging eine
+Korrektur beim Mergen verloren, weil sie kurz vor dem Merge gepusht wurde.
 
 ## Chronologie der Fehlschläge
 
@@ -85,9 +84,9 @@ einer rot wird, ist ein Rennen gegen die Runner-Auslastung.
 
 ## Ursache
 
-**Eigene Argumentation wurde als Beweis behandelt.** In jedem der ersten acht Fälle war die
-Gegenprobe billig und verfügbar — ausführen, mutieren, unter Last laufen lassen, nachmessen — und
-in jedem Fall kam zuerst das Argument.
+**Eigene Argumentation wurde als Beweis behandelt.** In jedem Fall oben, der eine Messung betraf,
+war die Gegenprobe billig und verfügbar — ausführen, mutieren, unter Last laufen lassen,
+nachmessen — und in jedem Fall kam zuerst das Argument.
 
 Zwei Verstärker, die das über Einzelfälle hinaus systematisch machen:
 
@@ -154,15 +153,23 @@ gegeneinander zu lesen, sondern auch beim ersten Schreiben, denn eine Zusammenfa
 ihre Absicht gelesen und nicht gegen ihre Belege.
 
 Der fünfte entstand in derselben Korrekturrunde. Der Satz, mit dem ich dabei eine unprüfbare Zahl
-ersetzte,
-lautete „elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt sie einzeln",
-und das tut sie nicht: ihr elfter Eintrag fasst vier Widersprüche zusammen, es sind vierzehn
+ersetzte, lautete „elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt sie
+einzeln", und das tut sie nicht: ihr elfter Eintrag fasst vier Widersprüche zusammen, es sind vierzehn
 Behauptungen in elf Zeilen. Die Korrektur einer Zusammenfassung ist selbst eine Zusammenfassung
 und braucht dieselbe Gegenprobe wie das Original — sonst ersetzt man eine unbelegte Zahl durch
 eine falsche.
 
-Fünf Belege in einem Dokument über diese Fehlerklasse — was die Regel eher stützt als schwächt:
-sie ist nicht durch Vorsatz einzuhalten, sondern nur durch die Gegenprobe Behauptung gegen Beleg.
+Ein sechster stand danach in der Einleitung: sie sagte weiter, der Review habe den Befund „noch
+zweimal" bestätigt, während dieser Abschnitt inzwischen drei Fälle führte. Damit ist die Ursache
+deutlicher als bei jedem Einzelfall: eine Zusammenfassung, die eine Zahl wiederholt, die
+anderswo belegt wird, veraltet bei jeder Änderung des Belegs — und zwar lautlos, weil beide
+Stellen für sich stimmig aussehen. Die Einleitung nennt jetzt keine Zahl mehr, sondern verweist
+auf diesen Abschnitt. Das ist die belastbarere Form der Regel: **eine Zahl gehört an genau eine
+Stelle, und die anderen verweisen darauf, statt sie zu wiederholen.**
+
+Sechs Belege in einem Dokument über diese Fehlerklasse — was die Regel eher stützt als schwächt:
+sie ist nicht durch Vorsatz einzuhalten, sondern nur durch die Gegenprobe Behauptung gegen Beleg,
+und wo die Gegenprobe wiederholt scheitert, durch das Entfernen der doppelten Angabe.
 
 ## Die Sorte Fehler, die zweimal identisch auftrat
 
@@ -183,7 +190,7 @@ Lastläufe sichtbar geworden. Das gehört zur Sache, nicht zum Fehler.
 
 Die Trennlinie: Erkunden erzeugt Wissen, das vorher nicht da war. Nacharbeit an einer Behauptung,
 die vor der Messung aufgestellt wurde, erzeugt nur den Zustand, der ohne die Behauptung schon
-gegolten hätte. Von den elf Zeilen oben fällt keine in die erste Kategorie.
+gegolten hätte. Keine Zeile der Chronologie oben fällt in die erste Kategorie.
 
 ## Was daraus in `CLAUDE.md` steht
 
@@ -210,7 +217,7 @@ Ausnahme für Probleme, die der PR selbst verursacht hat. Genau die wurde verwor
 ## Offen aus dieser Welle
 
 - **#92** — Schritt 1 (UDS-Starvation, einziger Produktbug-Kandidat) und Schritt 2 (virtuelle Uhr
-  für die drei verbleibenden zeitabhängigen Tests).
+  für die verbleibenden zeitabhängigen Tests).
 - **#102** — `Transmit` unter `_pendingGate`, mit FIFO-Ordnung, reentrantem Echo-Pfad und
   Dispose-Race als Randbedingungen.
 - **#103** — RX-Kopie in J1939-TP und CANopen.
