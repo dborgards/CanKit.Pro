@@ -22,12 +22,14 @@
   every reviewer and bot re-runs against the new head, and findings that were settled come back.
   Two pull requests in flight produced exactly that and accelerated nothing.
 
-  There is one exception, and it is narrow: a change this pull request's own review makes
-  necessary, which is too large to fold in without making the diff unreviewable, and which the
-  maintainer agrees to split. All three conditions, and the third is not a formality — an author
-  who decides alone that their finding deserves its own pull request has re-derived the parallel
-  working this rule exists to stop. Anything the review turns up *elsewhere* is not covered here:
-  the scope rule below already says where it goes.
+  There is one exception, and it runs the opposite way from the one people reach for: a problem
+  this pull request did **not** cause, surfaced while working on it, which warrants its own pull
+  request rather than an issue. That one may overlap, because the alternative is sitting on it
+  until this pull request lands.
+
+  What the exception never covers is anything this pull request *did* cause. There is no split,
+  no waiver and no "too large to fold in" for your own regression — the scope rule below has no
+  exception at all, and this is not one.
 
   *Aside, because it dates the second cost above:* `ci.yml` already carries a `merge_group`
   trigger, added after #81 and #83 merged four minutes apart and their untested combination broke
@@ -92,12 +94,10 @@ Scope is decided by **causality, not by which files the diff opened**. A change 
 existing behaviour is caught by a regression test in a file it never touched — that failure is
 the branch's, and "I did not edit that file" is not a defence. The question to answer is whether
 the failure reproduces on the base revision: if it does not, the branch caused it, and it is
-closed **in this pull request** — not filed as a follow-up.
-
-There is exactly one way out, and it is the split exception above: the maintainer agrees that the
-fix is too large to fold in. Note who that leaves holding the decision. The author never defers
-their own regression alone — that is the whole of this rule, and the only question it leaves open
-is who may authorise an exception, which is not the author.
+closed **in this pull request** — not filed as a follow-up, not split into a second pull request,
+and not waived. **This rule has no exception.** The split permitted above is for problems the
+branch did not cause; reaching for it to defer your own regression is precisely the move it was
+written to block.
 
 Filing it is the move that turns a five-minute fix into debt. It is also strictly worse than
 fixing it, because the option expires: once the branch is merged the defect can no longer be
