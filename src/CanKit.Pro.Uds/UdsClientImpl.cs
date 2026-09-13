@@ -848,8 +848,15 @@ internal sealed class UdsClientImpl : IUdsClient
                             throw new UdsProtocolException(
                                 $"ECU sent {pendingCount} consecutive NRC 0x78 responses, exceeding MaxResponsePendingCount={_options.MaxResponsePendingCount}.");
 
-                        // Restart the wait budget on P2* (SRS FR-UDS-009, ISO 14229-1 §7.3.3).
-                        budgetStart = Stopwatch.GetTimestamp();
+                        // Restart the wait budget on P2* (SRS FR-UDS-009, ISO 14229-1 §7.3.3)
+                        // from when the pending response *arrived*, not from now. Restarting at
+                        // "now" would hand the ECU whatever scheduling delay this client just
+                        // suffered on top of its P2* budget: a 0x78 that arrived at 50 ms but is
+                        // processed at 200 ms would make a final response that arrived at 150 ms
+                        // -- 100 ms after the 0x78, against an 80 ms P2* -- measure as zero and
+                        // be accepted. Same scheduling independence as the check above, and for
+                        // the same reason.
+                        budgetStart = received.ArrivalTimestamp;
                         timeout = _options.P2StarClientMax;
                         timerKind = UdsTimeoutTimer.P2Star;
                         continue;

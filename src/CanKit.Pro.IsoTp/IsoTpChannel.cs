@@ -357,13 +357,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
-                // Stamp here, not where the PDU is emitted. Everything between this line and
-                // the emit -- the actor mailbox and reassembly -- is scheduling, and a deadline
-                // measured after scheduling is not a deadline (Codex on #112). The adapter's own
-                // CanFrameEvent.ReceiveTimestamp cannot serve: it is zero on adapters that do not
-                // timestamp and is documented as not comparable across buses, so the reference
-                // has to be a host-monotonic reading of ours.
-                var frameArrival = Stopwatch.GetTimestamp();
+                // The demux stamps every frame before it is buffered for any subscription, so
+                // neither this reader's channel wait, nor the actor mailbox, nor reassembly
+                // contributes to it -- all three are scheduling, and a deadline measured after
+                // scheduling is not a deadline. The adapter's own ReceiveTimestamp cannot serve:
+                // zero on adapters that do not timestamp, and documented as not comparable
+                // across buses.
+                //
+                // Falling back to "now" keeps an event built outside the demux (a hand-rolled
+                // ISubscription in a test, say) usable rather than making it look infinitely
+                // old, which is what a zero stamp would mean to a deadline.
+                var frameArrival = frameEvent.HostArrivalTimestamp > 0
+                    ? frameEvent.HostArrivalTimestamp
+                    : Stopwatch.GetTimestamp();
                 var frame = frameEvent.Frame;
                 // Not the hazard the previous comment described: the subscription already hands
                 // out a payload it owns, so nothing the adapter does can corrupt it. What it hands

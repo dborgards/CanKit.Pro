@@ -71,6 +71,32 @@ public class UdsExpiredDeadlineTests
     }
 
     /// <summary>
+    /// P2* restarts when NRC 0x78 arrives, and it must restart from that response's *arrival*.
+    /// Restarting from "now" would hand the ECU whatever scheduling delay the client just
+    /// suffered on top of its budget — here the 0x78 arrives at 0 ms and the final response
+    /// 200 ms later, which against an 80 ms P2* is late however long the client took to notice.
+    /// </summary>
+    [Fact]
+    public async Task C_P2Star_Restarts_From_The_Pending_Response_Arrival()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(20),
+            stampArrivalAtDelivery: false)
+        {
+            RespondPendingFirst = true,
+            PendingToFinalArrivalGap = TimeSpan.FromMilliseconds(200),
+            // The client is descheduled between the two: it sees the 0x78 long after it landed.
+            ObservationDelayAfterPending = TimeSpan.FromMilliseconds(150),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "P2* runs from when the pending response arrived, not from when it was read");
+    }
+
+    /// <summary>
     /// Answers one positive RDBI response, ignoring the cancellation token so the delivery — not
     /// the deadline — completes the caller's wait.
     /// </summary>
@@ -78,9 +104,21 @@ public class UdsExpiredDeadlineTests
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
 
+        private static readonly byte[] Pending = { 0x7F, 0x22, 0x78 };
+
         private readonly TimeSpan _deliverAfter;
         private readonly bool _stampArrivalAtDelivery;
         private long _arrivalStamp;
+        private bool _pendingSent;
+
+        /// <summary>Answer NRC 0x78 first, then the positive response.</summary>
+        public bool RespondPendingFirst { get; init; }
+
+        /// <summary>How much later than the 0x78 the final response arrived.</summary>
+        public TimeSpan PendingToFinalArrivalGap { get; init; }
+
+        /// <summary>How long the client is kept from noticing the 0x78 after it arrived.</summary>
+        public TimeSpan ObservationDelayAfterPending { get; init; }
 
         public StubChannel(TimeSpan deliverAfter, bool stampArrivalAtDelivery)
         {
@@ -103,7 +141,23 @@ public class UdsExpiredDeadlineTests
             CancellationToken cancellationToken = default)
         {
             // Deliberately not observing the token: this models the write winning the race.
+            if (RespondPendingFirst && !_pendingSent)
+            {
+                _pendingSent = true;
+                await Task.Delay(ObservationDelayAfterPending, CancellationToken.None)
+                    .ConfigureAwait(false);
+                return new IsoTpReceivedPdu(Pending, _arrivalStamp);
+            }
+
             await Task.Delay(_deliverAfter, CancellationToken.None).ConfigureAwait(false);
+
+            if (RespondPendingFirst)
+            {
+                var late = _arrivalStamp
+                    + (long)(PendingToFinalArrivalGap.TotalSeconds * Stopwatch.Frequency);
+                return new IsoTpReceivedPdu(Response, late);
+            }
+
             var stamp = _stampArrivalAtDelivery ? Stopwatch.GetTimestamp() : _arrivalStamp;
             return new IsoTpReceivedPdu(Response, stamp);
         }
