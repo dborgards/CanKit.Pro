@@ -120,14 +120,25 @@ public class PendingKeyTests
     public void Equals_Object_Follows_The_Typed_Comparison()
     {
         // A Dictionary<PendingKey, ...> always takes the generic IEquatable path, so this
-        // override is only reached by a non-generic caller. It still has to agree.
+        // override is only reached by a non-generic caller. It still has to agree, including
+        // on the `obj is PendingKey` guard: a foreign object and null must both come back
+        // false rather than throwing or matching.
+        //
+        // The last two operands are held in `object?` locals rather than written inline as a
+        // string literal and `null`. CodeQL is right that `key.Equals("...")` compares
+        // incomparable types and that `key.Equals(null)` can never be true -- that is the
+        // point of the assertions, and stating the operands as `object?` says "some reference
+        // that is not a PendingKey", which is the contract being pinned, instead of tripping
+        // a rule aimed at accidental comparisons in production code.
         object same = Key();
         object different = Key(id: 0x999);
+        object? foreign = "not a key";
+        object? nothing = null;
 
         Key().Equals(same).Should().BeTrue();
         Key().Equals(different).Should().BeFalse();
-        Key().Equals("not a key").Should().BeFalse();
-        Key().Equals(null).Should().BeFalse();
+        Key().Equals(foreign).Should().BeFalse();
+        Key().Equals(nothing).Should().BeFalse();
     }
 
     [Fact]
