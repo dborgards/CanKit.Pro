@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -154,6 +156,15 @@ namespace CanKit.Pro.RawCan
 
         private void OnFrameObserved(object? sender, CanReceiveDataView e)
         {
+            // Taken once per frame, here, and not per subscription: every matching subscriber must
+            // agree on when the frame arrived. Taken on the very first line for the same reason --
+            // everything below it can block. TryMatchEcho takes _pendingGate, which
+            // SendWithEchoConfirmAsync deliberately holds across _bus.Transmit (#102), and the
+            // per-subscription buffers below can hold a frame while their reader is descheduled.
+            // Either would make a punctual frame look late to whoever is enforcing a deadline on
+            // it (Codex on #112).
+            var hostArrival = Stopwatch.GetTimestamp();
+
             // Independent of subscription dispatch below: echo frames must be checked against
             // outstanding SendConfirmed calls regardless of whether anyone also has a
             // subscription open. Guarded by the same lock-free fast path as subscriptions.
@@ -194,7 +205,8 @@ namespace CanKit.Pro.RawCan
                 // of being silently swallowed.
                 try
                 {
-                    subscription.TryDeliver(view, isEcho, receiveTimestamp, ref ownedPayload);
+                    subscription.TryDeliver(view, isEcho, receiveTimestamp, hostArrival,
+                        ref ownedPayload);
                 }
                 catch (Exception ex)
                 {
@@ -301,9 +313,34 @@ namespace CanKit.Pro.RawCan
             // FR-RAW-032: best-effort approximation -- confirmed as soon as the driver accepts the
             // frame, explicitly marked IsApproximated so callers can never mistake this for a real
             // hardware acknowledgment.
-            var accepted = await _bus.TransmitAsync(frame, cancellationToken).ConfigureAwait(false);
+            //
+            // The hand-off instant is taken by a continuation on the thread that completes the
+            // driver's task, not after awaiting it. Resuming this method is a scheduling event:
+            // for an adapter whose TransmitAsync completes asynchronously, the driver has
+            // accepted the frame -- and the peer may already be answering -- before this method
+            // runs again, and a reading taken there starts a caller's response deadline late
+            // (Codex on #112). ExecuteSynchronously is what observes completion closest; when the
+            // runtime declines to inline it the reading is what it would have been anyway.
+            var stamp = new StrongBox<long>();
+            var accepted = await _bus.TransmitAsync(frame, cancellationToken)
+                .ContinueWith(
+                    static (completed, state) =>
+                    {
+                        ((StrongBox<long>)state!).Value = Stopwatch.GetTimestamp();
+
+                        // GetResult rather than .Result: it surfaces a driver fault or a
+                        // cancellation as itself instead of wrapping it in an AggregateException,
+                        // so this continuation is invisible to callers apart from the stamp.
+                        return completed.GetAwaiter().GetResult();
+                    },
+                    stamp,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default)
+                .ConfigureAwait(false);
+            var handoff = stamp.Value;
             return accepted > 0
-                ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None }
+                ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff }
                 : new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Rejected };
         }
 
@@ -312,6 +349,7 @@ namespace CanKit.Pro.RawCan
             var pending = new PendingSend(PendingKey.ForPendingSend(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
 
             int accepted;
+            long handoff = 0;
             try
             {
                 // Register and transmit as one atomic step under _pendingGate: this is what makes
@@ -347,6 +385,14 @@ namespace CanKit.Pro.RawCan
 
                     RegisterPending(pending);
                     accepted = _bus.Transmit(in frame);
+
+                    // Taken here, inside the lock and immediately after the driver call returns:
+                    // this is the closest observable instant to the frame reaching the wire.
+                    // Anything earlier is before the frame was handed over -- including the wait
+                    // for this very lock, which another send holds across its own Transmit -- and
+                    // would start a caller's response deadline while the request was still
+                    // queued behind it (Codex on #112).
+                    handoff = Stopwatch.GetTimestamp();
                 }
             }
             catch
@@ -363,7 +409,9 @@ namespace CanKit.Pro.RawCan
 
             try
             {
-                return await WaitForPendingAsync(pending, timeout, cancellationToken).ConfigureAwait(false);
+                var confirmation = await WaitForPendingAsync(pending, timeout, cancellationToken)
+                    .ConfigureAwait(false);
+                return confirmation with { HostTransmitTimestamp = handoff };
             }
             finally
             {

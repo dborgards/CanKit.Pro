@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using CanKit.Abstractions.API.Can.Definitions;
 
 namespace CanKit.Pro.RawCan
@@ -36,11 +37,13 @@ namespace CanKit.Pro.RawCan
         /// Creates an event. The caller is responsible for <paramref name="frame"/> owning its
         /// payload; see the remarks on <see cref="CanFrameEvent"/>.
         /// </summary>
-        public CanFrameEvent(CanFrameView frame, bool isEcho, TimeSpan receiveTimestamp)
+        public CanFrameEvent(CanFrameView frame, bool isEcho, TimeSpan receiveTimestamp,
+            long hostArrivalTimestamp = 0)
         {
             Frame = frame;
             IsEcho = isEcho;
             ReceiveTimestamp = receiveTimestamp;
+            HostArrivalTimestamp = hostArrivalTimestamp;
         }
 
         /// <summary>The frame.</summary>
@@ -92,6 +95,28 @@ namespace CanKit.Pro.RawCan
         /// that do not timestamp; not comparable across buses.
         /// </summary>
         public TimeSpan ReceiveTimestamp { get; }
+
+        /// <summary>
+        /// A host-monotonic <see cref="Stopwatch.GetTimestamp"/> reading taken by the demux when
+        /// this frame was dispatched, before it was buffered for any subscription. Zero when the
+        /// event was constructed outside the demux.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This is what a deadline should be measured against, and <see cref="ReceiveTimestamp"/>
+        /// is not: the adapter's reading is zero on adapters that do not timestamp and is
+        /// documented above as not comparable across buses, so it cannot be subtracted from
+        /// anything. This one is ours, taken once per frame so every subscription that matches
+        /// sees the same instant, and comparable with any other
+        /// <see cref="Stopwatch.GetTimestamp"/> reading in the process.
+        /// </para>
+        /// <para>
+        /// It deliberately takes no part in equality: it records when a delivery happened, not
+        /// what the frame is, and two events are the same frame or they are not regardless of
+        /// when either was dispatched.
+        /// </para>
+        /// </remarks>
+        public long HostArrivalTimestamp { get; }
 
         /// <summary>
         /// Value equality over the frame's kind, ID, flags and <em>payload bytes</em>, plus

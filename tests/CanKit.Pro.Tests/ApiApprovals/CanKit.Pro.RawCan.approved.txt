@@ -20,8 +20,9 @@ namespace CanKit.Pro.RawCan
     }
     public readonly struct CanFrameEvent : System.IEquatable<CanKit.Pro.RawCan.CanFrameEvent>
     {
-        public CanFrameEvent(CanKit.Abstractions.API.Can.Definitions.CanFrameView frame, bool isEcho, System.TimeSpan receiveTimestamp) { }
+        public CanFrameEvent(CanKit.Abstractions.API.Can.Definitions.CanFrameView frame, bool isEcho, System.TimeSpan receiveTimestamp, long hostArrivalTimestamp = 0) { }
         public CanKit.Abstractions.API.Can.Definitions.CanFrameView Frame { get; }
+        public long HostArrivalTimestamp { get; }
         public bool IsEcho { get; }
         public System.TimeSpan ReceiveTimestamp { get; }
         public bool Equals(CanKit.Pro.RawCan.CanFrameEvent other) { }
@@ -82,6 +83,7 @@ namespace CanKit.Pro.RawCan
     {
         public bool Confirmed { get; init; }
         public CanKit.Pro.RawCan.TxConfirmFailureReason FailureReason { get; init; }
+        public long HostTransmitTimestamp { get; init; }
         public bool IsApproximated { get; init; }
         public System.DateTime Timestamp { get; init; }
     }

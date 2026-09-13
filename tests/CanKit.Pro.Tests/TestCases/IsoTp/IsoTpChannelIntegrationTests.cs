@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -65,6 +67,140 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             NCr = nCr ?? TimeSpan.FromMilliseconds(500),
             WftMax = wftMax,
         };
+
+    // --------------------------------------------------------------------------------
+    // #112 — the arrival stamp reports when the PDU arrived, not when it was collected.
+    // A deadline built on it (UDS P2) is only as good as that distinction: a stamp taken at
+    // delivery would make every late reader look like a late peer.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task ArrivalStamp_Is_Taken_On_Arrival_Not_On_Collection()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epAB = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        var epBA = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+
+        using var sender = IsoTpFactory.Open(busA, epAB, FastOptions());
+        using var receiver = IsoTpFactory.Open(busB, epBA, FastOptions());
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+
+        // Multi-frame on purpose: the stamp must follow the *last* frame, and a multi-frame PDU
+        // is the case where reassembly sits between arrival and delivery.
+        var payload = new byte[64];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
+
+        await sender.SendAsync(payload).WaitAsync(ShortTimeout);
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        // Collect late, deliberately. Nothing about this delay is the peer's fault, so none of
+        // it may show up in the stamp.
+        var collectionDelay = TimeSpan.FromMilliseconds(300);
+        await Task.Delay(collectionDelay);
+
+        var received = await receiver.ReceiveWithArrivalAsync(CancellationToken.None)
+            .WaitAsync(ShortTimeout);
+        var collectedAt = Stopwatch.GetTimestamp();
+
+        received.Pdu.Should().Equal(payload);
+
+        var age = TimeSpan.FromSeconds(
+            (double)(collectedAt - received.ArrivalTimestamp) / Stopwatch.Frequency);
+        age.Should().BeGreaterThan(TimeSpan.FromMilliseconds(250),
+            "the PDU arrived before the deliberate {0} collection delay, so the stamp must be "
+            + "that much older than the read — a stamp taken at delivery would read ~0",
+            collectionDelay);
+    }
+
+    // --------------------------------------------------------------------------------
+    // #112 — an ICanBusService that does not stamp its events still yields usable arrival
+    // times. IsoTp.Open(ICanBusService, …) is public, so an event carrying no host stamp is
+    // reachable from outside this repository; a zero read as a timestamp would mean
+    // "infinitely old" and make every deadline reject every PDU.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task Unstamped_Events_From_A_Foreign_Bus_Service_Fall_Back_To_Now()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new UnstampingBusService();
+        using var channel = IsoTpFactory.Open(service, ep, FastOptions());
+
+        var before = Stopwatch.GetTimestamp();
+
+        // Single Frame, Normal addressing: low nibble of byte 0 is the length.
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x03, 0xAA, 0xBB, 0xCC }, FrameFlags.None));
+
+        var received = await channel.ReceiveWithArrivalAsync(CancellationToken.None)
+            .WaitAsync(ShortTimeout);
+        var after = Stopwatch.GetTimestamp();
+
+        received.Pdu.Should().Equal(new byte[] { 0xAA, 0xBB, 0xCC });
+        received.ArrivalTimestamp.Should().BeInRange(before, after,
+            "an unstamped event must be treated as having arrived now, not at tick zero");
+    }
+
+    /// <summary>
+    /// The smallest <see cref="ICanBusService"/> that an ISO-TP channel will run on, delivering
+    /// events built without a host arrival stamp — what any implementation outside this
+    /// repository would produce.
+    /// </summary>
+    private sealed class UnstampingBusService : ICanBusService
+    {
+        private readonly Channel<CanFrameEvent> _frames =
+            Channel.CreateUnbounded<CanFrameEvent>();
+
+        public void Deliver(CanFrameView frame) => _frames.Writer.TryWrite(
+            new CanFrameEvent(frame, isEcho: false, TimeSpan.Zero));
+
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 1;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add { }
+            remove { }
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null,
+            int? bufferCapacity = null, bool includeEcho = false)
+            => new Sub(_frames);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => new Sub(_frames);
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => Array.Empty<FilterOverlap>();
+
+        public void Dispose() => _frames.Writer.TryComplete();
+
+        private sealed class Sub : ISubscription
+        {
+            private readonly Channel<CanFrameEvent> _frames;
+            public Sub(Channel<CanFrameEvent> frames) => _frames = frames;
+
+            public IAsyncEnumerable<CanFrameEvent> Frames => _frames.Reader.ReadAllAsync();
+
+            public bool TryRead(out CanFrameEvent frameEvent)
+                => _frames.Reader.TryRead(out frameEvent);
+
+            public void Reconfigure(CanIdFilter filter) { }
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
+
+            public void Dispose() { }
+        }
+    }
 
     // --------------------------------------------------------------------------------
     // FR-TP-001 — SF round-trip on classic CAN via the actor runtime + Virtual loopback.
@@ -1359,6 +1495,84 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             request,
             "the peer channel's request is genuine traffic even though the host echo flag marks "
             + "it exactly like the tester's own transmissions");
+    }
+
+    // #112 -- the non-blocking take, on the real channel. The UDS client reaches for it exactly
+    // when its budget is spent, and every test of that behaviour runs on a channel stub, so the
+    // real implementation's hand-over path had no coverage at all: the branch that returns a
+    // queued PDU is the load-bearing half, and it is the half the stub replaces.
+    //
+    // EmitPdu enqueues before raising DatagramReceived, so the event is a sound signal that the
+    // inbox is non-empty -- no polling and no sleep.
+    [Fact]
+    public async Task TryReceiveWithArrival_Hands_Over_A_Queued_Pdu_And_Then_Reports_Empty()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var tester = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+        using var ecu = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0));
+
+        var arrived = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        tester.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+
+        var response = new byte[] { 0x62, 0xF1, 0x90, 0xAA };
+
+        tester.TryReceiveWithArrival(out _).Should().BeFalse("nothing has been sent yet");
+
+        var before = Stopwatch.GetTimestamp();
+        await ecu.SendAsync(response);
+        await arrived.Task.WaitAsync(ShortTimeout);
+        var after = Stopwatch.GetTimestamp();
+
+        tester.TryReceiveWithArrival(out var taken).Should().BeTrue(
+            "the PDU is queued, and taking it must not require waiting");
+        taken.Pdu.Should().Equal(response);
+        taken.ArrivalTimestamp.Should().BeInRange(before, after,
+            "the stamp is the frame's arrival, which happened during this exchange");
+
+        tester.TryReceiveWithArrival(out _).Should().BeFalse(
+            "the one queued PDU has been taken");
+    }
+
+    // #112 -- the transmit stamp must come from the bus's own hand-off to the driver, not from
+    // anywhere upstream of it. The UDS-level tests for this run on a channel stub, which by
+    // construction cannot say where in the real path the reading is taken (Codex on #112); this
+    // one runs the whole chain and pins the placement by ordering.
+    //
+    // ControllableBus.OnTransmitting runs on the transmitting thread inside Transmit, so blocking
+    // there parks the frame mid-hand-off. Every candidate instant upstream of the driver call --
+    // the channel's send task starting, the actor hop, acquiring the pending-send lock -- happens
+    // before this test releases it; the correct one happens after. No tolerance, no duration.
+    [Fact]
+    public async Task Transmit_Stamp_Comes_From_The_Bus_Hand_Off_Not_From_Upstream()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var channel = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+
+        using var transmitting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        bus.OnTransmitting = _ =>
+        {
+            transmitting.Set();
+            release.Wait(ShortTimeout);
+        };
+
+        var send = channel.SendWithTransmitStampAsync(new byte[] { 0x22, 0xF1, 0x90 });
+        transmitting.Wait(ShortTimeout).Should().BeTrue("the frame must reach the driver call");
+
+        var releasedAt = Stopwatch.GetTimestamp();
+        release.Set();
+
+        var transmitStamp = await send.WaitAsync(ShortTimeout);
+
+        transmitStamp.Should().BeGreaterThan(releasedAt,
+            "the stamp must be taken after the driver accepted the frame, and this test held the "
+            + "driver call open until the instant above");
     }
 
     /// <summary>

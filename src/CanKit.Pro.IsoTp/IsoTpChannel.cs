@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
@@ -157,6 +158,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     /// <inheritdoc />
     public async Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
+        => await SendWithTransmitStampAsync(pdu, cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+        CancellationToken cancellationToken = default)
     {
         if (pdu.Length == 0)
             throw new ArgumentException("ISO-TP PDU must be non-empty.", nameof(pdu));
@@ -172,12 +178,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         try
         {
             ThrowIfDisposed();
-            var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
             var pduBytes = pdu.ToArray();
             CancellationTokenRegistration ctr = cancellationToken.CanBeCanceled
                 ? cancellationToken.Register(static state =>
                 {
-                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<object?>, CancellationToken))state!;
+                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<long>, CancellationToken))state!;
                     self.CancelInFlightSend(t, ct);
                 }, (this, tcs, cancellationToken))
                 : default;
@@ -192,9 +198,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 tcs.TrySetException(ex);
             }
 
+            long transmitStamp;
             try
             {
-                await tcs.Task.ConfigureAwait(false);
+                transmitStamp = await tcs.Task.ConfigureAwait(false);
             }
             finally
             {
@@ -207,6 +214,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 if (Volatile.Read(ref _disposed) == 0)
                     await WaitForBusTxIdleAsync().ConfigureAwait(false);
             }
+
+            return transmitStamp;
         }
         finally
         {
@@ -219,13 +228,31 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     /// <inheritdoc />
     public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
+        => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
+
+    /// <inheritdoc />
+    public async Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(
+        CancellationToken cancellationToken = default)
     {
         while (await _pduInbox.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {
             if (_pduInbox.Reader.TryRead(out var item))
-                return UnwrapInboxItem(item);
+                return new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp);
         }
         throw new InvalidOperationException("Channel is disposed; no more PDUs will arrive.");
+    }
+
+    /// <inheritdoc />
+    public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
+    {
+        if (_pduInbox.Reader.TryRead(out var item))
+        {
+            pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp);
+            return true;
+        }
+
+        pdu = default;
+        return false;
     }
 
     /// <inheritdoc />
@@ -351,6 +378,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                // The demux stamps every frame before it is buffered for any subscription, so
+                // neither this reader's channel wait, nor the actor mailbox, nor reassembly
+                // contributes to it -- all three are scheduling, and a deadline measured after
+                // scheduling is not a deadline. The adapter's own ReceiveTimestamp cannot serve:
+                // zero on adapters that do not timestamp, and documented as not comparable
+                // across buses.
+                //
+                // Falling back to "now" keeps an event built outside the demux (a hand-rolled
+                // ISubscription in a test, say) usable rather than making it look infinitely
+                // old, which is what a zero stamp would mean to a deadline.
+                var frameArrival = frameEvent.HostArrivalTimestamp > 0
+                    ? frameEvent.HostArrivalTimestamp
+                    : Stopwatch.GetTimestamp();
                 var frame = frameEvent.Frame;
                 // Not the hazard the previous comment described: the subscription already hands
                 // out a payload it owns, so nothing the adapter does can corrupt it. What it hands
@@ -374,7 +414,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // Pass the on-wire frame kind into TryParsePci so CAN-FD escape SF/FF headers are
                 // accepted only for real FD frames (develop codec API: isCanFd required).
                 bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
-                _actor.Post(() => HandleReceivedFrame(payload, isCanFd));
+                _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival));
             }
         }
         catch (OperationCanceledException)
@@ -411,7 +451,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // TX side (all methods run on the actor loop unless noted)
     // -----------------------------------------------------------------------------------------
 
-    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<object?> tcs, CancellationToken ct)
+    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<long> tcs, CancellationToken ct)
     {
         // Fix (Bugbot 3594960794): the send may have been canceled between when the caller
         // posted us and when the actor got around to running us -- CancelInFlightSend may have
@@ -466,7 +506,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private static bool IsSendAlreadyCanceled(TaskCompletionSource<object?> tcs, CancellationToken ct)
+    private static bool IsSendAlreadyCanceled(TaskCompletionSource<long> tcs, CancellationToken ct)
     {
         if (!tcs.Task.IsCompleted && !ct.IsCancellationRequested)
             return false;
@@ -653,6 +693,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         var conf = confirmation!.Value;
+
+        // The bus reports when it handed this frame to the driver. Recording it here, on the
+        // actor, rather than around the send: this task's own scheduling and the pending-send
+        // lock both sit between "we decided to send" and the frame going out, and P2 starts at
+        // the second of those (Codex on #112). The last frame to be confirmed leaves the value
+        // CompleteTx hands back, which is the instant the request finished transmitting.
+        if (conf.HostTransmitTimestamp > 0)
+            expected.LastFrameTransmitTimestamp = conf.HostTransmitTimestamp;
+
         if (!conf.Confirmed)
         {
             switch (conf.FailureReason)
@@ -764,7 +813,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (tx is null) return;
         tx.NBsDeadline?.Complete();
         _tx = null;
-        tx.Tcs.TrySetResult(null);
+        tx.Tcs.TrySetResult(tx.LastFrameTransmitTimestamp);
     }
 
     private void FailTx(Exception ex)
@@ -776,7 +825,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.Fail(ex);
     }
 
-    private void CancelInFlightSend(TaskCompletionSource<object?> tcs, CancellationToken ct)
+    private void CancelInFlightSend(TaskCompletionSource<long> tcs, CancellationToken ct)
     {
         // Complete the caller's await immediately (any thread). BeginSendOnLoop may still be
         // sitting in the actor mailbox ahead of our cleanup work item; completing `tcs` here
@@ -807,7 +856,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // RX side (all methods run on the actor loop)
     // -----------------------------------------------------------------------------------------
 
-    private void HandleReceivedFrame(byte[] payload, bool isCanFd)
+    private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival)
     {
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
@@ -815,13 +864,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         switch (pci.Type)
         {
             case PciType.SingleFrame:
-                HandleRxSingleFrame(payload, pci);
+                HandleRxSingleFrame(payload, pci, frameArrival);
                 break;
             case PciType.FirstFrame:
-                HandleRxFirstFrame(payload, pci);
+                HandleRxFirstFrame(payload, pci, frameArrival);
                 break;
             case PciType.ConsecutiveFrame:
-                HandleRxConsecutiveFrame(payload, pci);
+                HandleRxConsecutiveFrame(payload, pci, frameArrival);
                 break;
             case PciType.FlowControl:
                 HandleRxFlowControl(pci);
@@ -829,7 +878,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private void HandleRxSingleFrame(byte[] payload, Pci pci)
+    private void HandleRxSingleFrame(byte[] payload, Pci pci, long frameArrival)
     {
         // A racing SF starts a fresh PDU: abort any in-flight reassembly (matches ISO 15765-2
         // §6.5.2's "an unexpected N_PCI type shall abort reception"). Must go through AbortRx —
@@ -843,10 +892,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (pci.DataOffset + pci.Length > payload.Length) return; // codec already validates but guard again
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
-        EmitPdu(pdu);
+        EmitPdu(pdu, frameArrival);
     }
 
-    private void HandleRxFirstFrame(byte[] payload, Pci pci)
+    private void HandleRxFirstFrame(byte[] payload, Pci pci, long frameArrival)
     {
         // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
@@ -896,7 +945,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // waiting for a CF that will never arrive.
         if (firstChunk >= pci.Length)
         {
-            EmitPdu(buffer);
+            EmitPdu(buffer, frameArrival);
             return;
         }
 
@@ -906,7 +955,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         ArmNCr();
     }
 
-    private void HandleRxConsecutiveFrame(byte[] payload, Pci pci)
+    private void HandleRxConsecutiveFrame(byte[] payload, Pci pci, long frameArrival)
     {
         var rx = _rx;
         if (rx is null) return; // stray CF, no reassembly in progress: drop per ISO 15765-2 §6.5.2.
@@ -940,7 +989,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             rx.CancelDeadline();
             var pdu = rx.Buffer;
             _rx = null;
-            EmitPdu(pdu);
+            // The last consecutive frame's arrival: a PDU is complete when its final frame
+            // lands, not when its first one did.
+            EmitPdu(pdu, frameArrival);
             return;
         }
 
@@ -1139,13 +1190,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         });
     }
 
-    private void EmitPdu(byte[] pdu)
+    private void EmitPdu(byte[] pdu, long frameArrival)
     {
         // Enqueue first so ReceiveAsync/ReceiveAllAsync can observe the PDU even if a
         // DatagramReceived handler blocks. Raise the event off the actor loop so a sync wait
         // on ReceiveAsync / SendAsync / DiscardPendingPdus cannot deadlock the mailbox
         // (Bugbot 3596580061).
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu));
+        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival));
 
         var handler = DatagramReceived;
         if (handler is null)
@@ -1174,17 +1225,28 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// </summary>
     private readonly struct RxInboxItem
     {
-        private RxInboxItem(byte[]? pdu, Exception? error)
+        private RxInboxItem(byte[]? pdu, Exception? error, long arrivalTimestamp)
         {
             Pdu = pdu;
             Error = error;
+            ArrivalTimestamp = arrivalTimestamp;
         }
 
         public byte[]? Pdu { get; }
         public Exception? Error { get; }
 
-        public static RxInboxItem FromPdu(byte[] pdu) => new(pdu, null);
-        public static RxInboxItem FromError(Exception error) => new(null, error);
+        /// <summary>
+        /// When this item was created, from <see cref="Stopwatch.GetTimestamp"/>. Stamped at
+        /// enqueue rather than at delivery: the two differ by however long the reader was
+        /// descheduled, and a deadline that measures the second one is not a deadline.
+        /// </summary>
+        public long ArrivalTimestamp { get; }
+
+        public static RxInboxItem FromPdu(byte[] pdu, long arrivalTimestamp)
+            => new(pdu, null, arrivalTimestamp);
+
+        public static RxInboxItem FromError(Exception error)
+            => new(null, error, Stopwatch.GetTimestamp());
     }
 
     private enum TxStage
@@ -1197,7 +1259,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private sealed class TxState
     {
-        public TxState(byte[] pdu, TaskCompletionSource<object?> tcs)
+        public TxState(byte[] pdu, TaskCompletionSource<long> tcs)
         {
             Pdu = pdu;
             Tcs = tcs;
@@ -1205,7 +1267,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         public byte[] Pdu { get; }
-        public TaskCompletionSource<object?> Tcs { get; }
+        public TaskCompletionSource<long> Tcs { get; }
+
+        /// <summary>
+        /// <see cref="Stopwatch.GetTimestamp"/> reading reported by the bus for the most recent
+        /// frame of this PDU it handed to the driver. Written and read on the actor loop only.
+        /// When the send completes, the last value written is the last frame's -- which is the
+        /// instant P2 starts.
+        /// </summary>
+        public long LastFrameTransmitTimestamp { get; set; }
 
         public TxStage State { get; set; }
         public int Offset { get; set; }

@@ -142,18 +142,25 @@ namespace CanKit.Pro.RawCan
         /// The predicate is deliberately handed the *aliasing* event rather than the copy, so a
         /// rejected frame costs no allocation at all — the copy is made only once the frame is
         /// known to be going into the buffer. Both carry the same <see cref="CanFrameEvent.IsEcho"/>
-        /// and <see cref="CanFrameEvent.ReceiveTimestamp"/>; they differ only in who owns the
+        /// <see cref="CanFrameEvent.ReceiveTimestamp"/> and
+        /// <see cref="CanFrameEvent.HostArrivalTimestamp"/>; they differ only in who owns the
         /// payload, which is why the predicate must not retain what it is given.
         /// </para>
         /// </remarks>
         /// <param name="view">The observed frame, aliasing the adapter's RX lease.</param>
         /// <param name="isEcho">Whether the bus reported this frame as the host's own echo.</param>
         /// <param name="receiveTimestamp">The adapter's receive timestamp for this frame.</param>
+        /// <param name="hostArrivalTimestamp">
+        /// The demux's host-monotonic reading for this frame, taken once before any subscription
+        /// buffers it, so a deadline measured against it does not include this subscription's
+        /// queueing.
+        /// </param>
         /// <param name="ownedPayload">
         /// The service-owned copy of this frame's payload, shared across one dispatch of one
         /// frame. Null until some subscription accepts the frame; set by whichever does so first.
         /// </param>
-        internal void TryDeliver(in CanFrameView view, bool isEcho, TimeSpan receiveTimestamp, ref byte[]? ownedPayload)
+        internal void TryDeliver(in CanFrameView view, bool isEcho, TimeSpan receiveTimestamp,
+            long hostArrivalTimestamp, ref byte[]? ownedPayload)
         {
             if (isEcho && !_includeEcho) return;
 
@@ -163,14 +170,16 @@ namespace CanKit.Pro.RawCan
                 if (!filter.Matches(view)) return;
             }
             else if (criteria.Predicate is { } predicate
-                     && !predicate(new CanFrameEvent(view, isEcho, receiveTimestamp)))
+                     && !predicate(new CanFrameEvent(view, isEcho, receiveTimestamp,
+                         hostArrivalTimestamp)))
             {
                 return;
             }
 
             ownedPayload ??= view.Data.ToArray();
             var owned = new CanFrameView(view.FrameKind, view.ID, ownedPayload, view.Flags);
-            _channel.Writer.TryWrite(new CanFrameEvent(owned, isEcho, receiveTimestamp));
+            _channel.Writer.TryWrite(new CanFrameEvent(owned, isEcho, receiveTimestamp,
+                hostArrivalTimestamp));
         }
 
         /// <inheritdoc/>

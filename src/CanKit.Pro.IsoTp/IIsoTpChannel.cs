@@ -54,6 +54,23 @@ public interface IIsoTpChannel : IDisposable
     Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// As <see cref="SendAsync"/>, but returns the monotonic
+    /// (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) instant at which the PDU's last
+    /// frame was handed to the bus. Zero when nothing was transmitted.
+    /// </summary>
+    /// <remarks>
+    /// The send-side counterpart of <see cref="ReceiveWithArrivalAsync"/>, and needed for the
+    /// same reason. A caller whose response deadline starts when its request went out cannot read
+    /// that instant off its own clock: awaiting this method returns behind the bus TX
+    /// confirmation, an actor hop and the caller's own scheduling, all of which happen after the
+    /// peer already has the request. Timing the deadline from the returned stamp makes its start
+    /// as independent of scheduling as the arrival stamp makes its end -- pinning only one of the
+    /// two leaves the deadline movable from the other side.
+    /// </remarks>
+    Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Awaits the next fully reassembled inbound PDU. Cancels via <paramref name="cancellationToken"/>.
     /// Faults with <see cref="IsoTpTimeoutException"/> (<see cref="IsoTpTimer.NCr"/>) or
     /// <see cref="IsoTpException"/> when an in-progress multi-frame reassembly is aborted
@@ -62,6 +79,36 @@ public interface IIsoTpChannel : IDisposable
     /// indefinitely.
     /// </summary>
     Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// As <see cref="ReceiveAsync"/>, but also reports the monotonic instant the PDU was queued.
+    /// </summary>
+    /// <remarks>
+    /// For callers that enforce a response deadline. <see cref="ReceiveAsync"/> can only tell
+    /// them when they observed the PDU, and a caller descheduled past its own deadline cannot
+    /// tell a punctual response from a late one on that basis — it would either accept a
+    /// response it had already given up on, or reject a timely one for arriving while it was not
+    /// looking. The arrival timestamp removes the ambiguity, so the deadline holds regardless of
+    /// scheduling.
+    /// </remarks>
+    Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Takes the next inbound PDU if one is already queued, without waiting for one to arrive.
+    /// Returns <see langword="false"/> — leaving <paramref name="pdu"/> at its default — when the
+    /// inbox is empty or the channel is disposed. Throws the recorded reassembly-abort exception
+    /// when the queued item is a fault, exactly as
+    /// <see cref="ReceiveWithArrivalAsync"/> would.
+    /// </summary>
+    /// <remarks>
+    /// The companion to <see cref="ReceiveWithArrivalAsync"/> for a caller whose deadline has
+    /// already passed. Awaiting with an expired token is not the same thing: an already-cancelled
+    /// token wins against a queued item, so the wait would report a timeout while the answer sat
+    /// unread in the inbox. Separating <em>how long to wait</em> from <em>was it in time</em>
+    /// leaves the second question to the arrival stamp, which is the only reading of it that does
+    /// not depend on when the caller was scheduled.
+    /// </remarks>
+    bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu);
 
     /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort

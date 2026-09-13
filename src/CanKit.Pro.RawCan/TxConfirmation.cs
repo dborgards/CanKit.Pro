@@ -68,5 +68,21 @@ namespace CanKit.Pro.RawCan
         /// <see cref="Confirmed"/> is true.
         /// </summary>
         public TxConfirmFailureReason FailureReason { get; init; }
+
+        /// <summary>
+        /// <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading taken immediately
+        /// after the driver accepted the frame, or zero when nothing was handed to the driver
+        /// (an outright rejection). Monotonic, and comparable with the
+        /// <c>HostArrivalTimestamp</c> the demux puts on received frames.
+        /// </summary>
+        /// <remarks>
+        /// <see cref="Timestamp"/> answers "when was this result produced" and is a wall-clock
+        /// reading; this answers "when did the frame go out", which is a different question and
+        /// needs a different clock. A caller whose response deadline starts at transmission has
+        /// no other way to learn that instant: by the time the returned task completes it is
+        /// behind the echo wait, and reading the clock then starts the deadline late enough to
+        /// let a late response pass for a punctual one (#92).
+        /// </remarks>
+        public long HostTransmitTimestamp { get; init; }
     }
 }
