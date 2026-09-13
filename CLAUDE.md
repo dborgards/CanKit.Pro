@@ -23,9 +23,10 @@
   Two pull requests in flight produced exactly that and accelerated nothing.
 
   There is one exception, and it runs the opposite way from the one people reach for: a problem
-  this pull request did **not** cause, surfaced while working on it, which warrants its own pull
-  request rather than an issue. That one may overlap, because the alternative is sitting on it
-  until this pull request lands.
+  this pull request did **not** cause, surfaced while working on it, which the maintainer wants
+  as its own pull request rather than an issue. That one may overlap, because the alternative is
+  sitting on it until this pull request lands. The default is the issue — "this warrants a pull
+  request" is not a judgement the author makes about their own detour.
 
   What the exception never covers is anything this pull request *did* cause. There is no split,
   no waiver and no "too large to fold in" for your own regression — the scope rule below has no
@@ -114,11 +115,12 @@ test that fails on the base revision too, a coverage row from elsewhere, a bot f
 neighbouring code. That is information, not work. It goes into an issue, or onto the issue that
 already covers it, and the pull request in hand is finished first.
 
-This is the rule that was broken hardest. A markdown-only change to this file ran the full suite,
-the suite failed on an unrelated timing test, and that produced a second pull request — justified
-by the exception written into the rule above, three hours earlier, by the same hand. The exception
-is for findings on the pull request's *own* content. Reading it any wider makes the sequencing
-rule mean nothing.
+This is the rule that was broken hardest, and the interesting part is that the failure *was* out
+of scope. A markdown-only change to this file ran the full suite, the suite failed on a timing
+test the change had not caused — so far, correctly identified as information. What turned it into
+work was deciding, mid-task, that it deserved a pull request of its own rather than the issue it
+should have been. The exception above permits that; it does not make it the author's call, and
+the cost of getting it wrong is a second front to supervise on a task that had one.
 
 The same applies to review findings, in that order: **causality first, then urgency.** A finding
 about something this branch caused is closed here however small it looks, and a review does not
