@@ -326,6 +326,24 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
     // The fault channel above is an *event on ICanBusService*, and only the type declaring an
     // event can raise it -- so for any implementation other than CanBusService the extension has
     // no way to report a failing handler, and used to drop it. onError is that way.
+    // The two argument guards on the callback overload had no test. They are the whole contract
+    // for a null service or handler: without them the null reaches the pump task and surfaces
+    // later as a NullReferenceException on a background thread, with nothing pointing at the
+    // call that caused it.
+    [Fact]
+    public void Callback_Subscribe_Rejects_A_Null_Service_Or_Handler()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+
+        ICanBusService nullService = null!;
+        Action noService = () => nullService.Subscribe(_ => { });
+        Action noHandler = () => service.Subscribe((Action<CanFrameEvent>)null!);
+
+        noService.Should().Throw<ArgumentNullException>().WithParameterName("service");
+        noHandler.Should().Throw<ArgumentNullException>().WithParameterName("onNext");
+    }
+
     [Fact]
     public async Task Callback_Subscribe_Reports_A_Handler_Failure_Through_OnError_For_A_Foreign_Service()
     {

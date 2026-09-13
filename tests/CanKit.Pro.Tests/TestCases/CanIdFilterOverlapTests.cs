@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -245,6 +246,34 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
                 overlaps[0].HighestSharedId.Should().Be(highest!.Value, $"highest shared ID of {because}");
             }
         }
+    }
+
+    // The high witness is only interesting when the largest shared ID is *not* the range's own
+    // upper bound -- that is the case where the walk must abandon the high bound and fill the
+    // remaining bits itself. The existing brute-force sweep never produced that shape, so the
+    // preferHigh fill-in went unexercised in the riskiest code in this change.
+    //
+    // Here the mask requires bits 4..7 clear, so within [0x000, 0x040] only 0x000..0x00F qualify:
+    // the highest shared ID is 0x00F, well below the range's 0x040.
+    [Fact]
+    public void The_Highest_Shared_Id_Is_Found_When_It_Lies_Below_The_Range_Upper_Bound()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+
+        using var range = service.Subscribe(CanIdFilter.Range(0x000, 0x040));
+        using var mask = service.Subscribe(CanIdFilter.Mask(accCode: 0x000, accMask: 0x0F0));
+
+        var overlap = service.FindOverlappingFilterSubscriptions().Should().ContainSingle().Subject;
+
+        overlap.LowestSharedId.Should().Be(0x000u);
+        overlap.HighestSharedId.Should().Be(0x00Fu);
+
+        // Independently: those bounds really are the extremes of the shared set.
+        var shared = Enumerable.Range(0x000, 0x041).Select(i => (uint)i)
+            .Where(id => (id & 0x0F0u) == 0x000u).ToArray();
+        shared.Min().Should().Be(overlap.LowestSharedId);
+        shared.Max().Should().Be(overlap.HighestSharedId);
     }
 
     [Fact]
