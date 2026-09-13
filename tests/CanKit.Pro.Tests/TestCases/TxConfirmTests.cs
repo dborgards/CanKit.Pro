@@ -189,6 +189,62 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
     }
 
+    // Regression for the fix to #24 itself. An earlier revision unlinked the expired entry under
+    // _pendingGate *before* completing its Tcs, so resolving a send had to wait for that lock --
+    // which SendWithEchoConfirmAsync holds across _bus.Transmit. The visible cost was on the
+    // caller's own thread: CancellationTokenSource.Cancel() for one send blocked until an
+    // unrelated send's driver call returned. Completing the Tcs without the lock removes that;
+    // TryMatchEcho's skip of already-completed entries is what keeps #24 fixed meanwhile.
+    //
+    // Scope, stated so this test is not read as promising more than it checks: the caller's
+    // SendConfirmed task still completes only after the `finally` unlinks, and that unlink does
+    // take the lock. That coupling predates this change and follows from holding _pendingGate
+    // across Transmit at all -- the deliberate decision recorded next to that lock (#53). What is
+    // asserted here is the part this change is responsible for.
+    //
+    // Causal, not timed: the claim is "Cancel() returned while the other send was still inside
+    // Transmit", not "within N ms" (unmeasurable on a shared runner, see #92). The 2 s allowance
+    // is slack for a slow runner -- with the coupling in place Cancel() cannot return until the
+    // release below, which happens afterwards.
+    [Fact]
+    public async Task Cancelling_One_Send_Does_Not_Block_On_An_Unrelated_Send_Inside_Transmit()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+
+        using var cancelFirst = new CancellationTokenSource();
+        sender.EchoAcceptedFrames = false;
+        var first = service.SendConfirmed(
+            CanFrame.Classic(0x610, new byte[] { 1 }), TimeSpan.FromSeconds(30), cancelFirst.Token);
+
+        // A second, unrelated send parks inside Transmit -- and so inside _pendingGate.
+        using var stuckInTransmit = new ManualResetEventSlim(false);
+        using var reachedTransmit = new ManualResetEventSlim(false);
+        sender.OnTransmitting = f =>
+        {
+            if (f.ID != 0x611) return;
+            reachedTransmit.Set();
+            stuckInTransmit.Wait(TimeSpan.FromSeconds(10));
+        };
+        var blocked = Task.Run(() => service.SendConfirmed(
+            CanFrame.Classic(0x611, new byte[] { 2 }), ShortTimeout));
+
+        reachedTransmit.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
+            "the second send must actually be parked in Transmit for this test to mean anything");
+
+        var cancelling = Task.Run(() => cancelFirst.Cancel());
+        var finished = await Task.WhenAny(cancelling, Task.Delay(TimeSpan.FromSeconds(2)));
+        var cancelReturnedWhileBlocked = ReferenceEquals(finished, cancelling);
+
+        stuckInTransmit.Set();
+        await cancelling;
+        await blocked;
+
+        cancelReturnedWhileBlocked.Should().BeTrue(
+            "cancelling one send must not wait on an unrelated send's driver call to return");
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+    }
+
     // FR-RAW-031: the echo is matched on what identifies the frame, not on its ID alone. A
     // standard 0x100 and an extended 0x100 carrying the same payload are two different frames on
     // the wire; keyed on the ID alone they share one FIFO, so the extended frame's echo confirms

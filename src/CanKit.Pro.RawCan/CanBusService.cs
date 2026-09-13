@@ -379,23 +379,26 @@ namespace CanKit.Pro.RawCan
             // Registration fires on whichever comes first: caller cancellation or our own timeout.
             using var registration = timeoutCts.Token.Register(static state =>
             {
-                var (service, p, ct) = ((CanBusService, PendingSend, CancellationToken))state!;
+                var (p, ct) = ((PendingSend, CancellationToken))state!;
 
-                // Unlink *before* completing, and here rather than in SendWithEchoConfirmAsync's
-                // `finally`. The Tcs completes its awaiter asynchronously
-                // (RunContinuationsAsynchronously), so that `finally` runs a scheduling turn later
-                // on a pool thread; until it did, this expired entry stayed the FIFO head for its
-                // key and swallowed the echo of the next byte-identical send, turning one timeout
-                // into a cascade of them. Unlinking under _pendingGate before the Tcs is completed
-                // closes that window entirely: from the instant this entry is resolved it is no
-                // longer matchable. The `finally` stays as the cleanup for every path that does not
-                // pass through here (rejection, an exception out of Transmit).
+                // Complete the Tcs *without touching _pendingGate*. An earlier revision of the #24
+                // fix unlinked here first, reasoning that an entry must stop being matchable the
+                // instant it is resolved. It does -- but taking the lock to achieve that runs on
+                // whichever thread trips the token, and SendWithEchoConfirmAsync holds that lock
+                // across _bus.Transmit. A caller's own CancellationTokenSource.Cancel() therefore
+                // blocked until an unrelated send's driver call returned. Cancelling one send is
+                // not something that should wait on another send's adapter.
                 //
-                // Monitor is reentrant, so this is safe even when the cancellation is triggered
-                // from a thread that already holds _pendingGate (a caller cancelling from inside a
-                // subscription predicate while a synchronous echo is being dispatched, say).
-                service.RemovePending(p);
-
+                // Unlinking here is also unnecessary. What makes the still-linked expired entry
+                // harmless is TryMatchEcho skipping (and unlinking) entries whose Tcs is already
+                // completed -- see the loop there, which is the mechanism that fixes #24. An echo
+                // arriving in the window before the `finally` unlinks walks past this entry to the
+                // live one behind it instead of being swallowed.
+                //
+                // What this does *not* change: the caller's SendConfirmed task still completes only
+                // after that `finally`, and the unlink there does take the lock. That coupling is
+                // older than this fix and follows from holding _pendingGate across Transmit at all
+                // -- see the note on that lock, and #53.
                 if (ct.IsCancellationRequested)
                 {
                     p.Tcs.TrySetCanceled(ct);
@@ -410,7 +413,7 @@ namespace CanKit.Pro.RawCan
                         FailureReason = TxConfirmFailureReason.Timeout,
                     });
                 }
-            }, (this, pending, cancellationToken));
+            }, (pending, cancellationToken));
 
             timeoutCts.CancelAfter(timeout);
             return await pending.Tcs.Task.ConfigureAwait(false);
@@ -464,11 +467,18 @@ namespace CanKit.Pro.RawCan
                     // drop this echo (TrySetResult no-ops on a completed Tcs) and leave the send it
                     // actually belonged to waiting for an echo that has already come and gone.
                     //
-                    // Every resolution path unlinks under this same lock before it completes the
-                    // Tcs, so a completed entry should not be reachable here at all. This stays as
-                    // the second guard for that invariant -- and, because it unlinks what it skips,
-                    // it also stops such an entry from blocking the FIFO for every later echo
-                    // instead of only for this one.
+                    // This skip is the mechanism that fixes #24, not a redundant guard. The
+                    // timeout and cancellation path completes its Tcs without taking this lock --
+                    // deliberately, so a deadline cannot be held up by an unrelated send sitting in
+                    // a slow _bus.Transmit -- and the entry it resolved stays linked until
+                    // SendWithEchoConfirmAsync's `finally` runs a scheduling turn later. Inside
+                    // that window the expired entry is still the FIFO head for its key, and
+                    // without this skip it would swallow the next byte-identical send's echo,
+                    // turning one timeout into a cascade of them.
+                    //
+                    // Unlinking what it skips matters as much as skipping it: otherwise the same
+                    // dead entry would block the FIFO for every later echo rather than only this
+                    // one.
                     for (var node = list.First; node is not null;)
                     {
                         var next = node.Next;
