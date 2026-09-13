@@ -7,16 +7,23 @@
   same package that touch the same files belong in one PR — two PRs racing over
   `CanBusService.cs` cost more review than they save, and the second one inherits a conflict.
   Issues in different packages get their own PR.
-- **One pull request open at a time.** Not because parallel work is wrong in principle, but
-  because of what merging does to everything else in flight: each merge to `main` obliges every
-  open branch to take a base merge, and each base merge is a fresh full-gate run, a fresh CI
-  cycle and a fresh review pass over code that did not change. Two green pull requests in flight
-  cost exactly that, plus a manual base merge when GitHub's *Update branch* button failed.
-  Finishing one and merging it before opening the next is cheaper than either.
+- **One pull request open at a time.** The cost of running two is not machine time, it is
+  supervision. Each open pull request carries its own review threads, bot findings and coverage
+  report, and each of those has to be driven to actually closed — which in practice means the
+  maintainer chasing them, one at a time, which is the opposite of what the parallelism was for.
+
+  Merging one makes it worse rather than better: the others need a base merge, every reviewer and
+  bot re-runs against the new head, and findings that were settled come back. Two pull requests
+  in flight produced exactly that and accelerated nothing.
 
   The exception is a pull request that comes *out of* the one in flight — a follow-up split off
   during review, or a fix the review made necessary elsewhere. Those may overlap, because the
   alternative is holding the finding until the first one lands.
+- **A pull request is finished when every thread is closed, not when the code is right.** Bot
+  findings and the coverage report count; so does a thread whose finding was fixed but which
+  still shows no answer in it. And none of that survives a base merge unchanged — merging `main`
+  in re-triggers the reviewers against a new head, so re-check afterwards instead of assuming the
+  earlier pass still holds.
 - Branch from `main` as `feat/…`, `fix/…`, `docs/…` (see `CONTRIBUTING.md` § Branching).
 - **Every commit on the branch decides the release, not the pull-request title.** As practised,
   pull requests land as two-parent merge commits (`git log --first-parent main` shows
