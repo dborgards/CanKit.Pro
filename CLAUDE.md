@@ -6,7 +6,7 @@
 - **Group tickets into one PR where they overlap, split them where they don't.** Issues in the
   same package that touch the same files belong in one PR — two PRs racing over
   `CanBusService.cs` cost more review than they save, and the second one inherits a conflict.
-  Issues in different packages get their own PR.
+  Issues in different packages get their own PR — one after another, per the next rule.
 - **One pull request open at a time** — of deliberately authored work. Dependabot is not in this
   count and is not meant to be: `.github/dependabot.yml` allows five concurrent NuGet updates,
   three npm and two pip, and those carry no design to review, only a green or red build. Whether
@@ -22,12 +22,15 @@
   every reviewer and bot re-runs against the new head, and findings that were settled come back.
   Two pull requests in flight produced exactly that and accelerated nothing.
 
-  There is one exception, and it is narrow: a change this pull request's own review makes
-  necessary, which is too large to fold in without making the diff unreviewable, and which the
-  maintainer agrees to split. All three conditions, and the third is not a formality — an author
-  who decides alone that their finding deserves its own pull request has re-derived the parallel
-  working this rule exists to stop. Anything the review turns up *elsewhere* is not covered here:
-  the scope rule below already says where it goes.
+  There is one exception, and it runs the opposite way from the one people reach for: a problem
+  this pull request did **not** cause, surfaced while working on it, which the maintainer wants
+  as its own pull request rather than an issue. That one may overlap, because the alternative is
+  sitting on it until this pull request lands. The default is the issue — "this warrants a pull
+  request" is not a judgement the author makes about their own detour.
+
+  What the exception never covers is anything this pull request *did* cause. There is no split,
+  no waiver and no "too large to fold in" for your own regression — the scope rule below has no
+  exception at all, and this is not one.
 
   *Aside, because it dates the second cost above:* `ci.yml` already carries a `merge_group`
   trigger, added after #81 and #83 merged four minutes apart and their untested combination broke
@@ -92,12 +95,10 @@ Scope is decided by **causality, not by which files the diff opened**. A change 
 existing behaviour is caught by a regression test in a file it never touched — that failure is
 the branch's, and "I did not edit that file" is not a defence. The question to answer is whether
 the failure reproduces on the base revision: if it does not, the branch caused it, and it is
-closed **in this pull request** — not filed as a follow-up.
-
-There is exactly one way out, and it is the split exception above: the maintainer agrees that the
-fix is too large to fold in. Note who that leaves holding the decision. The author never defers
-their own regression alone — that is the whole of this rule, and the only question it leaves open
-is who may authorise an exception, which is not the author.
+closed **in this pull request** — not filed as a follow-up, not split into a second pull request,
+and not waived. **This rule has no exception.** The split permitted above is for problems the
+branch did not cause; reaching for it to defer your own regression is precisely the move it was
+written to block.
 
 Filing it is the move that turns a five-minute fix into debt. It is also strictly worse than
 fixing it, because the option expires: once the branch is merged the defect can no longer be
@@ -106,27 +107,36 @@ archaeology exercise on `main` with nobody's name on it. A follow-up issue for y
 regression is a promise to pay later at a higher price.
 
 Once the causing pull request *is* merged the option is gone and an issue is all that remains —
-but it is then the next thing worked, not queued behind whatever else is open. Debt that is
-already owed does not also get to wait.
+and that issue is then worked **next after the pull request in hand**, ahead of everything else in
+the backlog. Not immediately: dropping the current pull request to chase it would breach both
+*one pull request open at a time* and *finish the pull request in hand first*. But it does not go
+to the back of the queue either. Debt already owed waits for exactly one thing.
 
-What the answer *is* out of scope is everything the tooling merely surfaces along the way — a
-test that fails on the base revision too, a coverage row from elsewhere, a bot finding about
-neighbouring code. That is information, not work. It goes into an issue, or onto the issue that
-already covers it, and the pull request in hand is finished first.
+What *is* out of scope is everything the tooling merely surfaces along the way — a test that
+fails on the base revision too, a coverage row from elsewhere, a bot finding about neighbouring
+code. That is information, not work. By default it goes into an issue, or onto the issue that
+already covers it, and the pull request in hand is finished first. The one other route is the
+exception above, and it is the maintainer's to take: they may want it as its own pull request
+instead. Default and exception, not two competing instructions.
 
-This is the rule that was broken hardest. A markdown-only change to this file ran the full suite,
-the suite failed on an unrelated timing test, and that produced a second pull request — justified
-by the exception written into the rule above, three hours earlier, by the same hand. The exception
-is for findings on the pull request's *own* content. Reading it any wider makes the sequencing
-rule mean nothing.
+This is the rule that was broken hardest, and the interesting part is that the failure *was* out
+of scope. A markdown-only change to this file ran the full suite, the suite failed on a timing
+test the change had not caused — so far, correctly identified as information. What turned it into
+work was deciding, mid-task, that it deserved a pull request of its own rather than the issue it
+should have been. The exception above can permit that — it is about a problem the branch did
+*not* cause, so "this rule has no exception" above is untouched by it — but it does not make the
+call the author's. The cost of getting it wrong is a second front to supervise on a task that had
+one.
 
-The same applies to review findings, in that order: **causality first, then urgency.** A finding
-about something this branch caused is closed here however small it looks, and a review does not
-create an exception to the rule above — "it is only a P2" is the same deferral as "I will file
-it", reached by a different route. The second question is only reached for a
-finding the branch did not cause, and there a correct finding is still not automatically this
-task's work: a bot can be right about a real defect that belongs in a ticket rather than in the
-change being reviewed.
+The same applies to review findings, and causality is again the first question. A finding about
+something this branch caused is closed here however small it looks, and a review does not create
+an exception to the rule above — "it is only a P2" is the same deferral as "I will file it",
+reached by a different route.
+
+Only a finding the branch did *not* cause reaches a second question, and note what that question
+decides: not whether it happens in this pull request — it does not — but how urgently the ticket
+carrying it should be worked. A bot can be right about a real defect that still belongs in a
+ticket rather than in the change under review.
 
 ## Before claiming something is true
 
