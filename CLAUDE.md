@@ -55,17 +55,23 @@
   So say those words, literally, and only once every thread is closed and every check this
   branch is answerable for is green. A leg red for a failure the branch did not cause does not
   block the signal — § *Stay inside the task* says what to do with it — but say so in the same
-  breath, with what
-  is failing and where it is recorded, so the merge decision is made on the facts rather than on
-  a green tick.
+  breath, with what is failing and where it is recorded, so the merge decision is made on the
+  facts rather than on a green tick.
 
   Afterwards the branch is frozen. A finding that arrives later still gets its answer in the
   thread, because the rule above does not lapse; what waits is the *push*, which becomes a
   decision for the maintainer — put as a question with options, per § *Decisions that belong to
-  the maintainer*, not as a fix that quietly races their merge. Editing the pull-request
-  description is not a push and does not break the signal; it usually needs doing, because a
-  description written mid-branch goes stale exactly as the branch's own text does — see
-  § *Before claiming something is true*.
+  the maintainer*, not as a fix that quietly races their merge.
+
+  If that push is authorised, it **revokes the signal**. Say so when you push, and say
+  "FERTIG — mergebar" again only once the new head's checks and threads have settled. Without
+  that, the old signal outlives the head it described and the maintainer can merge a commit
+  whose verification has not finished — which is the original race, re-entered through the
+  procedure meant to prevent it.
+
+  Editing the pull-request description is not a push and does not revoke the signal; it usually
+  needs doing, because a description written mid-branch goes stale exactly as the branch's own
+  text does — see § *Before claiming something is true*.
 - Branch from `main` as `feat/…`, `fix/…`, `docs/…` (see `CONTRIBUTING.md` § Branching).
 - **Every commit on the branch decides the release, not the pull-request title.** As practised,
   pull requests land as two-parent merge commits (`git log --first-parent main` shows
