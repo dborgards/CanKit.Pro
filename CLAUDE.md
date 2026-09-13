@@ -7,7 +7,13 @@
   same package that touch the same files belong in one PR — two PRs racing over
   `CanBusService.cs` cost more review than they save, and the second one inherits a conflict.
   Issues in different packages get their own PR.
-- **One pull request open at a time.** The cost of running two is not machine time, it is
+- **One pull request open at a time** — of deliberately authored work. Dependabot is not in this
+  count and is not meant to be: `.github/dependabot.yml` allows five concurrent NuGet updates,
+  three npm and two pip, and those carry no design to review, only a green or red build. Whether
+  *that* fan-out is worth narrowing is a separate question from this rule, and belongs in the
+  Dependabot config rather than here.
+
+  The cost of running two of the other kind is not machine time, it is
   supervision. Each open pull request carries its own review threads, bot findings and coverage
   report, and each of those has to be driven to actually closed — which in practice means the
   maintainer chasing them, one at a time, which is the opposite of what the parallelism was for.
@@ -79,9 +85,15 @@ an XML comment is illegal and once made every project fail to load, i.e. every C
 
 ## Stay inside the task
 
-A pull request's scope is its own diff. Anything else the tooling surfaces while checking it —
-a failing test the branch does not touch, a coverage row from elsewhere, a bot finding about
-neighbouring code — is information, not work. It goes into an issue, or onto the issue that
+Scope is decided by **causality, not by which files the diff opened**. A change that breaks
+existing behaviour is caught by a regression test in a file it never touched — that failure is
+the branch's, and "I did not edit that file" is not a defence. The question to answer is whether
+the failure reproduces on the base revision: if it does not, the branch caused it and it is work
+now.
+
+What the answer *is* out of scope is everything the tooling merely surfaces along the way — a
+test that fails on the base revision too, a coverage row from elsewhere, a bot finding about
+neighbouring code. That is information, not work. It goes into an issue, or onto the issue that
 already covers it, and the pull request in hand is finished first.
 
 This is the rule that was broken hardest. A markdown-only change to this file ran the full suite,
