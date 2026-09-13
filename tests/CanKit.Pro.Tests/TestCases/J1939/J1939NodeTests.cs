@@ -1168,12 +1168,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // ~15.6 ms default timer granularity on Windows, and short enough to gather the
         // samples in under two seconds.
         var period = TimeSpan.FromMilliseconds(120);
-        // 21, not 10. The bound below is undercut by however late the run's first emission was,
-        // divided by the number of gaps -- see the assertion for why that is the error term that
-        // matters. Ten samples divide a 240 ms cold start by nine and lose 27 ms of a 120 ms
-        // period; twenty gaps divide it by twenty. This is the knob that makes the assertion
-        // sound, so it is not a free parameter.
-        const int requiredSamples = 21;
+        // 22, not 10. The bound below is undercut by however late the run's first emission was,
+        // divided by the number of *measured* gaps -- see the assertion for why that is the error
+        // term that matters. Note the two subtractions: 22 emissions give 21 gaps, and trimming
+        // the warm-up leaves 20. Ten samples would divide a 240 ms cold start by nine and lose
+        // 27 ms of a 120 ms period; twenty measured gaps divide it by twenty, which is what the
+        // 10 % allowance below is worth. This is the knob that makes the assertion sound, so it
+        // is not a free parameter.
+        const int requiredSamples = 22;
         var payload = new byte[] { 0x11, 0x22, 0x33, 0x44 };
         var message = new J1939Message(targetPgn, payload, priority: 6, destinationAddress: 0xFF);
 
@@ -1247,10 +1249,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         //     perfectly good run.
         //
         // So: trim the first gap, which is the only one measured from a cold schedule, and take
-        // the mean of the rest. With twenty gaps the residual endpoint term stays under a tenth
-        // of a period for anything short of a 240 ms swing between the second emission's lateness
-        // and the last one's -- an order of magnitude beyond what a loaded runner has produced
-        // here. Oscillation cancels in a mean by construction, so the case above passes.
+        // the mean of the rest. Twenty measured gaps hold the residual endpoint term under a
+        // tenth of a period for any swing below 20 x 12 ms = 240 ms between the second emission's
+        // lateness and the last one's -- which is exactly the worst cold start observed here, and
+        // an order of magnitude beyond the jitter a loaded runner has otherwise produced.
+        // Oscillation cancels in a mean by construction, so the case above passes.
         var measured = gaps.GetRange(1, gaps.Count - 1);
         var meanGap = measured.Sum() / measured.Count;
 
