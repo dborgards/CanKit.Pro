@@ -114,8 +114,10 @@ to the back of the queue either. Debt already owed waits for exactly one thing.
 
 What *is* out of scope is everything the tooling merely surfaces along the way — a test that
 fails on the base revision too, a coverage row from elsewhere, a bot finding about neighbouring
-code. That is information, not work. It goes into an issue, or onto the issue that
-already covers it, and the pull request in hand is finished first.
+code. That is information, not work. By default it goes into an issue, or onto the issue that
+already covers it, and the pull request in hand is finished first. The one other route is the
+exception above, and it is the maintainer's to take: they may want it as its own pull request
+instead. Default and exception, not two competing instructions.
 
 This is the rule that was broken hardest, and the interesting part is that the failure *was* out
 of scope. A markdown-only change to this file ran the full suite, the suite failed on a timing
