@@ -252,14 +252,16 @@ namespace CanKit.Pro.RawCan
                 {
                     // Neither bound constrains the remaining bits any more, so fill them in.
                     //
-                    // The bit >= 31 arm cannot be reached from here and is a guard, not a case:
-                    // Search starts with both bounds tight, and getting both loose costs at least
-                    // one bit, so this branch always runs at bit <= 30. It stays because the
-                    // alternative is silently wrong rather than loud -- C# masks the shift count,
-                    // so 1u << 32 evaluates to 1 instead of overflowing, and the fill-in would
-                    // quietly produce a one-bit "remaining" mask. Coverage reports it as a half
-                    // branch for that reason.
-                    var remaining = bit >= 31 ? uint.MaxValue : (1u << (bit + 1)) - 1;
+                    // Shift in 64 bits and narrow, rather than special-casing bit == 31. The
+                    // hazard being avoided is that C# masks the shift count: `1u << 32` is not
+                    // an overflow, it evaluates to 1, so a 32-bit shift here would silently
+                    // produce a one-bit "remaining" mask instead of the all-ones one. `1UL << 32`
+                    // has room for the carry, so the same expression is correct for every
+                    // bit in 0..31 and there is no arm to get wrong -- or, as it turned out, to
+                    // leave permanently half-covered because it cannot be reached from the only
+                    // call site (Search starts with both bounds tight, and loosening both costs
+                    // at least one bit, so this runs at bit <= 30).
+                    var remaining = (uint)((1UL << (bit + 1)) - 1);
                     var required = code & mask & remaining;
                     result = prefix | (preferHigh ? required | (remaining & ~mask) : required);
                     return true;
