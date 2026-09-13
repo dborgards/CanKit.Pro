@@ -785,7 +785,10 @@ internal sealed class UdsClientImpl : IUdsClient
 
         await _channel.SendAsync(request, linkedToken).ConfigureAwait(false);
 
-        var timer = Stopwatch.StartNew();
+        // A raw monotonic reading rather than a Stopwatch instance, because the budget is
+        // compared against the *arrival* stamp the channel takes at enqueue, and both must come
+        // from the same source (Stopwatch.GetTimestamp) for the subtraction to mean anything.
+        var budgetStart = Stopwatch.GetTimestamp();
         var timeout = _options.P2ClientMax;
         var timerKind = UdsTimeoutTimer.P2;
         int pendingCount = 0;
@@ -794,8 +797,30 @@ internal sealed class UdsClientImpl : IUdsClient
         {
             while (true)
             {
-                byte[] response = await ReceiveWithTimeoutAsync(
-                    serviceId, timerKind, timeout, timer.Elapsed, linkedToken).ConfigureAwait(false);
+                var received = await ReceiveWithTimeoutAsync(
+                    serviceId, timerKind, timeout, ElapsedSince(budgetStart), linkedToken)
+                    .ConfigureAwait(false);
+
+                // The budget is enforced here, not by the cancellation that raced it.
+                //
+                // ReceiveWithTimeoutAsync arms a CancellationTokenSource for the remaining
+                // budget and waits on the channel; whichever of the two completes the wait
+                // first decides the outcome. That is a race, and a host that delays the
+                // deadline callback past the response's arrival lets the response win --
+                // whereupon the client returns data for a request it had already given up on,
+                // and specifically the stale record that the next request would then have to
+                // discard. #92 recorded five CI failures of exactly that shape.
+                //
+                // Checking the arrival stamp rather than "am I past the deadline now" is the
+                // point: the second question is answered by when this code got scheduled, so a
+                // punctual response observed late would be rejected -- swapping a rare wrong
+                // accept for a frequent wrong reject under precisely the load that causes the
+                // bug.
+                var arrival = ElapsedSince(budgetStart, received.ArrivalTimestamp);
+                if (arrival > timeout)
+                    throw new UdsTimeoutException(serviceId, timerKind, timeout);
+
+                byte[] response = received.Pdu;
 
                 if (response.Length == 0)
                     throw new UdsProtocolException(
@@ -824,7 +849,7 @@ internal sealed class UdsClientImpl : IUdsClient
                                 $"ECU sent {pendingCount} consecutive NRC 0x78 responses, exceeding MaxResponsePendingCount={_options.MaxResponsePendingCount}.");
 
                         // Restart the wait budget on P2* (SRS FR-UDS-009, ISO 14229-1 §7.3.3).
-                        timer.Restart();
+                        budgetStart = Stopwatch.GetTimestamp();
                         timeout = _options.P2StarClientMax;
                         timerKind = UdsTimeoutTimer.P2Star;
                         continue;
@@ -869,7 +894,7 @@ internal sealed class UdsClientImpl : IUdsClient
     /// (P2 or P2*) timeout, taking already-elapsed time into account so a single wait budget
     /// isn't re-set to full when the loop iterates for a stray frame.
     /// </summary>
-    private async Task<byte[]> ReceiveWithTimeoutAsync(UdsServiceId serviceId,
+    private async Task<IsoTpReceivedPdu> ReceiveWithTimeoutAsync(UdsServiceId serviceId,
         UdsTimeoutTimer timerKind, TimeSpan budget, TimeSpan elapsedInBudget,
         CancellationToken linkedToken)
     {
@@ -883,13 +908,26 @@ internal sealed class UdsClientImpl : IUdsClient
 
         try
         {
-            return await _channel.ReceiveAsync(combined.Token).ConfigureAwait(false);
+            return await _channel.ReceiveWithArrivalAsync(combined.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested
                                                  && !linkedToken.IsCancellationRequested)
         {
             throw new UdsTimeoutException(serviceId, timerKind, budget);
         }
+    }
+
+    /// <summary>
+    /// Elapsed time between two <see cref="Stopwatch.GetTimestamp"/> readings, defaulting the
+    /// second to now. Kept in one place so the pre-check (how much budget is left) and the
+    /// post-check (was this PDU inside it) can never drift onto different clocks.
+    /// </summary>
+    private static TimeSpan ElapsedSince(long startTimestamp, long? endTimestamp = null)
+    {
+        var end = endTimestamp ?? Stopwatch.GetTimestamp();
+        var ticks = end - startTimestamp;
+        if (ticks <= 0) return TimeSpan.Zero;
+        return TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 
     private void ThrowIfDisposed()
