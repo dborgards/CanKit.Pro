@@ -429,10 +429,16 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         var subscribeAndDispose = () =>
         {
-            var subscription = service.Subscribe(_ => { });
-            Thread.Sleep(50); // let the pump reach the failure
-            subscription.Dispose();
-            subscription.Dispose(); // idempotent -- the second call must be a no-op
+            // `using` as well as the explicit call: the explicit one is the idempotence check,
+            // the `using` makes sure disposal still happens if anything above it throws.
+            using var subscription = service.Subscribe(_ => { });
+
+            // Wait for the stream to have actually failed rather than sleeping and hoping --
+            // without this the pump might not have reached the throw yet and the drop path
+            // would go unexercised while the test still passed.
+            service.StreamFailed.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+            subscription.Dispose(); // the `using` disposes again: the second call must be a no-op
         };
 
         subscribeAndDispose.Should().NotThrow();
@@ -440,6 +446,10 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
     private sealed class FramesThrowOnEnumerationService : ICanBusService
     {
+        // Set immediately before the enumerator throws, so a test can wait for the failure to
+        // have happened instead of guessing at a delay.
+        public ManualResetEventSlim StreamFailed { get; } = new(false);
+
         public ICanBus Bus => throw new NotSupportedException();
 
         public int SubscriptionCount => 0;
@@ -449,21 +459,21 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 #pragma warning restore CS0067
 
         public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
-            => new ThrowingSubscription();
+            => new ThrowingSubscription(StreamFailed);
 
         public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
-            => new ThrowingSubscription();
+            => new ThrowingSubscription(StreamFailed);
 
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => Array.Empty<FilterOverlap>();
 
         public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
-        public void Dispose() { }
+        public void Dispose() => StreamFailed.Dispose();
 
-        private sealed class ThrowingSubscription : ISubscription
+        private sealed class ThrowingSubscription(ManualResetEventSlim streamFailed) : ISubscription
         {
-            public IAsyncEnumerable<CanFrameEvent> Frames => Throwing();
+            public IAsyncEnumerable<CanFrameEvent> Frames => Throwing(streamFailed);
 
             public bool TryRead(out CanFrameEvent frameEvent) { frameEvent = default; return false; }
 
@@ -473,9 +483,10 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
             public void Dispose() { }
 
-            private static async IAsyncEnumerable<CanFrameEvent> Throwing()
+            private static async IAsyncEnumerable<CanFrameEvent> Throwing(ManualResetEventSlim streamFailed)
             {
                 await Task.Yield();
+                streamFailed.Set();
                 throw new InvalidOperationException("the frame stream itself failed");
 #pragma warning disable CS0162
                 yield break; // unreachable, but required to make this an iterator
