@@ -641,32 +641,57 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         };
         using var node = J1939Node.Open(busA, opts);
 
-        using var cts = new CancellationTokenSource();
-        var claimTask = node.ClaimAddressAsync(0x33, cts.Token);
+        // Wait for the transition into Claiming on the node's own event rather than by
+        // polling. The poll this replaces was `for (i < 20) await Task.Delay(10)` followed by
+        // an assertion that the state is still Claiming -- a 200 ms nominal budget bounded by
+        // nothing, inside a 500 ms window. On a stalled runner those twenty hops overrun the
+        // window, the arbitration timer commits the address exactly as documented, and the
+        // test reports the product's correct behaviour as a defect. It did (#92, macOS).
+        //
+        // The event fires *at* the transition, so cancellation is issued at the start of the
+        // arbitration window instead of an unknown distance into it. That does not make the
+        // window infinite -- a half-second stall between the signal and the cancel reaching
+        // the actor would still miss it -- but it no longer needs the runner to be fast, only
+        // to not stall for the whole window inside three statements.
+        var claiming = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnClaimChanged(object? _, J1939ClaimEventArgs e)
+        {
+            if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult(true);
+        }
 
-        // Give the actor a beat to enter Claiming so we know we cancel mid-arbitration and
-        // not before BeginClaim has run.
-        for (int i = 0; i < 20 && node.ClaimState != J1939ClaimState.Claiming; i++)
-            await Task.Delay(10);
-        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+        node.AddressClaimChanged += OnClaimChanged;
+        try
+        {
+            using var cts = new CancellationTokenSource();
+            var claimTask = node.ClaimAddressAsync(0x33, cts.Token);
 
-        cts.Cancel();
+            await claiming.Task.WithTimeout(ShortTimeout);
 
-        // The task itself must complete as cancelled.
-        Func<Task> awaitClaim = () => claimTask.WithTimeout(ShortTimeout);
-        await awaitClaim.Should().ThrowAsync<TaskCanceledException>();
+            cts.Cancel();
 
-        // Wait past the original arbitration window so any surviving timer would have fired.
-        await Task.Delay(700);
+            // The task itself must complete as cancelled. This is also the causal witness
+            // that the cancel landed inside the arbitration window: had the window expired
+            // first, the claim would have completed successfully instead.
+            Func<Task> awaitClaim = () => claimTask.WithTimeout(ShortTimeout);
+            await awaitClaim.Should().ThrowAsync<TaskCanceledException>();
 
-        // The node MUST NOT have silently committed to the cancelled address.
-        node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
-        node.Address.Should().BeNull();
+            // Wait past the original arbitration window so any surviving timer would have
+            // fired.
+            await Task.Delay(700);
 
-        // A fresh claim must still work (i.e. teardown left the state machine consistent).
-        await node.ClaimAddressAsync(0x44).WithTimeout(ShortTimeout);
-        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
-        node.Address.Should().Be((byte)0x44);
+            // The node MUST NOT have silently committed to the cancelled address.
+            node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
+            node.Address.Should().BeNull();
+
+            // A fresh claim must still work (i.e. teardown left the state machine consistent).
+            await node.ClaimAddressAsync(0x44).WithTimeout(ShortTimeout);
+            node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+            node.Address.Should().Be((byte)0x44);
+        }
+        finally
+        {
+            node.AddressClaimChanged -= OnClaimChanged;
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1066,10 +1091,35 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // node's SendAsync / actor loop (L2 scheduling) — the previous dual `IPeriodicTx` path
     // was collapsed to a single implementation (PR #33) so error handling and claim-gate
     // semantics are uniform across payload sizes. The test collects a run of frames on a
-    // spectator bus and asserts the median inter-arrival matches the caller's configured
-    // period. Median, not mean: one runner stall of a few hundred milliseconds pulls a mean
-    // over ten samples out of any honest tolerance while saying nothing about the rate the
-    // scheduler actually keeps.
+    // spectator bus and asserts the two rate properties that survive a loaded runner.
+    //
+    // What this test deliberately does NOT assert is grid alignment, and the reason is
+    // measurement resolution rather than modesty. PeriodicSchedule skips a tick whose
+    // previous emission is still in flight and coalesces the ticks that fell behind by
+    // advancing the anchor whole periods at a time, so under load it emits at 2 x period, or
+    // 3 x, *by design*. Checking that those gaps land on the grid means resolving them to
+    // better than half a period -- and these stamps are taken on a spectator bus, where an
+    // emission observed late next to one observed on time already moves a gap by ~50 ms.
+    // Against a 120 ms period that is 40 % of the grid spacing, so the check cannot separate
+    // a drifting scheduler from a busy host no matter how the tolerance is set. Measured, not
+    // assumed: under an 8x CPU overload the observed gaps scatter across 130..410 ms.
+    //
+    // The anti-drift property is real and is tested -- by the multi-frame sibling below,
+    // which earns the resolution by deriving its period from a measured send time so that one
+    // period is several times the jitter. Asserting it twice, once where it cannot be
+    // measured, bought a standing red leg on macOS (#92) and no coverage.
+    //
+    // So, the two properties that hold regardless of host load:
+    //
+    //   * No bursting -- every gap rounds to at least one slot. Coalescing must advance the
+    //     anchor, never queue the ticks it skipped and release them back to back. Jitter
+    //     cannot fake this: half a period separates a real emission from slot zero.
+    //   * Never faster than requested -- the mean gap is at least one period. Dropped ticks
+    //     only ever make it longer, so this bound is one-sided in the direction load pushes
+    //     and cannot be tripped by a slow runner.
+    //
+    // The collection loop above closes the other side: requiring requiredSamples emissions
+    // inside ShortTimeout bounds the mean gap from above too, loosely but honestly.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod()
@@ -1084,7 +1134,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // The stamp collection is protected by its own lock; the FrameObserved handler runs
         // on the bus's dispatch thread and multiple readers might in principle observe the
         // frame concurrently on some adapters.
-        var stamps = new List<DateTime>();
+        // Stopwatch ticks, not DateTime.UtcNow: these samples are only ever subtracted from
+        // each other, and a wall clock can step under them mid-run. Same monotonic basis the
+        // actor measures its own deadlines on.
+        var stamps = new List<long>();
         var stampsLock = new object();
         const uint targetPgn = 0xFEE5u; // PDU2, PS=0xE5 (arbitrary), well-known-ish
         busB.FrameObserved += (_, e) =>
@@ -1093,7 +1146,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
             if (fields.SourceAddress != 0xC1) return;
             if (fields.Pgn != targetPgn) return;
-            lock (stampsLock) stamps.Add(DateTime.UtcNow);
+            lock (stampsLock) stamps.Add(Stopwatch.GetTimestamp());
         };
 
         // 120 ms period is comfortably above both the ~1 ms virtual-loopback latency and the
@@ -1110,13 +1163,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
             // Collect until we have enough samples for a stable mean, or bail out with a
             // clear failure message if the schedule never fires.
-            var deadline = DateTime.UtcNow + ShortTimeout;
+            var deadline = Stopwatch.GetTimestamp() + (long)(ShortTimeout.TotalSeconds * Stopwatch.Frequency);
             while (true)
             {
                 int count;
                 lock (stampsLock) count = stamps.Count;
                 if (count >= requiredSamples) break;
-                if (DateTime.UtcNow >= deadline)
+                if (Stopwatch.GetTimestamp() >= deadline)
                     throw new TimeoutException(
                         $"Expected at least {requiredSamples} periodic emissions within " +
                         $"{ShortTimeout.TotalSeconds}s; observed {count}.");
@@ -1135,26 +1188,38 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "disposing the handle must stop the periodic loop so at most an already-in-flight " +
             "SendAsync may still land after Dispose returns");
 
-        // Inter-arrival timing: the median delta over the collected samples must match the
-        // requested period. A single stalled sample shifts the median by nothing and the mean
-        // by (stall / n), which is why this reads the median.
-        List<DateTime> snapshot;
-        lock (stampsLock) snapshot = new List<DateTime>(stamps);
+        List<long> snapshot;
+        lock (stampsLock) snapshot = new List<long>(stamps);
         snapshot.Count.Should().BeGreaterOrEqualTo(requiredSamples);
 
-        var deltas = new List<double>(snapshot.Count - 1);
-        for (int i = 1; i < snapshot.Count; i++)
-            deltas.Add((snapshot[i] - snapshot[i - 1]).TotalMilliseconds);
-        deltas.Sort();
-        var median = deltas.Count % 2 == 1
-            ? deltas[deltas.Count / 2]
-            : (deltas[(deltas.Count / 2) - 1] + deltas[deltas.Count / 2]) / 2d;
-
         double targetMs = period.TotalMilliseconds;
-        // Fixed-rate anchoring: the typical inter-arrival is the configured period, with
-        // enough tolerance in both directions for timer granularity and CI jitter.
-        median.Should().BeInRange(targetMs * 0.7, targetMs * 1.6,
-            $"median inter-arrival ({median:F1} ms) should approximate the configured period ({targetMs:F0} ms)");
+        var gaps = new List<double>(snapshot.Count - 1);
+        for (int i = 1; i < snapshot.Count; i++)
+            gaps.Add((snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency);
+
+        // No bursting. Rounding to slots rather than comparing raw milliseconds is what makes
+        // this survive a loaded runner: an emission observed late next to one observed on time
+        // compresses their gap without the scheduler having done anything, and under an 8x CPU
+        // overload that produced gaps of 69 and 76 ms against a 120 ms period. Those round to
+        // one slot; a scheduler that queued its skipped ticks and released them back to back
+        // rounds to zero, which no amount of jitter can produce.
+        for (var i = 0; i < gaps.Count; i++)
+        {
+            var slots = Math.Round(gaps[i] / targetMs, MidpointRounding.AwayFromZero);
+            slots.Should().BeGreaterOrEqualTo(1,
+                $"gap {i + 1} ({gaps[i]:F0} ms) must be at least one period ({targetMs:F0} ms): "
+                + "coalesced ticks must advance the anchor, not burst out");
+        }
+
+        // Never faster than requested. Load can only lengthen gaps -- a dropped tick moves an
+        // emission to the next slot -- so a mean below the period means the schedule is
+        // running fast, which no runner can cause. The 10 % allowance absorbs the endpoint
+        // jitter of the span the mean is taken over, nothing more.
+        var meanGap = gaps.Sum() / gaps.Count;
+        meanGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
+            $"mean gap ({meanGap:F0} ms) must not undercut the configured period "
+            + $"({targetMs:F0} ms); observed gaps: "
+            + string.Join(", ", gaps.ConvertAll(g => $"{g:F0}")));
     }
 
     // ---------------------------------------------------------------------------------------
