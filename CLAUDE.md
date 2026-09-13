@@ -102,10 +102,13 @@ by the exception written into the rule above, three hours earlier, by the same h
 is for findings on the pull request's *own* content. Reading it any wider makes the sequencing
 rule mean nothing.
 
-The same applies to review findings. A correct finding is not automatically this task's work: a
-bot can be right about a real defect that still belongs in a ticket rather than in the change
-being reviewed. Correct and urgent are different questions, and only the second one decides
-whether it happens now.
+The same applies to review findings, in that order: **causality first, then urgency.** A finding
+about something this branch caused is this task's work however small it looks — that is the rule
+above, and a review does not create an exception to it. The second question is only reached for a
+finding the branch did not cause, and there a correct finding is still not automatically this
+task's work: a bot can be right about a real defect that belongs in a ticket rather than in the
+change being reviewed. Read the other way round, urgency alone would let a valid regression this
+branch introduced be deferred, which is the excuse this whole section exists to remove.
 
 ## Before claiming something is true
 
