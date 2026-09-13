@@ -54,7 +54,7 @@ Korrektur beim Mergen verloren, weil sie kurz vor dem Merge gepusht wurde.
 | 6 | #101: „Claim-Test repariert" | Cancel feuerte vor dem Armen der Deadline; der Test bestand die Regression, für die er existiert | Codex-P2 |
 | 7 | #101: „Slot-Untergrenze ist lastunabhängig" | ein verspäteter Tick verkürzt den Abstand zum nächsten Grid-Slot legitim | 2/8 bzw. 1/12 rot unter Last |
 | 8 | #101: „Mittelwert ist die stärkste wahre Aussage" | ein später erster Tick senkt den Mittelwert unter die Schranke, ohne dass der Scheduler etwas falsch macht | Codex-P2 |
-| 9 | #104: ein zweiter PR (#105) für einen Fehler, den der Docs-PR nicht verursacht hatte | Ich berief mich auf eine Ausnahme, die ich drei Stunden zuvor selbst in dieselbe Datei geschrieben hatte | PR geschlossen, Nachfassen des Maintainers |
+| 9 | #104: „dieser Fehler verdient einen eigenen PR" — #105 aufgemacht | Der Fehler war korrekt als *nicht* vom Branch verursacht eingeordnet, und die Ausnahme deckt genau diesen Fall. Falsch war, dass ich die Entscheidung selbst getroffen habe: sie gehört dem Maintainer, der Default ist das Issue | PR geschlossen, Nachfassen des Maintainers |
 | 10 | #107: „Widerspruch aufgelöst" | Ich behielt die permissive Regel und verengte ihre Bedingungen — ein genehmigter Freibrief ist immer noch ein Freibrief | Korrektur durch den Maintainer |
 | 11 | Vier Widersprüche *zwischen Absätzen* in `CLAUDE.md` | jeder Absatz für sich korrekt; der Konflikt existiert nur zwischen ihnen | 4 Codex-Befunde, davon 1 P1 |
 
@@ -168,6 +168,13 @@ der Fall *Eine Zahl, die an zwei Stellen stand* unten verbietet:
   verweisen darauf, statt sie zu wiederholen** — sonst veraltet die Wiederholung bei jeder Änderung
   des Belegs, und lautlos, weil beide Stellen für sich stimmig aussehen. Die Einleitung nennt
   seither keine Zahl mehr.
+- **Ein Beleg, der die abgeleitete Regel widerlegte statt sie zu stützen.** Zeile 9 der Chronologie
+  führte „ein zweiter PR für einen Fehler, den der Docs-PR nicht verursacht hatte" als den
+  Fehlschlag — während die Regelzusammenfassung desselben Dokuments genau das als erlaubt
+  beschreibt, sofern der Maintainer es so will. Der Fehlschlag war die Selbstermächtigung, nicht
+  der zweite PR; `CLAUDE.md` sagt das an seinem Beispiel wörtlich, und ich hatte es aus der
+  Erinnerung an die *alte* Regelfassung zusammengefasst. Der Beleg widersprach damit der Regel,
+  für die er stehen sollte.
 - **Belege, die der falschen Quelle zugeschrieben waren.** Die Liste der vier Widersprüche oben
   führte anfangs zwei Fälle, die ich selbst gefunden hatte (`1e2f3e3`, `c5519db`), als
   Codex-Befunde — und einer davon ist in `c5519db` ausdrücklich als *Nebeneinanderstellung ohne
