@@ -455,26 +455,32 @@ namespace CanKit.Pro.RawCan
             // Aliases the echo frame's payload rather than copying it: this runs for every echo
             // frame the adapter reports, and the key is dropped again before the lock is released.
             var key = PendingKey.ForEchoLookup(echoView.ID, echoView.Data, echoView.Flags, echoView.FrameKind);
-            PendingSend? matched = null;
 
             lock (_pendingGate)
             {
                 if (_pending.TryGetValue(key, out var list))
                 {
-                    // FIFO: the oldest pending send for this key matches first -- but only if it is
-                    // still waiting. An entry whose Tcs is already completed has been resolved by
-                    // some other path and can no longer consume anything; matching it would silently
-                    // drop this echo (TrySetResult no-ops on a completed Tcs) and leave the send it
-                    // actually belonged to waiting for an echo that has already come and gone.
+                    var confirmation = new TxConfirmation
+                    {
+                        Confirmed = true,
+                        IsApproximated = false,
+                        Timestamp = DateTime.UtcNow,
+                        FailureReason = TxConfirmFailureReason.None,
+                    };
+
+                    // FIFO: the oldest pending send for this key gets the echo -- but only if it
+                    // is still waiting. An entry already resolved by some other path can no longer
+                    // consume anything, and handing it the echo would drop it silently while the
+                    // send it actually belonged to waits for one that has already come and gone.
                     //
-                    // This skip is the mechanism that fixes #24, not a redundant guard. The
-                    // timeout and cancellation path completes its Tcs without taking this lock --
-                    // deliberately, so a deadline cannot be held up by an unrelated send sitting in
-                    // a slow _bus.Transmit -- and the entry it resolved stays linked until
-                    // SendWithEchoConfirmAsync's `finally` runs a scheduling turn later. Inside
-                    // that window the expired entry is still the FIFO head for its key, and
-                    // without this skip it would swallow the next byte-identical send's echo,
-                    // turning one timeout into a cascade of them.
+                    // Walking past such entries is the mechanism that fixes #24, not a redundant
+                    // guard. The timeout and cancellation path completes its Tcs without taking
+                    // this lock -- deliberately, so a deadline cannot be held up by an unrelated
+                    // send sitting in a slow _bus.Transmit -- and the entry it resolved stays
+                    // linked until SendWithEchoConfirmAsync's `finally` runs a scheduling turn
+                    // later. Inside that window the expired entry is still the FIFO head for its
+                    // key, and without this walk it would swallow the next byte-identical send's
+                    // echo, turning one timeout into a cascade of them.
                     //
                     // Unlinking what it skips matters as much as skipping it: otherwise the same
                     // dead entry would block the FIFO for every later echo rather than only this
@@ -488,11 +494,22 @@ namespace CanKit.Pro.RawCan
                         candidate.Node = null;
                         Interlocked.Decrement(ref _pendingCount);
 
-                        if (!candidate.Tcs.Task.IsCompleted)
-                        {
-                            matched = candidate;
-                            break;
-                        }
+                        // Claim by completing, not by asking first. An `IsCompleted` test followed
+                        // by a TrySetResult is check-then-act: the timeout and cancellation path
+                        // completes without this lock, so it can land between the two, and then
+                        // the echo is consumed by an entry that lost the race while a live send
+                        // behind it in the FIFO waits for an echo that has already arrived. That
+                        // is the same defect as #24 wearing different clothes.
+                        //
+                        // TrySetResult is the only test that cannot be raced, because it *is* the
+                        // transition. A false return means some other path got there first, so
+                        // this candidate never owned the echo and the walk continues to the next.
+                        //
+                        // Safe under the lock precisely because the Tcs is created with
+                        // RunContinuationsAsynchronously: completing it queues the awaiting
+                        // continuation rather than running it inline, so no caller code executes
+                        // while _pendingGate is held.
+                        if (candidate.Tcs.TrySetResult(confirmation)) break;
 
                         node = next;
                     }
@@ -501,15 +518,6 @@ namespace CanKit.Pro.RawCan
                         _pending.Remove(key);
                 }
             }
-
-            // TrySetResult outside the lock: never invoke TCS continuations while holding a lock.
-            matched?.Tcs.TrySetResult(new TxConfirmation
-            {
-                Confirmed = true,
-                IsApproximated = false,
-                Timestamp = DateTime.UtcNow,
-                FailureReason = TxConfirmFailureReason.None,
-            });
         }
 
         private void OnFaultOccurred(object? sender, Exception ex)
