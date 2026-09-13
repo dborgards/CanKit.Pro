@@ -42,9 +42,10 @@ public sealed class J1939SpnCatalog : IEnumerable<J1939SpnDefinition>
     }
 
     /// <summary>Decodes SPN <paramref name="spn"/> from <paramref name="payload"/> using the
-    /// registered definition. Throws <see cref="KeyNotFoundException"/> for unknown SPNs and
+    /// registered definition — a measurement, or the SAE J1939-71 §5.1.1 indicator the field
+    /// carries instead. Throws <see cref="KeyNotFoundException"/> for unknown SPNs and
     /// <see cref="ArgumentOutOfRangeException"/> when the field exceeds the payload.</summary>
-    public double Extract(ReadOnlySpan<byte> payload, int spn)
+    public J1939SpnValue Extract(ReadOnlySpan<byte> payload, int spn)
     {
         if (!TryGet(spn, out var definition) || definition is null)
         {

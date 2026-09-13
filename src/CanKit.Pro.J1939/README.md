@@ -8,7 +8,12 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
 - **PGN send/receive** with 29-bit Priority / PF / PS / SA encoding &
   decoding via `CanKit.Pro.Addressing.J1939Id` (**FR-J1939-001**).
 - **SPN extraction** from PGN payloads with configurable resolution and
-  offset (little-endian, 1..64-bit fields) via `J1939Spn` (**FR-J1939-002**).
+  offset (little-endian, 1..64-bit fields, unsigned or two's-complement
+  signed) via `J1939Spn` (**FR-J1939-002**). Extraction returns a
+  `J1939SpnValue`, not a `double`: SAE J1939-71 §5.1.1 reserves the top of
+  every SPN's raw range for the *not available*, *error*, *reserved* and
+  *parameter-specific* indicators, and a 16-bit engine-speed field reading
+  `0xFFFF` means the ECU does not have the parameter — not 8191.875 rpm.
 - **Address claiming** (PGN 0xEE00) with SAE J1939-81 §4.4.3 NAME arbitration
   and the 250 ms announcement window (**FR-J1939-003**).
 - **Address-Claim fallback** (**FR-J1939-004**): after losing the preferred
@@ -80,11 +85,33 @@ await node.RequestPgnAsync(requestedPgn: 0xFEF1, destinationAddress: 0xFF);
 // SPN extraction (little-endian, physical = raw * resolution + offset).
 node.MessageReceived += (_, msg) =>
 {
-    double speed = J1939Spn.Extract(msg.Payload.Span,
+    J1939SpnValue speed = J1939Spn.Extract(msg.Payload.Span,
         byteOffset: 3, startBit: 0, bitLength: 16,
         resolution: 0.125, offset: 0.0);
+
+    // .Value throws unless the field really carries a measurement.
+    if (speed.TryGetValue(out double rpm)) Use(rpm);
+    else if (speed.IsNotAvailable) { /* the ECU does not have this parameter */ }
+    else if (speed.IsError)        { /* the ECU flagged its own reading as wrong */ }
+
+    // Or, for arithmetic that should stay visibly wrong rather than plausible:
+    double rpmOrNaN = speed.GetValueOrDefault();          // NaN unless valid
+
+    // Signed SPNs (two's-complement SLOTs) pass isSigned: true.
+    J1939SpnValue trim = J1939Spn.Extract(msg.Payload.Span,
+        byteOffset: 0, startBit: 0, bitLength: 16,
+        resolution: 0.1, offset: 0.0, isSigned: true);
 };
 ```
+
+The indicator ranges follow SAE J1939-71 §5.1.1 and scale with the field
+width — for one byte `0xFB` / `0xFC`..`0xFD` / `0xFE` / `0xFF`, for two bytes
+the same codes in the leading byte (`0xFF00`..`0xFFFF` is *not available*),
+and with the sign bit cleared (`0x7B`..`0x7F`) for a signed SPN. `Raw` on the
+returned value is always the bit pattern as read off the wire, so the exact
+code can still be logged or forwarded. `J1939Spn.Classify` exposes the range
+check on its own, and `J1939SpnDefinition` carries an `IsSigned` flag so the
+catalog decodes signed parameters too.
 
 ## Status
 
