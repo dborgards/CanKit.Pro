@@ -38,8 +38,8 @@ Produktivcode, einer in der Suite:
   in der Behauptung des Tests, nicht im Produktivcode — die Suite meldete dauerhaft einen Bug, den
   es nicht gab, und verdeckte damit, was sie sonst hätte melden können.
 
-Der Preis: elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt sie
-einzeln —, dreimal musste der Maintainer
+Der Preis: elf Einträge in der Chronologie unten, und weil deren letzter vier Widersprüche
+zusammenfasst, vierzehn einzeln korrigierte Fehlbehauptungen. Dreimal musste der Maintainer
 nachfassen, und zweimal ging eine Korrektur beim Mergen verloren, weil sie kurz vor dem Merge
 gepusht wurde.
 
@@ -137,8 +137,8 @@ Verschärfung einer Regel die Datei nach Verweisen auf sie durchsuchen, nicht na
 Zeilen. Und Absätze gegeneinander lesen, nicht jeden gegen seine Absicht — Letzteres findet diese
 Klasse nie, wie hier zweimal belegt.
 
-Ein dritter und vierter Beleg entstanden beim Schreiben dieses Dokuments selbst; Codex fand beide
-in #109.
+Ein dritter, vierter und fünfter Beleg entstanden beim Schreiben dieses Dokuments selbst; Codex
+fand alle drei in #109.
 
 Der dritte ist exakt die Klasse von oben. Der Entwurf wurde von acht auf elf Chronologie-Zeilen
 erweitert; die Kopfzeile zählte danach noch acht gemergte Pull Requests bei neun im Inventar, und
@@ -153,7 +153,15 @@ an weiter als ihre Liste. Das erweitert die Regel: nicht nur nach einer Änderun
 gegeneinander zu lesen, sondern auch beim ersten Schreiben, denn eine Zusammenfassung wird gegen
 ihre Absicht gelesen und nicht gegen ihre Belege.
 
-Vier Belege in einem Dokument über diese Fehlerklasse — was die Regel eher stützt als schwächt:
+Der fünfte entstand in derselben Korrekturrunde. Der Satz, mit dem ich dabei eine unprüfbare Zahl
+ersetzte,
+lautete „elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt sie einzeln",
+und das tut sie nicht: ihr elfter Eintrag fasst vier Widersprüche zusammen, es sind vierzehn
+Behauptungen in elf Zeilen. Die Korrektur einer Zusammenfassung ist selbst eine Zusammenfassung
+und braucht dieselbe Gegenprobe wie das Original — sonst ersetzt man eine unbelegte Zahl durch
+eine falsche.
+
+Fünf Belege in einem Dokument über diese Fehlerklasse — was die Regel eher stützt als schwächt:
 sie ist nicht durch Vorsatz einzuhalten, sondern nur durch die Gegenprobe Behauptung gegen Beleg.
 
 ## Die Sorte Fehler, die zweimal identisch auftrat
