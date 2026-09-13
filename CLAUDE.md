@@ -12,9 +12,17 @@
   report, and each of those has to be driven to actually closed — which in practice means the
   maintainer chasing them, one at a time, which is the opposite of what the parallelism was for.
 
-  Merging one makes it worse rather than better: the others need a base merge, every reviewer and
-  bot re-runs against the new head, and findings that were settled come back. Two pull requests
-  in flight produced exactly that and accelerated nothing.
+  Merging one makes it worse rather than better *as things stand*: the others need a base merge,
+  every reviewer and bot re-runs against the new head, and findings that were settled come back.
+  Two pull requests in flight produced exactly that and accelerated nothing.
+
+  That second half has a known expiry. `ci.yml` already carries a `merge_group` trigger, added
+  after #81 and #83 merged four minutes apart and their untested combination broke the `net48`
+  leg (#85) — a merge queue builds `main` plus the queued pull requests together, so a queued
+  branch is tested against current `main` without a base merge and without a new head. It has
+  never run: zero `merge_group` workflow runs to date, because the queue is configured in the
+  workflow but not enabled on the branch (#106). Enabling it would remove the base-merge cost.
+  It would not touch the supervision cost above, which is the reason this rule exists.
 
   The exception is a pull request that comes *out of* the one in flight — a follow-up split off
   during review, or a fix the review made necessary elsewhere. Those may overlap, because the
