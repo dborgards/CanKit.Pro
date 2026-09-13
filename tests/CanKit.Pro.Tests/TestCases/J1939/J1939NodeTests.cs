@@ -1265,122 +1265,129 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             + "observed gaps: " + string.Join(", ", gaps.ConvertAll(g => $"{g:F0}")));
     }
 
-    // ---------------------------------------------------------------------------------------
-    // FR-J1939-007 (fixed-rate): emissions are anchored on the DeadlineScheduler grid
-    // (t0 + n × period), so the long-run rate does not drift by the per-emission send time
-    // the way a send-then-delay loop would. A 60-byte multi-frame (TP.BAM) PGN makes the
-    // per-send cost measurable (~9 Th-paced DTs), which is what a drifting implementation
-    // would leak into the rate.
-    //
-    // The observable this asserts is grid alignment, not total elapsed time: every gap
-    // between consecutive announces is a whole number of periods. PeriodicSchedule drops a
-    // tick whose previous emission is still in flight rather than queueing it, so a slow
-    // runner turns some gaps into 2 × period — which is still on the grid. A send-then-delay
-    // loop instead produces gaps of period + sendTime, which is on no grid at all.
-    //
-    // The period is derived from a measured emission rather than hard-coded: sendTime is what
-    // separates the two hypotheses, and it is ~90 ms on Linux but ~140 ms on Windows, where
-    // the 15.6 ms default timer granularity stretches every Th pause. Anchoring the period at
-    // twice the measured sendTime puts the drift hypothesis exactly half a period off the
-    // grid — the furthest from it the two can ever be — on whichever runner this is.
-    // ---------------------------------------------------------------------------------------
+    /// <summary>
+    /// #92 step 2, J1939 half: the same fixed-rate property, on a clock the test drives.
+    ///
+    /// The wall-clock version above calibrates a period from a measured send, then allows gaps
+    /// 30 % off the grid — a tolerance picked to survive the slowest runner seen so far, which is
+    /// the shape #92 says gets widened again next time. Here the node schedules against a clock
+    /// only this test moves, so "on the grid" is exact.
+    ///
+    /// <b>The trap this test had to avoid.</b> A virtual clock makes work free, and this test
+    /// distinguishes anchor scheduling from a send-then-delay loop <em>only because a send takes
+    /// time</em>. Two things restore that. The bus double charges virtual time for every frame it
+    /// transmits, so an emission costs what a real one would; and each round advances to an
+    /// absolute grid slot rather than by one period, so drift is not carried along with the
+    /// goalposts. Under send-then-delay the next emission falls due a whole send-cost past the
+    /// slot and so does not happen at all while the clock sits on it, which this reports as the
+    /// emission never arriving.
+    ///
+    /// Both halves were needed, and finding that out took a wrong mutation first: rescheduling
+    /// from "now" <em>inside OnTick</em> changes nothing, because OnTick runs before the send has
+    /// cost anything. The hypothesis this guards against is structural — a loop that awaits the
+    /// send and only then starts its delay — and only a mutation shaped like that discriminates.
+    /// </summary>
     [Fact]
-    public async Task StartPeriodicSend_MultiFrame_KeepsFixedRate_Without_SendTime_Drift()
+    public async Task StartPeriodicSend_MultiFrame_Emits_On_An_Exact_Grid_On_A_Clock_The_Test_Drives()
     {
-        var session = NewSession();
-        using var busA = Open(session, 0);
-        using var busB = Open(session, 1); // spectator: samples BAM announce arrival times
+        var period = TimeSpan.FromMilliseconds(200);
+        var perFrameCost = TimeSpan.FromMilliseconds(1);
+        const int requiredEmissions = 6;
+
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        // Every transmitted frame costs virtual time, so a BAM emission is not free: a 60-byte
+        // payload is one TP.CM announce plus nine TP.DT frames.
+        bus.OnTransmitting = _ => clock.Advance(perFrameCost);
 
         var nodeOptions = new J1939NodeOptions(Name(1))
         {
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(10)),
+            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(1)),
         };
-        using var sender = J1939Node.Open(busA, nodeOptions);
-        await sender.ClaimAddressAsync(0xC1).WithTimeout(ShortTimeout);
+        using var sender = new J1939NodeImpl(service, nodeOptions, ownsService: false,
+            clock.NewActor());
+
+        // The claim waits out its contention window on the same clock, so it needs the clock
+        // moved before it can succeed -- it is a precondition here, not the subject.
+        await clock.RunUntilAsync(sender.ClaimAddressAsync(0xC1),
+            step: TimeSpan.FromMilliseconds(50), giveUpAfter: ShortTimeout);
 
         const uint targetPgn = 0xFEE6u;
-        const int requiredEmissions = 8;
-        var stamps = new List<long>();
-        var stampsLock = new object();
-        busB.FrameObserved += (_, e) =>
+        var announces = new List<TimeSpan>();
+        var announcesLock = new object();
+        var dataFrames = 0;
+        bus.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
             if (fields.SourceAddress != 0xC1) return;
-            // One stamp per emission: the TP.CM(BAM) announce of our target PGN (not its DTs).
+            // Data frames of the transfer: counted so a round can wait for the whole emission,
+            // not just its announce. A tick arriving while the previous emission is still in
+            // flight is dropped by design (one TP session per schedule), so advancing early
+            // would be testing that rule instead of the grid.
+            if (J1939Pgn.IsTransportDt(fields.Pgn)) { Interlocked.Increment(ref dataFrames); return; }
             if (!J1939Pgn.IsTransportCm(fields.Pgn)) return;
             var data = e.CanFrame.Data.Span;
             if (data.Length < 8 || data[0] != J1939TpFrames.ControlBam) return;
             if (J1939TpFrames.ReadDataPgn(data) != targetPgn) return;
-            lock (stampsLock) stamps.Add(Stopwatch.GetTimestamp());
+            lock (announcesLock) announces.Add(clock.Elapsed);
         };
 
         var payload = Enumerable.Range(0, 60).Select(i => (byte)(i & 0xFF)).ToArray();
         var message = new J1939Message(targetPgn, payload, priority: 6, destinationAddress: 0xFF);
 
-        // Calibration: one one-shot emission, timed, to learn what a BAM send costs here.
-        var calibration = Stopwatch.StartNew();
-        await sender.SendAsync(message).WithTimeout(ShortTimeout);
-        calibration.Stop();
-        var sendMilliseconds = calibration.Elapsed.TotalMilliseconds;
-        sendMilliseconds.Should().BeGreaterThan(0);
+        int Count() { lock (announcesLock) return announces.Count; }
 
-        // Two send times per period, bounded so neither a suspiciously fast nor a stalled
-        // calibration can turn this into a different test.
-        const double toleranceFraction = 0.3;
-        var periodMs = Math.Min(Math.Max(2d * sendMilliseconds, 120d), 600d);
-        var period = TimeSpan.FromMilliseconds(periodMs);
+        // 60 bytes over 7-byte data frames is 9 per emission.
+        const int dataFramesPerEmission = 9;
 
-        // Guard the premise: if a clamp pulled the period so far from twice the send time that
-        // period + sendTime would land inside the grid tolerance, this test could no longer
-        // tell the two implementations apart and would pass for the wrong reason.
-        sendMilliseconds.Should().BeGreaterThan(periodMs * toleranceFraction * 1.2,
-            $"a {sendMilliseconds:F0} ms send against a {periodMs:F0} ms period leaves the " +
-            "send-then-delay hypothesis inside the grid tolerance, so the assertion below " +
-            "would prove nothing");
-
-        lock (stampsLock) stamps.Clear();
-
-        // Room for the required emissions plus a few dropped ticks before giving up.
-        var collectTimeout = TimeSpan.FromMilliseconds(periodMs * (requiredEmissions + 6));
-
+        var startedAt = clock.Elapsed;
         using (sender.StartPeriodicSend(message, period))
         {
-            var deadline = Stopwatch.GetTimestamp() + (long)(collectTimeout.TotalSeconds * Stopwatch.Frequency);
-            while (true)
+            for (var slot = 1; slot <= requiredEmissions; slot++)
             {
-                int count;
-                lock (stampsLock) count = stamps.Count;
-                if (count >= requiredEmissions) break;
-                if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new TimeoutException(
-                        $"Expected at least {requiredEmissions} periodic BAM emissions within " +
-                        $"{collectTimeout.TotalSeconds:F1}s (period {periodMs:F0} ms, " +
-                        $"measured send {sendMilliseconds:F0} ms); observed {count}.");
-                await Task.Delay(20);
+                await clock.SettleAsync();
+                Count().Should().Be(slot - 1,
+                    "the schedule is armed against a clock that has not reached slot {0}, so no "
+                    + "further emission may have happened", slot);
+
+                await clock.AdvanceToAsync(startedAt + TimeSpan.FromTicks(period.Ticks * slot));
+                await WaitForAnnouncesAsync(Count, slot);
+                await WaitForAnnouncesAsync(() => Volatile.Read(ref dataFrames),
+                    slot * dataFramesPerEmission);
             }
         }
 
-        List<long> snapshot;
-        lock (stampsLock) snapshot = new List<long>(stamps);
-        snapshot.Count.Should().BeGreaterOrEqualTo(requiredEmissions);
+        List<TimeSpan> snapshot;
+        lock (announcesLock) snapshot = new List<TimeSpan>(announces);
 
-        // Every gap sits on the grid: a whole number of periods, within jitter. The drift
-        // hypothesis lands at half a period from the nearest slot, so the tolerance can stay
-        // well below that and still leave room for a slow runner.
-        for (var i = 1; i < snapshot.Count; i++)
+        // Every announce sits on its slot. The send cost that accrued before it is exactly what a
+        // send-then-delay loop would have added to the next due point, and it does not move these.
+        for (var i = 0; i < requiredEmissions; i++)
         {
-            var gapMs = (snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency;
-            var slots = Math.Round(gapMs / periodMs, MidpointRounding.AwayFromZero);
-            slots.Should().BeGreaterOrEqualTo(1,
-                $"gap {i} ({gapMs:F0} ms) must be at least one period ({periodMs:F0} ms): " +
-                "emissions must not burst (anchor coalescing)");
-            var offGridMs = Math.Abs(gapMs - (slots * periodMs));
-            offGridMs.Should().BeLessOrEqualTo(periodMs * toleranceFraction,
-                $"gap {i} ({gapMs:F0} ms) must sit on the fixed-rate grid — {slots:F0} × " +
-                $"{periodMs:F0} ms, off by {offGridMs:F0} ms. A send-then-delay loop would " +
-                $"land at period + sendTime ({periodMs + sendMilliseconds:F0} ms), half a " +
-                "period off the grid");
+            var slotPoint = startedAt + TimeSpan.FromTicks(period.Ticks * (i + 1));
+            snapshot[i].Should().BeGreaterThanOrEqualTo(slotPoint,
+                "emission {0} is triggered by the clock reaching its slot", i + 1);
+            snapshot[i].Should().BeLessThan(slotPoint + period,
+                "emission {0} belongs to slot {0} and not to a later one: a schedule that "
+                + "restarted its period after each send would have drifted past it", i + 1);
+        }
+    }
+
+    /// <summary>
+    /// Waits for a frame count to reach <paramref name="target"/>. A wait for an effect, not an
+    /// assertion about how long it took: a slow runner delays this rather than failing it.
+    /// </summary>
+    private static async Task WaitForAnnouncesAsync(Func<int> count, int target)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (count() < target)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"Expected {target} frames, saw {count()}.");
+            await Task.Delay(5);
         }
     }
 

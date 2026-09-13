@@ -41,6 +41,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
 {
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
+
+    // True when this node created its own actor and must therefore dispose it. An injected actor
+    // belongs to whoever built it, exactly as _ownsService works for the bus service.
+    private readonly bool _ownsActor;
+
+    // The clock the actor measures its timers against, read off the actor so the node's own
+    // fixed-rate anchor cannot end up on a different one (#92).
+    private readonly ITimeSource _time;
+
+    /// <summary>Ticks of <see cref="_time"/> as a <see cref="TimeSpan"/>.</summary>
+    private TimeSpan TimeSpanFromTicks(long ticks)
+        => TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
     private readonly J1939NodeOptions _options;
     private readonly J1939Name _name;
     private readonly ProtocolActor _actor;
@@ -94,7 +106,20 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
-    internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService)
+    /// <summary>
+    /// Builds a node on <paramref name="service"/>. A null <paramref name="actor"/> -- the only
+    /// value production passes -- makes the node create and own its own loop; an injected one
+    /// stays the caller's to dispose.
+    /// </summary>
+    /// <remarks>
+    /// A seam for tests, not a feature: substituting a loop built on a hand-driven monotonic
+    /// source is what lets the fixed-rate periodic schedule be asserted without measuring
+    /// wall-clock gaps on a shared runner (#92). The node's own anchor arithmetic reads the
+    /// clock off the actor rather than taking one of its own, so the two cannot be given
+    /// different clocks.
+    /// </remarks>
+    internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService,
+        ProtocolActor? actor = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -110,7 +135,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         };
         _rxInbox = Channel.CreateBounded<J1939Message>(inboxOpts);
 
-        _actor = new ProtocolActor();
+        _ownsActor = actor is null;
+        _actor = actor ?? new ProtocolActor();
+        _time = _actor.TimeSource;
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
         _deadlines = new DeadlineScheduler(_actor);
 
@@ -128,7 +155,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
         catch
         {
-            _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
             throw;
         }
         _transport.BackgroundExceptionOccurred += OnTransportBackgroundException;
@@ -153,7 +181,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         catch
         {
             _transport.Dispose();
-            _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
             throw;
         }
 
@@ -1020,7 +1049,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         _subscription.Dispose();
         _transport.Dispose();
-        _actor.Dispose();
+        // An injected actor is not ours to dispose; the handler is, either way.
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+        if (_ownsActor) _actor.Dispose();
         _readerCts.Dispose();
         if (_ownsService) _service.Dispose();
     }
@@ -1112,7 +1143,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         private readonly J1939NodeImpl _owner;
         private readonly J1939Message _message;
-        private readonly long _periodStopwatchTicks;
+        // In units of the owner's clock, not Stopwatch's. The anchor and the deadline it arms
+        // are the same quantity measured twice, and the only way they cannot disagree is to read
+        // them off one clock -- which for a test means the one it drives (#92).
+        private readonly long _periodTicks;
 
         private IDeadline? _tick;
         private long _nextAnchorTicks;
@@ -1123,7 +1157,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         public PeriodicSchedule(J1939NodeImpl owner, J1939Message message, TimeSpan period)
         {
             _owner = owner;
-            _periodStopwatchTicks = (long)(period.TotalSeconds * Stopwatch.Frequency);
+            _periodTicks = (long)(period.TotalSeconds * owner._time.Frequency);
 
             // Snapshot the caller's payload into an owned array so the wire traffic is
             // frozen at Start-time regardless of whether the caller mutates the buffer that
@@ -1142,8 +1176,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
         public void Start()
         {
             // First emission after one full period, then on the fixed-rate grid.
-            _nextAnchorTicks = Stopwatch.GetTimestamp() + _periodStopwatchTicks;
-            _tick = _owner._deadlines.Arm(TimeSpanFromStopwatchTicks(_periodStopwatchTicks), OnTick);
+            _nextAnchorTicks = _owner._time.GetTimestamp() + _periodTicks;
+            _tick = _owner._deadlines.Arm(_owner.TimeSpanFromTicks(_periodTicks), OnTick);
         }
 
         private void OnTick()
@@ -1182,13 +1216,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
             // Advance the anchor by whole periods until it is back in the future, coalescing
             // any ticks that fell behind (keeps the long-run rate at exactly 1/period).
-            var now = Stopwatch.GetTimestamp();
+            var now = _owner._time.GetTimestamp();
             do
             {
-                _nextAnchorTicks += _periodStopwatchTicks;
+                _nextAnchorTicks += _periodTicks;
             } while (_nextAnchorTicks <= now);
 
-            var delay = TimeSpanFromStopwatchTicks(_nextAnchorTicks - now);
+            var delay = _owner.TimeSpanFromTicks(_nextAnchorTicks - now);
             var tick = _tick;
             if (tick is null || !tick.Rearm(delay))
             {
@@ -1204,8 +1238,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             try { _sendTask?.Wait(TimeSpan.FromSeconds(2)); } catch { /* send observed elsewhere */ }
         }
 
-        private static TimeSpan TimeSpanFromStopwatchTicks(long ticks)
-            => TimeSpan.FromSeconds(ticks / (double)Stopwatch.Frequency);
+
     }
 
     // Historical note: an earlier revision routed single-frame (<= 8 byte) periodic PGNs

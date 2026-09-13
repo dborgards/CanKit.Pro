@@ -96,6 +96,54 @@ internal sealed class VirtualClock : IDisposable
     }
 
     /// <summary>
+    /// Moves the clock to an absolute point and returns once the newly due timers have fired.
+    /// Throws if that point is already behind.
+    /// </summary>
+    /// <remarks>
+    /// The difference from <see cref="AdvanceAsync"/> matters whenever the thing under test is a
+    /// <em>grid</em>. Advancing by a period each round moves the target along with any drift the
+    /// implementation has accumulated, so a schedule that restarts its interval after each
+    /// emission stays exactly as due as one anchored to the grid, and the test cannot tell them
+    /// apart. Advancing to an absolute slot fixes the goalposts: only a schedule that is still on
+    /// the grid is due there.
+    /// </remarks>
+    public Task AdvanceToAsync(TimeSpan point)
+    {
+        var now = Elapsed;
+        if (point < now)
+            throw new ArgumentOutOfRangeException(nameof(point), point,
+                $"A monotonic clock cannot go back to {point} from {now}.");
+        return AdvanceAsync(point - now);
+    }
+
+    /// <summary>
+    /// Steps the clock forward until <paramref name="operation"/> completes, for an operation
+    /// that waits on a timer of its own. Returns the virtual time it took.
+    /// </summary>
+    /// <remarks>
+    /// Needed because a protocol operation that is not the subject of a test can still block on
+    /// the clock the test froze — J1939's address claim waits out a contention window before it
+    /// reports success, and on a clock nobody moves it waits forever. Stepping rather than making
+    /// one large jump avoids having to know when the operation gets round to arming its timer: an
+    /// advance that lands before that happens is simply not the one that releases it.
+    /// </remarks>
+    public async Task<TimeSpan> RunUntilAsync(Task operation, TimeSpan step, TimeSpan giveUpAfter)
+    {
+        var started = Elapsed;
+        var realDeadline = DateTime.UtcNow + giveUpAfter;
+        while (!operation.IsCompleted)
+        {
+            if (DateTime.UtcNow > realDeadline)
+                throw new TimeoutException(
+                    $"The operation did not complete after {Elapsed - started} of virtual time.");
+            await AdvanceAsync(step).ConfigureAwait(false);
+        }
+
+        await operation.ConfigureAwait(false); // surface a fault as itself
+        return Elapsed - started;
+    }
+
+    /// <summary>
     /// Lets every actor reach a quiescent point without moving the clock — the same two
     /// round-trips, for when a test needs work already posted to have been processed.
     /// </summary>

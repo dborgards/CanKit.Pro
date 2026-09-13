@@ -13,6 +13,13 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CanKit.Pro.Tests</_Parameter1>
     </AssemblyAttribute>
+    <!-- J1939 keeps a fixed-rate anchor of its own alongside the deadline it arms here, and the
+         two must be read off the same clock (#92). ITimeSource stays internal, a seam rather
+         than a feature, so the layer that needs it is named here instead of the type being
+         made public. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.J1939</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>
