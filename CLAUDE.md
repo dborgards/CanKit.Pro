@@ -94,6 +94,11 @@ the branch's, and "I did not edit that file" is not a defence. The question to a
 the failure reproduces on the base revision: if it does not, the branch caused it, and it is
 closed **in this pull request** — not filed as a follow-up.
 
+There is exactly one way out, and it is the split exception above: the maintainer agrees that the
+fix is too large to fold in. Note who that leaves holding the decision. The author never defers
+their own regression alone — that is the whole of this rule, and the only question it leaves open
+is who may authorise an exception, which is not the author.
+
 Filing it is the move that turns a five-minute fix into debt. It is also strictly worse than
 fixing it, because the option expires: once the branch is merged the defect can no longer be
 closed where it was introduced, and what was a diff someone still had in their head becomes an
