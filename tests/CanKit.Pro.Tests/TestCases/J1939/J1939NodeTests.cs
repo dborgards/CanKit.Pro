@@ -1212,26 +1212,35 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         for (int i = 1; i < snapshot.Count; i++)
             gaps.Add((snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency);
 
-        // Never faster than requested, taken over the whole run rather than per gap.
+        // Never faster than requested -- as the median gap, not the mean.
         //
-        // A per-gap floor is tempting and wrong, which cost two iterations to establish. Each
-        // emission lands on its own grid slot, but *late* by however long the host stalled, so
-        // a late emission followed by a punctual one closes the distance between them: when a
-        // tick fires 200 ms behind its slot, Reschedule anchors the next one only 40 ms later,
-        // and the two frames are 40 ms apart with the scheduler having done exactly the right
-        // thing. Measured under an 8x CPU overload -- a 32 ms gap against a 120 ms period, and
-        // 69 and 76 ms ones before that. None of them is a burst.
+        // The mean is not safe here, and the reason is the same lateness that killed the
+        // per-gap floor. Each emission lands on its own grid slot but late by however long the
+        // host stalled, and a run that *starts* late gives that time back inside the measured
+        // window: a first tick 239 ms behind its 120 ms slot makes Reschedule skip the missed
+        // anchor, the second emission follows ~1 ms later, and eight punctual gaps after it
+        // average to 106.8 ms. Every one of those emissions came from the documented
+        // fixed-rate coalescing scheduler, and a mean bound rejects the run anyway, because a
+        // single collapsed gap moves a nine-sample mean by a ninth of a period.
         //
-        // What lateness cannot do is manufacture extra emissions: distinct slots are one
-        // period apart, so over n samples the mean gap is at least a period no matter how the
-        // host schedules them. That makes this the strongest statement here that is actually
-        // true of the implementation -- and it is enough on its own, since a schedule that
-        // bursts, or runs at the wrong rate, drags the mean down (each of those mutations was
-        // checked against exactly this assertion). The 10 % allowance absorbs the endpoint
-        // jitter of the span the mean is taken over, nothing more.
-        var meanGap = gaps.Sum() / gaps.Count;
-        meanGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
-            $"mean gap ({meanGap:F0} ms) must not undercut the configured period "
+        // The median does not care: a minority of collapsed gaps cannot move it, dropped ticks
+        // only ever push gaps to 2x or 3x the period and so move it away from the bound, and a
+        // schedule genuinely running fast moves *every* gap and takes the median with it. The
+        // original version of this test already read the median for the robustness half of that
+        // argument; what was wrong with it was the upper bound it paired with -- 1.6x a period,
+        // which coalescing legitimately exceeds by design. Dropping the upper bound was the fix;
+        // dropping the median with it was an over-correction, corrected here.
+        var ordered = new List<double>(gaps);
+        ordered.Sort();
+        var medianGap = ordered.Count % 2 == 1
+            ? ordered[ordered.Count / 2]
+            : (ordered[(ordered.Count / 2) - 1] + ordered[ordered.Count / 2]) / 2d;
+
+        // One-sided on purpose: load can only lengthen gaps, so there is no honest upper bound
+        // to pair with this one. The collection loop above bounds the rate from above instead,
+        // by requiring requiredSamples emissions inside ShortTimeout.
+        medianGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
+            $"median gap ({medianGap:F0} ms) must not undercut the configured period "
             + $"({targetMs:F0} ms); observed gaps: "
             + string.Join(", ", gaps.ConvertAll(g => $"{g:F0}")));
     }
