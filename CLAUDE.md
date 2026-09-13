@@ -8,10 +8,11 @@
   `CanBusService.cs` cost more review than they save, and the second one inherits a conflict.
   Issues in different packages get their own PR — one after another, per the next rule.
 - **One pull request open at a time** — of deliberately authored work. Dependabot is not in this
-  count and is not meant to be: `.github/dependabot.yml` allows five concurrent NuGet updates,
-  three npm and two pip, and those carry no design to review, only a green or red build. Whether
-  *that* fan-out is worth narrowing is a separate question from this rule, and belongs in the
-  Dependabot config rather than here.
+  count and is not meant to be: `.github/dependabot.yml` allows several concurrent updates per
+  ecosystem — NuGet, npm, pip and github-actions, the last on the default limit because it sets
+  none — and those carry no design to review, only a green or red build. Whether *that* fan-out
+  is worth narrowing is a separate question from this rule, and belongs in the Dependabot config
+  rather than here, which is also where the per-ecosystem numbers belong.
 
   The cost of running two of the other kind is not machine time, it is
   supervision. Each open pull request carries its own review threads, bot findings and coverage
@@ -36,14 +37,49 @@
   trigger, added after #81 and #83 merged four minutes apart and their untested combination broke
   the `net48` leg (#85) — a merge queue builds `main` plus the queued pull requests together, so
   a queued branch is tested against current `main` without a base merge and without a new head.
-  It has never run: zero `merge_group` workflow runs to date, because the queue is configured in
-  the workflow but not enabled on the branch (#106). Enabling it would remove the base-merge cost
-  and leave the supervision cost, which is the reason this rule exists, untouched.
+  It has never run, because the queue is configured in the workflow but not enabled on the
+  branch — #106 carries the evidence and will carry the change. Enabling it would remove the
+  base-merge cost and leave the supervision cost, which is the reason this rule exists,
+  untouched.
 - **A pull request is finished when every thread is closed, not when the code is right.** Bot
   findings and the coverage report count; so does a thread whose finding was fixed but which
   still shows no answer in it. And none of that survives a base merge unchanged — merging `main`
   in re-triggers the reviewers against a new head, so re-check afterwards instead of assuming the
   earlier pass still holds.
+- **"FERTIG — mergebar" is what says a branch is finished. A status message is not.** Twice a
+  correction was pushed shortly before a merge, announced here, and merged past anyway — #104
+  lost two and #107 lost one, and their pull-request timelines are the durable record, since the
+  commits themselves never entered `main`. The gap is between the push and the merge, not
+  between the people, so promptness cannot close it — only a state that says *no further push is
+  coming*.
+
+  So say those words, literally, and only once every thread is closed and every check this
+  branch is answerable for is green. A leg red for a failure the branch did not cause does not
+  block the signal — § *Stay inside the task* says what to do with it — but say so in the same
+  breath, with what is failing and where it is recorded, so the merge decision is made on the
+  facts rather than on a green tick.
+
+  Afterwards the branch is frozen, and the signal describes a state rather than an intention —
+  so **anything that falsifies that state revokes it, at the moment it happens**. A finding
+  arriving opens a thread, which makes "every thread is closed" false there and then: say the
+  signal is withdrawn, before investigating and before knowing whether a fix is even needed.
+  Waiting until a push is authorised would leave the maintainer holding a signal that stopped
+  being true when the comment landed, and they can merge on it during the investigation or after
+  a finding that needed no code at all.
+
+  A push revokes it likewise, and the push itself is never yours to decide after the signal: it
+  becomes a question with options for the maintainer, per § *Decisions that belong to the
+  maintainer*, not a fix that quietly races their merge. The finding still gets its answer in
+  the thread either way — the rule above does not lapse.
+
+  Say "FERTIG — mergebar" again once the state is true again: threads closed, and any new head's
+  checks settled. Re-issuing it costs a sentence; a signal that outlives the state it described
+  is the original race, re-entered through the procedure meant to prevent it.
+
+  Editing the pull-request description is the one thing that does not revoke it, because it
+  changes no thread and no head. It usually needs doing, because a description written
+  mid-branch goes stale exactly as the branch's own text does — see § *Before claiming something
+  is true*.
 - Branch from `main` as `feat/…`, `fix/…`, `docs/…` (see `CONTRIBUTING.md` § Branching).
 - **Every commit on the branch decides the release, not the pull-request title.** As practised,
   pull requests land as two-parent merge commits (`git log --first-parent main` shows
@@ -163,8 +199,28 @@ available at the time.
 - **For anything asserted against a clock, name the quantity the host can perturb and check the
   margin against it.** Not against timings observed so far — that is how a tolerance gets widened
   again next time. If the margin is not large compared with the perturbation, the property is not
-  measurable there: use a signal, a virtual clock, or stop gating on it. Five distinct tests in
-  three packages have gone red on a loaded CI runner for want of this (#92).
+  measurable there: use a signal, a virtual clock, or stop gating on it. #92 counts the tests
+  that have gone red on a loaded CI runner for want of it; the list keeps growing.
+- **A figure belongs in one place; everywhere else points at it.** A summary that restates a
+  count proved elsewhere goes stale on the next change to the evidence, and silently, because
+  each of the two places stays internally consistent. Keeping them in sync is not a fix but a
+  standing obligation, and it failed three times in one review of #109 — twice in the correction
+  of the previous failure. Delete the duplicate instead: state the number where it is evidenced
+  and refer to that from the summary, so there is nothing left to synchronise. The same applies
+  to a pull-request description, which is a summary of a branch that is still moving.
+
+  This binds living text, not a dated record. A retro or a review states its figures as of its
+  date and is read that way; a rules file, a description or a summary is read as current, and
+  that is where a stale number misleads.
+- **A claim about where something came from is checkable, so check it.** Provenance — which
+  commit introduced a rule, who found a defect, what a pull request said it did — is in the
+  history, and writing it from memory put two wrong entries into one three-item list: a finding
+  credited to a review that had not made it, and a pair of sentences offered as a contradiction
+  when the commit that resolved them had explicitly classified them as *not* one — and that
+  entry was not the review's either. Cite the record instead of paraphrasing it, and read the
+  record before citing it — the commit where it is reachable from `main`, and the pull request
+  or issue where it is not, because a hash that only lives on a branch tip stops resolving the
+  day that branch is deleted.
 - **A fallback does not finish the task.** When an API call fails and the work goes somewhere
   else — an answer posted as a plain comment because the review thread rejected the reply — the
   task is done only once the original path is retried. A resolved review thread containing no

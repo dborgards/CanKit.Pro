@@ -191,12 +191,16 @@ Entfernen der doppelten Angabe, damit es nichts mehr zu synchronisieren gibt.
 ## Die Sorte Fehler, die zweimal identisch auftrat
 
 Zwei Korrekturen gingen beim Mergen verloren: `9b5248f` und `9f172d6` verpassten #104, `8ebced1`
-verpasste #107. Beide Male hatte ich den neuen Head gemeldet und mich danach schlafen gelegt;
-beide Male mergte der Maintainer den Stand, den er kannte. Die Lücke liegt zwischen Push und
-Merge, nicht zwischen den Beteiligten — eine Meldung im Chat schließt sie nicht.
+verpasste #107. Die drei Commits sind von `main` aus nicht erreichbar — sie liegen nur noch auf
+den Spitzen ihrer Branches, was genau das ist, was hier „verloren" heißt; die dauerhafte Quelle
+sind die beiden PR-Verläufe. Beide Male hatte ich den neuen Head gemeldet und mich danach
+schlafen gelegt; beide Male mergte der Maintainer den Stand, den er kannte. Die Lücke liegt
+zwischen Push und Merge, nicht zwischen den Beteiligten — eine Meldung im Chat schließt sie
+nicht.
 
 Vereinbart wurde deshalb ein Zustandssignal statt eines Vorsatzes: **„FERTIG — mergebar"** wird
 erst geschrieben, wenn keine Pushes mehr kommen, und danach wird der Branch nicht mehr angefasst.
+Die Regel steht in `CLAUDE.md` § *Pull requests*; was hier steht, ist nur, woher sie kommt.
 
 ## Was nicht verallgemeinerbar ist
 
@@ -242,7 +246,6 @@ Ausnahme für Probleme, die der PR selbst verursacht hat. Genau die wurde verwor
   Läufe, weil sie auf dem Branch nicht aktiviert ist. Gefunden beim Prüfen eines Codex-Befunds,
   nicht beim Suchen. Ein Schutz, der nur dekorativ ist, ist schlechter als keiner — der Fall, für
   den er gebaut wurde, ist bereits eingetreten (#85).
-- **Die Konvention „FERTIG — mergebar"** steht noch nicht in `CLAUDE.md`.
 - **Nach dem 1.3.0-Release** — der veraltete `Block 3→1 / remap`-Hinweis in `CHANGELOG.md` und im
   Release-Text (vermerkt auf #44). Das ist der einzige Rest, der direkt aus Fehler #2 stammt und
   den kein Issue automatisch erledigt.
