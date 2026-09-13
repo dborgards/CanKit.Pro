@@ -783,12 +783,25 @@ internal sealed class UdsClientImpl : IUdsClient
         // uses the same service (the stale positive response SID would match).
         DiscardStalePdus();
 
-        await _channel.SendAsync(request, linkedToken).ConfigureAwait(false);
-
+        // The stamp the channel took as the request's last frame went to the bus -- not a reading
+        // taken here. P2 starts when the request was transmitted, and this continuation resumes
+        // an unbounded time after that: behind the bus TX confirmation, an actor hop and the
+        // thread pool. Reading the clock here therefore starts the budget late, and a response
+        // that was late against the real P2 measures as punctual and is accepted -- the same
+        // defect as the one below, entered from the other end of the interval. On a four-core box
+        // under 3x load the gap reached 74.8 ms against an 80 ms P2; #92's CI failures are what a
+        // starved runner does with it.
+        //
         // A raw monotonic reading rather than a Stopwatch instance, because the budget is
         // compared against the *arrival* stamp the channel takes at enqueue, and both must come
         // from the same source (Stopwatch.GetTimestamp) for the subtraction to mean anything.
-        var budgetStart = Stopwatch.GetTimestamp();
+        var transmitStamp = await _channel.SendWithTransmitStampAsync(request, linkedToken)
+            .ConfigureAwait(false);
+
+        // Zero means the channel reported no transmit instant. Falling back to now is the old
+        // behaviour, which is worse but not broken; treating zero as a timestamp would read as
+        // infinitely long ago and time out every request.
+        var budgetStart = transmitStamp > 0 ? transmitStamp : Stopwatch.GetTimestamp();
         var timeout = _options.P2ClientMax;
         var timerKind = UdsTimeoutTimer.P2;
         int pendingCount = 0;

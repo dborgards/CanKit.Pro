@@ -54,6 +54,23 @@ public interface IIsoTpChannel : IDisposable
     Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// As <see cref="SendAsync"/>, but returns the monotonic
+    /// (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) instant at which the PDU's last
+    /// frame was handed to the bus. Zero when nothing was transmitted.
+    /// </summary>
+    /// <remarks>
+    /// The send-side counterpart of <see cref="ReceiveWithArrivalAsync"/>, and needed for the
+    /// same reason. A caller whose response deadline starts when its request went out cannot read
+    /// that instant off its own clock: awaiting this method returns behind the bus TX
+    /// confirmation, an actor hop and the caller's own scheduling, all of which happen after the
+    /// peer already has the request. Timing the deadline from the returned stamp makes its start
+    /// as independent of scheduling as the arrival stamp makes its end -- pinning only one of the
+    /// two leaves the deadline movable from the other side.
+    /// </remarks>
+    Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Awaits the next fully reassembled inbound PDU. Cancels via <paramref name="cancellationToken"/>.
     /// Faults with <see cref="IsoTpTimeoutException"/> (<see cref="IsoTpTimer.NCr"/>) or
     /// <see cref="IsoTpException"/> when an in-progress multi-frame reassembly is aborted

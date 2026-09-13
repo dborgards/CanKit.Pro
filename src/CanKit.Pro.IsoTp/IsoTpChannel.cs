@@ -158,6 +158,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     /// <inheritdoc />
     public async Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
+        => await SendWithTransmitStampAsync(pdu, cancellationToken).ConfigureAwait(false);
+
+    /// <inheritdoc />
+    public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+        CancellationToken cancellationToken = default)
     {
         if (pdu.Length == 0)
             throw new ArgumentException("ISO-TP PDU must be non-empty.", nameof(pdu));
@@ -173,12 +178,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         try
         {
             ThrowIfDisposed();
-            var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
             var pduBytes = pdu.ToArray();
             CancellationTokenRegistration ctr = cancellationToken.CanBeCanceled
                 ? cancellationToken.Register(static state =>
                 {
-                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<object?>, CancellationToken))state!;
+                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<long>, CancellationToken))state!;
                     self.CancelInFlightSend(t, ct);
                 }, (this, tcs, cancellationToken))
                 : default;
@@ -193,9 +198,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 tcs.TrySetException(ex);
             }
 
+            long transmitStamp;
             try
             {
-                await tcs.Task.ConfigureAwait(false);
+                transmitStamp = await tcs.Task.ConfigureAwait(false);
             }
             finally
             {
@@ -208,6 +214,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 if (Volatile.Read(ref _disposed) == 0)
                     await WaitForBusTxIdleAsync().ConfigureAwait(false);
             }
+
+            return transmitStamp;
         }
         finally
         {
@@ -443,7 +451,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // TX side (all methods run on the actor loop unless noted)
     // -----------------------------------------------------------------------------------------
 
-    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<object?> tcs, CancellationToken ct)
+    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<long> tcs, CancellationToken ct)
     {
         // Fix (Bugbot 3594960794): the send may have been canceled between when the caller
         // posted us and when the actor got around to running us -- CancelInFlightSend may have
@@ -498,7 +506,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private static bool IsSendAlreadyCanceled(TaskCompletionSource<object?> tcs, CancellationToken ct)
+    private static bool IsSendAlreadyCanceled(TaskCompletionSource<long> tcs, CancellationToken ct)
     {
         if (!tcs.Task.IsCompleted && !ct.IsCancellationRequested)
             return false;
@@ -592,6 +600,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             Exception? failure = null;
             try
             {
+                // Taken here, on the thread that is about to hand the frame to the bus, and not
+                // by whoever awaits SendAsync: P2 starts when the request was transmitted, and
+                // the caller's continuation runs an unbounded time after that -- behind this
+                // task's completion, the actor hop that posts it, and WaitForBusTxIdleAsync,
+                // which waits for the echo. Measured at up to 74.8 ms against an 80 ms P2 on a
+                // four-core box under 3x load; on a starved CI runner it is what makes a late
+                // response measure as punctual (#92).
+                if (expected is not null)
+                    Volatile.Write(ref expected.LastFrameTransmitTimestamp, Stopwatch.GetTimestamp());
+
                 var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
                 confirmation = c;
             }
@@ -796,7 +814,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (tx is null) return;
         tx.NBsDeadline?.Complete();
         _tx = null;
-        tx.Tcs.TrySetResult(null);
+        tx.Tcs.TrySetResult(Volatile.Read(ref tx.LastFrameTransmitTimestamp));
     }
 
     private void FailTx(Exception ex)
@@ -808,7 +826,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.Fail(ex);
     }
 
-    private void CancelInFlightSend(TaskCompletionSource<object?> tcs, CancellationToken ct)
+    private void CancelInFlightSend(TaskCompletionSource<long> tcs, CancellationToken ct)
     {
         // Complete the caller's await immediately (any thread). BeginSendOnLoop may still be
         // sitting in the actor mailbox ahead of our cleanup work item; completing `tcs` here
@@ -1242,7 +1260,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private sealed class TxState
     {
-        public TxState(byte[] pdu, TaskCompletionSource<object?> tcs)
+        public TxState(byte[] pdu, TaskCompletionSource<long> tcs)
         {
             Pdu = pdu;
             Tcs = tcs;
@@ -1250,7 +1268,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         public byte[] Pdu { get; }
-        public TaskCompletionSource<object?> Tcs { get; }
+        public TaskCompletionSource<long> Tcs { get; }
+
+        /// <summary>
+        /// <see cref="Stopwatch.GetTimestamp"/> reading taken as the most recent frame of this
+        /// PDU was handed to the bus. A field rather than a property because it is written from
+        /// the thread-pool task that performs the send and read back on the actor loop, so both
+        /// sides go through <see cref="Volatile"/>. When the send completes, the last write is
+        /// the last frame -- which is the instant P2 starts.
+        /// </summary>
+        public long LastFrameTransmitTimestamp;
 
         public TxStage State { get; set; }
         public int Offset { get; set; }

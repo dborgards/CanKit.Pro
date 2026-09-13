@@ -144,6 +144,57 @@ public class UdsExpiredDeadlineTests
     }
 
     /// <summary>
+    /// P2 starts when the request was transmitted, and the client may not read that instant off
+    /// its own clock: awaiting the send returns behind the bus TX confirmation, an actor hop and
+    /// the thread pool, all of it after the peer already has the request. Here the request is on
+    /// the wire immediately, the send is observed 200 ms later, and the response arrived 240 ms
+    /// after transmission against an 80 ms P2. Timed from the transmit stamp it is late by
+    /// 160 ms; timed from the client's own clock it measures 40 ms and is wrongly accepted —
+    /// which is what CI recorded on macOS while every other leg was green.
+    /// </summary>
+    [Fact]
+    public async Task F_A_Late_Response_Is_Late_However_Long_The_Send_Took_To_Be_Observed()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(20),
+            stampArrivalAtDelivery: false)
+        {
+            SendObservationDelay = TimeSpan.FromMilliseconds(200),
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(240),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "P2 runs from when the request went out, not from when the client noticed it had");
+    }
+
+    /// <summary>
+    /// The mirror, and the reason the fix is a stamp rather than simply starting the budget
+    /// before the send: transmission time is not scheduling, and P2 genuinely starts after it —
+    /// the ECU cannot answer a request it has not finished receiving. Here transmission takes
+    /// 120 ms and the response arrived 60 ms after it, inside the 80 ms P2. Starting the budget
+    /// when the send was requested would make that 180 ms and reject a punctual response.
+    /// </summary>
+    [Fact]
+    public async Task G_Transmission_Time_Shifts_P2_Because_The_Ecu_Cannot_Answer_Sooner()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(20),
+            stampArrivalAtDelivery: false)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(120),
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(60),
+        };
+        using var client = NewClient(channel);
+
+        var data = await client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        data.Should().Equal(0xAA);
+    }
+
+    /// <summary>
     /// Answers one positive RDBI response, ignoring the cancellation token so the delivery — not
     /// the deadline — completes the caller's wait.
     /// </summary>
@@ -173,6 +224,19 @@ public class UdsExpiredDeadlineTests
         /// </summary>
         public bool HonorCancellation { get; init; }
 
+        /// <summary>How long the request itself takes to reach the wire.</summary>
+        public TimeSpan TransmissionTime { get; init; }
+
+        /// <summary>
+        /// How long after the request reached the wire the caller's await of the send completes.
+        /// Everything the real channel does between those two instants — the bus TX confirmation,
+        /// the actor hop, the thread pool — happens when the peer already has the request.
+        /// </summary>
+        public TimeSpan SendObservationDelay { get; init; }
+
+        /// <summary>How long after the request reached the wire the response arrived.</summary>
+        public TimeSpan ResponseArrivalOffsetFromTransmit { get; init; }
+
         public StubChannel(TimeSpan deliverAfter, bool stampArrivalAtDelivery)
         {
             _deliverAfter = deliverAfter;
@@ -183,12 +247,26 @@ public class UdsExpiredDeadlineTests
 
         public IsoTpChannelOptions Options { get; } = new();
 
-        public Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
+        public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+            CancellationToken cancellationToken = default)
         {
-            // Arrival is "now" for the punctual case: inside the budget, long before delivery.
+            if (TransmissionTime > TimeSpan.Zero)
+                await Task.Delay(TransmissionTime, CancellationToken.None).ConfigureAwait(false);
+
+            // The wire instant. Everything the client is entitled to measure is relative to this
+            // and to nothing else; arrival is "now" for the punctual case, inside the budget and
+            // long before delivery.
             _arrivalStamp = Stopwatch.GetTimestamp();
-            return Task.CompletedTask;
+
+            if (SendObservationDelay > TimeSpan.Zero)
+                await Task.Delay(SendObservationDelay, CancellationToken.None).ConfigureAwait(false);
+
+            return _arrivalStamp;
         }
+
+        public async Task SendAsync(ReadOnlyMemory<byte> pdu,
+            CancellationToken cancellationToken = default)
+            => await SendWithTransmitStampAsync(pdu, cancellationToken).ConfigureAwait(false);
 
         public async Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(
             CancellationToken cancellationToken = default)
@@ -209,7 +287,9 @@ public class UdsExpiredDeadlineTests
             if (RespondPendingFirst)
                 return new IsoTpReceivedPdu(Response, FinalArrivalStamp());
 
-            var stamp = _stampArrivalAtDelivery ? Stopwatch.GetTimestamp() : _arrivalStamp;
+            var stamp = _stampArrivalAtDelivery
+                ? Stopwatch.GetTimestamp()
+                : _arrivalStamp + Ticks(ResponseArrivalOffsetFromTransmit);
             return new IsoTpReceivedPdu(Response, stamp);
         }
 
@@ -237,8 +317,10 @@ public class UdsExpiredDeadlineTests
             return false;
         }
 
-        private long FinalArrivalStamp() => _arrivalStamp
-            + (long)(PendingToFinalArrivalGap.TotalSeconds * Stopwatch.Frequency);
+        private long FinalArrivalStamp() => _arrivalStamp + Ticks(PendingToFinalArrivalGap);
+
+        private static long Ticks(TimeSpan span)
+            => (long)(span.TotalSeconds * Stopwatch.Frequency);
 
         public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
             => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
