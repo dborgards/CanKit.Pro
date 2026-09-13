@@ -18,6 +18,9 @@ namespace CanKit.Pro.J1939;
 /// <param name="Resolution">Physical units per raw increment (scale factor).</param>
 /// <param name="Offset">Physical value at raw 0.</param>
 /// <param name="Unit">Physical unit string (e.g. "rpm", "km/h", "%").</param>
+/// <param name="IsSigned">Whether the raw field is two's-complement signed (a signed SAE J1939-71
+/// SLOT). Defaults to <see langword="false"/>; most SPNs are unsigned and express a negative
+/// physical range through <paramref name="Offset"/> instead.</param>
 public sealed record J1939SpnDefinition(
     int Spn,
     string Name,
@@ -27,10 +30,14 @@ public sealed record J1939SpnDefinition(
     int BitLength,
     double Resolution,
     double Offset,
-    string Unit)
+    string Unit,
+    bool IsSigned = false)
 {
-    /// <summary>Decodes this SPN from a received PGN payload:
-    /// <c>physical = raw × Resolution + Offset</c>.</summary>
-    public double Extract(ReadOnlySpan<byte> payload)
-        => J1939Spn.Extract(payload, ByteOffset, StartBit, BitLength, Resolution, Offset);
+    /// <summary>
+    /// Decodes this SPN from a received PGN payload: <c>physical = raw × Resolution + Offset</c>
+    /// for a measurement, or the SAE J1939-71 §5.1.1 indicator the field carries instead
+    /// ("not available", "error", reserved, parameter-specific).
+    /// </summary>
+    public J1939SpnValue Extract(ReadOnlySpan<byte> payload)
+        => J1939Spn.Extract(payload, ByteOffset, StartBit, BitLength, Resolution, Offset, IsSigned);
 }
