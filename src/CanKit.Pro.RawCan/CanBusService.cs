@@ -42,8 +42,10 @@ namespace CanKit.Pro.RawCan
         // holding _hubsGate while delivering.
         private volatile Subscription[] _snapshot = Array.Empty<Subscription>();
 
-        // Pending SendConfirmed calls awaiting an echo match, keyed by (ID, payload) so multiple
-        // concurrent byte-identical sends are matched FIFO instead of crashing/cross-matching
+        // Pending SendConfirmed calls awaiting an echo match, keyed by everything that identifies
+        // the frame on the wire (see PendingKey) so multiple concurrent identical sends are matched
+        // FIFO instead of crashing/cross-matching, and two sends that merely *look* alike -- a
+        // standard and an extended 0x100 with the same payload -- do not share one FIFO at all
         // (FR-RAW-031). Guarded by its own lock, separate from _gate, so TX-confirm churn never
         // contends with subscription registry churn (and vice versa).
         private readonly object _pendingGate = new();
@@ -95,13 +97,13 @@ namespace CanKit.Pro.RawCan
             => AddSubscription(idFilter: filter, predicate: null, bufferCapacity, includeEcho);
 
         /// <inheritdoc />
-        public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         {
             // Snapshot read, same lock-free discipline as the dispatch hot path -- this is a
             // diagnostic call, not something exercised per-frame, but there's no reason to take
             // _gate for a read when the existing snapshot already gives a consistent view.
             var subscriptions = _snapshot;
-            var overlaps = new List<(ISubscription, ISubscription)>();
+            var overlaps = new List<FilterOverlap>();
 
             for (var i = 0; i < subscriptions.Length; i++)
             {
@@ -109,8 +111,8 @@ namespace CanKit.Pro.RawCan
                 for (var j = i + 1; j < subscriptions.Length; j++)
                 {
                     if (subscriptions[j].IsDisposed || subscriptions[j].IdFilter is not { } filterJ) continue;
-                    if (filterI.Overlaps(filterJ))
-                        overlaps.Add((subscriptions[i], subscriptions[j]));
+                    if (filterI.TryGetSharedIdRange(filterJ, out var lowest, out var highest))
+                        overlaps.Add(new FilterOverlap(subscriptions[i], subscriptions[j], lowest, highest));
                 }
             }
 
@@ -172,6 +174,15 @@ namespace CanKit.Pro.RawCan
             var view = e.CanFrame;
             var isEcho = e.IsEcho;
             var receiveTimestamp = e.ReceiveTimestamp;
+
+            // One owned payload copy per *frame*, created by the first subscription that actually
+            // buffers it and reused by every later one, instead of one copy per matching
+            // subscription. The copy exists because the view aliases the adapter's RX lease (see
+            // Subscription.TryDeliver); nothing about that reason is per-subscriber, and what the
+            // subscribers get handed is a ReadOnlyMemory they may only read. A frame nobody
+            // matches still allocates nothing at all.
+            byte[]? ownedPayload = null;
+
             foreach (var subscription in subscriptions)
             {
                 // A subscription's filter predicate is caller-supplied and may throw. Isolate each
@@ -183,7 +194,7 @@ namespace CanKit.Pro.RawCan
                 // of being silently swallowed.
                 try
                 {
-                    subscription.TryDeliver(view, isEcho, receiveTimestamp);
+                    subscription.TryDeliver(view, isEcho, receiveTimestamp, ref ownedPayload);
                 }
                 catch (Exception ex)
                 {
@@ -298,7 +309,7 @@ namespace CanKit.Pro.RawCan
 
         private async Task<TxConfirmation> SendWithEchoConfirmAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
-            var pending = new PendingSend(new PendingKey(frame.ID, frame.Data));
+            var pending = new PendingSend(PendingKey.ForPendingSend(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
 
             int accepted;
             try
@@ -320,6 +331,15 @@ namespace CanKit.Pro.RawCan
                 // enqueue step (Transmit is expected to be a fast, non-blocking enqueue, same
                 // assumption every other caller of ICanBus.Transmit already makes), never across
                 // the echo wait, so unrelated sends are not serialized against each other.
+                //
+                // A review finding (#53) asked for Transmit to move out of this lock, so that a
+                // blocking vendor driver cannot stall the adapter's RX thread in TryMatchEcho. It
+                // is deliberately not done: the atomicity above is the whole reason the FIFO order
+                // means anything, an echo-mode adapter re-enters this lock from inside Transmit
+                // anyway, and no driver that blocks in Transmit could be used with this service in
+                // any case -- the same call is on the dispatch path of every other consumer of
+                // ICanBus. If one ever has to be, the fix is a queue in front of the driver, not a
+                // pending list whose order no longer matches the wire.
                 lock (_pendingGate)
                 {
                     if (_pendingDisposed)
@@ -353,13 +373,32 @@ namespace CanKit.Pro.RawCan
             }
         }
 
-        private static async Task<TxConfirmation> WaitForPendingAsync(PendingSend pending, TimeSpan timeout, CancellationToken cancellationToken)
+        private async Task<TxConfirmation> WaitForPendingAsync(PendingSend pending, TimeSpan timeout, CancellationToken cancellationToken)
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             // Registration fires on whichever comes first: caller cancellation or our own timeout.
             using var registration = timeoutCts.Token.Register(static state =>
             {
                 var (p, ct) = ((PendingSend, CancellationToken))state!;
+
+                // Complete the Tcs *without touching _pendingGate*. An earlier revision of the #24
+                // fix unlinked here first, reasoning that an entry must stop being matchable the
+                // instant it is resolved. It does -- but taking the lock to achieve that runs on
+                // whichever thread trips the token, and SendWithEchoConfirmAsync holds that lock
+                // across _bus.Transmit. A caller's own CancellationTokenSource.Cancel() therefore
+                // blocked until an unrelated send's driver call returned. Cancelling one send is
+                // not something that should wait on another send's adapter.
+                //
+                // Unlinking here is also unnecessary. What makes the still-linked expired entry
+                // harmless is TryMatchEcho skipping (and unlinking) entries whose Tcs is already
+                // completed -- see the loop there, which is the mechanism that fixes #24. An echo
+                // arriving in the window before the `finally` unlinks walks past this entry to the
+                // live one behind it instead of being swallowed.
+                //
+                // What this does *not* change: the caller's SendConfirmed task still completes only
+                // after that `finally`, and the unlink there does take the lock. That coupling is
+                // older than this fix and follows from holding _pendingGate across Transmit at all
+                // -- see the note on that lock, and #53.
                 if (ct.IsCancellationRequested)
                 {
                     p.Tcs.TrySetCanceled(ct);
@@ -413,31 +452,72 @@ namespace CanKit.Pro.RawCan
 
         private void TryMatchEcho(in CanFrameView echoView)
         {
-            var key = new PendingKey(echoView.ID, echoView.Data);
-            PendingSend? matched = null;
+            // Aliases the echo frame's payload rather than copying it: this runs for every echo
+            // frame the adapter reports, and the key is dropped again before the lock is released.
+            var key = PendingKey.ForEchoLookup(echoView.ID, echoView.Data, echoView.Flags, echoView.FrameKind);
 
             lock (_pendingGate)
             {
-                if (_pending.TryGetValue(key, out var list) && list.First is { } node)
+                if (_pending.TryGetValue(key, out var list))
                 {
-                    matched = node.Value;
-                    list.RemoveFirst(); // FIFO: oldest pending send for this key matches first
-                    matched.Node = null;
-                    Interlocked.Decrement(ref _pendingCount);
+                    var confirmation = new TxConfirmation
+                    {
+                        Confirmed = true,
+                        IsApproximated = false,
+                        Timestamp = DateTime.UtcNow,
+                        FailureReason = TxConfirmFailureReason.None,
+                    };
+
+                    // FIFO: the oldest pending send for this key gets the echo -- but only if it
+                    // is still waiting. An entry already resolved by some other path can no longer
+                    // consume anything, and handing it the echo would drop it silently while the
+                    // send it actually belonged to waits for one that has already come and gone.
+                    //
+                    // Walking past such entries is the mechanism that fixes #24, not a redundant
+                    // guard. The timeout and cancellation path completes its Tcs without taking
+                    // this lock -- deliberately, so a deadline cannot be held up by an unrelated
+                    // send sitting in a slow _bus.Transmit -- and the entry it resolved stays
+                    // linked until SendWithEchoConfirmAsync's `finally` runs a scheduling turn
+                    // later. Inside that window the expired entry is still the FIFO head for its
+                    // key, and without this walk it would swallow the next byte-identical send's
+                    // echo, turning one timeout into a cascade of them.
+                    //
+                    // Unlinking what it skips matters as much as skipping it: otherwise the same
+                    // dead entry would block the FIFO for every later echo rather than only this
+                    // one.
+                    for (var node = list.First; node is not null;)
+                    {
+                        var next = node.Next;
+                        var candidate = node.Value;
+
+                        list.Remove(node);
+                        candidate.Node = null;
+                        Interlocked.Decrement(ref _pendingCount);
+
+                        // Claim by completing, not by asking first. An `IsCompleted` test followed
+                        // by a TrySetResult is check-then-act: the timeout and cancellation path
+                        // completes without this lock, so it can land between the two, and then
+                        // the echo is consumed by an entry that lost the race while a live send
+                        // behind it in the FIFO waits for an echo that has already arrived. That
+                        // is the same defect as #24 wearing different clothes.
+                        //
+                        // TrySetResult is the only test that cannot be raced, because it *is* the
+                        // transition. A false return means some other path got there first, so
+                        // this candidate never owned the echo and the walk continues to the next.
+                        //
+                        // Safe under the lock precisely because the Tcs is created with
+                        // RunContinuationsAsynchronously: completing it queues the awaiting
+                        // continuation rather than running it inline, so no caller code executes
+                        // while _pendingGate is held.
+                        if (candidate.Tcs.TrySetResult(confirmation)) break;
+
+                        node = next;
+                    }
 
                     if (list.Count == 0)
                         _pending.Remove(key);
                 }
             }
-
-            // TrySetResult outside the lock: never invoke TCS continuations while holding a lock.
-            matched?.Tcs.TrySetResult(new TxConfirmation
-            {
-                Confirmed = true,
-                IsApproximated = false,
-                Timestamp = DateTime.UtcNow,
-                FailureReason = TxConfirmFailureReason.None,
-            });
         }
 
         private void OnFaultOccurred(object? sender, Exception ex)

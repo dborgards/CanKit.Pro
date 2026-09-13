@@ -15,4 +15,13 @@
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
 
+  <!-- PendingKey decides which echo confirms which send, and it is internal. Testing that
+       contract through the bus only reaches it via a dictionary, which diverges at the hash
+       and never exercises the equality comparison itself. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

@@ -1401,7 +1401,7 @@ internal sealed class RejectTpCmBusService : ICanBusService
     public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
         => _inner.Subscribe(filter, bufferCapacity, includeEcho);
 
-    public IReadOnlyList<(ISubscription First, ISubscription Second)> FindOverlappingFilterSubscriptions()
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
     public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
