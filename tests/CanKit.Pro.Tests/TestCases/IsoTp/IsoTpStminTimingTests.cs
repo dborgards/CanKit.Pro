@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.IsoTp;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -22,9 +23,12 @@ namespace CanKit.Pro.Tests.TestCases.IsoTp;
 /// STmin flow-control value (ISO 15765-2). Before these tests existed, no test drove the
 /// STmin scheduling path at all (every peer FC used STmin = 0), so a regression to
 /// "STmin ignored" (which would flood slow real ECUs) would have been invisible in CI.
-/// Bounds are deliberately soft (shared CI runners), following the philosophy of
-/// <c>PeriodicJitterTests</c>: tight enough to catch a missing/broken pacing path, loose
-/// enough not to flake under load.
+/// The pacing assertion used to be a soft wall-clock bound -- "observed spacing roughly reaches
+/// the advertised STmin" -- which is a claim about the runner as much as about the code, and #92
+/// records it going red on macOS for that reason. It now runs on a clock the test drives, so the
+/// property asserted is the one the code implements and there is no tolerance to widen. What a
+/// real runner does to effective spacing is a separate question, and #92 step 3 is where it is
+/// decided what of that is still worth observing non-gating.
 /// </summary>
 public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
 {
@@ -49,67 +53,94 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
             WftMax = 10,
         };
 
+    /// <summary>
+    /// #92 step 2, the same property with the clock in the test's hands.
+    ///
+    /// The wall-clock version above asserts that observed CF spacing roughly reaches the
+    /// advertised STmin, which is a claim about the runner as much as about the code — the ISO-TP
+    /// README concedes that effective spacing is "STmin + OS scheduling latency … with no hard
+    /// real-time guarantee under load", and #92 records this test going red on macOS for exactly
+    /// that. Here the sender's actor measures its timers against a clock nobody but this test
+    /// moves, so the property becomes the one the code implements: <b>the transfer advances only
+    /// as the clock advances, by one CF per STmin</b>.
+    ///
+    /// No tolerance appears anywhere below, and no assertion is made about elapsed real time.
+    /// </summary>
     [Fact]
-    public async Task Sender_Paces_Consecutive_Frames_According_To_Peer_Stmin()
+    public async Task Sender_Advances_One_Consecutive_Frame_Per_Stmin_On_A_Clock_The_Test_Drives()
     {
-        const int stMinMs = 5;
+        var stMin = TimeSpan.FromMilliseconds(5);
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
         using var snifferBus = OpenClassic(session, 2);
 
-        using var sender = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastOptions());
-        // The receiver advertises STmin = 5 ms in its flow-control frames.
-        using var receiver = IsoTpFactory.Open(busB, IsoTpEndpoint.Normal(0x7E8, 0x7E0),
-            FastOptions(localStMin: TimeSpan.FromMilliseconds(stMinMs)));
+        using var clock = new VirtualClock();
+        using var serviceA = new CanBusService(busA);
+        using var serviceB = new CanBusService(busB);
 
-        // Sniff the sender's Consecutive Frames (ID 0x7E0, PCI nibble 0x2) with a
-        // monotonic Stopwatch timestamp taken in the observe callback.
-        var cfTimes = new List<TimeSpan>();
-        var sw = Stopwatch.StartNew();
+        using var sender = new IsoTpChannel(serviceA, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            FastOptions(), ownsService: false, clock.NewActor());
+        using var receiver = new IsoTpChannel(serviceB, IsoTpEndpoint.Normal(0x7E8, 0x7E0),
+            FastOptions(localStMin: stMin), ownsService: false, clock.NewActor());
+
+        var cfCount = 0;
+        var fcCount = 0;
         snifferBus.FrameObserved += (_, view) =>
         {
-            if (view.CanFrame.ID != 0x7E0)
-            {
-                return;
-            }
             var data = view.CanFrame.Data.Span;
-            if (data.Length == 0 || (data[0] & 0xF0) != 0x20)
-            {
-                return;
-            }
-            lock (cfTimes)
-            {
-                cfTimes.Add(sw.Elapsed);
-            }
+            if (data.Length == 0) return;
+            // The peer's Flow Control, which is what releases the sender into the CF phase.
+            if (view.CanFrame.ID == 0x7E8 && (data[0] & 0xF0) == 0x30)
+                Interlocked.Increment(ref fcCount);
+            if (view.CanFrame.ID == 0x7E0 && (data[0] & 0xF0) == 0x20)
+                Interlocked.Increment(ref cfCount);
         };
 
-        // 60 bytes classic => FF carries 6, remaining 54 bytes over 8 CFs (7 bytes each)
-        // => 7 CF-to-CF gaps to measure.
+        // 60 bytes classic: FF carries 6, the remaining 54 go in 8 CFs of 7 bytes.
+        const int expectedCfs = 8;
         var pdu = Enumerable.Range(0, 60).Select(i => (byte)(i & 0xFF)).ToArray();
         var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
-        await sender.SendAsync(pdu);
-        var got = await recvTask;
-        got.Should().Equal(pdu);
+        var sendTask = sender.SendAsync(pdu);
 
-        // Let the hub deliver the final CF to the sniffer as well before reading.
-        await Task.Delay(100);
+        // Anchor on the peer's Flow Control: until it lands the sender is waiting for the peer,
+        // not for STmin, and asserting "nothing came out" would be true for the wrong reason.
+        // Every CF from the first one on is paced -- STmin governs the gap after the FC too.
+        await WaitForCountAsync(() => Volatile.Read(ref fcCount), 1, "flow control frames");
 
-        List<TimeSpan> times;
-        lock (cfTimes)
+        for (var expected = 1; expected <= expectedCfs; expected++)
         {
-            times = cfTimes.ToList();
-        }
-        times.Should().HaveCount(8, "60 bytes over classic CAN require exactly 8 CFs");
+            // Nothing may come out while the clock stands still. A sender that ignored STmin
+            // would already have emitted the rest by now: it does not wait for anything else.
+            await clock.SettleAsync();
+            Volatile.Read(ref cfCount).Should().Be(expected - 1,
+                "the sender schedules the next CF STmin away on a clock that has not moved, so "
+                + "the transfer must be stalled at {0} CFs", expected - 1);
 
-        var gaps = times.Zip(times.Skip(1), (a, b) => b - a).ToList();
-        gaps.Should().HaveCount(7);
-        gaps.Min().Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(3),
-            "pacing must not collapse: CFs bursting back-to-back would mean STmin is ignored");
-        gaps.Average(g => g.TotalMilliseconds).Should().BeGreaterThanOrEqualTo(4.5,
-            $"average CF spacing must roughly reach the advertised STmin of {stMinMs} ms");
-        gaps.Average(g => g.TotalMilliseconds).Should().BeLessThanOrEqualTo(100,
-            "sanity bound against pathological over-pacing");
+            await clock.AdvanceAsync(stMin);
+            await WaitForCountAsync(() => Volatile.Read(ref cfCount), expected, "consecutive frames");
+        }
+
+        await sendTask.WaitAsync(ShortTimeout);
+        (await recvTask.WaitAsync(ShortTimeout)).Should().Equal(pdu);
+        Volatile.Read(ref cfCount).Should().Be(expectedCfs);
+    }
+
+    /// <summary>
+    /// Waits for the sniffer to have seen <paramref name="target"/> consecutive frames. This is a
+    /// wait for an <em>effect</em> — the emission a due timer handed to the thread pool — not an
+    /// assertion about how long anything took, so a slow runner delays this test rather than
+    /// failing it.
+    /// </summary>
+    private static async Task WaitForCountAsync(Func<int> count, int target, string what)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (count() < target)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"Expected {target} {what}, saw {count()}.");
+            await Task.Delay(5);
+        }
     }
 
     [Fact]

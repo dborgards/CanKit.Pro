@@ -44,13 +44,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 {
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
+
+    // True when this channel created its own actor and must therefore dispose it. An injected
+    // actor belongs to whoever built it -- disposing it here would tear down a loop the caller
+    // may still be using, which is the same reason _ownsService exists for the bus service.
+    private readonly bool _ownsActor;
     private readonly IsoTpEndpoint _endpoint;
     private readonly IsoTpChannelOptions _options;
     // Cached at construction so a negative / unencodable LocalStMin fails Open instead of
     // throwing on the actor loop mid-FF (which left ReceiveAsync hung — Bugbot 3597312227).
     private readonly byte _localStMinRaw;
 
-    private readonly ProtocolActor _actor;
+    private readonly IProtocolActor _actor;
     private readonly DeadlineScheduler _deadlines;
     private readonly ISubscription _subscription;
     private readonly Task _readerTask;
@@ -107,13 +112,29 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
+    /// <summary>
+    /// Builds a channel on <paramref name="service"/>. A null <paramref name="actor"/> -- the only
+    /// value production passes -- makes the channel create and own its own loop; an injected one
+    /// stays the caller's to dispose.
+    /// </summary>
+    /// <remarks>
+    /// The actor parameter is a seam for tests, not a feature: substituting a loop built on a
+    /// hand-driven monotonic source is what makes STmin pacing and the N_Cr timeout assertable
+    /// without measuring wall-clock time on a shared runner (#92). It works because nothing in
+    /// this class reads a clock of its own for an interval -- every one goes through
+    /// <see cref="IProtocolActor.Schedule"/> or the <see cref="DeadlineScheduler"/> built on it,
+    /// so substituting the actor puts all of them on the one clock the test controls. The
+    /// <c>Stopwatch</c> readings that remain here are arrival and transmit *instants* on the
+    /// wire (#112), which are facts about the host and deliberately not on the actor's clock.
+    /// </remarks>
     internal IsoTpChannel(ICanBusService service, IsoTpEndpoint endpoint,
-        IsoTpChannelOptions options, bool ownsService)
+        IsoTpChannelOptions options, bool ownsService, IProtocolActor? actor = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _endpoint = endpoint;
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _ownsService = ownsService;
+        _ownsActor = actor is null;
         // Encode once: EncodeStMin throws on negative values; surfacing at Open keeps the RX
         // path free of codec throws that ProtocolActor would only raise as BackgroundException.
         _localStMinRaw = IsoTpFrameCodec.EncodeStMin(_options.LocalStMin);
@@ -126,7 +147,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         };
         _pduInbox = Channel.CreateBounded<RxInboxItem>(inboxOptions);
 
-        _actor = new ProtocolActor();
+        _actor = actor ?? new ProtocolActor();
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
         _deadlines = new DeadlineScheduler(_actor);
 
@@ -149,7 +170,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         catch
         {
-            _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
             throw;
         }
 
@@ -351,8 +373,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         _subscription.Dispose();
         // Actor.Dispose drains the FailTx/idle-waiter post above (FinalDrain), so the in-flight
-        // SendAsync can leave its await and enter WaitForBusTxIdleAsync / Release.
-        _actor.Dispose();
+        // SendAsync can leave its await and enter WaitForBusTxIdleAsync / Release. An injected
+        // actor is not ours to dispose -- the caller may still be running other channels on it --
+        // but the handler is, so it comes off either way rather than outliving this channel on a
+        // loop that keeps going.
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+        if (_ownsActor) _actor.Dispose();
         _readerCts.Dispose();
 
         // Do not dispose _sendGate while an in-flight SendAsync still holds it — Release would
