@@ -194,8 +194,9 @@ Zwei Korrekturen gingen beim Mergen verloren: `9b5248f` und `9f172d6` verpassten
 verpasste #107. Die drei Commits sind von `main` aus nicht erreichbar — sie liegen nur noch auf
 den Spitzen ihrer Branches, was genau das ist, was hier „verloren" heißt; die dauerhafte Quelle
 sind die beiden PR-Verläufe. Beide Male hatte ich den neuen Head gemeldet und mich danach
-schlafen gelegt; beide Male mergte der Maintainer den Stand, den er kannte. Die Lücke liegt zwischen Push und
-Merge, nicht zwischen den Beteiligten — eine Meldung im Chat schließt sie nicht.
+schlafen gelegt; beide Male mergte der Maintainer den Stand, den er kannte. Die Lücke liegt
+zwischen Push und Merge, nicht zwischen den Beteiligten — eine Meldung im Chat schließt sie
+nicht.
 
 Vereinbart wurde deshalb ein Zustandssignal statt eines Vorsatzes: **„FERTIG — mergebar"** wird
 erst geschrieben, wenn keine Pushes mehr kommen, und danach wird der Branch nicht mehr angefasst.
