@@ -34,6 +34,16 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>The virtual resolution a pacing interval is bracketed to.</summary>
+    private static readonly TimeSpan Step = TimeSpan.FromMilliseconds(1);
+
+    /// <summary>
+    /// Real time allowed for an emission to become observable before concluding one did not
+    /// happen. See <see cref="VirtualClock.SettleAndPauseAsync"/> for why this is a wait and not
+    /// a tolerance, and which way it fails.
+    /// </summary>
+    private static readonly TimeSpan Grace = TimeSpan.FromMilliseconds(100);
+
     private static string NewSession() => $"isotp-stmin-{Guid.NewGuid():N}";
 
     private static ICanBus OpenClassic(string session, int channel) => CanBus.Open(
@@ -61,10 +71,15 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
     /// README concedes that effective spacing is "STmin + OS scheduling latency … with no hard
     /// real-time guarantee under load", and #92 records this test going red on macOS for exactly
     /// that. Here the sender's actor measures its timers against a clock nobody but this test
-    /// moves, so the property becomes the one the code implements: <b>the transfer advances only
-    /// as the clock advances, by one CF per STmin</b>.
+    /// moves, so the property becomes the one the code implements: <b>each consecutive frame is
+    /// released once STmin of that clock has elapsed, and not before</b>. Each interval is
+    /// bracketed from both sides — nothing at STmin minus one tick, the frame at STmin — which is
+    /// what makes this about the configured value rather than merely about pacing existing at all.
     ///
-    /// No tolerance appears anywhere below, and no assertion is made about elapsed real time.
+    /// The only real-time quantity is the grace allowed for an emission to become observable
+    /// before concluding one did not happen, and that is a wait rather than a tolerance: it fails
+    /// towards passing, and every negative it guards is paired with a positive that a load spike
+    /// cannot fake.
     /// </summary>
     [Fact]
     public async Task Sender_Advances_One_Consecutive_Frame_Per_Stmin_On_A_Clock_The_Test_Drives()
@@ -108,16 +123,31 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
         // Every CF from the first one on is paced -- STmin governs the gap after the FC too.
         await WaitForCountAsync(() => Volatile.Read(ref fcCount), 1, "flow control frames");
 
+        // One tick short of STmin. Stepping to here first is what makes this test about the
+        // configured value rather than merely about pacing existing at all: a jump of a whole
+        // STmin cannot tell 5 ms from any shorter positive delay, because the overdue timer fires
+        // on arrival either way and re-arms from the clock's new value. Codex found that on the
+        // first revision of this test, and halving the sender's STmin confirmed it -- the test
+        // passed. This probe fails on a halved STmin, because the frame is out before the
+        // interval is up.
+        var justUnder = stMin - Step;
+
         for (var expected = 1; expected <= expectedCfs; expected++)
         {
-            // Nothing may come out while the clock stands still. A sender that ignored STmin
-            // would already have emitted the rest by now: it does not wait for anything else.
-            await clock.SettleAsync();
-            Volatile.Read(ref cfCount).Should().Be(expected - 1,
-                "the sender schedules the next CF STmin away on a clock that has not moved, so "
-                + "the transfer must be stalled at {0} CFs", expected - 1);
+            // Let the previous frame's TX confirmation reach the sender and arm the next STmin
+            // before moving the clock. It arrives from the thread pool, so it is not ordered
+            // against this loop: moving first would have the interval armed from the new reading
+            // and the frame would never come. Bugbot found this on the first revision, and it
+            // reproduced immediately once the probe below made the timing tight enough to matter.
+            await clock.SettleAndPauseAsync(Grace);
 
-            await clock.AdvanceAsync(stMin);
+            await clock.AdvanceAsync(justUnder);
+            await clock.SettleAndPauseAsync(Grace);
+            Volatile.Read(ref cfCount).Should().Be(expected - 1,
+                "only {0} of the {1} STmin interval has elapsed, so consecutive frame {2} is not "
+                + "due yet", justUnder, stMin, expected);
+
+            await clock.AdvanceAsync(Step);
             await WaitForCountAsync(() => Volatile.Read(ref cfCount), expected, "consecutive frames");
         }
 

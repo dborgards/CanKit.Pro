@@ -50,6 +50,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // fixed-rate anchor cannot end up on a different one (#92).
     private readonly ITimeSource _time;
 
+    private int _periodicEmissionsCompleted;
+
+    /// <summary>
+    /// How many periodic emissions have finished sending. A seam for tests, and specifically for
+    /// the one thing a virtual clock cannot observe: OnTick drops a tick whose previous emission
+    /// is still in flight, and "in flight" ends on the transport's own loop and the thread pool,
+    /// neither of which a test clock governs. Without this a test would have to guess with a
+    /// delay, and guessing wrong drops the tick it was about to assert on (Bugbot on #113).
+    /// </summary>
+    internal int PeriodicEmissionsCompleted => Volatile.Read(ref _periodicEmissionsCompleted);
+
     /// <summary>Ticks of <see cref="_time"/> as a <see cref="TimeSpan"/>.</summary>
     private TimeSpan TimeSpanFromTicks(long ticks)
         => TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
@@ -1202,7 +1213,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     }
                     finally
                     {
+                        // Clear the gate first: a reader that sees the count has, by that
+                        // ordering, already seen a tick become possible again.
                         Volatile.Write(ref _sendInFlight, 0);
+                        Interlocked.Increment(ref _owner._periodicEmissionsCompleted);
                     }
                 });
             }

@@ -1343,20 +1343,40 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // 60 bytes over 7-byte data frames is 9 per emission.
         const int dataFramesPerEmission = 9;
 
+        // The virtual resolution the period is bracketed to, and the real time allowed for an
+        // emission to become observable before concluding one did not happen. The latter is a
+        // wait rather than a tolerance -- see VirtualClock.SettleAndPauseAsync.
+        var Step = TimeSpan.FromMilliseconds(1);
+        var Grace = TimeSpan.FromMilliseconds(100);
+
         var startedAt = clock.Elapsed;
         using (sender.StartPeriodicSend(message, period))
         {
             for (var slot = 1; slot <= requiredEmissions; slot++)
             {
-                await clock.SettleAsync();
-                Count().Should().Be(slot - 1,
-                    "the schedule is armed against a clock that has not reached slot {0}, so no "
-                    + "further emission may have happened", slot);
+                var slotPoint = startedAt + TimeSpan.FromTicks(period.Ticks * slot);
 
-                await clock.AdvanceToAsync(startedAt + TimeSpan.FromTicks(period.Ticks * slot));
+                // One tick short of the slot. Without this probe the test cannot tell the
+                // configured period from any shorter one: a jump straight to the slot passes over
+                // the earlier deadline, Reschedule coalesces the missed anchors, and exactly one
+                // emission comes out either way. Codex found that on the first revision, and
+                // halving the period confirmed it -- the test passed.
+                await clock.AdvanceToAsync(slotPoint - Step);
+                await clock.SettleAndPauseAsync(Grace);
+                Count().Should().Be(slot - 1,
+                    "the clock is one tick short of slot {0}, so that emission is not due yet",
+                    slot);
+
+                await clock.AdvanceToAsync(slotPoint);
                 await WaitForAnnouncesAsync(Count, slot);
                 await WaitForAnnouncesAsync(() => Volatile.Read(ref dataFrames),
                     slot * dataFramesPerEmission);
+
+                // The last data frame on the wire is not the end of the emission: OnTick drops a
+                // tick whose predecessor is still in flight, and that state clears on the
+                // transport's own loop. Waiting for the node to say so is what keeps the next
+                // slot's assertion about the grid rather than about a race (Bugbot on #113).
+                await WaitForAnnouncesAsync(() => sender.PeriodicEmissionsCompleted, slot);
             }
         }
 

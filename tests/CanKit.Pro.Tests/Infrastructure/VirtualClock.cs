@@ -144,6 +144,26 @@ internal sealed class VirtualClock : IDisposable
     }
 
     /// <summary>
+    /// Settles every actor, then leaves <paramref name="grace"/> of real time for anything a
+    /// callback handed to the thread pool to become observable. For asserting that something has
+    /// <em>not</em> happened.
+    /// </summary>
+    /// <remarks>
+    /// A negative is the one thing a virtual clock cannot make deterministic: the work a due
+    /// callback starts finishes on the thread pool and on real I/O, neither of which this clock
+    /// governs. The grace is therefore a wait, not a tolerance, and its failure direction is the
+    /// safe one — on a loaded runner an effect that was going to appear may simply not have yet,
+    /// which turns a broken implementation into a pass rather than a correct one into a failure.
+    /// Every such assertion here is paired with a positive one that a load spike cannot fake.
+    /// </remarks>
+    public async Task SettleAndPauseAsync(TimeSpan grace)
+    {
+        await SettleAsync().ConfigureAwait(false);
+        await Task.Delay(grace).ConfigureAwait(false);
+        await SettleAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Lets every actor reach a quiescent point without moving the clock — the same two
     /// round-trips, for when a test needs work already posted to have been processed.
     /// </summary>
