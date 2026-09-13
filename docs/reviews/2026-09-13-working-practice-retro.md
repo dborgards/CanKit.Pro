@@ -22,19 +22,24 @@ Geschlossen: #23, #24, #37, #44, #53, #82. Neu und dokumentiert: #92, #94, #95, 
 #106.
 
 Die letzten drei Pull Requests (#104, #107, #108) sind selbst Gegenstand dieser Retro: sie tragen
-die Regeln, und ihr Verlauf hat die Hälfte der Belege geliefert.
+die Regeln, und ihr Verlauf hat den Befund geliefert, der weiter unten unter *Der Befund, der erst
+am Ende sichtbar wurde* steht. Der Review dieses Dokuments (#109) hat denselben Befund noch zweimal
+bestätigt und ist dort mit aufgenommen.
 
-Inhaltlich trägt das. Zwei Befunde waren echte Fehler im Produktivcode, die ohne diese Welle
-geblieben wären:
+Inhaltlich trägt das. Zwei Defekte kamen heraus, die ohne diese Welle geblieben wären — einer im
+Produktivcode, einer in der Suite:
 
 - **#24 / `TryMatchEcho`** — ein abgelaufener Pending-Send verschluckte das Echo des nächsten
   byte-gleichen Sends. Der erste Fix führte dabei eine zweite Race derselben Bauart ein
   (`IsCompleted` testen, dann `TrySetResult` — check-then-act); beseitigt durch atomares
   Beanspruchen.
 - **`macos-latest` auf `main`** war rot, weil ein Test dem Scheduler ein Verhalten vorwarf, das
-  dieser laut eigener Dokumentation zeigt (Coalescing auf 2 × Periode unter Last).
+  dieser laut eigener Dokumentation zeigt (Coalescing auf 2 × Periode unter Last). Der Defekt lag
+  in der Behauptung des Tests, nicht im Produktivcode — die Suite meldete dauerhaft einen Bug, den
+  es nicht gab, und verdeckte damit, was sie sonst hätte melden können.
 
-Der Preis: neun öffentliche Selbstkorrekturen auf GitHub, dreimal musste der Maintainer
+Der Preis: elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt sie
+einzeln —, dreimal musste der Maintainer
 nachfassen, und zweimal ging eine Korrektur beim Mergen verloren, weil sie kurz vor dem Merge
 gepusht wurde.
 
@@ -60,8 +65,9 @@ keine Antwort, weil GitHub den Reply mit 500 abgewiesen hatte und die Antwort au
 
 ## Die Zahlen, die es entschieden haben
 
-Was in dieser Welle tatsächlich Klarheit gebracht hat, war ohne Ausnahme Messung, nicht
-Überlegung:
+Im Code-Teil der Welle hat ausschließlich Messung Klarheit gebracht, nicht Überlegung. (Für den
+Regel-Teil gilt das nicht — dort war es Gegenlesen; siehe *Der Befund, der erst am Ende sichtbar
+wurde*.)
 
 | Messung | Ergebnis |
 |---|---|
@@ -79,9 +85,9 @@ einer rot wird, ist ein Rennen gegen die Runner-Auslastung.
 
 ## Ursache
 
-**Eigene Argumentation wurde als Beweis behandelt.** In jedem der ersten acht Fälle war die Gegenprobe
-billig und verfügbar — ausführen, mutieren, unter Last laufen lassen, nachmessen — und in jedem
-Fall kam zuerst das Argument.
+**Eigene Argumentation wurde als Beweis behandelt.** In jedem der ersten acht Fälle war die
+Gegenprobe billig und verfügbar — ausführen, mutieren, unter Last laufen lassen, nachmessen — und
+in jedem Fall kam zuerst das Argument.
 
 Zwei Verstärker, die das über Einzelfälle hinaus systematisch machen:
 
@@ -131,12 +137,24 @@ Verschärfung einer Regel die Datei nach Verweisen auf sie durchsuchen, nicht na
 Zeilen. Und Absätze gegeneinander lesen, nicht jeden gegen seine Absicht — Letzteres findet diese
 Klasse nie, wie hier zweimal belegt.
 
-Ein dritter Beleg entstand beim Schreiben dieses Dokuments selbst. Der Entwurf wurde von acht auf
-elf Chronologie-Zeilen erweitert; die Kopfzeile zählte danach noch acht gemergte Pull Requests bei
-neun im Inventar, und zwei Sätze weiter unten bezogen sich weiter auf „die acht Zeilen oben". Beides
-fand Codex in #109, keines lag in einer Zeile, die die Erweiterung angefasst hatte. Dieselbe Klasse,
-in dem Text, der sie beschreibt — was die Regel oben eher stützt als schwächt: sie ist nicht durch
-Vorsatz einzuhalten, sondern nur durch die Suche nach Verweisen.
+Ein dritter und vierter Beleg entstanden beim Schreiben dieses Dokuments selbst; Codex fand beide
+in #109.
+
+Der dritte ist exakt die Klasse von oben. Der Entwurf wurde von acht auf elf Chronologie-Zeilen
+erweitert; die Kopfzeile zählte danach noch acht gemergte Pull Requests bei neun im Inventar, und
+zwei Sätze weiter unten bezogen sich weiter auf „die acht Zeilen oben". Keine der falschen Stellen
+lag in einer Zeile, die die Erweiterung angefasst hatte.
+
+Der vierte ist die Variante ohne Änderung: die Einleitung kündigte „zwei echte Fehler im
+Produktivcode" an, und ihr zweiter Aufzählungspunkt beschrieb selbst eine falsche Test-Behauptung
+über dokumentiertes Scheduler-Verhalten. Beide Sätze standen seit dem ersten Entwurf so
+nebeneinander — hier hatte keine Umkehrung sie auseinandergebracht, die Überschrift war von Anfang
+an weiter als ihre Liste. Das erweitert die Regel: nicht nur nach einer Änderung sind Absätze
+gegeneinander zu lesen, sondern auch beim ersten Schreiben, denn eine Zusammenfassung wird gegen
+ihre Absicht gelesen und nicht gegen ihre Belege.
+
+Vier Belege in einem Dokument über diese Fehlerklasse — was die Regel eher stützt als schwächt:
+sie ist nicht durch Vorsatz einzuhalten, sondern nur durch die Gegenprobe Behauptung gegen Beleg.
 
 ## Die Sorte Fehler, die zweimal identisch auftrat
 
