@@ -1,6 +1,6 @@
 # Retro – Arbeitsweise der Issue-Welle vom 12./13. September 2026
 
-**Datum:** 2026-09-13 · **Stand:** `main` @ `67f70a9` · **Umfang:** 8 gemergte Pull Requests, 1 ungemergt geschlossener, 6 geschlossene Issues, 7 neue Issues
+**Datum:** 2026-09-13 · **Stand:** `main` @ `67f70a9` · **Umfang:** 9 gemergte Pull Requests, 1 ungemergt geschlossener, 6 geschlossene Issues, 7 neue Issues
 **Gegenstand:** nicht der Code, sondern wie er entstanden ist
 
 > **Zweck und Verhältnis zu `CLAUDE.md`.** Die Regeln, die aus dieser Welle folgen, stehen in
@@ -50,7 +50,6 @@ gepusht wurde.
 | 6 | #101: „Claim-Test repariert" | Cancel feuerte vor dem Armen der Deadline; der Test bestand die Regression, für die er existiert | Codex-P2 |
 | 7 | #101: „Slot-Untergrenze ist lastunabhängig" | ein verspäteter Tick verkürzt den Abstand zum nächsten Grid-Slot legitim | 2/8 bzw. 1/12 rot unter Last |
 | 8 | #101: „Mittelwert ist die stärkste wahre Aussage" | ein später erster Tick senkt den Mittelwert unter die Schranke, ohne dass der Scheduler etwas falsch macht | Codex-P2 |
-
 | 9 | #104: ein zweiter PR (#105) für einen Fehler, den der Docs-PR nicht verursacht hatte | Ich berief mich auf eine Ausnahme, die ich drei Stunden zuvor selbst in dieselbe Datei geschrieben hatte | PR geschlossen, Nachfassen des Maintainers |
 | 10 | #107: „Widerspruch aufgelöst" | Ich behielt die permissive Regel und verengte ihre Bedingungen — ein genehmigter Freibrief ist immer noch ein Freibrief | Korrektur durch den Maintainer |
 | 11 | Vier Widersprüche *zwischen Absätzen* in `CLAUDE.md` | jeder Absatz für sich korrekt; der Konflikt existiert nur zwischen ihnen | 4 Codex-Befunde, davon 1 P1 |
@@ -80,7 +79,7 @@ einer rot wird, ist ein Rennen gegen die Runner-Auslastung.
 
 ## Ursache
 
-**Eigene Argumentation wurde als Beweis behandelt.** In jedem der acht Fälle war die Gegenprobe
+**Eigene Argumentation wurde als Beweis behandelt.** In jedem der ersten acht Fälle war die Gegenprobe
 billig und verfügbar — ausführen, mutieren, unter Last laufen lassen, nachmessen — und in jedem
 Fall kam zuerst das Argument.
 
@@ -132,6 +131,13 @@ Verschärfung einer Regel die Datei nach Verweisen auf sie durchsuchen, nicht na
 Zeilen. Und Absätze gegeneinander lesen, nicht jeden gegen seine Absicht — Letzteres findet diese
 Klasse nie, wie hier zweimal belegt.
 
+Ein dritter Beleg entstand beim Schreiben dieses Dokuments selbst. Der Entwurf wurde von acht auf
+elf Chronologie-Zeilen erweitert; die Kopfzeile zählte danach noch acht gemergte Pull Requests bei
+neun im Inventar, und zwei Sätze weiter unten bezogen sich weiter auf „die acht Zeilen oben". Beides
+fand Codex in #109, keines lag in einer Zeile, die die Erweiterung angefasst hatte. Dieselbe Klasse,
+in dem Text, der sie beschreibt — was die Regel oben eher stützt als schwächt: sie ist nicht durch
+Vorsatz einzuhalten, sondern nur durch die Suche nach Verweisen.
+
 ## Die Sorte Fehler, die zweimal identisch auftrat
 
 Zwei Korrekturen gingen beim Mergen verloren: `9b5248f` und `9f172d6` verpassten #104, `8ebced1`
@@ -151,7 +157,7 @@ Lastläufe sichtbar geworden. Das gehört zur Sache, nicht zum Fehler.
 
 Die Trennlinie: Erkunden erzeugt Wissen, das vorher nicht da war. Nacharbeit an einer Behauptung,
 die vor der Messung aufgestellt wurde, erzeugt nur den Zustand, der ohne die Behauptung schon
-gegolten hätte. Von den acht Zeilen oben fällt keine in die erste Kategorie.
+gegolten hätte. Von den elf Zeilen oben fällt keine in die erste Kategorie.
 
 ## Was daraus in `CLAUDE.md` steht
 
