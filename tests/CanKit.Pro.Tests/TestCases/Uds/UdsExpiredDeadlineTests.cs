@@ -195,6 +195,30 @@ public class UdsExpiredDeadlineTests
     }
 
     /// <summary>
+    /// A channel that reports no transmit instant — zero — must not be read as a timestamp: zero
+    /// means 1970 to a monotonic subtraction, so every response would measure as infinitely late
+    /// and every request would time out. The client falls back to its own clock there, which is
+    /// the behaviour this branch replaces, and worse only in the way that behaviour was worse.
+    /// Reachable from outside the repository, because <c>IsoTp.Open</c> and
+    /// <see cref="IIsoTpChannel"/> are public.
+    /// </summary>
+    [Fact]
+    public async Task H_A_Channel_Reporting_No_Transmit_Instant_Falls_Back_To_The_Client_Clock()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(20),
+            stampArrivalAtDelivery: false)
+        {
+            ReportNoTransmitStamp = true,
+        };
+        using var client = NewClient(channel);
+
+        var data = await client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        data.Should().Equal(0xAA);
+    }
+
+    /// <summary>
     /// Answers one positive RDBI response, ignoring the cancellation token so the delivery — not
     /// the deadline — completes the caller's wait.
     /// </summary>
@@ -237,6 +261,13 @@ public class UdsExpiredDeadlineTests
         /// <summary>How long after the request reached the wire the response arrived.</summary>
         public TimeSpan ResponseArrivalOffsetFromTransmit { get; init; }
 
+        /// <summary>
+        /// Report no transmit instant at all, as a foreign <see cref="IIsoTpChannel"/> that does
+        /// not track one would. <see cref="IsoTp"/> is public, so this is reachable from outside
+        /// the repository.
+        /// </summary>
+        public bool ReportNoTransmitStamp { get; init; }
+
         public StubChannel(TimeSpan deliverAfter, bool stampArrivalAtDelivery)
         {
             _deliverAfter = deliverAfter;
@@ -261,7 +292,7 @@ public class UdsExpiredDeadlineTests
             if (SendObservationDelay > TimeSpan.Zero)
                 await Task.Delay(SendObservationDelay, CancellationToken.None).ConfigureAwait(false);
 
-            return _arrivalStamp;
+            return ReportNoTransmitStamp ? 0 : _arrivalStamp;
         }
 
         public async Task SendAsync(ReadOnlyMemory<byte> pdu,

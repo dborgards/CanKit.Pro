@@ -1497,6 +1497,46 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             + "it exactly like the tester's own transmissions");
     }
 
+    // #112 -- the non-blocking take, on the real channel. The UDS client reaches for it exactly
+    // when its budget is spent, and every test of that behaviour runs on a channel stub, so the
+    // real implementation's hand-over path had no coverage at all: the branch that returns a
+    // queued PDU is the load-bearing half, and it is the half the stub replaces.
+    //
+    // EmitPdu enqueues before raising DatagramReceived, so the event is a sound signal that the
+    // inbox is non-empty -- no polling and no sleep.
+    [Fact]
+    public async Task TryReceiveWithArrival_Hands_Over_A_Queued_Pdu_And_Then_Reports_Empty()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var tester = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+        using var ecu = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0));
+
+        var arrived = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        tester.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+
+        var response = new byte[] { 0x62, 0xF1, 0x90, 0xAA };
+
+        tester.TryReceiveWithArrival(out _).Should().BeFalse("nothing has been sent yet");
+
+        var before = Stopwatch.GetTimestamp();
+        await ecu.SendAsync(response);
+        await arrived.Task.WaitAsync(ShortTimeout);
+        var after = Stopwatch.GetTimestamp();
+
+        tester.TryReceiveWithArrival(out var taken).Should().BeTrue(
+            "the PDU is queued, and taking it must not require waiting");
+        taken.Pdu.Should().Equal(response);
+        taken.ArrivalTimestamp.Should().BeInRange(before, after,
+            "the stamp is the frame's arrival, which happened during this exchange");
+
+        tester.TryReceiveWithArrival(out _).Should().BeFalse(
+            "the one queued PDU has been taken");
+    }
+
     // #112 -- the transmit stamp must come from the bus's own hand-off to the driver, not from
     // anywhere upstream of it. The UDS-level tests for this run on a channel stub, which by
     // construction cannot say where in the real path the reading is taken (Codex on #112); this
