@@ -110,13 +110,18 @@ heraus, die im Code-Teil nicht auffiel, weil dort Tests und Messungen sie abfang
 
 Sieben Codex-Befunde über #101, #104, #107 und #108. **Alle sieben berechtigt. Vier davon
 Widersprüche zwischen Absätzen** — nicht Fehler in einem Absatz, sondern zwei Absätze, die je für
-sich korrekt sind und zusammen nicht gelten können. Beispiele:
+sich korrekt sind und zusammen nicht gelten können. Es sind genau die vier Commits, deren Nachricht
+Codex als Urheber nennt:
 
-- Die Ausnahme erlaubte einen Folge-PR für „a fix the review made necessary elsewhere"; die
-  Scope-Regel drei Abschnitte später schickte genau das in ein Issue.
-- Der Abschnitt eröffnete mit „Kausalität entscheidet" und schloss mit „nur Dringlichkeit
-  entscheidet, ob es jetzt passiert".
-- „This rule has no exception" stand drei Absätze über „The exception above permits that".
+- `a1d4323` — der Abschnitt eröffnete mit „Kausalität entscheidet" und schloss mit „nur
+  Dringlichkeit entscheidet, ob es jetzt passiert". Der Schlusssatz erlaubt, wofür der Abschnitt
+  geschrieben wurde: das Vertagen einer selbst verursachten Regression.
+- `72a572d` — die Sequencing-Ausnahme ließ eine vom Branch verursachte, zu große Änderung zum
+  eigenen PR werden; die Scope-Regel verbot für genau diesen Fall jeden Folge-PR.
+- `e30b632` (P1) — nach der Umkehrung der Ausnahme sagte der Absatz darunter weiter „The exception
+  is for findings on the pull request's own content", also das Gegenteil der neuen Regel.
+- `b087366` — die Out-of-scope-Prozedur schickte ein solches Problem ausnahmslos ins Issue,
+  während die Ausnahme vier Abschnitte darüber genau dafür einen eigenen PR zulässt.
 
 Der letzte Fall ist der aussagekräftigste. Der Maintainer hatte ausdrücklich gebeten, die ganze
 Datei noch einmal auf Widersprüche zu prüfen. Ich fand fünf und behob sie. Codex fand danach eine
@@ -136,40 +141,45 @@ Verschärfung einer Regel die Datei nach Verweisen auf sie durchsuchen, nicht na
 Zeilen. Und Absätze gegeneinander lesen, nicht jeden gegen seine Absicht — Letzteres findet diese
 Klasse nie, wie hier zweimal belegt.
 
-Ein dritter, vierter und fünfter Beleg entstanden beim Schreiben dieses Dokuments selbst; Codex
-fand alle drei in #109.
+Beim Schreiben dieses Dokuments trat dieselbe Klasse dann noch einmal auf, und zwar in Serie:
+jeder der folgenden Fälle kam aus dem Review von #109, mehrere davon aus der Korrektur des
+vorangegangenen. Ungezählt aufgeführt, weil eine laufende Nummer genau die Kopplung wäre, die
+der Fall *Eine Zahl, die an zwei Stellen stand* unten verbietet:
 
-Der dritte ist exakt die Klasse von oben. Der Entwurf wurde von acht auf elf Chronologie-Zeilen
-erweitert; die Kopfzeile zählte danach noch acht gemergte Pull Requests bei neun im Inventar, und
-zwei Sätze weiter unten bezogen sich weiter auf „die acht Zeilen oben". Keine der falschen Stellen
-lag in einer Zeile, die die Erweiterung angefasst hatte.
+- **Zähler, die eine Erweiterung nicht mitbekommen haben.** Der Entwurf wuchs von acht auf elf
+  Chronologie-Zeilen; die Kopfzeile nannte danach weiter acht gemergte Pull Requests bei neun im
+  Inventar, und zwei Sätze weiter unten stand weiter „die acht Zeilen oben". Keine der falschen
+  Stellen lag in einer Zeile, die die Erweiterung angefasst hatte — die Klasse von oben,
+  unverändert.
+- **Eine Überschrift, die von Anfang an weiter war als ihre Liste.** Die Einleitung kündigte „zwei
+  echte Fehler im Produktivcode" an; ihr zweiter Punkt beschrieb selbst eine falsche
+  Test-Behauptung über dokumentiertes Scheduler-Verhalten. Beide Sätze standen seit dem ersten
+  Entwurf so nebeneinander, ohne dass eine Umkehrung sie auseinandergebracht hätte. Das erweitert
+  die Regel: Absätze sind nicht nur nach einer Änderung gegeneinander zu lesen, sondern schon beim
+  ersten Schreiben — eine Zusammenfassung wird gegen ihre Absicht gelesen, nicht gegen ihre Belege.
+- **Die Korrektur, die selbst eine Zusammenfassung war.** Der Satz, mit dem ich eine unprüfbare
+  Zahl ersetzte, lautete „elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt
+  sie einzeln", und das tut sie nicht: ihr letzter Eintrag fasst vier Widersprüche zusammen. Eine
+  unbelegte Zahl gegen eine falsche getauscht, und die falsche ist schlechter, weil sie zur Prüfung
+  einlädt, die die erste nie bekam.
+- **Eine Zahl, die an zwei Stellen stand.** Die Einleitung sagte weiter, der Review habe den Befund
+  „noch zweimal" bestätigt, während dieser Abschnitt inzwischen mehr Fälle führte. Das ist die
+  Ursache hinter mehreren der anderen: **eine Zahl gehört an genau eine Stelle, und die anderen
+  verweisen darauf, statt sie zu wiederholen** — sonst veraltet die Wiederholung bei jeder Änderung
+  des Belegs, und lautlos, weil beide Stellen für sich stimmig aussehen. Die Einleitung nennt
+  seither keine Zahl mehr.
+- **Belege, die der falschen Quelle zugeschrieben waren.** Die Liste der vier Widersprüche oben
+  führte anfangs zwei Fälle, die ich selbst gefunden hatte (`1e2f3e3`, `c5519db`), als
+  Codex-Befunde — und einer davon ist in `c5519db` ausdrücklich als *Nebeneinanderstellung ohne
+  Widerspruch* eingeordnet. Sie belegte damit weder die Zahl noch die Klasse, für die sie stand.
+  Jetzt nennt sie die vier Commits, deren Nachricht Codex als Urheber ausweist. Allgemein: **eine
+  Behauptung über die Herkunft eines Befunds ist an der Historie zu prüfen, nicht aus der
+  Erinnerung zu schreiben** — derselbe Fehler wie Zeile 1 der Chronologie, zwei Tage später, in
+  einem Dokument über genau ihn.
 
-Der vierte ist die Variante ohne Änderung: die Einleitung kündigte „zwei echte Fehler im
-Produktivcode" an, und ihr zweiter Aufzählungspunkt beschrieb selbst eine falsche Test-Behauptung
-über dokumentiertes Scheduler-Verhalten. Beide Sätze standen seit dem ersten Entwurf so
-nebeneinander — hier hatte keine Umkehrung sie auseinandergebracht, die Überschrift war von Anfang
-an weiter als ihre Liste. Das erweitert die Regel: nicht nur nach einer Änderung sind Absätze
-gegeneinander zu lesen, sondern auch beim ersten Schreiben, denn eine Zusammenfassung wird gegen
-ihre Absicht gelesen und nicht gegen ihre Belege.
-
-Der fünfte entstand in derselben Korrekturrunde. Der Satz, mit dem ich dabei eine unprüfbare Zahl
-ersetzte, lautete „elf öffentlich korrigierte Fehlbehauptungen — die Chronologie unten zählt sie
-einzeln", und das tut sie nicht: ihr elfter Eintrag fasst vier Widersprüche zusammen, es sind vierzehn
-Behauptungen in elf Zeilen. Die Korrektur einer Zusammenfassung ist selbst eine Zusammenfassung
-und braucht dieselbe Gegenprobe wie das Original — sonst ersetzt man eine unbelegte Zahl durch
-eine falsche.
-
-Ein sechster stand danach in der Einleitung: sie sagte weiter, der Review habe den Befund „noch
-zweimal" bestätigt, während dieser Abschnitt inzwischen drei Fälle führte. Damit ist die Ursache
-deutlicher als bei jedem Einzelfall: eine Zusammenfassung, die eine Zahl wiederholt, die
-anderswo belegt wird, veraltet bei jeder Änderung des Belegs — und zwar lautlos, weil beide
-Stellen für sich stimmig aussehen. Die Einleitung nennt jetzt keine Zahl mehr, sondern verweist
-auf diesen Abschnitt. Das ist die belastbarere Form der Regel: **eine Zahl gehört an genau eine
-Stelle, und die anderen verweisen darauf, statt sie zu wiederholen.**
-
-Sechs Belege in einem Dokument über diese Fehlerklasse — was die Regel eher stützt als schwächt:
-sie ist nicht durch Vorsatz einzuhalten, sondern nur durch die Gegenprobe Behauptung gegen Beleg,
-und wo die Gegenprobe wiederholt scheitert, durch das Entfernen der doppelten Angabe.
+Das stützt die Regel eher, als es sie schwächt: sie ist nicht durch Vorsatz einzuhalten, sondern
+nur durch die Gegenprobe Behauptung gegen Beleg — und wo diese wiederholt scheitert, durch das
+Entfernen der doppelten Angabe, damit es nichts mehr zu synchronisieren gibt.
 
 ## Die Sorte Fehler, die zweimal identisch auftrat
 
