@@ -905,9 +905,24 @@ internal sealed class UdsClientImpl : IUdsClient
         UdsTimeoutTimer timerKind, TimeSpan budget, TimeSpan elapsedInBudget,
         CancellationToken linkedToken)
     {
+        // How long to wait and whether what turns up was in time are two questions, and only the
+        // first one is answered here. The second belongs to the caller's arrival check, because
+        // the answer must not depend on when this client got scheduled -- so neither exit below
+        // may discard a PDU unread on the strength of a clock reading taken now.
         var remaining = budget - elapsedInBudget;
         if (remaining <= TimeSpan.Zero)
+        {
+            // No budget left as measured from now -- but the budget started when the previous
+            // PDU *arrived*, and a client descheduled past the deadline can find the answer
+            // already queued. Awaiting with an expired token would not find it: an
+            // already-cancelled token wins against a queued item. Take what is there and let the
+            // caller judge its stamp; only an empty inbox means nothing arrived in time
+            // (Bugbot on #112).
+            if (_channel.TryReceiveWithArrival(out var queued))
+                return queued;
+
             throw new UdsTimeoutException(serviceId, timerKind, elapsedInBudget);
+        }
 
         using var timeoutCts = new CancellationTokenSource(remaining);
         using var combined = CancellationTokenSource.CreateLinkedTokenSource(
@@ -920,6 +935,12 @@ internal sealed class UdsClientImpl : IUdsClient
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested
                                                  && !linkedToken.IsCancellationRequested)
         {
+            // The deadline callback won the race -- which says nothing about whether a punctual
+            // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
+            // before declaring a timeout.
+            if (_channel.TryReceiveWithArrival(out var raced))
+                return raced;
+
             throw new UdsTimeoutException(serviceId, timerKind, budget);
         }
     }

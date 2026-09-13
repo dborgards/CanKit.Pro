@@ -235,6 +235,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     /// <inheritdoc />
+    public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
+    {
+        if (_pduInbox.Reader.TryRead(out var item))
+        {
+            pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp);
+            return true;
+        }
+
+        pdu = default;
+        return false;
+    }
+
+    /// <inheritdoc />
     public int DiscardPendingPdus()
     {
         // Abort actor-side multi-frame reassembly first so leftover CFs cannot finish and enqueue

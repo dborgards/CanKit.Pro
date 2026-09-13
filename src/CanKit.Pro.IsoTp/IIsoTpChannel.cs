@@ -77,6 +77,23 @@ public interface IIsoTpChannel : IDisposable
     Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Takes the next inbound PDU if one is already queued, without waiting for one to arrive.
+    /// Returns <see langword="false"/> — leaving <paramref name="pdu"/> at its default — when the
+    /// inbox is empty or the channel is disposed. Throws the recorded reassembly-abort exception
+    /// when the queued item is a fault, exactly as
+    /// <see cref="ReceiveWithArrivalAsync"/> would.
+    /// </summary>
+    /// <remarks>
+    /// The companion to <see cref="ReceiveWithArrivalAsync"/> for a caller whose deadline has
+    /// already passed. Awaiting with an expired token is not the same thing: an already-cancelled
+    /// token wins against a queued item, so the wait would report a timeout while the answer sat
+    /// unread in the inbox. Separating <em>how long to wait</em> from <em>was it in time</em>
+    /// leaves the second question to the arrival stamp, which is the only reading of it that does
+    /// not depend on when the caller was scheduled.
+    /// </remarks>
+    bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu);
+
+    /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
     /// faults enqueued by <c>AbortRx</c> — and returns how many were dropped. Also silently
     /// aborts any in-flight multi-frame reassembly on the actor so leftover consecutive frames

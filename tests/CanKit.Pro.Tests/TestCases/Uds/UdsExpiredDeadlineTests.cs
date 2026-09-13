@@ -17,8 +17,8 @@ namespace CanKit.Pro.Tests.TestCases.Uds;
 /// deadline callback past the response's arrival lets the response win, and the client returns
 /// data for a request it had already abandoned.
 ///
-/// Both tests drive the client through a channel double instead of a loaded runner, so the
-/// ordering the CI failures produced by accident is produced here on purpose.
+/// Every test here drives the client through a channel double instead of a loaded runner, so
+/// the ordering the CI failures produced by accident is produced here on purpose.
 /// </summary>
 public class UdsExpiredDeadlineTests
 {
@@ -97,6 +97,53 @@ public class UdsExpiredDeadlineTests
     }
 
     /// <summary>
+    /// The other half of C, and the regression the P2* restart introduced on its own: the same
+    /// deschedule, but the final response arrived 40 ms after the 0x78 — well inside the 80 ms
+    /// P2*. Measuring the remaining budget from the 0x78's arrival makes it negative before the
+    /// client ever looks at the inbox, so the wait must not turn that into a timeout without
+    /// looking. Only the arrival stamp decides, and it says this response was punctual.
+    /// </summary>
+    [Fact]
+    public async Task D_A_Punctual_Response_Queued_While_P2Star_Ran_Out_Is_Still_Read()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(20),
+            stampArrivalAtDelivery: false)
+        {
+            RespondPendingFirst = true,
+            PendingToFinalArrivalGap = TimeSpan.FromMilliseconds(40),
+            ObservationDelayAfterPending = TimeSpan.FromMilliseconds(150),
+        };
+        using var client = NewClient(channel);
+
+        var data = await client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        data.Should().Equal(0xAA);
+    }
+
+    /// <summary>
+    /// The same wrong reject reached the other way: the wait is completed by the deadline
+    /// callback — the channel double honours the token here — while a punctual response is
+    /// already queued behind it. Which of the two the runtime happens to run first is not a fact
+    /// about the response, so the timeout is only real once the inbox is empty.
+    /// </summary>
+    [Fact]
+    public async Task E_A_Punctual_Response_Queued_When_The_Deadline_Fires_Is_Still_Read()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(240),
+            stampArrivalAtDelivery: false)
+        {
+            HonorCancellation = true,
+        };
+        using var client = NewClient(channel);
+
+        var data = await client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        data.Should().Equal(0xAA);
+    }
+
+    /// <summary>
     /// Answers one positive RDBI response, ignoring the cancellation token so the delivery — not
     /// the deadline — completes the caller's wait.
     /// </summary>
@@ -119,6 +166,12 @@ public class UdsExpiredDeadlineTests
 
         /// <summary>How long the client is kept from noticing the 0x78 after it arrived.</summary>
         public TimeSpan ObservationDelayAfterPending { get; init; }
+
+        /// <summary>
+        /// Observe the cancellation token, so the deadline — not the delivery — ends the wait,
+        /// and leave the response for <see cref="TryReceiveWithArrival"/> to hand over.
+        /// </summary>
+        public bool HonorCancellation { get; init; }
 
         public StubChannel(TimeSpan deliverAfter, bool stampArrivalAtDelivery)
         {
@@ -149,18 +202,43 @@ public class UdsExpiredDeadlineTests
                 return new IsoTpReceivedPdu(Pending, _arrivalStamp);
             }
 
-            await Task.Delay(_deliverAfter, CancellationToken.None).ConfigureAwait(false);
+            await Task.Delay(_deliverAfter,
+                HonorCancellation ? cancellationToken : CancellationToken.None)
+                .ConfigureAwait(false);
 
             if (RespondPendingFirst)
-            {
-                var late = _arrivalStamp
-                    + (long)(PendingToFinalArrivalGap.TotalSeconds * Stopwatch.Frequency);
-                return new IsoTpReceivedPdu(Response, late);
-            }
+                return new IsoTpReceivedPdu(Response, FinalArrivalStamp());
 
             var stamp = _stampArrivalAtDelivery ? Stopwatch.GetTimestamp() : _arrivalStamp;
             return new IsoTpReceivedPdu(Response, stamp);
         }
+
+        /// <summary>
+        /// Models the final response already sitting in the inbox once the 0x78 has been read:
+        /// a caller past its deadline gets it handed over without waiting, and its stamp — not
+        /// the caller's clock — decides whether it counts.
+        /// </summary>
+        public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
+        {
+            if (RespondPendingFirst && _pendingSent)
+            {
+                pdu = new IsoTpReceivedPdu(Response, FinalArrivalStamp());
+                return true;
+            }
+
+            if (HonorCancellation)
+            {
+                // Stamped at the request: punctual, and waiting in the inbox all along.
+                pdu = new IsoTpReceivedPdu(Response, _arrivalStamp);
+                return true;
+            }
+
+            pdu = default;
+            return false;
+        }
+
+        private long FinalArrivalStamp() => _arrivalStamp
+            + (long)(PendingToFinalArrivalGap.TotalSeconds * Stopwatch.Frequency);
 
         public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
             => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
