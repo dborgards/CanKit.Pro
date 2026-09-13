@@ -6,7 +6,7 @@
 - **Group tickets into one PR where they overlap, split them where they don't.** Issues in the
   same package that touch the same files belong in one PR — two PRs racing over
   `CanBusService.cs` cost more review than they save, and the second one inherits a conflict.
-  Issues in different packages get their own PR.
+  Issues in different packages get their own PR — one after another, per the next rule.
 - **One pull request open at a time** — of deliberately authored work. Dependabot is not in this
   count and is not meant to be: `.github/dependabot.yml` allows five concurrent NuGet updates,
   three npm and two pip, and those carry no design to review, only a green or red build. Whether
@@ -107,28 +107,34 @@ archaeology exercise on `main` with nobody's name on it. A follow-up issue for y
 regression is a promise to pay later at a higher price.
 
 Once the causing pull request *is* merged the option is gone and an issue is all that remains —
-but it is then the next thing worked, not queued behind whatever else is open. Debt that is
-already owed does not also get to wait.
+and that issue is then worked **next after the pull request in hand**, ahead of everything else in
+the backlog. Not immediately: dropping the current pull request to chase it would breach both
+*one pull request open at a time* and *finish the pull request in hand first*. But it does not go
+to the back of the queue either. Debt already owed waits for exactly one thing.
 
-What the answer *is* out of scope is everything the tooling merely surfaces along the way — a
-test that fails on the base revision too, a coverage row from elsewhere, a bot finding about
-neighbouring code. That is information, not work. It goes into an issue, or onto the issue that
+What *is* out of scope is everything the tooling merely surfaces along the way — a test that
+fails on the base revision too, a coverage row from elsewhere, a bot finding about neighbouring
+code. That is information, not work. It goes into an issue, or onto the issue that
 already covers it, and the pull request in hand is finished first.
 
 This is the rule that was broken hardest, and the interesting part is that the failure *was* out
 of scope. A markdown-only change to this file ran the full suite, the suite failed on a timing
 test the change had not caused — so far, correctly identified as information. What turned it into
 work was deciding, mid-task, that it deserved a pull request of its own rather than the issue it
-should have been. The exception above permits that; it does not make it the author's call, and
-the cost of getting it wrong is a second front to supervise on a task that had one.
+should have been. The exception above can permit that — it is about a problem the branch did
+*not* cause, so "this rule has no exception" above is untouched by it — but it does not make the
+call the author's. The cost of getting it wrong is a second front to supervise on a task that had
+one.
 
-The same applies to review findings, in that order: **causality first, then urgency.** A finding
-about something this branch caused is closed here however small it looks, and a review does not
-create an exception to the rule above — "it is only a P2" is the same deferral as "I will file
-it", reached by a different route. The second question is only reached for a
-finding the branch did not cause, and there a correct finding is still not automatically this
-task's work: a bot can be right about a real defect that belongs in a ticket rather than in the
-change being reviewed.
+The same applies to review findings, and causality is again the first question. A finding about
+something this branch caused is closed here however small it looks, and a review does not create
+an exception to the rule above — "it is only a P2" is the same deferral as "I will file it",
+reached by a different route.
+
+Only a finding the branch did *not* cause reaches a second question, and note what that question
+decides: not whether it happens in this pull request — it does not — but how urgently the ticket
+carrying it should be worked. A bot can be right about a real defect that still belongs in a
+ticket rather than in the change under review.
 
 ## Before claiming something is true
 
