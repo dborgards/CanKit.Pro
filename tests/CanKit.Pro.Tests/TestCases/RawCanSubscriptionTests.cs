@@ -401,6 +401,89 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
     // An ICanBusService that is not a CanBusService: everything forwarded, so the only thing that
     // differs from using the concrete service is that its fault event is not ours to raise.
+    // The pump wraps the whole `await foreach`, not just the onNext call, so a failure of the
+    // enumeration itself is reported instead of being left on a task nobody will ever look at --
+    // Dispose's join is bounded and may already have given up on it. That is new behaviour in this
+    // change and it had no test: the existing onError cases all fail inside the handler, which the
+    // *inner* catch takes, so the outer one was never entered.
+    [Fact]
+    public async Task Callback_Subscribe_Reports_A_Failure_Of_The_Frame_Stream_Itself()
+    {
+        using var service = new FramesThrowOnEnumerationService();
+
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = service.Subscribe(_ => { }, onError: ex => observed.TrySetResult(ex));
+
+        var ex = await observed.Task.WaitAsync(ShortTimeout);
+        ex.Should().BeOfType<InvalidOperationException>()
+            .Which.Message.Should().Be("the frame stream itself failed");
+    }
+
+    // The same failure with no onError and a service that is not CanBusService: there is nowhere
+    // to report it -- the interface's fault event is not ours to raise -- so it must be dropped
+    // quietly rather than thrown on a pool thread. Disposing afterwards must still work.
+    [Fact]
+    public void Callback_Subscribe_Drops_A_Stream_Failure_It_Has_Nowhere_To_Report()
+    {
+        using var service = new FramesThrowOnEnumerationService();
+
+        var subscribeAndDispose = () =>
+        {
+            var subscription = service.Subscribe(_ => { });
+            Thread.Sleep(50); // let the pump reach the failure
+            subscription.Dispose();
+            subscription.Dispose(); // idempotent -- the second call must be a no-op
+        };
+
+        subscribeAndDispose.Should().NotThrow();
+    }
+
+    private sealed class FramesThrowOnEnumerationService : ICanBusService
+    {
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 0;
+
+#pragma warning disable CS0067
+        public event EventHandler<Exception>? BackgroundExceptionOccurred;
+#pragma warning restore CS0067
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => new ThrowingSubscription();
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => new ThrowingSubscription();
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => Array.Empty<FilterOverlap>();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public void Dispose() { }
+
+        private sealed class ThrowingSubscription : ISubscription
+        {
+            public IAsyncEnumerable<CanFrameEvent> Frames => Throwing();
+
+            public bool TryRead(out CanFrameEvent frameEvent) { frameEvent = default; return false; }
+
+            public void Reconfigure(CanIdFilter filter) { }
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
+
+            public void Dispose() { }
+
+            private static async IAsyncEnumerable<CanFrameEvent> Throwing()
+            {
+                await Task.Yield();
+                throw new InvalidOperationException("the frame stream itself failed");
+#pragma warning disable CS0162
+                yield break; // unreachable, but required to make this an iterator
+#pragma warning restore CS0162
+            }
+        }
+    }
+
     private sealed class ForeignCanBusService(ICanBusService inner) : ICanBusService
     {
         public ICanBus Bus => inner.Bus;
