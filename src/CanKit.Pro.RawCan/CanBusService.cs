@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -312,8 +313,32 @@ namespace CanKit.Pro.RawCan
             // FR-RAW-032: best-effort approximation -- confirmed as soon as the driver accepts the
             // frame, explicitly marked IsApproximated so callers can never mistake this for a real
             // hardware acknowledgment.
-            var accepted = await _bus.TransmitAsync(frame, cancellationToken).ConfigureAwait(false);
-            var handoff = Stopwatch.GetTimestamp();
+            //
+            // The hand-off instant is taken by a continuation on the thread that completes the
+            // driver's task, not after awaiting it. Resuming this method is a scheduling event:
+            // for an adapter whose TransmitAsync completes asynchronously, the driver has
+            // accepted the frame -- and the peer may already be answering -- before this method
+            // runs again, and a reading taken there starts a caller's response deadline late
+            // (Codex on #112). ExecuteSynchronously is what observes completion closest; when the
+            // runtime declines to inline it the reading is what it would have been anyway.
+            var stamp = new StrongBox<long>();
+            var accepted = await _bus.TransmitAsync(frame, cancellationToken)
+                .ContinueWith(
+                    static (completed, state) =>
+                    {
+                        ((StrongBox<long>)state!).Value = Stopwatch.GetTimestamp();
+
+                        // GetResult rather than .Result: it surfaces a driver fault or a
+                        // cancellation as itself instead of wrapping it in an AggregateException,
+                        // so this continuation is invisible to callers apart from the stamp.
+                        return completed.GetAwaiter().GetResult();
+                    },
+                    stamp,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default)
+                .ConfigureAwait(false);
+            var handoff = stamp.Value;
             return accepted > 0
                 ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff }
                 : new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Rejected };
