@@ -69,6 +69,24 @@ API approval baselines are taken from the generated `*.received.txt`, never hand
 After editing XML (`.props`, `.targets`, `.csproj`) or YAML, check well-formedness. A `--` inside
 an XML comment is illegal and once made every project fail to load, i.e. every CI job red.
 
+## Stay inside the task
+
+A pull request's scope is its own diff. Anything else the tooling surfaces while checking it —
+a failing test the branch does not touch, a coverage row from elsewhere, a bot finding about
+neighbouring code — is information, not work. It goes into an issue, or onto the issue that
+already covers it, and the pull request in hand is finished first.
+
+This is the rule that was broken hardest. A markdown-only change to this file ran the full suite,
+the suite failed on an unrelated timing test, and that produced a second pull request — justified
+by the exception written into the rule above, three hours earlier, by the same hand. The exception
+is for findings on the pull request's *own* content. Reading it any wider makes the sequencing
+rule mean nothing.
+
+The same applies to review findings. A correct finding is not automatically this task's work: a
+bot can be right about a real defect that still belongs in a ticket rather than in the change
+being reviewed. Correct and urgent are different questions, and only the second one decides
+whether it happens now.
+
 ## Before claiming something is true
 
 The gate above catches broken code. These catch a different failure: a claim that was reasoned
