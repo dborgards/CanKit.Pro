@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -65,6 +66,54 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             NCr = nCr ?? TimeSpan.FromMilliseconds(500),
             WftMax = wftMax,
         };
+
+    // --------------------------------------------------------------------------------
+    // #112 — the arrival stamp reports when the PDU arrived, not when it was collected.
+    // A deadline built on it (UDS P2) is only as good as that distinction: a stamp taken at
+    // delivery would make every late reader look like a late peer.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task ArrivalStamp_Is_Taken_On_Arrival_Not_On_Collection()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epAB = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        var epBA = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+
+        using var sender = IsoTpFactory.Open(busA, epAB, FastOptions());
+        using var receiver = IsoTpFactory.Open(busB, epBA, FastOptions());
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+
+        // Multi-frame on purpose: the stamp must follow the *last* frame, and a multi-frame PDU
+        // is the case where reassembly sits between arrival and delivery.
+        var payload = new byte[64];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
+
+        await sender.SendAsync(payload).WaitAsync(ShortTimeout);
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        // Collect late, deliberately. Nothing about this delay is the peer's fault, so none of
+        // it may show up in the stamp.
+        var collectionDelay = TimeSpan.FromMilliseconds(300);
+        await Task.Delay(collectionDelay);
+
+        var received = await receiver.ReceiveWithArrivalAsync(CancellationToken.None)
+            .WaitAsync(ShortTimeout);
+        var collectedAt = Stopwatch.GetTimestamp();
+
+        received.Pdu.Should().Equal(payload);
+
+        var age = TimeSpan.FromSeconds(
+            (double)(collectedAt - received.ArrivalTimestamp) / Stopwatch.Frequency);
+        age.Should().BeGreaterThan(TimeSpan.FromMilliseconds(250),
+            "the PDU arrived before the deliberate {0} collection delay, so the stamp must be "
+            + "that much older than the read — a stamp taken at delivery would read ~0",
+            collectionDelay);
+    }
 
     // --------------------------------------------------------------------------------
     // FR-TP-001 — SF round-trip on classic CAN via the actor runtime + Virtual loopback.

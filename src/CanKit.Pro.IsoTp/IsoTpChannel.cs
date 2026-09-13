@@ -357,6 +357,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
                 .ConfigureAwait(false))
             {
+                // Stamp here, not where the PDU is emitted. Everything between this line and
+                // the emit -- the actor mailbox and reassembly -- is scheduling, and a deadline
+                // measured after scheduling is not a deadline (Codex on #112). The adapter's own
+                // CanFrameEvent.ReceiveTimestamp cannot serve: it is zero on adapters that do not
+                // timestamp and is documented as not comparable across buses, so the reference
+                // has to be a host-monotonic reading of ours.
+                var frameArrival = Stopwatch.GetTimestamp();
                 var frame = frameEvent.Frame;
                 // Not the hazard the previous comment described: the subscription already hands
                 // out a payload it owns, so nothing the adapter does can corrupt it. What it hands
@@ -380,7 +387,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // Pass the on-wire frame kind into TryParsePci so CAN-FD escape SF/FF headers are
                 // accepted only for real FD frames (develop codec API: isCanFd required).
                 bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
-                _actor.Post(() => HandleReceivedFrame(payload, isCanFd));
+                _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival));
             }
         }
         catch (OperationCanceledException)
@@ -813,7 +820,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // RX side (all methods run on the actor loop)
     // -----------------------------------------------------------------------------------------
 
-    private void HandleReceivedFrame(byte[] payload, bool isCanFd)
+    private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival)
     {
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
@@ -821,13 +828,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         switch (pci.Type)
         {
             case PciType.SingleFrame:
-                HandleRxSingleFrame(payload, pci);
+                HandleRxSingleFrame(payload, pci, frameArrival);
                 break;
             case PciType.FirstFrame:
-                HandleRxFirstFrame(payload, pci);
+                HandleRxFirstFrame(payload, pci, frameArrival);
                 break;
             case PciType.ConsecutiveFrame:
-                HandleRxConsecutiveFrame(payload, pci);
+                HandleRxConsecutiveFrame(payload, pci, frameArrival);
                 break;
             case PciType.FlowControl:
                 HandleRxFlowControl(pci);
@@ -835,7 +842,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private void HandleRxSingleFrame(byte[] payload, Pci pci)
+    private void HandleRxSingleFrame(byte[] payload, Pci pci, long frameArrival)
     {
         // A racing SF starts a fresh PDU: abort any in-flight reassembly (matches ISO 15765-2
         // §6.5.2's "an unexpected N_PCI type shall abort reception"). Must go through AbortRx —
@@ -849,10 +856,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (pci.DataOffset + pci.Length > payload.Length) return; // codec already validates but guard again
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
-        EmitPdu(pdu);
+        EmitPdu(pdu, frameArrival);
     }
 
-    private void HandleRxFirstFrame(byte[] payload, Pci pci)
+    private void HandleRxFirstFrame(byte[] payload, Pci pci, long frameArrival)
     {
         // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
@@ -902,7 +909,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // waiting for a CF that will never arrive.
         if (firstChunk >= pci.Length)
         {
-            EmitPdu(buffer);
+            EmitPdu(buffer, frameArrival);
             return;
         }
 
@@ -912,7 +919,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         ArmNCr();
     }
 
-    private void HandleRxConsecutiveFrame(byte[] payload, Pci pci)
+    private void HandleRxConsecutiveFrame(byte[] payload, Pci pci, long frameArrival)
     {
         var rx = _rx;
         if (rx is null) return; // stray CF, no reassembly in progress: drop per ISO 15765-2 §6.5.2.
@@ -946,7 +953,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             rx.CancelDeadline();
             var pdu = rx.Buffer;
             _rx = null;
-            EmitPdu(pdu);
+            // The last consecutive frame's arrival: a PDU is complete when its final frame
+            // lands, not when its first one did.
+            EmitPdu(pdu, frameArrival);
             return;
         }
 
@@ -1145,13 +1154,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         });
     }
 
-    private void EmitPdu(byte[] pdu)
+    private void EmitPdu(byte[] pdu, long frameArrival)
     {
         // Enqueue first so ReceiveAsync/ReceiveAllAsync can observe the PDU even if a
         // DatagramReceived handler blocks. Raise the event off the actor loop so a sync wait
         // on ReceiveAsync / SendAsync / DiscardPendingPdus cannot deadlock the mailbox
         // (Bugbot 3596580061).
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu));
+        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival));
 
         var handler = DatagramReceived;
         if (handler is null)
@@ -1197,8 +1206,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         /// </summary>
         public long ArrivalTimestamp { get; }
 
-        public static RxInboxItem FromPdu(byte[] pdu)
-            => new(pdu, null, Stopwatch.GetTimestamp());
+        public static RxInboxItem FromPdu(byte[] pdu, long arrivalTimestamp)
+            => new(pdu, null, arrivalTimestamp);
 
         public static RxInboxItem FromError(Exception error)
             => new(null, error, Stopwatch.GetTimestamp());

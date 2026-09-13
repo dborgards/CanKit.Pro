@@ -36,8 +36,10 @@ public readonly struct IsoTpReceivedPdu
     public byte[] Pdu { get; }
 
     /// <summary>
-    /// Monotonic <see cref="Stopwatch.GetTimestamp"/> reading taken when the PDU was queued for
-    /// delivery — that is, when it arrived, not when it was observed.
+    /// Monotonic <see cref="Stopwatch.GetTimestamp"/> reading taken when the PDU's <b>final
+    /// frame</b> was dequeued from the bus subscription — ahead of the protocol actor and of
+    /// reassembly, so neither contributes to it. It is therefore an arrival time rather than an
+    /// observation time, up to one channel hop between the demux and the channel's reader.
     /// </summary>
     public long ArrivalTimestamp { get; }
 }
