@@ -155,6 +155,15 @@ namespace CanKit.Pro.RawCan
 
         private void OnFrameObserved(object? sender, CanReceiveDataView e)
         {
+            // Taken once per frame, here, and not per subscription: every matching subscriber must
+            // agree on when the frame arrived. Taken on the very first line for the same reason --
+            // everything below it can block. TryMatchEcho takes _pendingGate, which
+            // SendWithEchoConfirmAsync deliberately holds across _bus.Transmit (#102), and the
+            // per-subscription buffers below can hold a frame while their reader is descheduled.
+            // Either would make a punctual frame look late to whoever is enforcing a deadline on
+            // it (Codex on #112).
+            var hostArrival = Stopwatch.GetTimestamp();
+
             // Independent of subscription dispatch below: echo frames must be checked against
             // outstanding SendConfirmed calls regardless of whether anyone also has a
             // subscription open. Guarded by the same lock-free fast path as subscriptions.
@@ -175,13 +184,6 @@ namespace CanKit.Pro.RawCan
             var view = e.CanFrame;
             var isEcho = e.IsEcho;
             var receiveTimestamp = e.ReceiveTimestamp;
-
-            // Taken once per frame, here, and not per subscription: every matching subscriber
-            // must agree on when the frame arrived. Taken *before* the per-subscription buffers
-            // for the same reason -- a reader descheduled while a frame waits in its bounded
-            // channel would otherwise make a punctual frame look late to whoever is enforcing a
-            // deadline on it (Codex on #112).
-            var hostArrival = Stopwatch.GetTimestamp();
 
             // One owned payload copy per *frame*, created by the first subscription that actually
             // buffers it and reused by every later one, instead of one copy per matching

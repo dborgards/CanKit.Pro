@@ -475,4 +475,74 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         service.Dispose();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => outstanding);
     }
+
+    // The arrival stamp the demux hands to every subscriber must say when RawCan saw the frame,
+    // not when RawCan finished with it. The two differ by an unbounded amount on exactly one
+    // path: OnFrameObserved calls TryMatchEcho first, and TryMatchEcho takes the pending-send
+    // lock that SendWithEchoConfirmAsync deliberately holds across Transmit (#102 and the comment
+    // on that lock). A punctual frame arriving while a send is inside Transmit therefore waits
+    // there, and a stamp taken after the wait makes it look as late as the wait was long -- which
+    // is precisely the wrong reject the stamp exists to prevent (Codex on #112).
+    //
+    // Asserted as an ordering, not as a duration: the stamp must predate the instant this test
+    // released the lock. Nothing the host does can reorder those two -- the blocked thread cannot
+    // run before it is released -- so there is no tolerance to widen, and no clock quantity the
+    // runner can perturb. A load spike only makes the gap larger.
+    [Fact]
+    public async Task Frame_Arrival_Is_Stamped_Before_The_Pending_Send_Lock()
+    {
+        using var sender = OpenEcho();
+        // The test raises the echo itself, on a thread it controls, so the frame reaches the
+        // demux while the transmitting thread is still holding the lock.
+        sender.EchoAcceptedFrames = false;
+        using var service = new CanBusService(sender);
+        using var subscription = service.Subscribe(
+            CanIdFilter.Range(0x500, 0x500, CanFilterIDType.Standard), includeEcho: true);
+
+        using var transmitting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        sender.OnTransmitting = _ =>
+        {
+            transmitting.Set();
+            release.Wait(ShortTimeout);
+        };
+
+        var frame = CanFrame.Classic(0x500, new byte[] { 42 });
+        // Off the test thread: SendConfirmed runs synchronously as far as Transmit, so calling it
+        // here would park *this* thread in OnTransmitting and there would be nobody left to
+        // release it.
+        var send = Task.Run(() => service.SendConfirmed(frame, TimeSpan.FromSeconds(30)));
+        transmitting.Wait(ShortTimeout).Should().BeTrue("the send must reach Transmit");
+
+        // A dedicated thread rather than the pool: the point of the test is that this thread ends
+        // up parked on the pending-send lock, and a thread is where that is observable.
+        var observer = new Thread(() => sender.RaiseObserved(frame, isEcho: true))
+        {
+            IsBackground = true,
+            Name = "echo-observer",
+        };
+        observer.Start();
+
+        // Wait for the signal -- the observer actually blocked -- instead of sleeping and hoping.
+        // ThreadState is a heuristic, so a timeout backs it up; either way the assertion below is
+        // an ordering against an instant that has not happened yet.
+        var waitingForLock = SpinWait.SpinUntil(
+            () => observer.ThreadState.HasFlag(System.Threading.ThreadState.WaitSleepJoin), ShortTimeout);
+        waitingForLock.Should().BeTrue(
+            "the echo must reach the demux while the pending-send lock is held");
+
+        subscription.TryRead(out _).Should().BeFalse(
+            "the frame cannot have been delivered yet -- its dispatch is behind the lock");
+
+        var releasedAt = Stopwatch.GetTimestamp();
+        release.Set();
+
+        (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
+        observer.Join(ShortTimeout).Should().BeTrue();
+
+        subscription.TryRead(out var delivered).Should().BeTrue("the echo was subscribed to");
+        delivered.HostArrivalTimestamp.Should().BeLessThan(releasedAt,
+            "the stamp must be taken when the frame arrived, which was before this test let the "
+            + "transmitting thread out of Transmit");
+    }
 }
