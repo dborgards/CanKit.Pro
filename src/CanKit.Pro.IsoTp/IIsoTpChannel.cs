@@ -64,6 +64,19 @@ public interface IIsoTpChannel : IDisposable
     Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// As <see cref="ReceiveAsync"/>, but also reports the monotonic instant the PDU was queued.
+    /// </summary>
+    /// <remarks>
+    /// For callers that enforce a response deadline. <see cref="ReceiveAsync"/> can only tell
+    /// them when they observed the PDU, and a caller descheduled past its own deadline cannot
+    /// tell a punctual response from a late one on that basis — it would either accept a
+    /// response it had already given up on, or reject a timely one for arriving while it was not
+    /// looking. The arrival timestamp removes the ambiguity, so the deadline holds regardless of
+    /// scheduling.
+    /// </remarks>
+    Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
     /// faults enqueued by <c>AbortRx</c> — and returns how many were dropped. Also silently
     /// aborts any in-flight multi-frame reassembly on the actor so leftover consecutive frames

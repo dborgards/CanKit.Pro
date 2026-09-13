@@ -15,6 +15,7 @@ namespace CanKit.Pro.IsoTp
         int DiscardPendingPdus();
         System.Collections.Generic.IAsyncEnumerable<byte[]> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpReceivedPdu> ReceiveWithArrivalAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
     }
     public static class IsoTp
@@ -133,6 +134,12 @@ namespace CanKit.Pro.IsoTp
     public sealed class IsoTpOverflowException : CanKit.Pro.IsoTp.IsoTpException
     {
         public IsoTpOverflowException(string message) { }
+    }
+    public readonly struct IsoTpReceivedPdu
+    {
+        public IsoTpReceivedPdu(byte[] pdu, long arrivalTimestamp) { }
+        public long ArrivalTimestamp { get; }
+        public byte[] Pdu { get; }
     }
     public sealed class IsoTpSendRejectedException : CanKit.Pro.IsoTp.IsoTpException
     {

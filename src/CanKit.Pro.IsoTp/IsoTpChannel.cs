@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
@@ -219,11 +220,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     /// <inheritdoc />
     public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
+        => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
+
+    /// <inheritdoc />
+    public async Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(
+        CancellationToken cancellationToken = default)
     {
         while (await _pduInbox.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {
             if (_pduInbox.Reader.TryRead(out var item))
-                return UnwrapInboxItem(item);
+                return new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp);
         }
         throw new InvalidOperationException("Channel is disposed; no more PDUs will arrive.");
     }
@@ -1174,17 +1180,28 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// </summary>
     private readonly struct RxInboxItem
     {
-        private RxInboxItem(byte[]? pdu, Exception? error)
+        private RxInboxItem(byte[]? pdu, Exception? error, long arrivalTimestamp)
         {
             Pdu = pdu;
             Error = error;
+            ArrivalTimestamp = arrivalTimestamp;
         }
 
         public byte[]? Pdu { get; }
         public Exception? Error { get; }
 
-        public static RxInboxItem FromPdu(byte[] pdu) => new(pdu, null);
-        public static RxInboxItem FromError(Exception error) => new(null, error);
+        /// <summary>
+        /// When this item was created, from <see cref="Stopwatch.GetTimestamp"/>. Stamped at
+        /// enqueue rather than at delivery: the two differ by however long the reader was
+        /// descheduled, and a deadline that measures the second one is not a deadline.
+        /// </summary>
+        public long ArrivalTimestamp { get; }
+
+        public static RxInboxItem FromPdu(byte[] pdu)
+            => new(pdu, null, Stopwatch.GetTimestamp());
+
+        public static RxInboxItem FromError(Exception error)
+            => new(null, error, Stopwatch.GetTimestamp());
     }
 
     private enum TxStage
