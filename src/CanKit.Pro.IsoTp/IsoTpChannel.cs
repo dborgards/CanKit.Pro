@@ -600,16 +600,6 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             Exception? failure = null;
             try
             {
-                // Taken here, on the thread that is about to hand the frame to the bus, and not
-                // by whoever awaits SendAsync: P2 starts when the request was transmitted, and
-                // the caller's continuation runs an unbounded time after that -- behind this
-                // task's completion, the actor hop that posts it, and WaitForBusTxIdleAsync,
-                // which waits for the echo. Measured at up to 74.8 ms against an 80 ms P2 on a
-                // four-core box under 3x load; on a starved CI runner it is what makes a late
-                // response measure as punctual (#92).
-                if (expected is not null)
-                    Volatile.Write(ref expected.LastFrameTransmitTimestamp, Stopwatch.GetTimestamp());
-
                 var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
                 confirmation = c;
             }
@@ -703,6 +693,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         var conf = confirmation!.Value;
+
+        // The bus reports when it handed this frame to the driver. Recording it here, on the
+        // actor, rather than around the send: this task's own scheduling and the pending-send
+        // lock both sit between "we decided to send" and the frame going out, and P2 starts at
+        // the second of those (Codex on #112). The last frame to be confirmed leaves the value
+        // CompleteTx hands back, which is the instant the request finished transmitting.
+        if (conf.HostTransmitTimestamp > 0)
+            expected.LastFrameTransmitTimestamp = conf.HostTransmitTimestamp;
+
         if (!conf.Confirmed)
         {
             switch (conf.FailureReason)
@@ -814,7 +813,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (tx is null) return;
         tx.NBsDeadline?.Complete();
         _tx = null;
-        tx.Tcs.TrySetResult(Volatile.Read(ref tx.LastFrameTransmitTimestamp));
+        tx.Tcs.TrySetResult(tx.LastFrameTransmitTimestamp);
     }
 
     private void FailTx(Exception ex)
@@ -1271,13 +1270,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         public TaskCompletionSource<long> Tcs { get; }
 
         /// <summary>
-        /// <see cref="Stopwatch.GetTimestamp"/> reading taken as the most recent frame of this
-        /// PDU was handed to the bus. A field rather than a property because it is written from
-        /// the thread-pool task that performs the send and read back on the actor loop, so both
-        /// sides go through <see cref="Volatile"/>. When the send completes, the last write is
-        /// the last frame -- which is the instant P2 starts.
+        /// <see cref="Stopwatch.GetTimestamp"/> reading reported by the bus for the most recent
+        /// frame of this PDU it handed to the driver. Written and read on the actor loop only.
+        /// When the send completes, the last value written is the last frame's -- which is the
+        /// instant P2 starts.
         /// </summary>
-        public long LastFrameTransmitTimestamp;
+        public long LastFrameTransmitTimestamp { get; set; }
 
         public TxStage State { get; set; }
         public int Offset { get; set; }

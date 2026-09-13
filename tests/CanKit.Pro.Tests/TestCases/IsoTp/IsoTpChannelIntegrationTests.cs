@@ -1497,6 +1497,44 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             + "it exactly like the tester's own transmissions");
     }
 
+    // #112 -- the transmit stamp must come from the bus's own hand-off to the driver, not from
+    // anywhere upstream of it. The UDS-level tests for this run on a channel stub, which by
+    // construction cannot say where in the real path the reading is taken (Codex on #112); this
+    // one runs the whole chain and pins the placement by ordering.
+    //
+    // ControllableBus.OnTransmitting runs on the transmitting thread inside Transmit, so blocking
+    // there parks the frame mid-hand-off. Every candidate instant upstream of the driver call --
+    // the channel's send task starting, the actor hop, acquiring the pending-send lock -- happens
+    // before this test releases it; the correct one happens after. No tolerance, no duration.
+    [Fact]
+    public async Task Transmit_Stamp_Comes_From_The_Bus_Hand_Off_Not_From_Upstream()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var channel = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+
+        using var transmitting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        bus.OnTransmitting = _ =>
+        {
+            transmitting.Set();
+            release.Wait(ShortTimeout);
+        };
+
+        var send = channel.SendWithTransmitStampAsync(new byte[] { 0x22, 0xF1, 0x90 });
+        transmitting.Wait(ShortTimeout).Should().BeTrue("the frame must reach the driver call");
+
+        var releasedAt = Stopwatch.GetTimestamp();
+        release.Set();
+
+        var transmitStamp = await send.WaitAsync(ShortTimeout);
+
+        transmitStamp.Should().BeGreaterThan(releasedAt,
+            "the stamp must be taken after the driver accepted the frame, and this test held the "
+            + "driver call open until the instant above");
+    }
+
     /// <summary>
     /// Test double: the first <see cref="ICanBusService.SendConfirmed"/> call throws the supplied
     /// exception instead of transmitting; every later call is forwarded to the inner service

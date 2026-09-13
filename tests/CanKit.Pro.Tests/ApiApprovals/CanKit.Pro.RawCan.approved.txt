@@ -83,6 +83,7 @@ namespace CanKit.Pro.RawCan
     {
         public bool Confirmed { get; init; }
         public CanKit.Pro.RawCan.TxConfirmFailureReason FailureReason { get; init; }
+        public long HostTransmitTimestamp { get; init; }
         public bool IsApproximated { get; init; }
         public System.DateTime Timestamp { get; init; }
     }

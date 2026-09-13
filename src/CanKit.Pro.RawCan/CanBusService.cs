@@ -313,8 +313,9 @@ namespace CanKit.Pro.RawCan
             // frame, explicitly marked IsApproximated so callers can never mistake this for a real
             // hardware acknowledgment.
             var accepted = await _bus.TransmitAsync(frame, cancellationToken).ConfigureAwait(false);
+            var handoff = Stopwatch.GetTimestamp();
             return accepted > 0
-                ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None }
+                ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff }
                 : new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Rejected };
         }
 
@@ -323,6 +324,7 @@ namespace CanKit.Pro.RawCan
             var pending = new PendingSend(PendingKey.ForPendingSend(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
 
             int accepted;
+            long handoff = 0;
             try
             {
                 // Register and transmit as one atomic step under _pendingGate: this is what makes
@@ -358,6 +360,14 @@ namespace CanKit.Pro.RawCan
 
                     RegisterPending(pending);
                     accepted = _bus.Transmit(in frame);
+
+                    // Taken here, inside the lock and immediately after the driver call returns:
+                    // this is the closest observable instant to the frame reaching the wire.
+                    // Anything earlier is before the frame was handed over -- including the wait
+                    // for this very lock, which another send holds across its own Transmit -- and
+                    // would start a caller's response deadline while the request was still
+                    // queued behind it (Codex on #112).
+                    handoff = Stopwatch.GetTimestamp();
                 }
             }
             catch
@@ -374,7 +384,9 @@ namespace CanKit.Pro.RawCan
 
             try
             {
-                return await WaitForPendingAsync(pending, timeout, cancellationToken).ConfigureAwait(false);
+                var confirmation = await WaitForPendingAsync(pending, timeout, cancellationToken)
+                    .ConfigureAwait(false);
+                return confirmation with { HostTransmitTimestamp = handoff };
             }
             finally
             {
