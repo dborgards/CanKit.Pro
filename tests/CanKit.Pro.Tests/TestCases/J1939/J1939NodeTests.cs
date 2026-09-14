@@ -1306,8 +1306,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         {
             TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(1)),
         };
-        using var sender = new J1939NodeImpl(service, nodeOptions, ownsService: false,
-            clock.NewActor());
+        var senderActor = clock.NewActor();
+        using var sender = new J1939NodeImpl(service, nodeOptions, ownsService: false, senderActor);
 
         // The claim waits out its contention window on the same clock, so it needs the clock
         // moved before it can succeed -- it is a precondition here, not the subject.
@@ -1343,10 +1343,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // 60 bytes over 7-byte data frames is 9 per emission.
         const int dataFramesPerEmission = 9;
 
-        // The virtual resolution the period is bracketed to. No real-time quantity is needed for
-        // the probe: PeriodicEmissionsCompleted below is incremented after Reschedule has run, so
-        // by the time a round begins the next anchor is armed and a timer one tick away cannot
-        // have fired.
+        // The virtual resolution the period is bracketed to.
         var Step = TimeSpan.FromMilliseconds(1);
 
         var startedAt = clock.Elapsed;
@@ -1356,11 +1353,22 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             {
                 var slotPoint = startedAt + TimeSpan.FromTicks(period.Ticks * slot);
 
-                // One tick short of the slot. Without this probe the test cannot tell the
-                // configured period from any shorter one: a jump straight to the slot passes over
-                // the earlier deadline, Reschedule coalesces the missed anchors, and exactly one
-                // emission comes out either way. Codex found that on the first revision, and
-                // halving the period confirmed it -- the test passed.
+                // Which period the schedule is actually on is decided here, by asking the
+                // actor which instant its next tick is armed for. A shorter period arms a nearer
+                // one, and no jump this loop makes can turn that into a match.
+                //
+                // The wire cannot answer it. A jump straight to the slot passes over the earlier
+                // deadline of a shorter period, Reschedule coalesces the missed anchors, and
+                // exactly one emission comes out either way -- Codex found that on the first
+                // revision, and halving the period confirmed it. The one-tick-short probe below
+                // was the first answer and is not sufficient on its own either: SettleAsync ends
+                // the actor callback, not the send it hands to the thread pool, so an early
+                // emission can still be off the wire when Count() reads (Bugbot on #113).
+                await clock.WaitUntilTimerArmedAsync(senderActor, slotPoint - clock.Elapsed,
+                    ShortTimeout);
+
+                // One tick short of the slot: corroboration on the wire that the tick armed above
+                // has not fired early. It is the barrier, not this, that pins the period.
                 await clock.AdvanceToAsync(slotPoint - Step);
                 await clock.SettleAsync();
                 Count().Should().Be(slot - 1,

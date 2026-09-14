@@ -165,9 +165,12 @@ internal sealed class VirtualClock : IDisposable
     /// arms the interval from the new reading, and it then never elapses — the failure looks like
     /// the protocol not doing its job.
     ///
-    /// Exactness is deliberate. The clock has not moved since the arming, so the remaining delay
-    /// is the configured interval to the tick; anything else means a different timer, and waiting
-    /// for "something armed" would accept it. Polling here can be slow but cannot be wrong.
+    /// Exactness is deliberate, and it is what makes this a measurement rather than a wait: the
+    /// caller states the instant it believes the component is aiming at -- the configured interval
+    /// where the clock has not moved since the arming, or the remaining distance to a grid slot
+    /// where it has -- and a component aiming somewhere else never matches. Waiting for "something
+    /// armed" would accept the wrong timer, and a wire-side check cannot see an interval at all.
+    /// Polling here can be slow but cannot be wrong.
     /// </remarks>
     public async Task WaitUntilTimerArmedAsync(ProtocolActor actor, TimeSpan expected,
         TimeSpan giveUpAfter)
