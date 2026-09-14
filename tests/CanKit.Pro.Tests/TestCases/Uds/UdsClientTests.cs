@@ -555,7 +555,18 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         var (client, _, dispose) = BuildPair(
             e => e.On(0x22, _ => throw new EcuResponsePending(
                 pendingCount: 5, finalResponse: new byte[] { 0xF1, 0x90 },
-                delayBetween: TimeSpan.FromMilliseconds(20))),
+                // No spacing: what bounds this loop is the count, not the gap, and every 0x78
+                // restarts P2* -- so a gap is a wait racing a 1 s budget for no gain. It cost
+                // two red macOS legs (#115, #116) before anyone read which test was failing:
+                // the host stretches the Delay, P2* wins, and the client raises the timeout it
+                // is entitled to raise instead of the abort this test asserts.
+                //
+                // Checked before removing it rather than after: with the P2* restart mutated
+                // away entirely, this test passes at the old 20 ms too, so the gap carried
+                // nothing. Its two neighbours are not the same -- the 60 ms in
+                // ResponsePending_Restarts_P2Star_And_Returns_Final_Response is what pushes that
+                // transfer past P2, and the same mutation passes there once it is zero.
+                delayBetween: TimeSpan.Zero)),
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(500),
