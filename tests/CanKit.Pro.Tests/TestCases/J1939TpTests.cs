@@ -308,9 +308,16 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        // Th=1ms so 255 hold-offs together take ~0.25s rather than dominating test time; the
-        // Virtual hub delivers synchronously so timing is not what we're checking here.
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(1));
+        // Th=0: the subject here is the sequence number reaching 255 without an off-by-one, not
+        // pacing, and the maximum payload is 255 TP.DT packets -- so any non-zero Th puts 254
+        // scheduled waits on the path. That is not 254 ms. A Schedule(1 ms) parks the actor loop,
+        // and a parked loop on a contended host wakes when the scheduler gets round to it: under
+        // 8x load on four cores the same transfer took 48-55 s against this test's 10 s budget,
+        // and failed 6 of 6. At Th=0 nothing is ever not-yet-due, the loop drains instead of
+        // parking, and the same load costs 1-3 s (#114).
+        //
+        // Paced BAM is covered by the other BAM tests in this file, which is why it can go here.
+        var opts = new J1939TpOptions().With(th: TimeSpan.Zero);
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x50, options: opts);
         using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x51, options: opts);
 
