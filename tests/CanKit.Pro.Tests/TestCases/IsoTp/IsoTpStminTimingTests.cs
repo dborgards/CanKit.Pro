@@ -37,12 +37,7 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
     /// <summary>The virtual resolution a pacing interval is bracketed to.</summary>
     private static readonly TimeSpan Step = TimeSpan.FromMilliseconds(1);
 
-    /// <summary>
-    /// Real time allowed for an emission to become observable before concluding one did not
-    /// happen. See <see cref="VirtualClock.SettleAndPauseAsync"/> for why this is a wait and not
-    /// a tolerance, and which way it fails.
-    /// </summary>
-    private static readonly TimeSpan Grace = TimeSpan.FromMilliseconds(100);
+
 
     private static string NewSession() => $"isotp-stmin-{Guid.NewGuid():N}";
 
@@ -76,10 +71,9 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
     /// bracketed from both sides — nothing at STmin minus one tick, the frame at STmin — which is
     /// what makes this about the configured value rather than merely about pacing existing at all.
     ///
-    /// The only real-time quantity is the grace allowed for an emission to become observable
-    /// before concluding one did not happen, and that is a wait rather than a tolerance: it fails
-    /// towards passing, and every negative it guards is paired with a positive that a load spike
-    /// cannot fake.
+    /// There is no real-time quantity left. The probe is safe to assert because the sender is
+    /// known to have armed STmin — the test asks its actor rather than inferring it from a frame
+    /// on the wire — so a timer one tick away simply cannot have fired.
     /// </summary>
     [Fact]
     public async Task Sender_Advances_One_Consecutive_Frame_Per_Stmin_On_A_Clock_The_Test_Drives()
@@ -94,8 +88,9 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
         using var serviceA = new CanBusService(busA);
         using var serviceB = new CanBusService(busB);
 
+        var senderActor = clock.NewActor();
         using var sender = new IsoTpChannel(serviceA, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
-            FastOptions(), ownsService: false, clock.NewActor());
+            FastOptions(), ownsService: false, senderActor);
         using var receiver = new IsoTpChannel(serviceB, IsoTpEndpoint.Normal(0x7E8, 0x7E0),
             FastOptions(localStMin: stMin), ownsService: false, clock.NewActor());
 
@@ -134,15 +129,16 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
 
         for (var expected = 1; expected <= expectedCfs; expected++)
         {
-            // Let the previous frame's TX confirmation reach the sender and arm the next STmin
-            // before moving the clock. It arrives from the thread pool, so it is not ordered
-            // against this loop: moving first would have the interval armed from the new reading
-            // and the frame would never come. Bugbot found this on the first revision, and it
-            // reproduced immediately once the probe below made the timing tight enough to matter.
-            await clock.SettleAndPauseAsync(Grace);
+            // Wait until the sender has actually armed STmin before moving the clock. The
+            // confirmation that triggers the arming reaches its actor through a thread-pool post
+            // ordered against nothing here, so moving first would arm the interval from the new
+            // reading and the frame would never come. An earlier revision waited out a fixed
+            // grace instead; Codex pointed out that a grace establishes no ordering at all, and
+            // it was right -- this asks the actor.
+            await clock.WaitUntilTimerArmedAsync(senderActor, stMin, ShortTimeout);
 
             await clock.AdvanceAsync(justUnder);
-            await clock.SettleAndPauseAsync(Grace);
+            await clock.SettleAsync();
             Volatile.Read(ref cfCount).Should().Be(expected - 1,
                 "only {0} of the {1} STmin interval has elapsed, so consecutive frame {2} is not "
                 + "due yet", justUnder, stMin, expected);

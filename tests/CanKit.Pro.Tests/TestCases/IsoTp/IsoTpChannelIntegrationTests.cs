@@ -439,8 +439,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         using var serviceRecv = new CanBusService(busB);
         using var servicePeer = new CanBusService(busA);
+        var receiverActor = clock.NewActor();
         using var receiver = new IsoTpChannel(serviceRecv, epRecv, FastOptions(nCr: nCr),
-            ownsService: false, clock.NewActor());
+            ownsService: false, receiverActor);
         using var sender = new IsoTpChannel(servicePeer, epPeer, FastOptions(),
             ownsService: false, clock.NewActor());
 
@@ -453,24 +454,22 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await sender.SendAsync(new byte[] { 0x22, 0xF1, 0x90 });
         await singleFrameQueued.Task.WaitAsync(ShortTimeout);
 
-        // Queue an AbortRx fault via N_Cr (FF then silence). The receiver's flow control is the
-        // signal that it processed the FF and therefore armed N_Cr: advancing before that would
-        // arm the timer from the new reading and it would never expire.
-        var flowControlSeen = new TaskCompletionSource<bool>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        busA.FrameObserved += (_, e) =>
-        {
-            var payload = e.CanFrame.Data.Span;
-            if (e.CanFrame.ID == unchecked((int)epRecv.TxCanId)
-                && payload.Length > 0 && (payload[0] & 0xF0) == 0x30)
-                flowControlSeen.TrySetResult(true);
-        };
-
+        // Queue an AbortRx fault via N_Cr (FF then silence).
+        //
+        // The receiver's flow control on the wire is NOT proof that N_Cr is armed, though the
+        // first draft of this used it as one: HandleRxFirstFrame calls SendUnsequencedFrame --
+        // fire-and-forget -- and only afterwards assigns _rx and calls ArmNCr. The frame can
+        // therefore be observed while the handler is still several statements short of arming,
+        // and advancing there would arm the timer from the new reading and it would never expire.
+        // Codex and Bugbot both caught that; the code order is at IsoTpChannel.cs:968 and :981.
         byte[] ffPayload = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
         int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
         var ff = IsoTpFrameCodec.BuildFirstFrame(epPeer, ffPayload.Length, ffPayload.AsSpan(0, ffData), isCanFd: false);
         busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ff));
-        await flowControlSeen.Task.WaitAsync(ShortTimeout);
+
+        // Ask the actor instead. This is true exactly when N_Cr is armed and the clock has not
+        // moved since, which is the state the advance below requires.
+        await clock.WaitUntilTimerArmedAsync(receiverActor, nCr, ShortTimeout);
 
         // N_Cr expires because the clock says so. AdvanceAsync returns only once the callback has
         // run, and AbortRx enqueues its fault on the actor, so the item is in the inbox here --

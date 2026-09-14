@@ -94,6 +94,42 @@ namespace CanKit.Pro.Actor
         /// </summary>
         internal ITimeSource TimeSource => _time;
 
+        /// <summary>
+        /// Time from now until this actor's earliest armed timer is due, or null when none is
+        /// armed. Evaluated <em>on the loop</em>, which is what makes it usable as a barrier.
+        /// </summary>
+        /// <remarks>
+        /// A test driving a virtual clock has to know that the component under test has armed the
+        /// interval before moving the clock, or the interval gets armed from the new reading and
+        /// never elapses. Observing the wire does not establish that: a frame can leave inside a
+        /// handler that arms its timer several statements later, and a confirmation can reach the
+        /// actor through a thread-pool post that is not ordered against the test at all. Both were
+        /// found in review on #113 rather than by the tests failing.
+        ///
+        /// Reading <c>_timers</c> is only legal on the loop, so this asks by posting rather than
+        /// by locking, which also gives the ordering for free: the answer is computed after every
+        /// work item queued before it. Polling on it can be slow but cannot be wrong, which is the
+        /// difference between this and waiting out a fixed grace.
+        /// </remarks>
+        internal Task<TimeSpan?> NextTimerDelayAsync() => PostAsync(() =>
+        {
+            DrainPendingTimerInserts();
+
+            while (_timers.Count > 0 && _timers[0].IsCancelled)
+            {
+                var head = _timers[0];
+                _timers.RemoveAt(0);
+                Retire(head);
+            }
+
+            if (_timers.Count == 0) return (TimeSpan?)null;
+
+            var ticks = _timers[0].DueTimestamp - _time.GetTimestamp();
+            return ticks <= 0
+                ? TimeSpan.Zero
+                : TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
+        });
+
         private readonly TimeSpan _shutdownTimeout;
 
         private int _disposedFlag;

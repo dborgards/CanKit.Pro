@@ -1343,11 +1343,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // 60 bytes over 7-byte data frames is 9 per emission.
         const int dataFramesPerEmission = 9;
 
-        // The virtual resolution the period is bracketed to, and the real time allowed for an
-        // emission to become observable before concluding one did not happen. The latter is a
-        // wait rather than a tolerance -- see VirtualClock.SettleAndPauseAsync.
+        // The virtual resolution the period is bracketed to. No real-time quantity is needed for
+        // the probe: PeriodicEmissionsCompleted below is incremented after Reschedule has run, so
+        // by the time a round begins the next anchor is armed and a timer one tick away cannot
+        // have fired.
         var Step = TimeSpan.FromMilliseconds(1);
-        var Grace = TimeSpan.FromMilliseconds(100);
 
         var startedAt = clock.Elapsed;
         using (sender.StartPeriodicSend(message, period))
@@ -1362,7 +1362,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 // emission comes out either way. Codex found that on the first revision, and
                 // halving the period confirmed it -- the test passed.
                 await clock.AdvanceToAsync(slotPoint - Step);
-                await clock.SettleAndPauseAsync(Grace);
+                await clock.SettleAsync();
                 Count().Should().Be(slot - 1,
                     "the clock is one tick short of slot {0}, so that emission is not due yet",
                     slot);

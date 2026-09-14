@@ -32,6 +32,15 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// observable effect; what is deterministic here is <em>when the decision was taken</em>.
 /// </para>
 /// <para>
+/// <b>Arm before you advance.</b> The clock may only be moved once the component under test has
+/// armed the interval being tested; move first and it arms from the new reading and never
+/// elapses. A frame on the wire does not establish that — a receiver sends flow control several
+/// statements before it arms N_Cr, and a sender arms STmin from a confirmation posted by the
+/// thread pool — so <see cref="WaitUntilTimerArmedAsync"/> asks the actor instead. An earlier
+/// revision waited out a fixed grace here; review pointed out that a grace establishes no
+/// ordering whatsoever, only a probability, and it was right.
+/// </para>
+/// <para>
 /// <b>What it must not do.</b> A virtual clock makes work free unless the work is made to cost
 /// something, and that can silently destroy a test's reason for existing: the J1939 fixed-rate
 /// test tells anchor scheduling from send-then-delay only because a send takes time, and on a
@@ -144,23 +153,34 @@ internal sealed class VirtualClock : IDisposable
     }
 
     /// <summary>
-    /// Settles every actor, then leaves <paramref name="grace"/> of real time for anything a
-    /// callback handed to the thread pool to become observable. For asserting that something has
-    /// <em>not</em> happened.
+    /// Waits until <paramref name="actor"/> has an armed timer exactly <paramref name="expected"/>
+    /// away — i.e. until the component under test has armed that interval and the clock may safely
+    /// be moved.
     /// </summary>
     /// <remarks>
-    /// A negative is the one thing a virtual clock cannot make deterministic: the work a due
-    /// callback starts finishes on the thread pool and on real I/O, neither of which this clock
-    /// governs. The grace is therefore a wait, not a tolerance, and its failure direction is the
-    /// safe one — on a loaded runner an effect that was going to appear may simply not have yet,
-    /// which turns a broken implementation into a pass rather than a correct one into a failure.
-    /// Every such assertion here is paired with a positive one that a load spike cannot fake.
+    /// The barrier every test on this clock needs and the one that is easiest to fake. Observing a
+    /// frame on the wire does not establish it: a receiver sends flow control several statements
+    /// before it arms N_Cr, and a sender arms STmin from a transmit confirmation that reaches its
+    /// actor through a thread-pool post ordered against nothing. Moving the clock in that window
+    /// arms the interval from the new reading, and it then never elapses — the failure looks like
+    /// the protocol not doing its job.
+    ///
+    /// Exactness is deliberate. The clock has not moved since the arming, so the remaining delay
+    /// is the configured interval to the tick; anything else means a different timer, and waiting
+    /// for "something armed" would accept it. Polling here can be slow but cannot be wrong.
     /// </remarks>
-    public async Task SettleAndPauseAsync(TimeSpan grace)
+    public async Task WaitUntilTimerArmedAsync(ProtocolActor actor, TimeSpan expected,
+        TimeSpan giveUpAfter)
     {
-        await SettleAsync().ConfigureAwait(false);
-        await Task.Delay(grace).ConfigureAwait(false);
-        await SettleAsync().ConfigureAwait(false);
+        var deadline = DateTime.UtcNow + giveUpAfter;
+        TimeSpan? seen;
+        while ((seen = await actor.NextTimerDelayAsync().ConfigureAwait(false)) != expected)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException(
+                    $"Expected a timer armed {expected} away; the earliest is {seen?.ToString() ?? "none"}.");
+            await Task.Yield();
+        }
     }
 
     /// <summary>
