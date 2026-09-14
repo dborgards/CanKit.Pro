@@ -506,6 +506,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // (that peer has already lost).
         if (peerSa == J1939Pgn.NullAddress) return;
 
+        // Somebody else has taken the address this node is giving up (#119, Codex). Nothing here
+        // contests our pending claim -- that is for a different address -- but it does end the
+        // reason to treat traffic from the old one as our own draining echo. Without this the
+        // marker outlives its truth: the new owner's application PGNs would be discarded for the
+        // rest of an unrelated arbitration window, which on a long ClaimAnnounceTimeout is a
+        // sizeable hole. Reached only for a NAME that is not ours, checked above.
+        int vacatedBefore = Volatile.Read(ref _vacatedAddressStore);
+        if (vacatedBefore >= 0 && peerSa == (byte)vacatedBefore)
+            Volatile.Write(ref _vacatedAddressStore, -1);
+
         var pending = _pendingClaim;
         if (pending is not null && peerSa == pending.PreferredAddress)
         {
