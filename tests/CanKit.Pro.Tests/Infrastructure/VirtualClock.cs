@@ -1,0 +1,210 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using CanKit.Pro.Actor;
+
+namespace CanKit.Pro.Tests.Infrastructure;
+
+/// <summary>
+/// A monotonic clock the test owns, plus the actors that measure their timers against it (#92
+/// step 2). Advancing it is deterministic: when <see cref="AdvanceAsync"/> returns, every timer
+/// that became due has already run its callback.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The point is not that it is faster than sleeping. It is that a test asserting "the sender
+/// waited STmin before the next frame" is otherwise asserting something the code explicitly does
+/// not promise — the ISO-TP README concedes that effective spacing is "STmin + OS scheduling
+/// latency … with no hard real-time guarantee under load", and #92 counts the tests that have
+/// gone red for want of that distinction. With the clock in the test's hands, the property under
+/// test becomes the one the code actually implements: <em>the interval the sender waits for is
+/// STmin</em>, measured on the clock it schedules against.
+/// </para>
+/// <para>
+/// <b>Why two round-trips.</b> <see cref="ProtocolActor"/>'s loop runs
+/// <c>wait → DrainMailbox → DrainPendingTimerInserts → FireDueTimers</c>. A single
+/// <see cref="IProtocolActor.PostAsync(Action)"/> completes during the drain, so awaiting it can
+/// resume while that same iteration is still inside <c>FireDueTimers</c>. The second one is
+/// drained in the <em>next</em> iteration, which the loop reaches only after the first
+/// iteration's timer callbacks have returned — so awaiting it is a proof that they did, resting
+/// on the loop being sequential rather than on any delay. Anything a callback then hands to the
+/// thread pool (an emission, a send) is still asynchronous and must be awaited on its own
+/// observable effect; what is deterministic here is <em>when the decision was taken</em>.
+/// </para>
+/// <para>
+/// <b>Arm before you advance.</b> The clock may only be moved once the component under test has
+/// armed the interval being tested; move first and it arms from the new reading and never
+/// elapses. A frame on the wire does not establish that — a receiver sends flow control several
+/// statements before it arms N_Cr, and a sender arms STmin from a confirmation posted by the
+/// thread pool — so <see cref="WaitUntilTimerArmedAsync"/> asks the actor instead. An earlier
+/// revision waited out a fixed grace here; review pointed out that a grace establishes no
+/// ordering whatsoever, only a probability, and it was right.
+/// </para>
+/// <para>
+/// <b>What it must not do.</b> A virtual clock makes work free unless the work is made to cost
+/// something, and that can silently destroy a test's reason for existing: the J1939 fixed-rate
+/// test tells anchor scheduling from send-then-delay only because a send takes time, and on a
+/// clock nobody advances during a send both implementations land on the grid. Hence
+/// <see cref="Advance"/> is public and callable from inside a bus double — the cost of work is
+/// modelled explicitly rather than assumed away. #112 is the cautionary case: a virtual clock
+/// would have hidden that defect instead of fixing it.
+/// </para>
+/// </remarks>
+internal sealed class VirtualClock : IDisposable
+{
+    private readonly ManualTimeSource _source = new();
+    private readonly List<ProtocolActor> _actors = new();
+    private readonly object _gate = new();
+
+    /// <summary>How often the actors have read the clock. See <see cref="ManualTimeSource.ReadCount"/>.</summary>
+    public long ReadCount => _source.ReadCount;
+
+    /// <summary>
+    /// Elapsed virtual time since this clock was created. Read it at the moment an effect is
+    /// observed to learn which virtual instant it belongs to.
+    /// </summary>
+    public TimeSpan Elapsed => TimeSpan.FromTicks(_source.GetTimestamp());
+
+    /// <summary>
+    /// A new actor measuring its timers against this clock, tracked so <see cref="AdvanceAsync"/>
+    /// wakes it and <see cref="Dispose"/> tears it down. Hand it to the component under test.
+    /// </summary>
+    public ProtocolActor NewActor()
+    {
+        var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, _source, null);
+        lock (_gate) _actors.Add(actor);
+        return actor;
+    }
+
+    /// <summary>
+    /// Moves the clock forward without waiting for anyone to notice. For use from inside a double
+    /// that is modelling work which costs time — a driver call, a transmission — where the caller
+    /// is mid-operation and cannot await anything.
+    /// </summary>
+    public void Advance(TimeSpan by) => _source.Advance(by);
+
+    /// <summary>
+    /// Moves the clock forward and returns once every actor has fired the timers that became due.
+    /// </summary>
+    public async Task AdvanceAsync(TimeSpan by)
+    {
+        _source.Advance(by);
+
+        ProtocolActor[] actors;
+        lock (_gate) actors = _actors.ToArray();
+
+        // Poke every loop first: each is asleep on a wait computed from the clock as it was
+        // before the advance, and nothing about advancing a counter wakes it.
+        foreach (var actor in actors)
+            await actor.PostAsync(() => 0).ConfigureAwait(false);
+
+        // Second round-trip: see the remarks. This one is drained in the iteration after the one
+        // that fired the newly due timers, so it cannot return while a callback is still running.
+        foreach (var actor in actors)
+            await actor.PostAsync(() => 0).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Moves the clock to an absolute point and returns once the newly due timers have fired.
+    /// Throws if that point is already behind.
+    /// </summary>
+    /// <remarks>
+    /// The difference from <see cref="AdvanceAsync"/> matters whenever the thing under test is a
+    /// <em>grid</em>. Advancing by a period each round moves the target along with any drift the
+    /// implementation has accumulated, so a schedule that restarts its interval after each
+    /// emission stays exactly as due as one anchored to the grid, and the test cannot tell them
+    /// apart. Advancing to an absolute slot fixes the goalposts: only a schedule that is still on
+    /// the grid is due there.
+    /// </remarks>
+    public Task AdvanceToAsync(TimeSpan point)
+    {
+        var now = Elapsed;
+        if (point < now)
+            throw new ArgumentOutOfRangeException(nameof(point), point,
+                $"A monotonic clock cannot go back to {point} from {now}.");
+        return AdvanceAsync(point - now);
+    }
+
+    /// <summary>
+    /// Steps the clock forward until <paramref name="operation"/> completes, for an operation
+    /// that waits on a timer of its own. Returns the virtual time it took.
+    /// </summary>
+    /// <remarks>
+    /// Needed because a protocol operation that is not the subject of a test can still block on
+    /// the clock the test froze — J1939's address claim waits out a contention window before it
+    /// reports success, and on a clock nobody moves it waits forever. Stepping rather than making
+    /// one large jump avoids having to know when the operation gets round to arming its timer: an
+    /// advance that lands before that happens is simply not the one that releases it.
+    /// </remarks>
+    public async Task<TimeSpan> RunUntilAsync(Task operation, TimeSpan step, TimeSpan giveUpAfter)
+    {
+        var started = Elapsed;
+        var realDeadline = DateTime.UtcNow + giveUpAfter;
+        while (!operation.IsCompleted)
+        {
+            if (DateTime.UtcNow > realDeadline)
+                throw new TimeoutException(
+                    $"The operation did not complete after {Elapsed - started} of virtual time.");
+            await AdvanceAsync(step).ConfigureAwait(false);
+        }
+
+        await operation.ConfigureAwait(false); // surface a fault as itself
+        return Elapsed - started;
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="actor"/> has an armed timer exactly <paramref name="expected"/>
+    /// away — i.e. until the component under test has armed that interval and the clock may safely
+    /// be moved.
+    /// </summary>
+    /// <remarks>
+    /// The barrier every test on this clock needs and the one that is easiest to fake. Observing a
+    /// frame on the wire does not establish it: a receiver sends flow control several statements
+    /// before it arms N_Cr, and a sender arms STmin from a transmit confirmation that reaches its
+    /// actor through a thread-pool post ordered against nothing. Moving the clock in that window
+    /// arms the interval from the new reading, and it then never elapses — the failure looks like
+    /// the protocol not doing its job.
+    ///
+    /// Exactness is deliberate, and it is what makes this a measurement rather than a wait: the
+    /// caller states the instant it believes the component is aiming at -- the configured interval
+    /// where the clock has not moved since the arming, or the remaining distance to a grid slot
+    /// where it has -- and a component aiming somewhere else never matches. Waiting for "something
+    /// armed" would accept the wrong timer, and a wire-side check cannot see an interval at all.
+    /// Polling here can be slow but cannot be wrong.
+    /// </remarks>
+    public async Task WaitUntilTimerArmedAsync(ProtocolActor actor, TimeSpan expected,
+        TimeSpan giveUpAfter)
+    {
+        var deadline = DateTime.UtcNow + giveUpAfter;
+        TimeSpan? seen;
+        while ((seen = await actor.NextTimerDelayAsync().ConfigureAwait(false)) != expected)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException(
+                    $"Expected a timer armed {expected} away; the earliest is {seen?.ToString() ?? "none"}.");
+            await Task.Yield();
+        }
+    }
+
+    /// <summary>
+    /// Lets every actor reach a quiescent point without moving the clock — the same two
+    /// round-trips, for when a test needs work already posted to have been processed.
+    /// </summary>
+    public Task SettleAsync() => AdvanceAsync(TimeSpan.Zero);
+
+    public void Dispose()
+    {
+        ProtocolActor[] actors;
+        lock (_gate)
+        {
+            actors = _actors.ToArray();
+            _actors.Clear();
+        }
+
+        foreach (var actor in actors)
+        {
+            try { actor.Dispose(); }
+            catch (ObjectDisposedException) { /* already torn down by its owner */ }
+        }
+    }
+}

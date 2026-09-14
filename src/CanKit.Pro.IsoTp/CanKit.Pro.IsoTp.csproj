@@ -18,4 +18,12 @@
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
 
+  <!-- The tests substitute the channel's actor so its STmin and N_Cr timers run on a clock the
+       test drives rather than on the runner's (#92). -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

@@ -85,6 +85,78 @@ namespace CanKit.Pro.Actor
         // now measured as one.
         private readonly ITimeSource _time;
 
+        /// <summary>
+        /// The clock this actor measures its timers against. Exposed so a component that keeps
+        /// its own elapsed-time arithmetic alongside a deadline armed here -- J1939's fixed-rate
+        /// anchor is the one that does -- can read the same clock rather than a second one.
+        /// Asking the actor is what makes a mismatch unrepresentable: there is one clock per
+        /// loop and no way to pass a different one alongside it.
+        /// </summary>
+        // How many actor loops are running process-wide. Two Interlocked operations per actor
+        // lifetime, and nothing reads it in production.
+        //
+        // It exists because "a component disposes the actor it created, and never one it was
+        // handed" is otherwise unobservable from a test: when construction fails the component
+        // does not exist to be asked, and its own actor was never reachable. #113 asserted that
+        // contract in review and in a test named after it, and Codex pointed out the test could
+        // not fail -- it watched a subscription count that stays zero either way. This is the
+        // observable that makes it fail.
+        internal static int RunningLoopCount => Volatile.Read(ref s_runningLoops);
+
+        private static int s_runningLoops;
+
+        // The count is the type's state and not any instance's, so the operations on it belong to
+        // the type too. That is also what CodeQL's "static field written by instance method" was
+        // pointing at: the write was correct, its owner was not.
+        private static void EnterLoopCount() => Interlocked.Increment(ref s_runningLoops);
+
+        private static void ExitLoopCount() => Interlocked.Decrement(ref s_runningLoops);
+
+        internal ITimeSource TimeSource => _time;
+
+        /// <summary>
+        /// Time from now until this actor's earliest armed timer is due, or null when none is
+        /// armed. Evaluated <em>on the loop</em>, which is what makes it usable as a barrier.
+        /// </summary>
+        /// <remarks>
+        /// A test driving a virtual clock has to know that the component under test has armed the
+        /// interval before moving the clock, or the interval gets armed from the new reading and
+        /// never elapses. Observing the wire does not establish that: a frame can leave inside a
+        /// handler that arms its timer several statements later, and a confirmation can reach the
+        /// actor through a thread-pool post that is not ordered against the test at all. Both were
+        /// found in review on #113 rather than by the tests failing.
+        ///
+        /// Reading <c>_timers</c> is only legal on the loop, so this asks by posting rather than
+        /// by locking, which also gives the ordering for free: the answer is computed after every
+        /// work item queued before it. Polling on it can be slow but cannot be wrong, which is the
+        /// difference between this and waiting out a fixed grace.
+        /// </remarks>
+        internal Task<TimeSpan?> NextTimerDelayAsync() => PostAsync<TimeSpan?>(() =>
+        {
+            DrainPendingTimerInserts();
+
+            // A pure read: cancelled entries are skipped, not retired. The loop's own trim and
+            // CompactCancelledTimers own that job, and a query that quietly mutates the timer
+            // list would be a second writer to state whose single-writer discipline is the
+            // reason FR-RAW-021 exists.
+            // Indexed rather than foreach-with-continue: _timers is ordered by due time, so this
+            // is a scan for the first live entry and stops there. (A .Where(...) would read as the
+            // filter CodeQL suggests and then allocate an enumerator on the loop thread to return
+            // one element.)
+            for (var i = 0; i < _timers.Count; i++)
+            {
+                var entry = _timers[i];
+                if (entry.IsCancelled) continue;
+
+                var ticks = entry.DueTimestamp - _time.GetTimestamp();
+                return ticks <= 0
+                    ? TimeSpan.Zero
+                    : TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
+            }
+
+            return null;
+        });
+
         private readonly TimeSpan _shutdownTimeout;
 
         private int _disposedFlag;
@@ -182,6 +254,10 @@ namespace CanKit.Pro.Actor
 
             _time = timeSource ?? MonotonicTimeSource.Instance;
             _shutdownTimeout = shutdownTimeout ?? DefaultShutdownTimeout;
+
+            // Before either loop starts, so an actor whose loop has not been scheduled yet still
+            // counts as live; the loop's own finally is what takes it back down.
+            EnterLoopCount();
 
             if (mode == ActorExecutionMode.DedicatedThread)
             {
@@ -380,6 +456,7 @@ namespace CanKit.Pro.Actor
                 // getting here.
                 _stopCts.Dispose();
                 _signal.Dispose();
+                ExitLoopCount();
             }
         }
 
@@ -411,6 +488,7 @@ namespace CanKit.Pro.Actor
                 FinalDrain();
                 _stopCts.Dispose();
                 _signal.Dispose();
+                ExitLoopCount();
             }
         }
 

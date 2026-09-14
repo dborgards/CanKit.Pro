@@ -415,6 +415,16 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // DiscardPendingPdus drains completed PDUs and AbortRx faults so a later ReceiveAsync
     // is not poisoned by leftover inbox items after a higher-layer cancel/timeout.
     // --------------------------------------------------------------------------------
+    // #92 step 2. This used Task.Delay as a synchronisation primitive twice -- 50 ms for "the SF
+    // has surely been buffered by now" and 200 ms for "N_Cr has surely expired by now" -- and
+    // both are bets that a shared runner does a bounded amount of work in a fixed window. It lost
+    // them at 4 runs in 6 under 2x load, on this branch and equally on its base, which is how it
+    // was identified rather than assumed.
+    //
+    // Neither delay is replaced by a longer one. The first becomes a signal (EmitPdu enqueues
+    // before raising DatagramReceived, so the event proves the inbox is non-empty) and the second
+    // disappears entirely: N_Cr is armed on the receiver's actor, so a clock this test owns makes
+    // its expiry a fact established rather than waited for.
     [Fact]
     public async Task DiscardPendingPdus_Drains_Completed_Pdus_And_Abort_Faults()
     {
@@ -425,20 +435,46 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
         var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
 
-        using var receiver = IsoTpFactory.Open(busB, epRecv,
-            FastOptions(nCr: TimeSpan.FromMilliseconds(80)));
-        using var sender = IsoTpFactory.Open(busA, epPeer, FastOptions());
+        var nCr = TimeSpan.FromMilliseconds(80);
+        using var clock = new VirtualClock();
+        using var serviceRecv = new CanBusService(busB);
+        using var servicePeer = new CanBusService(busA);
+        var receiverActor = clock.NewActor();
+        using var receiver = new IsoTpChannel(serviceRecv, epRecv, FastOptions(nCr: nCr),
+            ownsService: false, receiverActor);
+        using var sender = new IsoTpChannel(servicePeer, epPeer, FastOptions(),
+            ownsService: false, clock.NewActor());
 
-        // Buffer a completed SF without a waiter.
+        // Buffer a completed SF without a waiter. The event is raised after the enqueue, so it
+        // says the inbox holds it -- which is what the 50 ms delay used to assume.
+        var singleFrameQueued = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, _) => singleFrameQueued.TrySetResult(true);
+
         await sender.SendAsync(new byte[] { 0x22, 0xF1, 0x90 });
-        await Task.Delay(50);
+        await singleFrameQueued.Task.WaitAsync(ShortTimeout);
 
         // Queue an AbortRx fault via N_Cr (FF then silence).
+        //
+        // The receiver's flow control on the wire is NOT proof that N_Cr is armed, though the
+        // first draft of this used it as one: HandleRxFirstFrame calls SendUnsequencedFrame --
+        // fire-and-forget -- and only afterwards assigns _rx and calls ArmNCr. The frame can
+        // therefore be observed while the handler is still several statements short of arming,
+        // and advancing there would arm the timer from the new reading and it would never expire.
+        // Codex and Bugbot both caught that; the code order is at IsoTpChannel.cs:968 and :981.
         byte[] ffPayload = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
         int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
         var ff = IsoTpFrameCodec.BuildFirstFrame(epPeer, ffPayload.Length, ffPayload.AsSpan(0, ffData), isCanFd: false);
         busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ff));
-        await Task.Delay(200); // > N_Cr
+
+        // Ask the actor instead. This is true exactly when N_Cr is armed and the clock has not
+        // moved since, which is the state the advance below requires.
+        await clock.WaitUntilTimerArmedAsync(receiverActor, nCr, ShortTimeout);
+
+        // N_Cr expires because the clock says so. AdvanceAsync returns only once the callback has
+        // run, and AbortRx enqueues its fault on the actor, so the item is in the inbox here --
+        // no window, nothing to wait out.
+        await clock.AdvanceAsync(nCr + TimeSpan.FromMilliseconds(1));
 
         int discarded = receiver.DiscardPendingPdus();
         discarded.Should().BeGreaterThanOrEqualTo(2,
@@ -1573,6 +1609,55 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         transmitStamp.Should().BeGreaterThan(releasedAt,
             "the stamp must be taken after the driver accepted the frame, and this test held the "
             + "driver call open until the instant above");
+    }
+
+    // #113 -- who disposes the actor when construction fails. The seam's contract is that a
+    // channel disposes only an actor it created, because an injected one may be running other
+    // channels; the constructor's catch block is where that is decided and it had never been
+    // executed. Codecov is what noticed -- I had asserted the rule in the pull request and in
+    // three review replies without once running the path.
+    //
+    // The self-created half is observed through ProtocolActor.RunningLoopCount, because nothing
+    // else can see it: construction failed, so there is no channel to ask and its actor was never
+    // reachable. The first revision watched inner.SubscriptionCount, which is zero whether or not
+    // that actor was disposed -- Codex found that, and it is the same "assertion that cannot
+    // fail" this branch was written to stop shipping.
+    [Fact]
+    public async Task A_Failed_Construction_Disposes_Its_Own_Actor_But_Never_An_Injected_One()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var inner = new CanBusService(bus);
+        var endpoint = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+
+        // Injected: the channel must leave it alone on the way out.
+        using var clock = new VirtualClock();
+        var injected = clock.NewActor();
+        var failing = new ThrowingSubscribeService(inner, failOnCall: 1);
+
+        // After the injected actor exists, so it is the baseline both attempts return to.
+        var loopsBefore = ProtocolActor.RunningLoopCount;
+
+        Action construct = () => new IsoTpChannel(failing, endpoint, FastOptions(),
+            ownsService: false, injected);
+        construct.Should().Throw<InvalidOperationException>();
+
+        (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
+            "an injected actor belongs to the caller and must survive a construction that failed");
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            "the channel created no actor here, so it must not have ended one either");
+
+        // Self-created: the channel owns it, so it must be gone. Dispose joins the loop before
+        // returning, so a count still above the baseline is a leaked actor thread and not one
+        // that has yet to notice -- no wait belongs here.
+        var failingAgain = new ThrowingSubscribeService(inner, failOnCall: 1);
+        Action constructOwning = () => new IsoTpChannel(failingAgain, endpoint, FastOptions(),
+            ownsService: false);
+        constructOwning.Should().Throw<InvalidOperationException>();
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            "an actor the channel created for itself must not outlive the construction that "
+            + "failed");
+        inner.SubscriptionCount.Should().Be(0, "neither attempt got as far as subscribing");
     }
 
     /// <summary>
