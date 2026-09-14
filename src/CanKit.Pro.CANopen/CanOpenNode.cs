@@ -738,10 +738,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 }
 
                 byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
-                // Our own heartbeat / bootup / node-guarding response, echoed back (#95). Only
-                // the data frame: an *RTR* at this COB-ID is a consumer polling us and was
-                // answered above, so it must not be caught here.
-                if (producer == _nodeId) return;
+                // Our own heartbeat / bootup / node-guarding response, echoed back (#95). Three
+                // things it must not swallow:
+                //   * an *RTR* at this COB-ID, which is a consumer polling us and was answered
+                //     above rather than here;
+                //   * a node-guarding consumer registered for our own id;
+                //   * a heartbeat consumer registered for our own id.
+                // Both of those APIs take a node id and accept the local one, and on an echo bus
+                // that is a working configuration -- the node's own producer feeds its own
+                // consumer. Dropping the frame starves the deadline and the timeout fires while
+                // the frames are arriving (#119, Codex). Same rule the RPDO branch below already
+                // states: an explicitly configured consumer outranks a guess about the sender.
+                if (producer == _nodeId
+                    && !_nodeGuardingConsumers.ContainsKey(producer)
+                    && !_heartbeatConsumers.ContainsKey(producer))
+                    return;
                 // Consumer role (FR-CO-009): if we have a node-guarding consumer registered
                 // for this producer, treat the incoming data frame as a node-guarding reply
                 // (toggle + state). Otherwise fall through to the heartbeat consumer, which is

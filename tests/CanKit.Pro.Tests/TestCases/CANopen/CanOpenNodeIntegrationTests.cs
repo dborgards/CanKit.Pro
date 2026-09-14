@@ -1026,6 +1026,85 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         heartbeats.Should().NotContain((byte)0x01, "the node produced this heartbeat itself");
     }
 
+    // #119, Codex on the heartbeat self-drop: both AddHeartbeatConsumer and
+    // StartNodeGuardingConsumer accept the local node id, and on an echo bus that is a working
+    // configuration -- the node's own producer feeds its own consumer. A blanket drop of
+    // 0x700 + our id starves it, and the deadline fires despite the frames arriving.
+    //
+    // Same principle the dispatch already records for RPDOs: an explicitly configured consumer
+    // outranks a guess about who sent the frame. I wrote that down and then did not apply it one
+    // branch further up.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Heartbeat_Consumer_Configured_For_This_Node_Still_Gets_Fed(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
+
+        var beats = new List<byte>();
+        var gate = new object();
+        node.HeartbeatReceived += (_, e) => { lock (gate) beats.Add(e.ProducerNodeId); };
+
+        // The application asks, explicitly, to consume its own node's heartbeat.
+        node.AddHeartbeatConsumer(producerNodeId: 0x01, timeout: TimeSpan.FromSeconds(5));
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(20));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (gate) { if (beats.Count(b => b == 0x01) >= 2) break; }
+            await Task.Delay(5);
+        }
+
+        node.StopHeartbeatProducer();
+
+        List<byte> snapshot;
+        lock (gate) snapshot = new List<byte>(beats);
+        snapshot.Should().Contain((byte)0x01,
+            "a consumer registered for this node's own id was asked for on purpose; the "
+            + "self-traffic guard must not starve it");
+    }
+
+    // The node-guarding half of the same finding, and the one Codex named first. On an echo bus a
+    // consumer registered for this node's own id is a closed loop: the consumer's RTR comes back
+    // to us, HandleNodeGuardingRtrForSelf answers, and that answer must reach
+    // HandleNodeGuardingResponse or the lifetime is never rearmed and the timeout fires while the
+    // replies are arriving.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_NodeGuarding_Consumer_Configured_For_This_Node_Still_Gets_Fed(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
+
+        var replies = new List<bool>();
+        var enough = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timedOut = new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId != 0x01) return;
+            lock (replies)
+            {
+                replies.Add(e.Toggle);
+                if (replies.Count >= 3) enough.TrySetResult(true);
+            }
+        };
+        node.NodeGuardingTimeout += (_, e) => timedOut.TrySetResult(e.ProducerNodeId);
+
+        node.StartNodeGuardingConsumer(producerNodeId: 0x01,
+            guardTime: TimeSpan.FromMilliseconds(30), lifeTimeFactor: 3);
+
+        var settled = await Task.WhenAny(enough.Task, timedOut.Task,
+            Task.Delay(ShortTimeout));
+        node.StopNodeGuardingConsumer(0x01);
+
+        timedOut.Task.IsCompleted.Should().BeFalse(
+            "the replies are arriving, so the lifetime must be rearmed by them");
+        settled.Should().BeSameAs(enough.Task,
+            "a node-guarding consumer registered for this node's own id was asked for on "
+            + "purpose; the self-traffic guard must not starve it");
+    }
+
     // -----------------------------------------------------------------------------------------
     // FR-CO-011 — EMCY encode + receive event.
     // -----------------------------------------------------------------------------------------
