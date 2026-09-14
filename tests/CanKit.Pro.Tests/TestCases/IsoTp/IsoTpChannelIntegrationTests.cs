@@ -415,6 +415,16 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // DiscardPendingPdus drains completed PDUs and AbortRx faults so a later ReceiveAsync
     // is not poisoned by leftover inbox items after a higher-layer cancel/timeout.
     // --------------------------------------------------------------------------------
+    // #92 step 2. This used Task.Delay as a synchronisation primitive twice -- 50 ms for "the SF
+    // has surely been buffered by now" and 200 ms for "N_Cr has surely expired by now" -- and
+    // both are bets that a shared runner does a bounded amount of work in a fixed window. It lost
+    // them at 4 runs in 6 under 2x load, on this branch and equally on its base, which is how it
+    // was identified rather than assumed.
+    //
+    // Neither delay is replaced by a longer one. The first becomes a signal (EmitPdu enqueues
+    // before raising DatagramReceived, so the event proves the inbox is non-empty) and the second
+    // disappears entirely: N_Cr is armed on the receiver's actor, so a clock this test owns makes
+    // its expiry a fact established rather than waited for.
     [Fact]
     public async Task DiscardPendingPdus_Drains_Completed_Pdus_And_Abort_Faults()
     {
@@ -425,20 +435,47 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
         var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
 
-        using var receiver = IsoTpFactory.Open(busB, epRecv,
-            FastOptions(nCr: TimeSpan.FromMilliseconds(80)));
-        using var sender = IsoTpFactory.Open(busA, epPeer, FastOptions());
+        var nCr = TimeSpan.FromMilliseconds(80);
+        using var clock = new VirtualClock();
+        using var serviceRecv = new CanBusService(busB);
+        using var servicePeer = new CanBusService(busA);
+        using var receiver = new IsoTpChannel(serviceRecv, epRecv, FastOptions(nCr: nCr),
+            ownsService: false, clock.NewActor());
+        using var sender = new IsoTpChannel(servicePeer, epPeer, FastOptions(),
+            ownsService: false, clock.NewActor());
 
-        // Buffer a completed SF without a waiter.
+        // Buffer a completed SF without a waiter. The event is raised after the enqueue, so it
+        // says the inbox holds it -- which is what the 50 ms delay used to assume.
+        var singleFrameQueued = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, _) => singleFrameQueued.TrySetResult(true);
+
         await sender.SendAsync(new byte[] { 0x22, 0xF1, 0x90 });
-        await Task.Delay(50);
+        await singleFrameQueued.Task.WaitAsync(ShortTimeout);
 
-        // Queue an AbortRx fault via N_Cr (FF then silence).
+        // Queue an AbortRx fault via N_Cr (FF then silence). The receiver's flow control is the
+        // signal that it processed the FF and therefore armed N_Cr: advancing before that would
+        // arm the timer from the new reading and it would never expire.
+        var flowControlSeen = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) =>
+        {
+            var payload = e.CanFrame.Data.Span;
+            if (e.CanFrame.ID == unchecked((int)epRecv.TxCanId)
+                && payload.Length > 0 && (payload[0] & 0xF0) == 0x30)
+                flowControlSeen.TrySetResult(true);
+        };
+
         byte[] ffPayload = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
         int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
         var ff = IsoTpFrameCodec.BuildFirstFrame(epPeer, ffPayload.Length, ffPayload.AsSpan(0, ffData), isCanFd: false);
         busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ff));
-        await Task.Delay(200); // > N_Cr
+        await flowControlSeen.Task.WaitAsync(ShortTimeout);
+
+        // N_Cr expires because the clock says so. AdvanceAsync returns only once the callback has
+        // run, and AbortRx enqueues its fault on the actor, so the item is in the inbox here --
+        // no window, nothing to wait out.
+        await clock.AdvanceAsync(nCr + TimeSpan.FromMilliseconds(1));
 
         int discarded = receiver.DiscardPendingPdus();
         discarded.Should().BeGreaterThanOrEqualTo(2,
