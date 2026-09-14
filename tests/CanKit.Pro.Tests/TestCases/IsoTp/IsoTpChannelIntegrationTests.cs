@@ -1616,6 +1616,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // channels; the constructor's catch block is where that is decided and it had never been
     // executed. Codecov is what noticed -- I had asserted the rule in the pull request and in
     // three review replies without once running the path.
+    //
+    // The self-created half is observed through ProtocolActor.RunningLoopCount, because nothing
+    // else can see it: construction failed, so there is no channel to ask and its actor was never
+    // reachable. The first revision watched inner.SubscriptionCount, which is zero whether or not
+    // that actor was disposed -- Codex found that, and it is the same "assertion that cannot
+    // fail" this branch was written to stop shipping.
     [Fact]
     public async Task A_Failed_Construction_Disposes_Its_Own_Actor_But_Never_An_Injected_One()
     {
@@ -1629,20 +1635,28 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var injected = clock.NewActor();
         var failing = new ThrowingSubscribeService(inner, failOnCall: 1);
 
+        // After the injected actor exists, so it is the baseline both attempts return to.
+        var loopsBefore = ProtocolActor.RunningLoopCount;
+
         Action construct = () => new IsoTpChannel(failing, endpoint, FastOptions(),
             ownsService: false, injected);
         construct.Should().Throw<InvalidOperationException>();
 
         (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
             "an injected actor belongs to the caller and must survive a construction that failed");
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            "the channel created no actor here, so it must not have ended one either");
 
-        // Self-created: the channel owns it, so it must be gone. Observed through the service --
-        // a disposed actor cannot be reached from here, but a leaked one would keep the
-        // subscription it never got to make, and there is none to leak.
+        // Self-created: the channel owns it, so it must be gone. Dispose joins the loop before
+        // returning, so a count still above the baseline is a leaked actor thread and not one
+        // that has yet to notice -- no wait belongs here.
         var failingAgain = new ThrowingSubscribeService(inner, failOnCall: 1);
         Action constructOwning = () => new IsoTpChannel(failingAgain, endpoint, FastOptions(),
             ownsService: false);
         constructOwning.Should().Throw<InvalidOperationException>();
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            "an actor the channel created for itself must not outlive the construction that "
+            + "failed");
         inner.SubscriptionCount.Should().Be(0, "neither attempt got as far as subscribing");
     }
 

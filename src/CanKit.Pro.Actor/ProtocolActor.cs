@@ -92,6 +92,19 @@ namespace CanKit.Pro.Actor
         /// Asking the actor is what makes a mismatch unrepresentable: there is one clock per
         /// loop and no way to pass a different one alongside it.
         /// </summary>
+        // How many actor loops are running process-wide. Two Interlocked operations per actor
+        // lifetime, and nothing reads it in production.
+        //
+        // It exists because "a component disposes the actor it created, and never one it was
+        // handed" is otherwise unobservable from a test: when construction fails the component
+        // does not exist to be asked, and its own actor was never reachable. #113 asserted that
+        // contract in review and in a test named after it, and Codex pointed out the test could
+        // not fail -- it watched a subscription count that stays zero either way. This is the
+        // observable that makes it fail.
+        internal static int RunningLoopCount => Volatile.Read(ref s_runningLoops);
+
+        private static int s_runningLoops;
+
         internal ITimeSource TimeSource => _time;
 
         /// <summary>
@@ -229,6 +242,10 @@ namespace CanKit.Pro.Actor
 
             _time = timeSource ?? MonotonicTimeSource.Instance;
             _shutdownTimeout = shutdownTimeout ?? DefaultShutdownTimeout;
+
+            // Before either loop starts, so an actor whose loop has not been scheduled yet still
+            // counts as live; the loop's own finally is what takes it back down.
+            Interlocked.Increment(ref s_runningLoops);
 
             if (mode == ActorExecutionMode.DedicatedThread)
             {
@@ -427,6 +444,7 @@ namespace CanKit.Pro.Actor
                 // getting here.
                 _stopCts.Dispose();
                 _signal.Dispose();
+                Interlocked.Decrement(ref s_runningLoops);
             }
         }
 
@@ -458,6 +476,7 @@ namespace CanKit.Pro.Actor
                 FinalDrain();
                 _stopCts.Dispose();
                 _signal.Dispose();
+                Interlocked.Decrement(ref s_runningLoops);
             }
         }
 

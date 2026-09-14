@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939;
 using CanKit.Pro.J1939Tp;
@@ -1408,6 +1409,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // A node opens its transport channel first and subscribes for itself second, so failing the
     // first Subscribe and failing the second reach different catch blocks; both had never run.
     // Codecov is what noticed, after I had asserted the rule repeatedly in review.
+    //
+    // Both halves are observed, and the second one only because Codex pointed out that the first
+    // revision could not fail: it watched a subscription count that is zero whether or not the
+    // node's own actor was disposed. RunningLoopCount is what a leaked actor moves.
     [Theory]
     // failOnCall 1 is the transport channel's own subscription, reaching the first catch;
     // 2 is the node's, reaching the second, which also disposes the transport it had opened.
@@ -1426,6 +1431,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var injected = inject ? clock.NewActor() : null;
         var failing = new ThrowingSubscribeService(inner, failOnCall);
 
+        // Taken after the injected actor exists, so it is the baseline the failed construction
+        // must come back to whichever row this is.
+        var loopsBefore = ProtocolActor.RunningLoopCount;
+
         Action construct = () => new J1939NodeImpl(failing, new J1939NodeOptions(Name(1)),
             ownsService: false, injected);
         construct.Should().Throw<InvalidOperationException>();
@@ -1434,6 +1443,12 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the construction must have reached exactly the subscription this case fails");
         inner.SubscriptionCount.Should().Be(0,
             "a construction that failed must not leave a subscription behind");
+
+        // Dispose joins the loop before returning, so no wait belongs here: a count still above
+        // the baseline is a leak, not a loop that has yet to notice.
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            "every actor the failed construction created -- the node's own and the transport "
+            + "channel's -- must be disposed on the way out");
 
         if (injected is not null)
             (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
