@@ -111,23 +111,25 @@ namespace CanKit.Pro.Actor
         /// work item queued before it. Polling on it can be slow but cannot be wrong, which is the
         /// difference between this and waiting out a fixed grace.
         /// </remarks>
-        internal Task<TimeSpan?> NextTimerDelayAsync() => PostAsync(() =>
+        internal Task<TimeSpan?> NextTimerDelayAsync() => PostAsync<TimeSpan?>(() =>
         {
             DrainPendingTimerInserts();
 
-            while (_timers.Count > 0 && _timers[0].IsCancelled)
+            // A pure read: cancelled entries are skipped, not retired. The loop's own trim and
+            // CompactCancelledTimers own that job, and a query that quietly mutates the timer
+            // list would be a second writer to state whose single-writer discipline is the
+            // reason FR-RAW-021 exists.
+            foreach (var entry in _timers)
             {
-                var head = _timers[0];
-                _timers.RemoveAt(0);
-                Retire(head);
+                if (entry.IsCancelled) continue;
+
+                var ticks = entry.DueTimestamp - _time.GetTimestamp();
+                return ticks <= 0
+                    ? TimeSpan.Zero
+                    : TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
             }
 
-            if (_timers.Count == 0) return (TimeSpan?)null;
-
-            var ticks = _timers[0].DueTimestamp - _time.GetTimestamp();
-            return ticks <= 0
-                ? TimeSpan.Zero
-                : TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
+            return null;
         });
 
         private readonly TimeSpan _shutdownTimeout;

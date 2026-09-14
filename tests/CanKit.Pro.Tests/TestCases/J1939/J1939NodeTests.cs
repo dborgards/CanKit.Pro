@@ -1396,6 +1396,42 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
+    // A node opens its transport channel first and subscribes for itself second, so failing the
+    // first Subscribe and failing the second reach different catch blocks; both had never run.
+    // Codecov is what noticed, after I had asserted the rule repeatedly in review.
+    [Theory]
+    // failOnCall 1 is the transport channel's own subscription, reaching the first catch;
+    // 2 is the node's, reaching the second, which also disposes the transport it had opened.
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    public async Task A_Failed_Construction_Never_Disposes_An_Injected_Actor(
+        int failOnCall, bool inject)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var inner = new CanBusService(bus);
+
+        using var clock = new VirtualClock();
+        var injected = inject ? clock.NewActor() : null;
+        var failing = new ThrowingSubscribeService(inner, failOnCall);
+
+        Action construct = () => new J1939NodeImpl(failing, new J1939NodeOptions(Name(1)),
+            ownsService: false, injected);
+        construct.Should().Throw<InvalidOperationException>();
+
+        failing.SubscribeCalls.Should().Be(failOnCall,
+            "the construction must have reached exactly the subscription this case fails");
+        inner.SubscriptionCount.Should().Be(0,
+            "a construction that failed must not leave a subscription behind");
+
+        if (injected is not null)
+            (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
+                "an injected actor belongs to the caller and must survive a failed construction");
+    }
+
     /// <summary>
     /// Waits for a frame count to reach <paramref name="target"/>. A wait for an effect, not an
     /// assertion about how long it took: a slow runner delays this rather than failing it.

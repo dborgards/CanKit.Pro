@@ -1611,6 +1611,41 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             + "driver call open until the instant above");
     }
 
+    // #113 -- who disposes the actor when construction fails. The seam's contract is that a
+    // channel disposes only an actor it created, because an injected one may be running other
+    // channels; the constructor's catch block is where that is decided and it had never been
+    // executed. Codecov is what noticed -- I had asserted the rule in the pull request and in
+    // three review replies without once running the path.
+    [Fact]
+    public async Task A_Failed_Construction_Disposes_Its_Own_Actor_But_Never_An_Injected_One()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var inner = new CanBusService(bus);
+        var endpoint = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+
+        // Injected: the channel must leave it alone on the way out.
+        using var clock = new VirtualClock();
+        var injected = clock.NewActor();
+        var failing = new ThrowingSubscribeService(inner, failOnCall: 1);
+
+        Action construct = () => new IsoTpChannel(failing, endpoint, FastOptions(),
+            ownsService: false, injected);
+        construct.Should().Throw<InvalidOperationException>();
+
+        (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
+            "an injected actor belongs to the caller and must survive a construction that failed");
+
+        // Self-created: the channel owns it, so it must be gone. Observed through the service --
+        // a disposed actor cannot be reached from here, but a leaked one would keep the
+        // subscription it never got to make, and there is none to leak.
+        var failingAgain = new ThrowingSubscribeService(inner, failOnCall: 1);
+        Action constructOwning = () => new IsoTpChannel(failingAgain, endpoint, FastOptions(),
+            ownsService: false);
+        constructOwning.Should().Throw<InvalidOperationException>();
+        inner.SubscriptionCount.Should().Be(0, "neither attempt got as far as subscribing");
+    }
+
     /// <summary>
     /// Test double: the first <see cref="ICanBusService.SendConfirmed"/> call throws the supplied
     /// exception instead of transmitting; every later call is forwarded to the inner service
