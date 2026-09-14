@@ -1613,30 +1613,53 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             await Task.Delay(5);
         node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
 
-        // A peer with a different NAME takes the address this node just vacated. Nothing about
-        // this contests the claim in flight, which is for 0x22.
         var peerName = Name(0x00ABCD);
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, J1939Pgn.AddressClaimed, sourceAddress: 0x11),
-            BitConverter.GetBytes(peerName.Value), isExtendedFrame: true));
+        byte[] Claim(byte sa) => BitConverter.GetBytes(peerName.Value);
+        void Inject(uint pgn, byte sa, byte[] data) => echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: sa), data, isExtendedFrame: true));
 
-        const uint pgn = 0xFEF9u;
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x11),
-            new byte[] { 7, 7, 7 }, isExtendedFrame: true));
-
-        var deadline = DateTime.UtcNow + ShortTimeout;
-        while (DateTime.UtcNow < deadline)
+        async Task DrainUntilAsync(uint barrierPgn)
         {
-            lock (seenLock) { if (seen.Any(m => m.Pgn == pgn)) break; }
-            await Task.Delay(5);
+            var until = DateTime.UtcNow + ShortTimeout;
+            while (DateTime.UtcNow < until)
+            {
+                lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) return; }
+                await Task.Delay(5);
+            }
         }
 
-        List<J1939Message> snapshot;
-        lock (seenLock) snapshot = new List<J1939Message>(seen);
-        snapshot.Should().Contain(m => m.Pgn == pgn && m.SourceAddress == 0x11,
-            "a peer announced that address as its own, so it is no longer this node's to mistake "
-            + "for a draining echo -- even though this node's own claim is still in flight");
+        const uint beforePgn = 0xFEF9u;
+        const uint afterPgn = 0xFEFCu;
+        const uint barrier1 = 0xFEFDu;
+        const uint barrier2 = 0xFEFEu;
+
+        // First a claim for an unrelated address. It must leave the marker alone -- otherwise any
+        // arbitration traffic on the bus would reopen the window this node still needs.
+        Inject(J1939Pgn.AddressClaimed, 0x44, Claim(0x44));
+        Inject(beforePgn, 0x11, new byte[] { 7, 7, 7 });
+        Inject(barrier1, 0x33, new byte[] { 1 });
+        await DrainUntilAsync(barrier1);
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == barrier1);
+            seen.Should().NotContain(m => m.Pgn == beforePgn,
+                "a claim for some other address says nothing about the one this node is giving up");
+        }
+
+        // Now the claim for the vacated address itself.
+        Inject(J1939Pgn.AddressClaimed, 0x11, Claim(0x11));
+        Inject(afterPgn, 0x11, new byte[] { 8, 8, 8 });
+        Inject(barrier2, 0x33, new byte[] { 2 });
+        await DrainUntilAsync(barrier2);
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == barrier2);
+            seen.Should().Contain(m => m.Pgn == afterPgn && m.SourceAddress == 0x11,
+                "a peer announced that address as its own, so it is no longer this node's to "
+                + "mistake for a draining echo -- even though this node's claim is still in flight");
+        }
 
         await reclaim.WithTimeout(ShortTimeout);
     }
