@@ -1831,8 +1831,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
 
         // The contest was won, not lost -- otherwise the assertion above would hold for the
-        // wrong reason.
-        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+        // wrong reason. Observing the claim's own task says so more directly than the state does,
+        // and observing it is what CodeQL asked for (303).
+        await reclaim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x11);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
     }
 
     // #119, Codex once more, this time about how long the marker may live at all. The unseated
@@ -1895,6 +1898,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 "0x11 was lost to a peer two claim sequences ago; a fresh arbitration for some "
                 + "other address does not make that peer's traffic this node's own echo");
         }
+
+        // Nothing contested 0x22, so the claim this test started must complete on it. Observing
+        // it also answers CodeQL (304).
+        await reclaim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x22);
     }
 
     // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
