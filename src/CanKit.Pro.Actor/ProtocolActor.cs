@@ -132,8 +132,13 @@ namespace CanKit.Pro.Actor
             // CompactCancelledTimers own that job, and a query that quietly mutates the timer
             // list would be a second writer to state whose single-writer discipline is the
             // reason FR-RAW-021 exists.
-            foreach (var entry in _timers)
+            // Indexed rather than foreach-with-continue: _timers is ordered by due time, so this
+            // is a scan for the first live entry and stops there. (A .Where(...) would read as the
+            // filter CodeQL suggests and then allocate an enumerator on the loop thread to return
+            // one element.)
+            for (var i = 0; i < _timers.Count; i++)
             {
+                var entry = _timers[i];
                 if (entry.IsCancelled) continue;
 
                 var ticks = entry.DueTimestamp - _time.GetTimestamp();

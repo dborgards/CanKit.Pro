@@ -28,6 +28,8 @@ internal sealed class ThrowingSubscribeService : ICanBusService
     private readonly int _failOnCall;
     private int _calls;
 
+    /// <summary>Wraps <paramref name="inner"/> and fails its <paramref name="failOnCall"/>-th
+    /// <c>Subscribe</c>.</summary>
     /// <param name="inner">The real service; the test owns and disposes it.</param>
     /// <param name="failOnCall">1-based index of the <c>Subscribe</c> call that should throw.</param>
     public ThrowingSubscribeService(ICanBusService inner, int failOnCall)
