@@ -1462,6 +1462,122 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the node sent this itself, and an echo bus hands it straight back");
     }
 
+    // #119, found by Codex on the guard above. BeginClaimRound calls WriteAddress(null) before
+    // announcing the new preferred SA, so for the whole arbitration window the node has no
+    // address and the guard's `myAddr >= 0` is false. A frame this node transmitted under the old
+    // SA, whose echo is still queued behind the claim on the actor, then walks straight past it.
+    //
+    // Reproduced deterministically rather than by racing the reader: a frame carrying the vacated
+    // SA is injected *while* the claim is pending, which is the state the race produces. The
+    // arbitration window is deliberately long here -- the assertion is that something is dropped
+    // during the window, so a wider window can only make the test surer.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Vacated_Address_Is_Still_Recognised_As_Ours_While_Reclaiming(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
+        });
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        var reclaim = node.ClaimAddressAsync(0x22);
+        var claiming = DateTime.UtcNow + ShortTimeout;
+        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
+            await Task.Delay(5);
+        node.ClaimState.Should().NotBe(J1939ClaimState.Claimed,
+            "the rest of this test is about the window where the node has no address");
+
+        const uint vacatedPgn = 0xFEF3u;
+        const uint thirdPartyPgn = 0xFEF4u;
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, vacatedPgn, sourceAddress: 0x11),
+            new byte[] { 1, 2, 3 }, isExtendedFrame: true));
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, thirdPartyPgn, sourceAddress: 0x33),
+            new byte[] { 4, 5, 6 }, isExtendedFrame: true));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == thirdPartyPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+
+        snapshot.Should().Contain(m => m.Pgn == thirdPartyPgn,
+            "an unrelated peer must still be heard during a re-claim");
+        snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
+            "0x11 is the address this node is in the middle of giving up, so a frame carrying it "
+            + "is its own echo draining behind the claim");
+
+        await reclaim.WithTimeout(ShortTimeout);
+    }
+
+    // The other half of the guard above: the memory of a vacated address must expire. Without the
+    // claim-in-flight condition it does not, and a node that lost its address goes deaf for good
+    // to whoever now holds it -- which is worse than the defect the memory fixes, and which
+    // nothing caught until this test existed.
+    //
+    // Two real nodes rather than the echo fixture, because the state this needs is a node
+    // *unseated by contention*: address cleared, claim no longer in flight, and the peer that won
+    // now transmitting from that very address.
+    [Fact]
+    public async Task A_Vacated_Address_Stops_Being_Ours_Once_The_Claim_Is_Over()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+
+        const byte contended = 0x40;
+        using var owner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000200))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        // Lower NAME wins arbitration, so this peer takes the address off the owner.
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+
+        await owner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        owner.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        var lost = DateTime.UtcNow + ShortTimeout;
+        while (owner.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < lost)
+            await Task.Delay(5);
+        owner.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
+        owner.Address.Should().BeNull();
+
+        const uint pgn = 0xFEF6u;
+        await winner.SendAsync(new J1939Message(pgn, new byte[] { 9, 9, 9 },
+            destinationAddress: J1939Pgn.GlobalAddress)).WithTimeout(ShortTimeout);
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == pgn)) break; }
+            await Task.Delay(5);
+        }
+
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+        snapshot.Should().Contain(m => m.Pgn == pgn && m.SourceAddress == contended,
+            "arbitration is over and this address belongs to the peer that won it; the unseated "
+            + "node must hear its traffic rather than keep mistaking it for its own echo");
+    }
+
     // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
     // A node opens its transport channel first and subscribes for itself second, so failing the
     // first Subscribe and failing the second reach different catch blocks; both had never run.

@@ -98,6 +98,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // most recently committed value; writes happen only on the actor loop.
     private int _addressStore = -1;
 
+    // The address the node is in the middle of giving up, or -1. See WriteAddress.
+    private int _vacatedAddressStore = -1;
+
     /// <inheritdoc />
     public J1939Name Name => _name;
 
@@ -637,6 +640,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void WriteAddress(byte? address)
     {
+        // Remember the address being given up, so the self-traffic guard can still recognise a
+        // frame this node sent under it while the echo drains (#119, Codex). Forgotten again the
+        // moment a new address is in place; the guard additionally requires the claim to still be
+        // in flight, so the memory cannot outlive the window it exists for.
+        if (address.HasValue) Volatile.Write(ref _vacatedAddressStore, -1);
+        else Volatile.Write(ref _vacatedAddressStore, Volatile.Read(ref _addressStore));
+
         Volatile.Write(ref _addressStore, address.HasValue ? address.Value : -1);
     }
 
@@ -1012,6 +1022,19 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // carrying our own source address, and on a shared bus that is indistinguishable from
             // our own echo in any case.
             if (myAddr >= 0 && sa == (byte)myAddr) return;
+
+            // BeginClaimRound clears the address before announcing the new preferred SA, so for
+            // the whole arbitration window `myAddr` is -1 and the check above cannot fire -- while
+            // the echo of a frame this node sent under the old SA may still be queued behind the
+            // claim on the actor. Codex found that on #119.
+            //
+            // Gated on the claim still being in flight rather than on the memory alone: once
+            // arbitration ends, whoever transmits with that address is somebody else, and a node
+            // whose claim failed would otherwise go deaf to it for good.
+            int vacated = Volatile.Read(ref _vacatedAddressStore);
+            if (vacated >= 0 && sa == (byte)vacated
+                && (J1939ClaimState)Volatile.Read(ref _claimStateStore) == J1939ClaimState.Claiming)
+                return;
 
             // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))
