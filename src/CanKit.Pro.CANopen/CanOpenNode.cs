@@ -773,11 +773,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 and <= CanOpenCobId.SdoTxBase + CanOpenCobId.MaxNodeId)
             {
                 byte serverNodeId = (byte)(cobId - CanOpenCobId.SdoTxBase);
-                // Our own SDO server's response, echoed back (#95). 0x580 + id names the server
-                // that sent it, so this is us; the 0x600 + id branch above is deliberately not
-                // guarded, because there the id names the *destination* and a frame addressed to
-                // our server is ours to serve whoever sent it.
-                if (serverNodeId == _nodeId) return;
+                // Neither SDO direction is self-guarded (#95), and the reason is the same both
+                // ways: nothing here reports a peer to the application, so there is nothing for
+                // an echo to misreport. 0x600 + id names the *destination*, so such a frame is
+                // ours to serve whoever sent it. 0x580 + id does name us as the sender, but both
+                // client handlers open with a lookup keyed on that id -- _sdoClients and
+                // _sdoBlockClients -- and an id with no session is already dropped.
+                //
+                // A guard here was written and taken back out: it could only subtract. When no
+                // session is keyed to our own id it does what the lookup already does, and when
+                // one is -- a node running an SDO transfer against its own server on an echo bus
+                // -- it drops the very response that transfer is waiting for.
                 // Symmetric to the server-side path above: while a client-side block session
                 // (upload or download) is in a "receiving segments" phase, incoming frames on
                 // this COB-ID are block segments rather than ordinary SDO responses.
