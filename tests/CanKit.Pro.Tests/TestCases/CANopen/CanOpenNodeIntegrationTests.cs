@@ -1068,8 +1068,21 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // The node-guarding half of the same finding, and the one Codex named first. On an echo bus a
     // consumer registered for this node's own id is a closed loop: the consumer's RTR comes back
     // to us, HandleNodeGuardingRtrForSelf answers, and that answer must reach
-    // HandleNodeGuardingResponse or the lifetime is never rearmed and the timeout fires while the
-    // replies are arriving.
+    // HandleNodeGuardingResponse. The guard dropped it, so the consumer was starved.
+    //
+    // What is asserted is *delivery*, not the deadline. The first revision also asserted that
+    // NodeGuardingTimeout had not fired, and macOS CI failed on exactly that, in both worlds. The
+    // quantity the host perturbs is the wall-clock distance from arming the life-time deadline to
+    // the first accepted reply: two timer fires and four actor hops, each of which a starved
+    // scheduler can stretch arbitrarily. The margin was guardTime 30 ms x lifeTimeFactor 3 = 90 ms,
+    // and #120 eats the first reply, leaving the second at ~60 ms to cover it. That is not large
+    // compared with the perturbation, so the deadline is not measurable here and this test stops
+    // gating on it (#92). Reproduced locally under 8 burners on 4 cores: 8 failures in 8, against
+    // 2 of 2 passing unloaded.
+    //
+    // Dropping it costs no evidence. The defect Codex found -- the guard swallowing the frames --
+    // produces no NodeGuardingReceived at all, which the assertions below still catch; the timeout
+    // was a second symptom of the same cause, measured through a clock.
     [Theory]
     [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
     public async Task A_NodeGuarding_Consumer_Configured_For_This_Node_Still_Gets_Fed(EchoWorld world)
@@ -1079,7 +1092,6 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         var replies = new List<bool>();
         var enough = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var timedOut = new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.NodeGuardingReceived += (_, e) =>
         {
             if (e.ProducerNodeId != 0x01) return;
@@ -1089,20 +1101,24 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
                 if (replies.Count >= 3) enough.TrySetResult(true);
             }
         };
-        node.NodeGuardingTimeout += (_, e) => timedOut.TrySetResult(e.ProducerNodeId);
 
         node.StartNodeGuardingConsumer(producerNodeId: 0x01,
             guardTime: TimeSpan.FromMilliseconds(30), lifeTimeFactor: 3);
 
-        var settled = await Task.WhenAny(enough.Task, timedOut.Task,
-            Task.Delay(ShortTimeout));
+        var settled = await Task.WhenAny(enough.Task, Task.Delay(ShortTimeout));
         node.StopNodeGuardingConsumer(0x01);
 
-        timedOut.Task.IsCompleted.Should().BeFalse(
-            "the replies are arriving, so the lifetime must be rearmed by them");
         settled.Should().BeSameAs(enough.Task,
             "a node-guarding consumer registered for this node's own id was asked for on "
             + "purpose; the self-traffic guard must not starve it");
+
+        List<bool> snapshot;
+        lock (replies) snapshot = new List<bool>(replies);
+        // HandleNodeGuardingResponse only raises an event when the toggle flips, so both values
+        // appearing is evidence that separate frames went through it rather than one being
+        // reported repeatedly.
+        snapshot.Should().Contain(true).And.Contain(false,
+            "each accepted reply alternates the toggle, so these are genuine guarding responses");
     }
 
     // -----------------------------------------------------------------------------------------
