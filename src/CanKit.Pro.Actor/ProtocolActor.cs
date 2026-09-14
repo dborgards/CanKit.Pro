@@ -105,6 +105,13 @@ namespace CanKit.Pro.Actor
 
         private static int s_runningLoops;
 
+        // The count is the type's state and not any instance's, so the operations on it belong to
+        // the type too. That is also what CodeQL's "static field written by instance method" was
+        // pointing at: the write was correct, its owner was not.
+        private static void EnterLoopCount() => Interlocked.Increment(ref s_runningLoops);
+
+        private static void ExitLoopCount() => Interlocked.Decrement(ref s_runningLoops);
+
         internal ITimeSource TimeSource => _time;
 
         /// <summary>
@@ -250,7 +257,7 @@ namespace CanKit.Pro.Actor
 
             // Before either loop starts, so an actor whose loop has not been scheduled yet still
             // counts as live; the loop's own finally is what takes it back down.
-            Interlocked.Increment(ref s_runningLoops);
+            EnterLoopCount();
 
             if (mode == ActorExecutionMode.DedicatedThread)
             {
@@ -449,7 +456,7 @@ namespace CanKit.Pro.Actor
                 // getting here.
                 _stopCts.Dispose();
                 _signal.Dispose();
-                Interlocked.Decrement(ref s_runningLoops);
+                ExitLoopCount();
             }
         }
 
@@ -481,7 +488,7 @@ namespace CanKit.Pro.Actor
                 FinalDrain();
                 _stopCts.Dispose();
                 _signal.Dispose();
-                Interlocked.Decrement(ref s_runningLoops);
+                ExitLoopCount();
             }
         }
 
