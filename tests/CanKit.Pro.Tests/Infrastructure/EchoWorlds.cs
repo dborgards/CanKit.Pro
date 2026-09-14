@@ -1,6 +1,6 @@
 using System;
-using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Can;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using Xunit;
 
