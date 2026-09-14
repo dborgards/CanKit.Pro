@@ -644,8 +644,21 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // frame this node sent under it while the echo drains (#119, Codex). Forgotten again the
         // moment a new address is in place; the guard additionally requires the claim to still be
         // in flight, so the memory cannot outlive the window it exists for.
-        if (address.HasValue) Volatile.Write(ref _vacatedAddressStore, -1);
-        else Volatile.Write(ref _vacatedAddressStore, Volatile.Read(ref _addressStore));
+        //
+        // Only when there *is* one to remember. BeginClaimRound clears the address on every
+        // round, so a second round while still Claiming -- an arbitrary-address fallback, or a
+        // ClaimAddressAsync replacing an in-flight claim -- arrives here with the store already
+        // -1, and copying that over the memory would forget the address this node last
+        // transmitted on (Codex and Bugbot, both on #119).
+        if (address.HasValue)
+        {
+            Volatile.Write(ref _vacatedAddressStore, -1);
+        }
+        else
+        {
+            int current = Volatile.Read(ref _addressStore);
+            if (current >= 0) Volatile.Write(ref _vacatedAddressStore, current);
+        }
 
         Volatile.Write(ref _addressStore, address.HasValue ? address.Value : -1);
     }

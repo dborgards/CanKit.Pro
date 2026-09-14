@@ -1521,6 +1521,69 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await reclaim.WithTimeout(ShortTimeout);
     }
 
+    // #119, found by Codex and Bugbot independently on the memory added for the first finding:
+    // BeginClaimRound calls WriteAddress(null) on *every* round, so a second round while still
+    // Claiming -- an arbitrary-address fallback, or a replacing ClaimAddressAsync -- copied the
+    // already-cleared -1 over the remembered address and forgot it.
+    //
+    // Driven through the public API rather than by reaching into the state: claim, start a
+    // re-claim, then replace that claim while it is still in flight. The second BeginClaimRound
+    // is the one that used to wipe the memory.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Vacated_Address_Survives_A_Second_Claim_Round(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
+        });
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        // First round: vacates 0x11.
+        var superseded = node.ClaimAddressAsync(0x22);
+        var claiming = DateTime.UtcNow + ShortTimeout;
+        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
+            await Task.Delay(5);
+        node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
+
+        // Second round while the first is still in flight. The address store is already -1 here,
+        // which is exactly the case that used to overwrite the memory of 0x11.
+        var reclaim = node.ClaimAddressAsync(0x23);
+        Func<Task> awaitSuperseded = () => superseded.WithTimeout(ShortTimeout);
+        await awaitSuperseded.Should().ThrowAsync<TaskCanceledException>();
+
+        const uint vacatedPgn = 0xFEF7u;
+        const uint thirdPartyPgn = 0xFEF8u;
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, vacatedPgn, sourceAddress: 0x11),
+            new byte[] { 1, 2, 3 }, isExtendedFrame: true));
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, thirdPartyPgn, sourceAddress: 0x33),
+            new byte[] { 4, 5, 6 }, isExtendedFrame: true));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == thirdPartyPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+        snapshot.Should().Contain(m => m.Pgn == thirdPartyPgn,
+            "an unrelated peer must still be heard across claim rounds");
+        snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
+            "0x11 is still the address this node is giving up; a further claim round does not "
+            + "make its own draining echo somebody else's traffic");
+
+        await reclaim.WithTimeout(ShortTimeout);
+    }
+
     // The other half of the guard above: the memory of a vacated address must expire. Without the
     // claim-in-flight condition it does not, and a node that lost its address goes deaf for good
     // to whoever now holds it -- which is worse than the defect the memory fixes, and which
