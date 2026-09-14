@@ -640,6 +640,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // the actor loop so HandleIncoming can distinguish an RTR poll from a genuine
                 // heartbeat / node-guarding data frame that happens to share the same COB-ID.
                 bool isRtr = frame.IsRemoteFrame;
+                // The copy stays, and #103 asked for the reason rather than the reflex: this
+                // array is captured into a post that runs later on the actor loop, and the
+                // handlers below take byte[] and hold it -- an SDO segment lands in a transfer
+                // that spans many frames, an RPDO's bytes are unpacked into the object
+                // dictionary. Removing it means threading ReadOnlyMemory<byte> through the whole
+                // dispatch, which is a different change from the hot-path tidy-up #103 describes.
+                //
+                // Unlike the J1939-TP reader one layer over, there is no cheap filter to put in
+                // front of it: HandleIncoming's first act is to classify the COB-ID, and it needs
+                // the payload for almost every class it can land in.
                 var data = frame.Data.ToArray();
                 _actor.Post(() => HandleIncoming(id, data, isRtr));
             }
@@ -679,6 +689,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         _eventChannel.Writer.TryWrite(raise);
     }
 
+    // Self-traffic guards (#95) are per message class rather than one test at the top, because
+    // only some COB-IDs identify this node as the *source*. Deliberately unguarded:
+    //   * NMT 0x000 and SYNC 0x080 carry no node id, and a node is documented to act on both from
+    //     its own producer -- ICanOpenNode.SyncReceived says so, and #93 silenced a node's own
+    //     synchronous TPDOs by getting this wrong.
+    //   * 0x600 + id names the destination, so such a frame is ours to serve regardless of sender.
+    //   * an RPDO's COB-ID is whatever the application configured, possibly on purpose our own
+    //     TPDO; overriding that from here is the narrowing #93 had to take back out.
     private void HandleIncoming(uint cobId, byte[] data, bool isRtr)
     {
         try
@@ -696,6 +714,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // EMCY 0x081..0x0FF (0x080 is SYNC and is handled above).
             if (cobId is >= 0x081 and <= 0x0FF)
             {
+                // Our own, on a bus that echoes (#95): 0x080 + id names the *producer*, so this
+                // is the node's own emergency coming back. Raising it through EmcyReceived would
+                // report us to ourselves as a peer in fault.
+                if (cobId == CanOpenCobId.Emcy(_nodeId)) return;
                 HandleEmcy(cobId, data);
                 return;
             }
@@ -716,6 +738,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 }
 
                 byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
+                // Our own heartbeat / bootup / node-guarding response, echoed back (#95). Only
+                // the data frame: an *RTR* at this COB-ID is a consumer polling us and was
+                // answered above, so it must not be caught here.
+                if (producer == _nodeId) return;
                 // Consumer role (FR-CO-009): if we have a node-guarding consumer registered
                 // for this producer, treat the incoming data frame as a node-guarding reply
                 // (toggle + state). Otherwise fall through to the heartbeat consumer, which is
@@ -747,6 +773,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 and <= CanOpenCobId.SdoTxBase + CanOpenCobId.MaxNodeId)
             {
                 byte serverNodeId = (byte)(cobId - CanOpenCobId.SdoTxBase);
+                // Our own SDO server's response, echoed back (#95). 0x580 + id names the server
+                // that sent it, so this is us; the 0x600 + id branch above is deliberately not
+                // guarded, because there the id names the *destination* and a frame addressed to
+                // our server is ours to serve whoever sent it.
+                if (serverNodeId == _nodeId) return;
                 // Symmetric to the server-side path above: while a client-side block session
                 // (upload or download) is in a "receiving segments" phase, incoming frames on
                 // this COB-ID are block segments rather than ordinary SDO responses.

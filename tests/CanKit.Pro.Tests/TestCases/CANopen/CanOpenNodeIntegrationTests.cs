@@ -969,6 +969,63 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         producer.StopSyncProducer();
     }
 
+    // #95 -- a node must not raise its own EMCY or heartbeat as a peer's. Both echo worlds (#94),
+    // because the flag the gate reads is an adapter detail and the default adapter never sets it.
+    //
+    // The rule is narrow on purpose, and the narrowness is the point: drop only where the COB-ID
+    // identifies *us as the source* by construction -- EMCY 0x080+id, and a heartbeat data frame
+    // at 0x700+id. Not SYNC or NMT, which carry no node id and which a node is documented to act
+    // on from its own producer; not 0x600+id, where the id names the destination; and not an RPDO,
+    // whose COB-ID the application configured explicitly and may deliberately point at our own
+    // TPDO. #93 narrowed by COB-ID once already and cut off all sibling traffic doing it.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Node_Does_Not_Raise_Its_Own_Emcy_Or_Heartbeat_As_A_Peers(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
+
+        var emcyProducers = new List<byte>();
+        var heartbeatProducers = new List<byte>();
+        var gate = new object();
+        node.EmcyReceived += (_, e) => { lock (gate) emcyProducers.Add(e.Message.ProducerNodeId); };
+        node.HeartbeatReceived += (_, e) => { lock (gate) heartbeatProducers.Add(e.ProducerNodeId); };
+
+        // Ours first, the peer's second, on the one bus this node reads. Arrival order on a single
+        // subscription is the barrier: once the peer's frame has been raised, ours has already
+        // been through the dispatch and was either dropped or delivered.
+        await node.SendEmcyAsync(errorCode: 0x8110, errorRegister: 0x01,
+            manufacturerSpecific: new byte[] { 0xAA, 0xBB, 0xCC });
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(20));
+
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)CanOpenCobId.Emcy(0x11),
+            new byte[] { 0x10, 0x81, 0x02, 0, 0, 0, 0, 0 }));
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)CanOpenCobId.Heartbeat(0x12), new byte[] { (byte)NmtState.Operational }));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (gate)
+            {
+                if (emcyProducers.Contains((byte)0x11) && heartbeatProducers.Contains((byte)0x12))
+                    break;
+            }
+            await Task.Delay(5);
+        }
+
+        node.StopHeartbeatProducer();
+
+        List<byte> emcy, heartbeats;
+        lock (gate) { emcy = new List<byte>(emcyProducers); heartbeats = new List<byte>(heartbeatProducers); }
+
+        emcy.Should().Contain((byte)0x11, "a peer's EMCY must still be delivered");
+        heartbeats.Should().Contain((byte)0x12, "a peer's heartbeat must still be delivered");
+        emcy.Should().NotContain((byte)0x01, "the node raised this EMCY itself");
+        heartbeats.Should().NotContain((byte)0x01, "the node produced this heartbeat itself");
+    }
+
     // -----------------------------------------------------------------------------------------
     // FR-CO-011 — EMCY encode + receive event.
     // -----------------------------------------------------------------------------------------
