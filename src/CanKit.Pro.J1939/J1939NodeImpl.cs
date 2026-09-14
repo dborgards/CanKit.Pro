@@ -911,11 +911,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 .ConfigureAwait(false))
             {
                 // The subscription opts into echoes, so this loop sees host echoes as well as
-                // peer traffic; `frameEvent.IsEcho` distinguishes them. Nothing here filters on
-                // source address, which is why a node on a flagging adapter also observes its own
-                // application PGNs -- the behaviour that predates the echo gate entirely, tracked
-                // as #95. Address Claim is the exception: HandleIncomingAddressClaim filters by
-                // NAME.
+                // peer traffic; `frameEvent.IsEcho` distinguishes them. Nothing *here* filters on
+                // source address, and that is deliberate rather than outstanding: the two frame
+                // classes that must not be filtered by it -- Address Claim, which arbitration
+                // needs to see even from a peer wrongly using our address, and a frame addressed
+                // to this node -- are only distinguishable after the id is decomposed. So the
+                // self-traffic drop lives in HandleIncomingFrame, past the Address Claim branch,
+                // and Address Claim filters by NAME instead (#95).
                 var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue;
                 var fields = J1939Id.Decompose((uint)frame.ID);
@@ -1073,7 +1075,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // 0xEE00, which never reaches this line. What is dropped is an application PGN
             // carrying our own source address, and on a shared bus that is indistinguishable from
             // our own echo in any case.
-            if (myAddr >= 0 && sa == (byte)myAddr) return;
+            //
+            // Except when the frame is addressed to this node on purpose. RequestPgnAsync and
+            // SendAsync both accept the local address as the destination, and on an echo bus that
+            // is a working loopback: the request comes back and the application's responder
+            // serves it. Dropping it would break a path that worked before this guard existed
+            // (#119, Codex). Same rule the CANopen guard states for 0x600 + id -- an explicitly
+            // directed frame is ours to serve whoever sent it -- and it cannot swallow a
+            // broadcast, because a broadcast is either PDU2 or carries da == 0xFF.
+            if (myAddr >= 0 && sa == (byte)myAddr && !(isPdu1 && da == (byte)myAddr)) return;
 
             // BeginClaimRound clears the address before announcing the new preferred SA, so for
             // the whole arbitration window `myAddr` is -1 and the check above cannot fire -- while

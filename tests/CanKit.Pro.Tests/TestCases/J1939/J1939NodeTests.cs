@@ -1905,6 +1905,74 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.Address.Should().Be(0x22);
     }
 
+    // #119, Codex: the self-source drop is unconditional, and RequestPgnAsync accepts this node's
+    // own address as the destination. On an echo bus that is a working loopback -- the request
+    // comes back and the application's responder serves it -- and it worked before the guard
+    // existed, because nothing filtered self traffic at all. The echo carries sa == myAddr *and*
+    // da == myAddr, so it was dropped before ever reaching the PDU1 destination check.
+    //
+    // Same rule the CANopen guard states for 0x600 + id: a frame explicitly directed at this node
+    // is ours to serve whoever sent it.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Request_Addressed_To_This_Node_Survives_The_Self_Drop(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1)));
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var arrived = WaitForMessageAsync(node,
+            m => m.Pgn == J1939Pgn.Request && m.DestinationAddress == 0x11, ShortTimeout);
+
+        await node.RequestPgnAsync(0xFEE5u, destinationAddress: 0x11).WithTimeout(ShortTimeout);
+
+        var request = await arrived;
+        request.SourceAddress.Should().Be(0x11,
+            "the loopback is this node asking itself, so the source address is its own");
+        request.Payload.ToArray().Should().Equal(0xE5, 0xFE, 0x00);
+    }
+
+    // The other half of the same carve-out, so it cannot be widened into "never drop anything with
+    // our source address". A *broadcast* this node sent is still its own echo and must stay
+    // dropped -- da is 0xFF there, never our address, and a PDU2 frame has no destination at all.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Broadcast_Request_Is_Still_Dropped_As_Our_Own(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1)));
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        await node.RequestPgnAsync(0xFEE5u).WithTimeout(ShortTimeout);
+
+        // The barrier: a peer frame sent after ours on the one bus this node reads. A single
+        // subscription delivers in arrival order, so this arriving proves ours has already been
+        // through the reader.
+        const uint barrierPgn = 0xFEFDu;
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true));
+
+        var until = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < until)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == barrierPgn);
+            seen.Should().NotContain(m => m.Pgn == J1939Pgn.Request,
+                "a broadcast request carries da == 0xFF, so it is this node's own echo and not "
+                + "something addressed to it");
+        }
+    }
+
     // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
     // A node opens its transport channel first and subscribes for itself second, so failing the
     // first Subscribe and failing the second reach different catch blocks; both had never run.

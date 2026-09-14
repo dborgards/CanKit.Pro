@@ -219,9 +219,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // the frame on the wire -- so a SYNC producer that never sees its own SYNC stops
             // emitting its own synchronous TPDOs.
             //
-            // What this does NOT do is filter out this node's own non-SYNC traffic. That matches
-            // the behaviour before echoes were ever gated; distinguishing self from sibling by
-            // node-id is a separate improvement, not something to bolt on here.
+            // What this does NOT do is filter out this node's own traffic. That is not left
+            // undone -- HandleIncoming does it per message class, where the node id inside the
+            // COB-ID can be read and where the classes that must keep hearing themselves (SYNC,
+            // NMT, both SDO directions, RPDOs, a consumer configured for the local id) can be
+            // exempted individually (#95). It cannot be done here, because at this point a frame
+            // is only an id in a range.
             _subscription = _service.Subscribe(f =>
             {
                 var frame = f.Frame;
