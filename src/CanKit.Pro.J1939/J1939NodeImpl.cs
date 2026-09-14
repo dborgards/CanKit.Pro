@@ -506,16 +506,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // (that peer has already lost).
         if (peerSa == J1939Pgn.NullAddress) return;
 
-        // Somebody else has taken the address this node is giving up (#119, Codex). Nothing here
-        // contests our pending claim -- that is for a different address -- but it does end the
-        // reason to treat traffic from the old one as our own draining echo. Without this the
-        // marker outlives its truth: the new owner's application PGNs would be discarded for the
-        // rest of an unrelated arbitration window, which on a long ClaimAnnounceTimeout is a
-        // sizeable hole. Reached only for a NAME that is not ours, checked above.
-        int vacatedBefore = Volatile.Read(ref _vacatedAddressStore);
-        if (vacatedBefore >= 0 && peerSa == (byte)vacatedBefore)
-            Volatile.Write(ref _vacatedAddressStore, -1);
-
         var pending = _pendingClaim;
         if (pending is not null && peerSa == pending.PreferredAddress)
         {
@@ -523,9 +513,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // SAE J1939-81 §4.4.3.2: numerically lower NAME wins.
             if (peerName.HasHigherClaimPriorityThan(_name))
             {
-                // We lose this contest. Arbitrary-address fallback (FR-J1939-004 /
-                // SAE J1939-81 §4.5): retry with the next candidate from the arbitrary
-                // address field before giving up with Cannot-Claim.
+                // We lose this contest, so the address is the peer's now. On a same-address
+                // re-claim that is also the address we were draining echoes for, and the marker
+                // has to go with it -- the fallback round below stays Claiming, so nothing else
+                // would clear it.
+                ClearVacatedIfMatches(peerSa);
+
+                // Arbitrary-address fallback (FR-J1939-004 / SAE J1939-81 §4.5): retry with the
+                // next candidate from the arbitrary address field before giving up with
+                // Cannot-Claim.
                 _pendingClaim = null;
                 pending.Deadline?.Dispose();
                 var scanStart = pending.ArbitraryScanStart;
@@ -552,10 +548,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
             }
 
             // Peer's NAME is >= ours: they lose. Re-announce our own claim so they hear it,
-            // then keep waiting on our deadline.
+            // then keep waiting on our deadline. The vacated marker deliberately stays: on a
+            // same-address re-claim the contested address *is* the one we are giving up and
+            // re-taking, and a peer that just lost it has not taken anything (#119, Codex and
+            // Bugbot). Clearing here would reopen the window on this node's own draining echo
+            // for the rest of an arbitration this node is winning.
             SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
             return;
         }
+
+        // Somebody else has taken the address this node is giving up (#119, Codex), and we are
+        // not contesting it -- either there is no claim in flight or it is for a different
+        // address. Either way it ends the reason to treat traffic from the old one as our own
+        // draining echo. Without this the marker outlives its truth: the new owner's application
+        // PGNs would be discarded for the rest of an unrelated arbitration window, which on a
+        // long ClaimAnnounceTimeout is a sizeable hole. Reached only for a NAME that is not ours,
+        // checked above -- our own claim echo must not clear the marker it was just set for.
+        ClearVacatedIfMatches(peerSa);
 
         // We are already claimed at SA and a peer claims the same SA.
         if (ClaimState == J1939ClaimState.Claimed && _addressStore >= 0 && peerSa == (byte)_addressStore)
@@ -633,9 +642,29 @@ internal sealed class J1939NodeImpl : IJ1939Node
         });
     }
 
+    // Drops the vacated-address marker when it names `sa`. Used wherever that address stops
+    // being one this node is merely draining echoes from.
+    private void ClearVacatedIfMatches(byte sa)
+    {
+        int vacated = Volatile.Read(ref _vacatedAddressStore);
+        if (vacated >= 0 && sa == (byte)vacated) Volatile.Write(ref _vacatedAddressStore, -1);
+    }
+
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
         J1939Name? contendingName)
     {
+        // The marker is scoped to the claim sequence that set it, and this is the one place every
+        // exit from that sequence passes through. Leaving Claiming for CannotClaim or NotClaimed
+        // ends the window; without this the value survives into a *later* ClaimAddressAsync --
+        // which sets Claiming again with the address store still -1, so WriteAddress leaves the
+        // stale marker standing -- and the node goes deaf to the peer that legitimately won the
+        // old address for that whole window (#119, Codex).
+        //
+        // Claimed needs no special case: the WriteAddress that commits the new address has
+        // already cleared it. BeginClaimRound sets the marker *before* announcing Claiming, so
+        // the ordering there is safe.
+        if (state != J1939ClaimState.Claiming) Volatile.Write(ref _vacatedAddressStore, -1);
+
         Volatile.Write(ref _claimStateStore, (int)state);
         var args = new J1939ClaimEventArgs(state, address, contendingSa, contendingName);
         try

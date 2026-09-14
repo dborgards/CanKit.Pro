@@ -1775,6 +1775,128 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             + "node must hear its traffic rather than keep mistaking it for its own echo");
     }
 
+    // #119, Codex and Bugbot on the same lines: the clear that answers the round above fired on
+    // *any* peer claim for the vacated address, including one this node is contesting and
+    // winning. Re-claiming the same address makes the vacated address and the pending preferred
+    // address one and the same, so a peer that loses that contest took the marker down with it --
+    // and the node stayed Claiming with no address, i.e. with neither guard able to fire.
+    //
+    // A peer that loses has taken nothing, so the marker stays.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task Winning_A_Same_Address_Contest_Keeps_The_Vacated_Marker(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
+        });
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        // Re-claiming the *same* address, which is what makes the two addresses coincide.
+        var reclaim = node.ClaimAddressAsync(0x11);
+        var claiming = DateTime.UtcNow + ShortTimeout;
+        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
+            await Task.Delay(5);
+        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+
+        void Inject(uint pgn, byte sa, byte[] data) => echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: sa), data, isExtendedFrame: true));
+
+        // A numerically higher NAME contests 0x11 and loses (SAE J1939-81 4.4.3.2).
+        Inject(J1939Pgn.AddressClaimed, 0x11, BitConverter.GetBytes(Name(0x00ABCD).Value));
+
+        const uint drainingPgn = 0xFEF9u;
+        const uint barrierPgn = 0xFEFDu;
+        Inject(drainingPgn, 0x11, new byte[] { 7, 7, 7 });
+        Inject(barrierPgn, 0x33, new byte[] { 1 });
+
+        var until = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < until)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == barrierPgn);
+            seen.Should().NotContain(m => m.Pgn == drainingPgn,
+                "the peer lost the contest, so 0x11 is still the address this node is re-taking "
+                + "and its own traffic under it may still be draining");
+        }
+
+        // The contest was won, not lost -- otherwise the assertion above would hold for the
+        // wrong reason.
+        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+    }
+
+    // #119, Codex once more, this time about how long the marker may live at all. The unseated
+    // path calls WriteAddress(null) while the address store still holds the lost address, so the
+    // marker is set for an address that now belongs to the peer that won it. CannotClaim makes
+    // the guard inert, which hides it -- until a later ClaimAddressAsync for some other address
+    // sets Claiming again and brings the stale marker back with it.
+    //
+    // The marker is scoped to one claim sequence, and SetClaimState is where every exit from a
+    // sequence passes.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task An_Address_Lost_To_A_Peer_Is_Not_Remembered_By_A_Later_Claim(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(0x00ABCD))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
+        });
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        void Inject(uint pgn, byte sa, byte[] data) => echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: sa), data, isExtendedFrame: true));
+
+        // A numerically lower NAME unseats this node at 0x11; from here on that address is the
+        // peer's.
+        Inject(J1939Pgn.AddressClaimed, 0x11, BitConverter.GetBytes(Name(1).Value));
+        var unseated = DateTime.UtcNow + ShortTimeout;
+        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < unseated)
+            await Task.Delay(5);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+
+        // A later, unrelated claim. It has nothing to do with 0x11 and must not resurrect it.
+        var reclaim = node.ClaimAddressAsync(0x22);
+        var claiming = DateTime.UtcNow + ShortTimeout;
+        while (node.ClaimState != J1939ClaimState.Claiming && DateTime.UtcNow < claiming)
+            await Task.Delay(5);
+        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
+
+        const uint ownerPgn = 0xFEF9u;
+        const uint barrierPgn = 0xFEFDu;
+        Inject(ownerPgn, 0x11, new byte[] { 8, 8, 8 });
+        Inject(barrierPgn, 0x33, new byte[] { 1 });
+
+        var until = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < until)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == barrierPgn);
+            seen.Should().Contain(m => m.Pgn == ownerPgn && m.SourceAddress == 0x11,
+                "0x11 was lost to a peer two claim sequences ago; a fresh arbitration for some "
+                + "other address does not make that peer's traffic this node's own echo");
+        }
+    }
+
     // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
     // A node opens its transport channel first and subscribes for itself second, so failing the
     // first Subscribe and failing the second reach different catch blocks; both had never run.
