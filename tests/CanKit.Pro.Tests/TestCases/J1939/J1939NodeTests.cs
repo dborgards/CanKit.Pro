@@ -1405,6 +1405,63 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #95 -- a node must not raise its own transmissions as peer traffic. Run in both echo
+    // worlds (#94) because the two answers to "does the adapter flag its echo?" reach the guard
+    // by different routes, and the default test adapter only reaches one of them.
+    //
+    // The guard is an unconditional source-address check on application PGNs, matching what
+    // J1939TpChannel already does. It sits after the Address Claim branch in HandleIncomingFrame,
+    // so arbitration -- which runs on PGN 0xEE00 and is what has to see a peer wrongly using our
+    // address -- is untouched by it. That is what dissolves the trade-off #95 left open: the
+    // conjunction with IsEcho would have been precise on a flagging adapter and inert on every
+    // other one.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Node_Does_Not_Raise_Its_Own_Broadcast_As_Peer_Traffic(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        const uint ownPgn = 0xFEF3u;
+        const uint peerPgn = 0xFEF4u;
+
+        // Our own broadcast first, the peer's second, both on the one bus this node reads. The
+        // order is the barrier: a single subscription delivers in arrival order, so once the
+        // peer's message has been raised, ours has already been through the reader and either
+        // dropped or delivered. No wait for an absence, and nothing timing-dependent.
+        await node.SendAsync(new J1939Message(ownPgn, new byte[] { 1, 2, 3 },
+            destinationAddress: J1939Pgn.GlobalAddress)).WithTimeout(ShortTimeout);
+
+        var peerFrame = CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, peerPgn, sourceAddress: 0x22),
+            new byte[] { 4, 5, 6 }, isExtendedFrame: true);
+        echo.InjectPeerFrame(peerFrame);
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == peerPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+
+        snapshot.Should().Contain(m => m.Pgn == peerPgn,
+            "a peer's broadcast must still be delivered -- the guard drops our own source "
+            + "address, not everything that arrives");
+        snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
+            "the node sent this itself, and an echo bus hands it straight back");
+    }
+
     // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
     // A node opens its transport channel first and subscribes for itself second, so failing the
     // first Subscribe and failing the second reach different catch blocks; both had never run.

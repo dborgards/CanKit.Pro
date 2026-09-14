@@ -999,8 +999,21 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 return;
             }
 
-            // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             int myAddr = Volatile.Read(ref _addressStore);
+
+            // Our own traffic, on any bus that echoes (#95). Unconditional on the source address
+            // rather than conjoined with IsEcho, matching J1939TpChannel: the flag is an adapter
+            // detail -- CanKit.Adapter.Virtual echoes without setting it (#94) -- so a conjunction
+            // would be inert on exactly the adapters where nothing else catches this.
+            //
+            // Safe here and not in the reader because Address Claim returned above. Arbitration is
+            // the one thing that must see a peer wrongly using our address, and it runs on PGN
+            // 0xEE00, which never reaches this line. What is dropped is an application PGN
+            // carrying our own source address, and on a shared bus that is indistinguishable from
+            // our own echo in any case.
+            if (myAddr >= 0 && sa == (byte)myAddr) return;
+
+            // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))
                 return;
 
