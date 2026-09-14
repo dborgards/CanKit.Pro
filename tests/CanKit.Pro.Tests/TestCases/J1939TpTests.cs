@@ -203,9 +203,16 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
         using var busC = Open(session, 2);
 
-        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x10);
-        using var receiverB = J1939TpFactory.Open(busB, sourceAddress: 0xB0);
-        using var receiverC = J1939TpFactory.Open(busC, sourceAddress: 0xC0);
+        // Th shortened, as every other BAM test in this file does. This was the one that did
+        // not, and the omission is what made it the file's CI flake (#92, #114): a 200-byte BAM
+        // is 29 TP.DT packets, so the default 50 ms hold-off is 28 mandatory gaps -- 1400 ms of
+        // pacing the test cannot avoid -- inside a 5 s ShortTimeout. That leaves roughly 107 ms
+        // of slack per scheduled hop, and the gaps are actor Schedule callbacks, so a loaded
+        // runner eats it. At 5 ms the same 28 gaps cost 140 ms and the margin is ~35x.
+        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x10, options: opts);
+        using var receiverB = J1939TpFactory.Open(busB, sourceAddress: 0xB0, options: opts);
+        using var receiverC = J1939TpFactory.Open(busC, sourceAddress: 0xC0, options: opts);
 
         var payloadBam = RandomPayload(200, seed: 1);
         var payloadCmB = RandomPayload(400, seed: 2);
