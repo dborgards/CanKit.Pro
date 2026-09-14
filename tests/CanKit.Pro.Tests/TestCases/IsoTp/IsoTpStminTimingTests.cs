@@ -118,13 +118,13 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
         // Every CF from the first one on is paced -- STmin governs the gap after the FC too.
         await WaitForCountAsync(() => Volatile.Read(ref fcCount), 1, "flow control frames");
 
-        // One tick short of STmin. Stepping to here first is what makes this test about the
-        // configured value rather than merely about pacing existing at all: a jump of a whole
-        // STmin cannot tell 5 ms from any shorter positive delay, because the overdue timer fires
-        // on arrival either way and re-arms from the clock's new value. Codex found that on the
-        // first revision of this test, and halving the sender's STmin confirmed it -- the test
-        // passed. This probe fails on a halved STmin, because the frame is out before the
-        // interval is up.
+        // One tick short of STmin: corroboration on the wire that the armed interval does not
+        // elapse early. It is not what makes this test about the configured value -- the barrier
+        // at the top of each round is, and it was added later. On its own this probe cannot
+        // decide the interval, because SettleAsync ends the actor callback and not the send it
+        // hands to the thread pool, so a frame a shorter STmin released can still be off the wire
+        // when the count is read (Codex on #113). The claim this comment used to make was written
+        // one revision before the barrier existed and stayed behind when it arrived.
         var justUnder = stMin - Step;
 
         for (var expected = 1; expected <= expectedCfs; expected++)
