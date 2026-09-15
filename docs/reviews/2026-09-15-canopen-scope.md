@@ -11,8 +11,8 @@ ausdrücklich, sie seien meine Erinnerung. Zwei davon haben sich beim Nachlesen 
 in jede Richtung.
 
 **Und ein zweiter Fehler, der erst im Review aufflog.** Dieses Dokument hat „die Norm definiert X"
-mit „die Implementierung muss X haben" gleichgesetzt — in der ersten Fassung an drei Stellen, und
-nachdem ich diese korrigiert hatte, **noch zweimal in der Korrektur selbst** — beim
+mit „die Implementierung muss X haben" gleichgesetzt — über fünf Review-Runden hinweg **acht
+Mal**, und dreimal davon in der jeweiligen Korrektur der Runde davor — beim
 leeren Objektverzeichnis, bei der Übertragungsart und bei den Abort-Codes. Codex hat alle drei
 auseinandergenommen, und alle drei zu Recht: CiA 301 bindet ein *Gerät*, diese Pakete sind eine
 *Bibliothek*, und eine Protokolltabelle ist kein Implementierungsauftrag. Die betroffenen
@@ -98,15 +98,30 @@ Was er verhindert, ist ein **stimmiges** Gerät, und das kann die Anwendung nich
 | Record | Per SDO beschreibbar? | Wirkt es? |
 |---|---|---|
 | `1600h`/`1A00h` | ja | **ja** — `ApplyTpdoMappingFromSdo` ersetzt das Mapping des laufenden TPDO-Slots (`CanOpenNode.PdoMapping.cs:282`) |
-| `1400h`/`1800h` | nur als selbst angelegte OD-Einträge | **nein** — kein Pfad liest sie; Übertragungsart, Inhibit Time und Event Timer leben ausschließlich in `ConfigureTpdo` |
+| `1400h`/`1800h` | nur als selbst angelegte OD-Einträge | **nein** — kein Pfad liest sie |
 
-Ein von der Anwendung angelegtes `1800h:02` wäre also ein Wert, den der SDO-Server ausliefert und
-annimmt, während der Knoten weiter sendet wie zuvor. Der Master liest eine Zusage, die das Gerät
-nicht einhält — schlechter als das Fehlen des Objekts, und die fehlende Verdrahtung liegt innen,
-wo die Anwendung nicht hinkommt.
+**Zweimal zurückgenommen (Codex auf #127), und was danach übrig bleibt, ist deutlich kleiner:**
 
-Der Posten heißt damit nicht „Objekte anlegen", sondern **„OD und PDO-Engine für die
-Kommunikationsparameter zusammenschließen, so wie es für das Mapping bereits geschieht"**.
+Ich hatte behauptet, ein von der Anwendung angelegtes `1800h:02` sei zwangsläufig eine Zusage, die
+das Gerät nicht einhält. Das stimmt nicht für den statischen Fall: `AddU8`/`AddU32` nehmen
+`OdAccess.ReadOnly`, der SDO-Server weist Schreibzugriffe darauf ab (`CanOpenNode.cs:1063`), und
+dieselbe Anwendung kann `ConfigureTpdo` dieselben Werte geben. Dann liest der Master einen
+zutreffenden Record — **ganz ohne Verdrahtung zwischen OD und Engine.** Ein kohärentes Gerät ist
+also baubar, und 2a ist keine zwingende Anforderung.
+
+Die Sorge schrumpft damit auf zwei Fälle, die die Anwendung *nicht* auflösen kann:
+
+1. **Beschreibbare Records.** Ein `rw`-Eintrag nimmt den Schreibzugriff eines Masters an, und die
+   Engine sieht ihn nie. Wer `1400h`/`1800h` beschreibbar anbietet, muss ihn verdrahten.
+2. **Drift.** Ruft die Anwendung später `ConfigureTpdo` erneut mit anderen Werten, veraltet der
+   OD-Eintrag still — nichts hält die beiden zusammen.
+
+**Und die Inhibit Time gehört gar nicht hierher.** `ConfigureTpdo` nimmt Übertragungsart, COB-ID
+und Event-Timer-Intervall entgegen — **keine Inhibit Time** (`ICanOpenNode.cs:184-187`), und die
+Paket-README sagt es selbst: *„a change-of-state TPDO is not rate-limited"* (`README.md:51`). Sie
+lebt also nicht „ausschließlich in `ConfigureTpdo`", wie ich geschrieben hatte, sondern nirgends.
+Ein wirksames `1800h:03` verlangt **neues Scheduling-Verhalten**, nicht das Anschließen vorhandener
+Zustände. In einem Posten namens „verdrahten" sähe sie erledigt aus und bliebe wirkungslos.
 
 **`1200h` gehört nicht in denselben Posten (Codex auf #127).** Es ist der SDO-Server-Parameter und
 hat mit der PDO-Engine nichts zu tun: `CanOpenNode.cs:774` erkennt eine Anfrage am Vergleich
@@ -228,7 +243,8 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
 | | Was | Normlage | Vorschlag |
 |---|---|---|---|
 | 1 | `1000h`, `1001h`, `1018h` | Pflicht **für das fertige Gerät** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h`. Zusätzlich das README-Beispiel auf alle drei erweitern — es zeigt heute nur `1000h` |
-| 2a | `1400h`/`1800h` **an die PDO-Engine anschließen** | Pflicht bei PDO-Support; die Verdrahtung liegt innen | der eigentliche Posten dieser Runde — nicht „Objekte anlegen", sondern sie wirksam machen, wie es `1600h`/`1A00h` bereits sind |
+| 2a | `1400h`/`1800h`: **entweder** statisch `ro` und dokumentiert, **oder** beschreibbar und dann verdrahtet | Pflicht bei PDO-Support, aber statisch-`ro` erfüllbar | keine zwingende Verdrahtung. Zu entscheiden ist, welche der beiden Formen das Produkt anbietet — und wie Drift zwischen OD und `ConfigureTpdo` verhindert wird |
+| 2c | Inhibit Time (`1800h:03`) | Wertetabelle; heute weder in OD noch in der Engine | **eigener Posten, kein Verdrahten** — verlangt neues Scheduling. README nennt die Lücke bereits |
 | 2b | `1200h` als SDO-Server-Record | Pflicht bei SDO-Support; **anderer Pfad als 2a** | minimal: schreibgeschützter Record über die festen `0x600`/`0x580 + Node-ID`. Größer wäre, die COB-IDs wirklich daraus zu lesen — separat zu entscheiden, nicht mit 2a zu verwechseln |
 | 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` | Wertetabelle definiert, verpflichtet nicht | **Kandidat, keine `Must`** — was unterstützt wird, muss im Record stehen; mehr verlangt CiA 301 hier nicht |
 | 4 | Abort-Code `0504 0003h` | normativ, und der Blocktransfer erkennt den Zustand | klein; die übrigen 13 erst, wenn ein Verhalten sie auslöst |
