@@ -93,7 +93,8 @@ Anwendung *kann* `1200h`, `1400h`, `1800h` über `ObjectDictionary.AddU*` anlege
 erlaubt sie sogar `ro`. Null Quelltext-Treffer belegen also nicht, dass der Stack ein konformes
 Gerät verhindert.
 
-Was er verhindert, ist ein **stimmiges** Gerät, und das kann die Anwendung nicht ausgleichen:
+Er verhindert auch kein **stimmiges** Gerät — solange der Record statisch und `ro` ist, siehe
+unten. Offen bleibt genau ein Fall, und der ist schmal:
 
 | Record | Per SDO beschreibbar? | Wirkt es? |
 |---|---|---|
@@ -142,7 +143,7 @@ erlaubt — **einen schreibgeschützten Record bereitstellen, der die festen Vor
 Der Stack unterstützt ohnehin nur diese; ein `rw`-Record würde eine Beweglichkeit zusagen, die es
 nicht gibt — derselbe Fehler wie bei `1800h:02`, nur auf dem SDO-Pfad.
 
-### 3. Die Übertragungsart ist falsch kodiert, nicht nur zu grob
+### 3. Die Übertragungsart: das Enum kann die Wertetabelle nicht abbilden
 
 Die normative Wertetabelle der PDO-Kommunikationsparameter:
 
@@ -164,7 +165,9 @@ Dagegen `Pdo/PdoMapping.cs:63`:
 | `EventTimer` | `0x01` | synchronous, jeder SYNC |
 | `Synchronous` | `0x02` | synchronous, jeder **zweite** SYNC |
 
-**Korrektur (Codex auf #127): daraus folgt nicht, was ich daraus gefolgert hatte.** Das Enum ist
+Die drei Enum-Namen entsprechen nicht den Bytes, die gleich heißen — `EventDriven` ist `0x00`, und
+`0x00` ist normativ *synchronous acyclic*. **Daraus folgt aber nicht, was ich zuerst gefolgert
+hatte (Codex auf #127): „falsch kodiert" ist es nicht, weil nichts es kodiert.** Das Enum ist
 bereits `: byte` deklariert, seine Werte sind interne Diskriminanten, und **kein Pfad serialisiert
 sie** — `ConfigureTpdo` vergleicht namentlich. `1800h` zu implementieren macht die Nummerierung
 also *nicht* automatisch zum Draht-Defekt: die OD-Kodierung kann `Synchronous` explizit als `01h`
