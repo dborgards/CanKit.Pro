@@ -273,11 +273,16 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         var seen = new List<(NmtState State, bool Toggle)>();
         var gate = new object();
         var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var booted = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
         master.NodeGuardingReceived += (_, e) =>
         {
             if (e.ProducerNodeId != producer) return;
             lock (gate) { seen.Add((e.State, e.Toggle)); }
             first.TrySetResult(true);
+        };
+        master.HeartbeatReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == producer) booted.TrySetResult(e.State);
         };
 
         master.StartNodeGuardingConsumer(producer,
@@ -301,6 +306,14 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
                 + "not be discarded as a repeat of a baseline the boot-up should never have set");
             seen[0].Toggle.Should().BeFalse("a producer's first reply carries toggle 0");
         }
+
+        // Not a response is not the same as not an event. HandleIncoming routes this COB-ID to
+        // the guarding path and returns once a consumer is registered, so the boot-up reaches no
+        // other handler -- and ICanOpenNode.HeartbeatReceived is documented for "a heartbeat (or
+        // bootup) frame". Swallowing it made a producer's reset invisible.
+        var bootState = await booted.Task.WithTimeoutAsync(ShortTimeout);
+        bootState.Should().Be(NmtState.Initializing,
+            "a restart must stay observable to subscribers even while node-guarding is running");
     }
 
     // -----------------------------------------------------------------------------------------

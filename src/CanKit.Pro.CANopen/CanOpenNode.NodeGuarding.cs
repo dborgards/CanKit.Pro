@@ -171,6 +171,16 @@ internal sealed partial class CanOpenNode
         if (b == (byte)NmtState.Initializing)
         {
             consumer.HasSeenResponse = false;
+            // The restart still has to be observable. HandleIncoming routes this COB-ID here and
+            // returns once a guarding consumer is registered for the producer, so HandleHeartbeat
+            // never sees it -- and ICanOpenNode.HeartbeatReceived is documented for "a heartbeat
+            // (or bootup) frame". Returning silently made a producer's reset invisible to every
+            // subscriber, which the first revision of this fix did (#122, Codex).
+            //
+            // Raised directly rather than through HandleHeartbeat: that path would also rearm a
+            // heartbeat consumer's deadline, which nothing did on this branch before, and a
+            // boot-up is not a heartbeat response.
+            RaiseHeartbeatReceived(producerNodeId, NmtState.Initializing, DateTime.UtcNow);
             return;
         }
 
