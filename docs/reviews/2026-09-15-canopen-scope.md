@@ -108,6 +108,19 @@ wo die Anwendung nicht hinkommt.
 Der Posten heißt damit nicht „Objekte anlegen", sondern **„OD und PDO-Engine für die
 Kommunikationsparameter zusammenschließen, so wie es für das Mapping bereits geschieht"**.
 
+**`1200h` gehört nicht in denselben Posten (Codex auf #127).** Es ist der SDO-Server-Parameter und
+hat mit der PDO-Engine nichts zu tun: `CanOpenNode.cs:774` erkennt eine Anfrage am Vergleich
+`cobId == CanOpenCobId.SdoRx(_nodeId)`, also fest `0x600 + Node-ID`, und antwortet auf
+`0x580 + Node-ID` — nie über einen OD-Eintrag. Es in eine Zeile mit `1400h`/`1800h` zu schreiben
+hätte genau das erlaubt, wovor der Befund warnt: die PDO-Arbeit als erledigt zu verbuchen, während
+`1200h` weiter wirkungslos ist.
+
+Für `1200h` gibt es deshalb zwei getrennte Wege, und der zweite ist der kleinere: entweder die
+SDO-Server-COB-IDs tatsächlich aus dem Record lesen, oder — weil die Fußnote `ro` ausdrücklich
+erlaubt — **einen schreibgeschützten Record bereitstellen, der die festen Vorgabe-IDs abbildet.**
+Der Stack unterstützt ohnehin nur diese; ein `rw`-Record würde eine Beweglichkeit zusagen, die es
+nicht gibt — derselbe Fehler wie bei `1800h:02`, nur auf dem SDO-Pfad.
+
 ### 3. Die Übertragungsart ist falsch kodiert, nicht nur zu grob
 
 Die normative Wertetabelle der PDO-Kommunikationsparameter:
@@ -206,7 +219,8 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
 | | Was | Normlage | Vorschlag |
 |---|---|---|---|
 | 1 | `1000h`, `1001h`, `1018h` | Pflicht **für das fertige Gerät** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h`. Zusätzlich das README-Beispiel auf alle drei erweitern — es zeigt heute nur `1000h` |
-| 2 | `1400h`/`1800h`, `1200h` **an die PDO-Engine anschließen** | Pflicht bei PDO-/SDO-Support; die Verdrahtung liegt innen | der eigentliche Posten dieser Runde — nicht „Objekte anlegen", sondern sie wirksam machen, wie es `1600h`/`1A00h` bereits sind |
+| 2a | `1400h`/`1800h` **an die PDO-Engine anschließen** | Pflicht bei PDO-Support; die Verdrahtung liegt innen | der eigentliche Posten dieser Runde — nicht „Objekte anlegen", sondern sie wirksam machen, wie es `1600h`/`1A00h` bereits sind |
+| 2b | `1200h` als SDO-Server-Record | Pflicht bei SDO-Support; **anderer Pfad als 2a** | minimal: schreibgeschützter Record über die festen `0x600`/`0x580 + Node-ID`. Größer wäre, die COB-IDs wirklich daraus zu lesen — separat zu entscheiden, nicht mit 2a zu verwechseln |
 | 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` | Wertetabelle definiert, verpflichtet nicht | **Kandidat, keine `Must`** — was unterstützt wird, muss im Record stehen; mehr verlangt CiA 301 hier nicht |
 | 4 | Abort-Code `0504 0003h` | normativ, und der Blocktransfer erkennt den Zustand | klein; die übrigen 13 erst, wenn ein Verhalten sie auslöst |
 | 5 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial, gehört zu 4 |
