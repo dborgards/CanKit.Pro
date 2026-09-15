@@ -8,6 +8,12 @@ GitHub-Standardansicht (zuletzt aktualisiert), und die ist eine Rückkopplung �
 die eigene letzte Welle angefasst hat. Dieses Dokument ist der erste Bezugspunkt, von dem eine
 Abweichung überhaupt messbar ist.
 
+> **Nachtrag 15.09.2026, nach der Zielklärung.** Das Produktziel ist *vollständig und
+> fehlerfrei*. Damit ist diese Liste dem Umfangs-Zuschnitt **nachgeordnet**: sie ordnet die 33
+> bekannten Defekte, sagt aber nichts über das, was fehlt und nie gemeldet wurde.
+> `2026-09-15-norm-gap.md` misst das und hat einen Eintrag dieser Liste widerlegt — siehe #94
+> unten. Diese Reihenfolge greift wieder, sobald der Umfang entschieden ist.
+
 ## Kriterien, in dieser Rangfolge
 
 1. **Schwere** — Wirkung, *wenn* der Defekt ausgelöst wird. Die Auslösewahrscheinlichkeit steht
@@ -120,16 +126,14 @@ L2 zuerst, dem Layer-Kriterium folgend:
 
 ### Eigene Spur: Testinfrastruktur und CI
 
-Diese sechs konkurrieren nicht um dieselben Plätze — sie ändern die **Kosten** jedes Fixes oben.
+Diese fünf konkurrieren nicht um dieselben Plätze — sie ändern die **Kosten** jedes Fixes oben.
 Innerhalb der Spur:
 
 1. **#92** — die wackeligen Uhrentests treffen jede einzelne PR der Liste oben.
-2. **#94** — Restarbeit klein, und das Ticket trägt den Beleg: die fehlende Zwei-Welten-Naht hat
-   zwei Regressionen verdeckt.
-3. **#114** — Schritt 2, die 29 B+C-Sites mit vorhandener Naht.
-4. **#52** — normative Negativtests; wächst mit jedem Fix oben mit.
-5. **#118** — gemessen (Kliff zwischen 40 und 25 ms), Fix bewusst nicht gebaut.
-6. **#106** — liegt beim Maintainer: die Merge Queue ist in `ci.yml` verdrahtet, aber am Branch
+2. **#114** — Schritt 2, die 29 B+C-Sites mit vorhandener Naht.
+3. **#52** — normative Negativtests; wächst mit jedem Fix oben mit.
+4. **#118** — gemessen (Kliff zwischen 40 und 25 ms), Fix bewusst nicht gebaut.
+5. **#106** — liegt beim Maintainer: die Merge Queue ist in `ci.yml` verdrahtet, aber am Branch
    nicht eingeschaltet.
 
 ## Daraus: PR-Zuschnitt
@@ -152,6 +156,23 @@ Trennung ist der Zuschnitt nach Schwere, nicht nach Datei. PR 6 hängt sachlich 
 
 Release-Wirkung: PR 1–7 sind durchgehend `fix`, also Patch. Die zweite Hälfte von #43 ist `feat`
 und gehört nicht in eine dieser PRs.
+
+## Korrektur: #94 gehörte nie in die Nebenspur
+
+In der ersten Fassung dieses Dokuments stand #94 unter *Testinfrastruktur*, mit der Begründung, es
+ändere nur die Kosten der Fixes darüber. Das war falsch, und der Beleg kam aus einer Messung, die
+ich erst danach gemacht habe.
+
+`eng/verify-requirements-traceability.py` prüft die SRS-Regel aus §7 — jede `Must`-Anforderung
+braucht einen Test. Zwei der Anforderungen ohne Nachweis sind **FR-RAW-015** (Echo-Kennzeichnung
+und Zeitstempel je Subscription-Element) und **FR-RAW-032** (dokumentierte TX-Confirm-Approximation
+ohne Echo-Unterstützung). Das ist genau die Echo-Semantik, die #94 als auf dem Standard-Testadapter
+nicht prüfbar beschreibt.
+
+#94 ist damit keine Testhygiene, sondern die fehlende Verifikation zweier `Must`-Anforderungen —
+also ein Vollständigkeitsdefekt im Sinne der SRS und nicht Werkzeugpflege. Der Unterschied ist
+nicht kosmetisch: in der Nebenspur konkurriert es mit nichts, als Must-Lücke steht es einer
+„fertigen" L2-Ebene im Weg.
 
 ## Was diese Reihenfolge sagt, das die bisherige Praxis nicht sagt
 
