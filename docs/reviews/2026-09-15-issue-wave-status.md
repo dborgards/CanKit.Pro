@@ -114,3 +114,8 @@ Buchführung im J1939-Knoten —, die sich erst lohnt, wenn mehr als ein Ticket 
 
 Und die 20 Produktdefekte warten weiter. Wenn die nächste Welle wieder nur Testinfrastruktur
 anfasst, ist das eine Entscheidung und sollte als solche getroffen werden.
+
+Womit sie zu vergleichen ist, steht seit heute daneben:
+[`2026-09-15-open-issue-priority.md`](2026-09-15-open-issue-priority.md) sortiert alle 33 offenen
+Issues nach Schwere, Layer und Produkt — jeder der 20 Defekte gegen den aktuellen Stand
+nachgelesen, nicht aus dem Ticket abgeschrieben.
