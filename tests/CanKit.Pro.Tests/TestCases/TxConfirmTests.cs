@@ -545,4 +545,77 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             "the stamp must be taken when the frame arrived, which was before this test let the "
             + "transmitting thread out of Transmit");
     }
+
+    // #102: SendWithEchoConfirmAsync holds _pendingGate across _bus.Transmit, so a blocking
+    // driver owns the lock for as long as the driver takes. This pins what that actually costs,
+    // which is narrower than the ticket states and worth having written down either way.
+    //
+    // OnFrameObserved calls TryMatchEcho -- which takes the same lock -- *before* it dispatches to
+    // subscriptions, and only for a frame flagged as an echo while a send is pending. So:
+    //
+    //   * a plain frame is dispatched lock-free and is unaffected;
+    //   * an echo frame parks the RX thread inside TryMatchEcho, and on a real adapter that is one
+    //     thread, so everything queued behind it waits too -- which is how "every subscription
+    //     stalls" comes about, rather than directly.
+    //
+    // Deferred echo mode is required: with the synchronous default, Transmit's own echo re-enters
+    // the lock on the transmitting thread while OnTransmitting still holds it.
+    [Fact]
+    public async Task A_Blocking_Transmit_Stalls_An_Echo_Frame_But_Not_A_Plain_One()
+    {
+        using var bus = OpenDeferredEcho();
+        using var service = new CanBusService(bus);
+
+        const int watchedId = 0x321;
+        using var sub = service.Subscribe(CanIdFilter.Range(watchedId, watchedId), includeEcho: true);
+
+        var plain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var echoed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var readerCts = new CancellationTokenSource();
+        var reader = Task.Run(async () =>
+        {
+            await foreach (var f in sub.Frames.WithCancellation(readerCts.Token))
+            {
+                if (f.IsEcho) echoed.TrySetResult(); else plain.TrySetResult();
+            }
+        });
+
+        var insideTransmit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseDriver = new ManualResetEventSlim(false);
+        bus.OnTransmitting = _ =>
+        {
+            insideTransmit.TrySetResult();
+            releaseDriver.Wait();
+        };
+
+        // On its own thread: SendConfirmed runs synchronously up to its first await, and the
+        // register-plus-transmit step is inside that stretch, so the *caller's* thread is what sits
+        // in the blocking driver call. Worth knowing on its own -- it is the same lock scope seen
+        // from the sending side.
+        var send = Task.Run(() => service.SendConfirmed(CanFrame.Classic(0x111, new byte[] { 1 })));
+        await insideTransmit.Task.WaitAsync(ShortTimeout);
+        // The driver is now inside Transmit, so the service holds _pendingGate.
+
+        var echoArrival = Task.Run(() => bus.RaiseObserved(
+            CanFrame.Classic(watchedId, new byte[] { 2 }), isEcho: true));
+        bus.RaiseObserved(CanFrame.Classic(watchedId, new byte[] { 3 }), isEcho: false);
+
+        await plain.Task.WaitAsync(ShortTimeout);
+        plain.Task.IsCompletedSuccessfully.Should().BeTrue(
+            "a plain frame is dispatched without ever taking the pending-send lock, so a blocking "
+            + "driver does not hold it up");
+        echoArrival.IsCompleted.Should().BeFalse(
+            "an echo frame is matched against pending sends under the very lock the driver call "
+            + "is holding, so it cannot be delivered until the driver returns (#102)");
+
+        releaseDriver.Set();
+        await echoArrival.WaitAsync(ShortTimeout);
+        await echoed.Task.WaitAsync(ShortTimeout);
+
+        bus.DeferredEchoes.ReleaseNext();
+        (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
+
+        readerCts.Cancel();
+        await reader.ContinueWith(_ => { }, TaskScheduler.Default);
+    }
 }
