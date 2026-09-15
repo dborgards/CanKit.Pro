@@ -10,6 +10,14 @@ Das ist der Unterschied, auf den es ankommt. Im Gap-Dokument stand über dieselb
 ausdrücklich, sie seien meine Erinnerung. Zwei davon haben sich beim Nachlesen verschoben, einer
 in jede Richtung.
 
+**Und ein zweiter Fehler, der erst im Review aufflog.** Die erste Fassung dieses Dokuments hat an
+drei Stellen „die Norm definiert X" mit „die Implementierung muss X haben" gleichgesetzt — beim
+leeren Objektverzeichnis, bei der Übertragungsart und bei den Abort-Codes. Codex hat alle drei
+auseinandergenommen, und alle drei zu Recht: CiA 301 bindet ein *Gerät*, diese Pakete sind eine
+*Bibliothek*, und eine Protokolltabelle ist kein Implementierungsauftrag. Die betroffenen
+Abschnitte sind entsprechend zurückgenommen; was übrig bleibt, ist schmaler und belastbarer. Den
+Normtext zu haben schützt also nicht davor, ihn zu überdehnen.
+
 ## Was die Norm entscheidet — und was das über zwei Codebasen sagt
 
 ### 1. Pflichtobjekte: es sind drei, nicht zwei
@@ -24,9 +32,24 @@ Anhang führt es als `1018h RECORD Identity Object IDENTITY (23h) ro M`. Ebenso
 | `1001h` | Error register | **M** | nur 2 Doku-Kommentare |
 | `1018h` | Identity object | **M** | 0 Treffer |
 
-**Folge für CanKit.Pro:** das Objektverzeichnis ist leer vorbelegt (`CanOpenNode.cs:65`), eine
-SDO-Anfrage auf `1000h:00` beantwortet der Server mit Abort `0602 0000h`. Ein Konformitäts-
-werkzeug scheitert an seiner ersten Anfrage. Bestätigt als Konformitätsdefekt.
+**Folge für CanKit.Pro — enger gefasst, als ich sie zuerst geschrieben hatte (Codex auf #127):**
+CiA 301 bindet das *fertige Gerät*, nicht eine wiederverwendbare Bibliothek. Vendor-ID, Produktcode
+und Seriennummer kann ein Stack gar nicht kennen; sie zu erfinden wäre schlimmer als sie
+wegzulassen. Das Paket ist also nicht dadurch nicht konform, dass `_od` leer startet
+(`CanOpenNode.cs:65`) — die Anwendung *kann* die Objekte anlegen, und `ObjectDictionary.AddU32`
+ist genau dafür öffentlich.
+
+Was bleibt, ist schmaler und trotzdem ein Befund:
+
+1. **Der Standardweg führt still zum nicht konformen Knoten.** Wer `CanOpen.OpenNode` aufruft und
+   sonst nichts tut, hat ein Gerät ohne `1000h`, `1001h` und `1018h`; die erste SDO-Anfrage eines
+   Konformitätswerkzeugs (`1000h:00`) bekommt Abort `0602 0000h`. Nichts warnt.
+2. **Der dokumentierte Weg reicht nicht.** Die Paket-README zeigt in ihrem Beispiel
+   `AddU32(0x1000, …)` und `AddU32(0x2000, …)` (`README.md:104-105`) — also *ein* Pflichtobjekt von
+   dreien. Wer dem Beispiel folgt, baut einen Knoten, dem `1001h` und `1018h` weiterhin fehlen.
+
+Das ist eine Frage an den Zuschnitt (wer legt sie an, und was passiert, wenn niemand es tut), keine
+festgestellte Nichtkonformität des Stacks.
 
 **Folge für EdsDcfNet:** `Parsers/XddCommNetProfileParser.cs:264` klassifiziert im XDD-Pfad
 ausschließlich `0x1000` und `0x1001` als mandatory —
@@ -85,14 +108,23 @@ Dagegen `Pdo/PdoMapping.cs:63`:
 | `EventTimer` | `0x01` | synchronous, jeder SYNC |
 | `Synchronous` | `0x02` | synchronous, jeder **zweite** SYNC |
 
-**Alle drei Werte bedeuten auf dem Draht etwas anderes als ihr Name.** Event-driven ist `FEh`/`FFh`.
-Das ist mehr als die fehlende Ausdrucksfähigkeit für „jeder n-te SYNC", die ich vorher notiert
-hatte.
+**Korrektur (Codex auf #127): daraus folgt nicht, was ich daraus gefolgert hatte.** Das Enum ist
+bereits `: byte` deklariert, seine Werte sind interne Diskriminanten, und **kein Pfad serialisiert
+sie** — `ConfigureTpdo` vergleicht namentlich. `1800h` zu implementieren macht die Nummerierung
+also *nicht* automatisch zum Draht-Defekt: die OD-Kodierung kann `Synchronous` explizit als `01h`
+und die ereignisgesteuerten Modi als `FEh`/`FFh` schreiben. Meine Formulierung „erst das Enum auf
+`byte` bringen" war zudem schlicht falsch — das ist es schon.
 
-Sichtbar wird es heute nicht, weil das Byte mangels `1800h` nie auf den Draht kommt. Damit hängen
-Punkt 2 und 3 zusammen: **`1800h` zu implementieren macht die Enum-Nummerierung zum Draht-Defekt.**
-Sie gehören in dieselbe Runde, und die Reihenfolge ist: erst das Enum auf `byte` bringen, dann
-`1800h`.
+Dazu kommt ein Preis, den ich nicht bedacht hatte: `TpdoTransmission` steht in der öffentlichen
+API-Baseline (`CanKit.Pro.CANopen.approved.txt:241`) und dient in `ConfigureTpdo` als
+Default-Parameter `transmission = 0`. Umnummerieren wäre ein Bruch für jeden, der sich auf die
+Zahlenwerte verlässt.
+
+Was **bleibt**: drei Werte können `02h`–`F0h` („jeder n-te SYNC") und `FCh`/`FDh` (RTR-only) nicht
+ausdrücken. Irgendetwas muss also dazu — aber als **explizite Kodierung in der OD-Schicht** oder
+als zusätzliche byte-wertige API, nicht als Umnummerierung des bestehenden Enums. Die
+Reihenfolge-Behauptung „erst Enum, dann `1800h`" fällt damit weg; sie stand auf der falschen
+Prämisse.
 
 ### 4. Abort-Codes: 17 von 31
 
@@ -105,8 +137,16 @@ erfunden. Es fehlen 14, darunter ausgerechnet der, den die Blockübertragung bra
 `0800 0020h`–`0800 0024h` (fünf Codes: Anwendung, local control, device state, OD-Generierung,
 no data available).
 
-Das ist das CANopen-Gegenstück zum NRC-Befund der GAP-Analyse (19 von ~35 bei UDS) — für CANopen
-hatte es niemand notiert.
+**Aber „17 von 31" ist keine Mängelliste (Codex auf #127).** Tabelle 22 ist eine
+Protokoll-Referenz, kein Implementierungsauftrag. Auf der Empfangsseite geht nichts verloren:
+`SdoAbortException.AbortCode` ist ein roher `uint`, ein unbekannter Peer-Code kommt unverfälscht
+bei der Anwendung an. Auf der Sendeseite braucht der Server nur benannte Werte für Zustände, die er
+tatsächlich erkennt und meldet.
+
+Damit schrumpft der Befund auf einen konkreten Eintrag: **`0504 0003h`**, weil der Blocktransfer
+diesen Zustand erkennt und heute keinen passenden Code dafür hat. Für die Hardware-, Gerätezustands-
+und Wertebereichs-Codes gibt es kein Verhalten im Paket, das sie auslösen würde — sie werden Scope,
+wenn ein solches Verhalten dazukommt, und vorher nicht.
 
 ### 5. Was sich zugunsten des Codes aufgelöst hat
 
@@ -137,10 +177,10 @@ hatte es niemand notiert.
 
 | | Was | Normlage | Vorschlag |
 |---|---|---|---|
-| 1 | `1000h`, `1001h`, `1018h` vorbelegen | **Pflicht** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h` (nur die Anwendung kennt Vendor-ID, Produktcode, Revision, Seriennummer) |
-| 2 | `TpdoTransmission` auf `byte` mit Normsemantik | Wertetabelle | **zuerst**, weil 3 ohne es zum Draht-Defekt wird |
-| 3 | `1400h`/`1800h`, `1200h` | **Pflicht bei PDO-/SDO-Support** | direkt nach 2, in derselben Runde |
-| 4 | Abort-Codes auf Tabelle 22 vervollständigen | normativ | klein, eigener Commit |
+| 1 | `1000h`, `1001h`, `1018h` | Pflicht **für das fertige Gerät** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h`. Zusätzlich das README-Beispiel auf alle drei erweitern — es zeigt heute nur `1000h` |
+| 2 | `1400h`/`1800h`, `1200h` | **Pflicht bei PDO-/SDO-Support** | der eigentliche Konformitätsposten dieser Runde |
+| 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` ausdrückbar machen | Wertetabelle | als **explizite OD-Kodierung** bzw. zusätzliche byte-wertige API — das bestehende öffentliche Enum *nicht* umnummerieren |
+| 4 | Abort-Code `0504 0003h` | normativ, und der Blocktransfer erkennt den Zustand | klein; die übrigen 13 erst, wenn ein Verhalten sie auslöst |
 | 5 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial, gehört zu 4 |
 | 6 | TIME `1012h` | **optional** | in den Ausnahmekatalog, nicht bauen |
 
