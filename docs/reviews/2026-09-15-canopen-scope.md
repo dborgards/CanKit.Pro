@@ -109,12 +109,18 @@ dieselbe Anwendung kann `ConfigureTpdo` dieselben Werte geben. Dann liest der Ma
 zutreffenden Record — **ganz ohne Verdrahtung zwischen OD und Engine.** Ein kohärentes Gerät ist
 also baubar, und 2a ist keine zwingende Anforderung.
 
-Die Sorge schrumpft damit auf zwei Fälle, die die Anwendung *nicht* auflösen kann:
+Die Sorge schrumpft damit auf **einen** Fall, den die Anwendung nicht auflösen kann, und einen, den
+sie mit Disziplin auflösen kann:
 
-1. **Beschreibbare Records.** Ein `rw`-Eintrag nimmt den Schreibzugriff eines Masters an, und die
-   Engine sieht ihn nie. Wer `1400h`/`1800h` beschreibbar anbietet, muss ihn verdrahten.
-2. **Drift.** Ruft die Anwendung später `ConfigureTpdo` erneut mit anderen Werten, veraltet der
-   OD-Eintrag still — nichts hält die beiden zusammen.
+1. **Beschreibbare Records — nicht auflösbar.** Ein `rw`-Eintrag nimmt den Schreibzugriff eines
+   Masters an, und die Engine sieht ihn nie. Wer `1400h`/`1800h` beschreibbar anbietet, muss ihn
+   verdrahten.
+2. **Drift — auflösbar, aber von Hand.** Ruft die Anwendung später `ConfigureTpdo` erneut, kann sie
+   den OD-Eintrag über `ObjectDictionary.WriteRaw`/`WriteUnsigned` nachziehen; diese lokalen Setter
+   prüfen die Zugriffsflags **nicht** (`ObjectDictionary.cs:131-141`), es funktioniert also auch bei
+   einem `ro`-Record. Die tatsächliche Grenze ist damit schmaler, als ich geschrieben hatte: der
+   Abgleich ist **weder automatisch noch atomar**, aber möglich. Als „von der Anwendung nicht
+   lösbar" zu führen hätte Drift-Vermeidung unberechtigt in den Zuschnitt gehoben (Codex auf #127).
 
 **Und die Inhibit Time gehört gar nicht hierher.** `ConfigureTpdo` nimmt Übertragungsart, COB-ID
 und Event-Timer-Intervall entgegen — **keine Inhibit Time** (`ICanOpenNode.cs:184-187`), und die
