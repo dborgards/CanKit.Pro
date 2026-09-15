@@ -244,6 +244,21 @@ jobs:
       - name: Verify release configuration loads
         run: node eng/verify-release-config.mjs
 
+  traceability:
+    name: requirements traceability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The SRS §7 rule -- every `Must` requirement covered by a test before its layer counts
+      # as finished -- was unenforced until this check existed, so nobody could say how many
+      # met it. The answer turned out to be "eight short", and none of the eight was in the
+      # issue tracker. The check is a ratchet, not a gate: it passes on the recorded gaps and
+      # fails on a new one, or on a recorded one that has since been closed and not removed.
+      - name: Verify requirements traceability
+        run: python3 eng/verify-requirements-traceability.py
+
   format:
     name: format
     runs-on: ubuntu-latest
