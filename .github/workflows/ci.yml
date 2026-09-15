@@ -244,6 +244,31 @@ jobs:
       - name: Verify release configuration loads
         run: node eng/verify-release-config.mjs
 
+  traceability:
+    name: requirements traceability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The SRS §7 rule -- every `Must` requirement covered by a test before its layer counts
+      # as finished -- was unenforced until this check existed, so nobody could say how many
+      # met it. The answer turned out to be eleven short, and not one of the eleven was in the
+      # issue tracker. The check is a ratchet, not a gate: it passes on the recorded gaps and
+      # fails on a new one, or on a recorded one that has since been closed and not removed.
+      #
+      # Running is not blocking. Only the three OS build-test legs are required by the `main`
+      # ruleset, so as things stand a pull request can introduce a new untraced `Must`, leave
+      # this job red, and still satisfy every required check (Codex on #126). Like `format`
+      # below, this job is meant to gate and therefore belongs in that ruleset -- a repository
+      # setting, not something this file can declare.
+      #
+      # Deliberately not wired as a `needs:` of an already-required job, which would enforce it
+      # today: that is the coupling the `format` comment below rejects for the same reason -- a
+      # requirement with no test has no business stopping the build legs from running.
+      - name: Verify requirements traceability
+        run: python3 eng/verify-requirements-traceability.py
+
   format:
     name: format
     runs-on: ubuntu-latest
