@@ -37,8 +37,8 @@ Dieses Dokument spezifiziert die Anforderungen an CanKit, um auf der bestehenden
 
 Das Dokument spezifiziert:
 
-- **L2 Raw-CAN-Dienstebene** (neu zu bauen) – die Härtung und Erweiterung von `ICanBus`/`CanFrame` um Multi-Consumer-Demultiplexing, einen verbindlichen Frame-Ownership-Vertrag, TX-Bestätigung, Adressierungs-Helfer und ein einheitliches Threading-Modell je Protokollinstanz.
-- **L3 Transport-Ebene** – Fertigstellung von ISO-TP (ISO 15765-2) sowie Neubau von J1939-TP (TP.BAM/TP.CM).
+- **L2 Raw-CAN-Dienstebene** – die Härtung und Erweiterung von `ICanBus`/`CanFrame` um Multi-Consumer-Demultiplexing, einen verbindlichen Frame-Ownership-Vertrag, TX-Bestätigung, Adressierungs-Helfer und ein einheitliches Threading-Modell je Protokollinstanz.
+- **L3 Transport-Ebene** – ISO-TP (ISO 15765-2) und J1939-TP (TP.BAM/TP.CM).
 - **L4 Anwendungsprotokoll-Ebene** – UDS (ISO 14229 über ISO-TP), CANopen (CiA 301), J1939-Applikation (SAE J1939/ISO 11783).
 
 Nicht im Scope: Neuimplementierung von L0 (Vendor-Adapter) und der bereits vorhandenen L1-Kernfunktionalität (`ICanBus`, `CanFrame`, `CanRegistry`) – diese werden als gegeben vorausgesetzt und nur dort referenziert, wo L2 auf ihnen aufsetzt oder bestehende Defekte (siehe Review) die L2-Anforderungen begründen.
@@ -98,9 +98,9 @@ CanKit wird in fünf Ebenen strukturiert. Diese Nomenklatur ist verbindlich und 
 |---|---|---|---|
 | L0 | Adapter-Ebene | 7 Vendor-Adapter (SocketCAN, ZLG, PCAN, Kvaser, Vector, ControlCAN, Virtual) + Fake-Native-Schicht für CI | **vorhanden**, produktionsnah |
 | L1 | Raw-CAN-Kern | `ICanBus`, `CanFrame`/`CanFrameView`, `ITransceiver`, `ICanDevice`, `IPeriodicTx`, `CanRegistry`, Utilities (`AsyncFramePipe`, `QueuedTxCanBus`, `SoftwarePeriodicTx`, `PreciseDelay`, `BitTimingSolver`) | **vorhanden**, mit bekannten Defekten (siehe Review) |
-| L2 | Raw-CAN-Dienstebene | Multi-Consumer-Demultiplexing, Frame-Ownership-Vertrag, TX-Bestätigung, Adressierungs-Helfer, Threading-Modell je Protokollinstanz, Fehler-/Timeout-Infrastruktur | **neu zu bauen** – Gegenstand dieser SRS |
+| L2 | Raw-CAN-Dienstebene | Multi-Consumer-Demultiplexing, Frame-Ownership-Vertrag, TX-Bestätigung, Adressierungs-Helfer, Threading-Modell je Protokollinstanz, Fehler-/Timeout-Infrastruktur | ausgeliefert als `CanKit.Pro.RawCan`, `.Actor`, `.Addressing`, `.Reliability` |
 | L3 | Transport-Ebene | ISO-TP (ISO 15765-2), J1939-TP (TP.BAM/TP.CM) | beide ausgeliefert als `CanKit.Pro.IsoTp` und `CanKit.Pro.J1939Tp` |
-| L4 | Anwendungsprotokoll-Ebene | UDS (auf ISO-TP), CANopen, J1939 (Applikation) | **nicht vorhanden** |
+| L4 | Anwendungsprotokoll-Ebene | UDS (auf ISO-TP), CANopen, J1939 (Applikation) | alle drei ausgeliefert als `CanKit.Pro.Uds`, `.CANopen`, `.J1939` |
 
 L2 ist die vom Auftraggeber geforderte zusätzliche „raw-CAN“-Schicht: Sie kapselt alles, was mehrere Protokoll-Stacks gemeinsam benötigen und was heute nicht (oder nicht korrekt) in L1 existiert.
 
@@ -249,7 +249,7 @@ Ist-Zustand (15.09.2026): ausgeliefert als `CanKit.Pro.IsoTp`. Die folgenden Anf
 
 #### 4.2.2 J1939-TP (TP.BAM/TP.CM)
 
-Ist-Zustand: nicht vorhanden, Neubau.
+Ist-Zustand (15.09.2026): ausgeliefert als `CanKit.Pro.J1939Tp`.
 
 | ID | Anforderung | Priorität | Verifikation | Quelle |
 |---|---|---|---|---|

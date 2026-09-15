@@ -31,7 +31,11 @@ import pathlib
 import re
 import sys
 
-REQ = re.compile(r"\b(?:FR|NFR)-[A-Z0-9]+-\d+\b")
+# The middle segment is optional: functional requirements are FR-RAW-001, but the
+# non-functional ones are plain NFR-001. Requiring three parts silently dropped all
+# twelve NFRs -- the totals looked plausible and the ratchet simply did not cover them
+# (Bugbot on #125). eng/mkdocs_hooks.py already treats that segment as optional.
+REQ = re.compile(r"\b(?:FR|NFR)-(?:[A-Z0-9]+-)?\d+\b")
 
 # id -> the substring that must appear in the SRS verification column for the
 # waiver to hold. Keep the reason, not just the id: a bare id list is how an
@@ -40,9 +44,13 @@ WAIVERS = {
     # Documented ownership contract. The SRS verifies it by documentation review
     # against the arc42 document, which no test can stand in for.
     "FR-RAW-001": "Dokumentationsreview",
-    # Dependency-list shape. Verified mechanically, but by the package check
-    # (eng/verify-packages.py) rather than by anything under tests/.
-    "FR-TP-020": "Paketprüfung",
+    # The four below are properties of the CI run itself -- that the matrix builds and
+    # tests every target, on every platform, with no hardware attached. No single test
+    # under tests/ can assert them, because the thing being asserted is the run.
+    "NFR-004": "CI-Testmatrix",
+    "NFR-005": "Buildmatrix",
+    "NFR-009": "CI-Lauf",
+    "NFR-010": "Architekturreview",
 }
 
 # `Must` requirements that no test mentions today. This is debt, not exemption --
@@ -56,10 +64,19 @@ WAIVERS = {
 # FR-RAW-015 and FR-RAW-032 are the echo semantics that #94 reports as
 # untestable on the default adapter -- which is why #94 is a missing
 # verification of two `Must` requirements, not test hygiene.
+# FR-TP-020 was waived here as verified by the package check until Codex pointed out on
+# #125 that eng/verify-packages.py inspects package count, version, README, license and
+# symbol metadata -- never the dependency list. The SRS says "Paketprüfung", but no
+# package check actually looks, so this is debt like the rest until one does.
+#
+# NFR-001 and NFR-002 name a performance test and a macOS integration test respectively.
+# Those are tests, so they are gaps rather than waivers; NFR-001 additionally has no
+# target values yet (SRS appendix item 1).
 KNOWN_GAPS = {
     "FR-RAW-002", "FR-RAW-003", "FR-RAW-004",
     "FR-RAW-015", "FR-RAW-032",
-    "FR-TP-013", "FR-TP-014", "FR-TP-017",
+    "FR-TP-013", "FR-TP-014", "FR-TP-017", "FR-TP-020",
+    "NFR-001", "NFR-002",
 }
 
 
