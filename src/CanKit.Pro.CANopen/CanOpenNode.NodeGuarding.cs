@@ -106,13 +106,6 @@ internal sealed partial class CanOpenNode
 
     private void SendNodeGuardingRtr(byte producerNodeId)
     {
-        // A response is only a response to something. Marking the poll here rather than on TX
-        // confirmation is deliberate: this runs on the actor loop and the reply cannot be
-        // processed before it, so the flag is always set early enough, and a slow or failed
-        // SendConfirmed must not make the consumer deaf to a reply that did arrive.
-        if (_nodeGuardingConsumers.TryGetValue(producerNodeId, out var polling))
-            polling.PollOutstanding = true;
-
         // RTR (remote transmission request) with zero-length payload on 0x700 + producer.
         // Preserving IsRemoteFrame end-to-end depends on the reader loop forwarding it into
         // HandleIncoming and on the adapter (Virtual: preserves via Duplicate) round-tripping it.
@@ -181,16 +174,22 @@ internal sealed partial class CanOpenNode
             return;
         }
 
-        // Beyond boot-up, a data frame on this COB-ID is only a response if we asked for one.
-        // HandleNmtCommand emits a heartbeat on every state change even when the periodic
-        // heartbeat producer is off -- which is the configuration node-guarding runs in, since
-        // CiA 301 7.2.8.3 makes the two mutually exclusive on the producer -- and that frame
-        // carries a real state with bit 7 clear, indistinguishable on the wire from a toggle-0
-        // reply. Rearming the life-time deadline from it would report liveness we never
-        // established, and it would take the toggle baseline with it.
-        if (!consumer.PollOutstanding) return;
-        consumer.PollOutstanding = false;
-
+        // An unsolicited frame that is *not* boot-up still gets through, and deliberately so
+        // after a round of review on it. HandleNmtCommand emits a heartbeat on every state
+        // change even with the periodic producer off -- the configuration node-guarding runs in,
+        // since CiA 301 7.2.8.3 makes the two mutually exclusive -- and it carries a real state
+        // with bit 7 clear, indistinguishable on the wire from a toggle-0 reply.
+        //
+        // A one-bit "a poll is outstanding" gate was written here for that and taken back out:
+        // it has to be spent by the frame that arrives, and the alternation check below is what
+        // decides whether that frame was a reply, so the gate is always spent before the answer
+        // is known. A delayed reply or a state-change heartbeat consumed it and the producer's
+        // real reply was then dropped outright -- worse than the case it was meant to catch
+        // (Bugbot, plus two adjacent findings from Codex on the same mechanism).
+        //
+        // Doing it properly means telling a reply from an unsolicited frame, and the wire carries
+        // nothing that distinguishes them. That is a design question and it belongs with the
+        // producer-side life guarding in #43, not in the baseline fix above.
         bool toggle = (b & 0x80) != 0;
         byte stateByte = (byte)(b & 0x7F);
         NmtState state = stateByte switch
@@ -289,12 +288,6 @@ internal sealed partial class CanOpenNode
         public byte LifeTimeFactor { get; }
         public IDisposable? PollHandle { get; set; }
         public IDeadline? LifeTimeDeadline { get; set; }
-        /// <summary>
-        /// True while an RTR has gone out and no response has been accepted for it yet. A data
-        /// frame arriving on the producer's COB-ID outside that window answers no poll (#43).
-        /// </summary>
-        public bool PollOutstanding { get; set; }
-
         /// <summary>True after the first response that was accepted for life-time rearm.</summary>
         public bool HasSeenResponse { get; set; }
         /// <summary>Toggle bit from the last response that rearmed the life-time deadline.</summary>
