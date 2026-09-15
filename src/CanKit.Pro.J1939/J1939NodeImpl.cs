@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common;
+using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939Tp;
@@ -101,6 +102,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // The address the node is in the middle of giving up, or -1. See WriteAddress.
     private int _vacatedAddressStore = -1;
 
+    // Application frames sent under the current address whose echo has not come back yet, and --
+    // once the address is given up -- that address plus what is still owed on it (#121).
+    //
+    // The marker above is bounded by the arbitration window, which is a proxy for "has the echo
+    // drained"; these two are the thing itself, so they outlive the claim. They are only ever
+    // non-zero on a bus that echoes, because on any other bus nothing comes back and the count
+    // could never drain.
+    private int _echoOutstanding;
+    private int _drainAddressStore = -1;
+    private int _drainOutstanding;
+
+    // WorkMode is the cross-adapter opt-in that actually turns echo delivery on, and it is the
+    // right predicate here rather than CanFeature.Echo: CanKit.Adapter.Virtual echoes in
+    // ChannelWorkMode.Echo without declaring the capability (#94), and its echoes are exactly the
+    // ones this counter exists for.
+    private readonly bool _busEchoes;
+
     /// <inheritdoc />
     public J1939Name Name => _name;
 
@@ -136,6 +154,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         ProtocolActor? actor = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
+        _busEchoes = _service.Bus.Options.WorkMode == ChannelWorkMode.Echo;
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
         _ownsService = ownsService;
@@ -648,6 +667,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         int vacated = Volatile.Read(ref _vacatedAddressStore);
         if (vacated >= 0 && sa == (byte)vacated) Volatile.Write(ref _vacatedAddressStore, -1);
+
+        // A peer that has taken the address owns whatever arrives under it from now on, so the
+        // drain marker ends here too -- otherwise the frames this node still owed would be
+        // charged against the new owner's traffic.
+        int draining = Volatile.Read(ref _drainAddressStore);
+        if (draining >= 0 && sa == (byte)draining) ClearDrain();
+    }
+
+    private void ClearDrain()
+    {
+        Volatile.Write(ref _drainAddressStore, -1);
+        Volatile.Write(ref _drainOutstanding, 0);
     }
 
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
@@ -692,11 +723,29 @@ internal sealed class J1939NodeImpl : IJ1939Node
         if (address.HasValue)
         {
             Volatile.Write(ref _vacatedAddressStore, -1);
+            // Re-taking the very address that is still draining makes the drain marker
+            // redundant: the unconditional check above owns that address again and runs first.
+            if (Volatile.Read(ref _drainAddressStore) == address.Value) ClearDrain();
         }
         else
         {
             int current = Volatile.Read(ref _addressStore);
             if (current >= 0) Volatile.Write(ref _vacatedAddressStore, current);
+        }
+
+        // Hand whatever is still owed under the old address to the drain marker, which is not
+        // bounded by the claim (#121). Sends are gated on ClaimState==Claimed, so nothing can be
+        // added to the live counter between here and the next commit; resetting it is bookkeeping
+        // rather than a race to lose.
+        int outstanding = Interlocked.Exchange(ref _echoOutstanding, 0);
+        if (!address.HasValue && outstanding > 0)
+        {
+            int current = Volatile.Read(ref _addressStore);
+            if (current >= 0)
+            {
+                Volatile.Write(ref _drainAddressStore, current);
+                Volatile.Write(ref _drainOutstanding, outstanding);
+            }
         }
 
         Volatile.Write(ref _addressStore, address.HasValue ? address.Value : -1);
@@ -741,6 +790,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 if (message.Payload.Length > 0) message.Payload.Span.CopyTo(payload);
 
                 using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
+                // Count it before the await: on a synchronously-echoing adapter the echo is
+                // raised from inside Transmit, so incrementing afterwards would race its own
+                // decrement. Only the single-frame path counts -- multi-frame goes out through
+                // the TP channel, whose PGNs the reader skips, so those echoes never reach the
+                // self-traffic guards at all.
+                if (_busEchoes) Interlocked.Increment(ref _echoOutstanding);
                 var confirmation = await _service.SendConfirmed(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (!confirmation.Confirmed)
                     throw new J1939NodeException(
@@ -1083,7 +1138,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // (#119, Codex). Same rule the CANopen guard states for 0x600 + id -- an explicitly
             // directed frame is ours to serve whoever sent it -- and it cannot swallow a
             // broadcast, because a broadcast is either PDU2 or carries da == 0xFF.
-            if (myAddr >= 0 && sa == (byte)myAddr && !(isPdu1 && da == (byte)myAddr)) return;
+            if (myAddr >= 0 && sa == (byte)myAddr && !(isPdu1 && da == (byte)myAddr))
+            {
+                // One of ours has come home, so one fewer is owed. If the address is given up
+                // before the rest arrive, what is left becomes the drain marker below (#121).
+                if (Volatile.Read(ref _echoOutstanding) > 0) Interlocked.Decrement(ref _echoOutstanding);
+                return;
+            }
 
             // BeginClaimRound clears the address before announcing the new preferred SA, so for
             // the whole arbitration window `myAddr` is -1 and the check above cannot fire -- while
@@ -1097,6 +1158,32 @@ internal sealed class J1939NodeImpl : IJ1939Node
             if (vacated >= 0 && sa == (byte)vacated
                 && (J1939ClaimState)Volatile.Read(ref _claimStateStore) == J1939ClaimState.Claiming)
                 return;
+
+            // The same question the check above answers with a proxy, answered directly (#121,
+            // Codex). "Is the claim still running" stands in for "has the echo drained", and the
+            // two come apart when an echo is delivered later than the whole arbitration window --
+            // an RX backlog, or a slow adapter. The claim completes, WriteAddress commits the new
+            // address, and the frame this node sent under the old one is then raised as a peer's.
+            //
+            // So the count of what is still owed under that address carries the guard instead,
+            // and it is not bounded by any claim state. It cannot strand the node the way an
+            // unbounded marker would -- A_Vacated_Address_Stops_Being_Ours_Once_The_Claim_Is_Over
+            // is the boundary that forbids that -- because it only counts down on frames carrying
+            // that address: if none arrive there is nothing to be deaf to, and if they do, at
+            // most this many are swallowed before the marker clears itself. A peer's Address
+            // Claim for the address ends it outright.
+            int draining = Volatile.Read(ref _drainAddressStore);
+            if (draining >= 0 && sa == (byte)draining)
+            {
+                int left = Volatile.Read(ref _drainOutstanding);
+                if (left > 0)
+                {
+                    if (left == 1) Volatile.Write(ref _drainAddressStore, -1);
+                    Volatile.Write(ref _drainOutstanding, left - 1);
+                    return;
+                }
+                ClearDrain();
+            }
 
             // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))

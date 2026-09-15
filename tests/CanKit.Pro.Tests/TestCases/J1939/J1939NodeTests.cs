@@ -1973,6 +1973,137 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #121, Codex on #119: the vacated-address guard is bounded by the arbitration window, which
+    // is a proxy for "has this node's own echo drained". The two come apart when an echo is
+    // delivered later than the whole window -- an RX backlog, or a slow adapter. The claim
+    // completes, WriteAddress commits the new address, and the frame this node sent under the old
+    // one is then raised through MessageReceived as a peer's.
+    //
+    // A [Fact] on the flagging world, because only there can a test say *when* the echo arrives:
+    // ControllableBus.DeferredEchoCapable parks it until released. On the Virtual hub the echo
+    // comes back on its own schedule and the window cannot be opened deliberately -- which is the
+    // same asymmetry #94 is about, seen from the other side.
+    [Fact]
+    public async Task An_Echo_Delivered_After_The_Claim_Completes_Is_Still_Ours()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        });
+
+        // Synchronous while claiming: an Address Claim confirms on its own echo, so a parked one
+        // would never complete.
+        bus.EchoMode = EchoDelivery.Synchronous;
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        // One application frame under 0x11, with its echo held back.
+        bus.EchoMode = EchoDelivery.Deferred;
+        const uint drainingPgn = 0xFEF9u;
+        var pending = node.SendAsync(new J1939Message(drainingPgn, new byte[] { 7, 7, 7 },
+            destinationAddress: J1939Pgn.GlobalAddress));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        // Now move to another address and let that claim finish. This is the step the old guard
+        // could not survive: it expires here, while the echo above is still parked.
+        bus.EchoMode = EchoDelivery.Synchronous;
+        await node.ClaimAddressAsync(0x22).WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be(0x22);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        // The late echo, and then a genuine peer frame as the barrier. One subscription delivers
+        // in arrival order, so the barrier's arrival proves the echo has already been classified.
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue("the echo was parked, not dropped");
+
+        // The send itself is reported as having crossed the reclaim, which is correct and is the
+        // scenario stated in one line: the frame went out under 0x11 and the address moved while
+        // it was still on the wire. What must not also happen is the node hearing it back.
+        await FluentActions.Awaiting(() => pending).Should()
+            .ThrowAsync<J1939NoAddressException>();
+
+        const uint barrierPgn = 0xFEFDu;
+        bus.RaiseObserved(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+
+        var until = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < until)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == barrierPgn);
+            seen.Should().NotContain(m => m.Pgn == drainingPgn,
+                "arbitration ending does not turn this node's own outstanding echo into a peer's "
+                + "traffic; what bounds the guard is the echo draining, not the claim");
+        }
+    }
+
+    // The boundary the drain counter must not cross, from the other side: it only counts down on
+    // frames carrying that address, so a peer that legitimately took it is heard after at most as
+    // many frames as this node still owed -- never permanently swallowed.
+    [Fact]
+    public async Task A_Peer_On_The_Draining_Address_Is_Heard_Once_The_Count_Is_Spent()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        });
+
+        bus.EchoMode = EchoDelivery.Synchronous;
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        bus.EchoMode = EchoDelivery.Deferred;
+        var pending = node.SendAsync(new J1939Message(0xFEF9u, new byte[] { 7 },
+            destinationAddress: J1939Pgn.GlobalAddress));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        bus.EchoMode = EchoDelivery.Synchronous;
+        await node.ClaimAddressAsync(0x22).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        void Peer(uint pgn, byte[] data) => bus.RaiseObserved(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x11), data, isExtendedFrame: true),
+            isEcho: false);
+
+        // Exactly one frame is owed under 0x11. The first peer frame carrying it pays that debt
+        // off -- indistinguishable from the echo, so it is spent on it -- and the second must
+        // arrive.
+        const uint swallowed = 0xFEFAu;
+        const uint heard = 0xFEFCu;
+        Peer(swallowed, new byte[] { 1 });
+        Peer(heard, new byte[] { 2 });
+
+        var until = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < until)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == heard)) break; }
+            await Task.Delay(5);
+        }
+
+        lock (seenLock)
+        {
+            seen.Should().Contain(m => m.Pgn == heard,
+                "the count is spent, so the address is the peer's from here on -- an unbounded "
+                + "marker would have gone deaf to it for good");
+        }
+
+        bus.DeferredEchoes.ReleaseNext();
+        await FluentActions.Awaiting(() => pending).Should()
+            .ThrowAsync<J1939NoAddressException>();
+    }
+
     // #113 -- the same ownership contract as the ISO-TP channel, at both of the node's exits.
     // A node opens its transport channel first and subscribes for itself second, so failing the
     // first Subscribe and failing the second reach different catch blocks; both had never run.
