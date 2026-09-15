@@ -152,6 +152,54 @@ internal sealed partial class CanOpenNode
         if (!_nodeGuardingConsumers.TryGetValue(producerNodeId, out var consumer)) return;
 
         byte b = data[0];
+
+        // The boot-up message is one byte of 0x00 on this very COB-ID (CiA 301 7.3.2), and it is
+        // not a guarding response: it answers no poll, and a node that answers guarding RTRs is
+        // never in Initializing -- HandleNmtCommand leaves that state in the same statement pair
+        // that enters it, and HandleNodeGuardingRtrForSelf reports whatever _state then holds.
+        //
+        // Read as a response it seeded LastToggle = false, and the producer's *first real* reply
+        // -- also toggle 0, because the producer's toggle starts there -- was then discarded by
+        // the alternation check as a repeat (#43). With lifeTimeFactor 1 that costs the entire
+        // life-time window, so NodeGuardingTimeout fires while the producer is answering
+        // correctly.
+        //
+        // It is still information, and the right kind: the producer restarted, so its toggle
+        // restarts at 0 too. Dropping the baseline rather than ignoring the frame is what makes
+        // that next reply acceptable -- "no baseline yet", not "toggle 0". The life-time deadline
+        // is deliberately not rearmed: a node that has just restarted has not answered our poll.
+        if (b == (byte)NmtState.Initializing)
+        {
+            consumer.HasSeenResponse = false;
+            // The restart still has to be observable. HandleIncoming routes this COB-ID here and
+            // returns once a guarding consumer is registered for the producer, so HandleHeartbeat
+            // never sees it -- and ICanOpenNode.HeartbeatReceived is documented for "a heartbeat
+            // (or bootup) frame". Returning silently made a producer's reset invisible to every
+            // subscriber, which the first revision of this fix did (#122, Codex).
+            //
+            // Raised directly rather than through HandleHeartbeat: that path would also rearm a
+            // heartbeat consumer's deadline, which nothing did on this branch before, and a
+            // boot-up is not a heartbeat response.
+            RaiseHeartbeatReceived(producerNodeId, NmtState.Initializing, DateTime.UtcNow);
+            return;
+        }
+
+        // An unsolicited frame that is *not* boot-up still gets through, and deliberately so
+        // after a round of review on it. HandleNmtCommand emits a heartbeat on every state
+        // change even with the periodic producer off -- the configuration node-guarding runs in,
+        // since CiA 301 7.2.8.3 makes the two mutually exclusive -- and it carries a real state
+        // with bit 7 clear, indistinguishable on the wire from a toggle-0 reply.
+        //
+        // A one-bit "a poll is outstanding" gate was written here for that and taken back out:
+        // it has to be spent by the frame that arrives, and the alternation check below is what
+        // decides whether that frame was a reply, so the gate is always spent before the answer
+        // is known. A delayed reply or a state-change heartbeat consumed it and the producer's
+        // real reply was then dropped outright -- worse than the case it was meant to catch
+        // (Bugbot, plus two adjacent findings from Codex on the same mechanism).
+        //
+        // Doing it properly means telling a reply from an unsolicited frame, and the wire carries
+        // nothing that distinguishes them. That is a design question and it belongs with the
+        // producer-side life guarding in #43, not in the baseline fix above.
         bool toggle = (b & 0x80) != 0;
         byte stateByte = (byte)(b & 0x7F);
         NmtState state = stateByte switch

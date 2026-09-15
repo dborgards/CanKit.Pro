@@ -206,11 +206,15 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         // by default so the slave answers RTRs out of the box.
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
 
-        // Give the initial bootup frames (which share the 0x700+id COB-ID and are indistin-
-        // guishable at the wire level from a node-guarding response with toggle=0) enough time
-        // to drain before we register the consumer, otherwise a bootup captured after
-        // registration would show up as toggle=false and skew the alternation check.
-        await Task.Delay(100);
+        // No draining wait here any more. A bootup captured after registration used to show up as
+        // a toggle=false response and skew the alternation check, and this test papered over it
+        // with Task.Delay(100) -- one of the sites #114 counts. HandleNodeGuardingResponse now
+        // reads a 0x00 payload as what it is (#43), so the race it was hiding has no effect and
+        // the sleep has nothing left to buy.
+        //
+        // What it does *not* become is a detector: with the boot-up fix reverted this test still
+        // passes, because the poisoned baseline costs it only the first reply and it asks for
+        // three alternating ones. A_Bootup_Does_Not_Become_The_Toggle_Baseline is the pin.
 
         var toggles = new List<bool>();
         var states = new List<NmtState>();
@@ -247,6 +251,69 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         }
 
         master.StopNodeGuardingConsumer(producerNodeId: 0x11);
+    }
+
+    // #43: the boot-up message is one byte of 0x00 on the producer's heartbeat COB-ID, which is
+    // exactly the shape of a guarding response with toggle 0. Reading it as one seeded the
+    // baseline, and the producer's first *real* reply -- whose toggle also starts at 0 -- was then
+    // discarded as a repeat.
+    //
+    // Driven by injecting both frames rather than by racing a real slave's bootup, because the
+    // subject is which frame is accepted, not which arrives first. guardTime is 30 s so no second
+    // RTR is scheduled during the test: nothing here is timed, the assertion is about content.
+    [Fact]
+    public async Task A_Bootup_Does_Not_Become_The_Toggle_Baseline()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+
+        const byte producer = 0x11;
+        var seen = new List<(NmtState State, bool Toggle)>();
+        var gate = new object();
+        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var booted = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
+        master.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId != producer) return;
+            lock (gate) { seen.Add((e.State, e.Toggle)); }
+            first.TrySetResult(true);
+        };
+        master.HeartbeatReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == producer) booted.TrySetResult(e.State);
+        };
+
+        master.StartNodeGuardingConsumer(producer,
+            guardTime: TimeSpan.FromSeconds(30), lifeTimeFactor: 1);
+
+        void Send(byte payload) => busB.Transmit(CanFrame.Classic(
+            unchecked((int)CanOpenCobId.Heartbeat(producer)),
+            new[] { payload }, isExtendedFrame: false));
+
+        // The producer boots while this consumer is already polling it, and then answers the poll.
+        Send(0x00);
+        Send((byte)NmtState.PreOperational);
+
+        await first.Task.WithTimeoutAsync(ShortTimeout);
+        master.StopNodeGuardingConsumer(producer);
+
+        lock (gate)
+        {
+            seen[0].State.Should().Be(NmtState.PreOperational,
+                "the boot-up is not a response to the poll; the frame after it is, and it must "
+                + "not be discarded as a repeat of a baseline the boot-up should never have set");
+            seen[0].Toggle.Should().BeFalse("a producer's first reply carries toggle 0");
+        }
+
+        // Not a response is not the same as not an event. HandleIncoming routes this COB-ID to
+        // the guarding path and returns once a consumer is registered, so the boot-up reaches no
+        // other handler -- and ICanOpenNode.HeartbeatReceived is documented for "a heartbeat (or
+        // bootup) frame". Swallowing it made a producer's reset invisible.
+        var bootState = await booted.Task.WithTimeoutAsync(ShortTimeout);
+        bootState.Should().Be(NmtState.Initializing,
+            "a restart must stay observable to subscribers even while node-guarding is running");
     }
 
     // -----------------------------------------------------------------------------------------
