@@ -969,6 +969,158 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         producer.StopSyncProducer();
     }
 
+    // #95 -- a node must not raise its own EMCY or heartbeat as a peer's. Both echo worlds (#94),
+    // because the flag the gate reads is an adapter detail and the default adapter never sets it.
+    //
+    // The rule is narrow on purpose, and the narrowness is the point: drop only where the COB-ID
+    // identifies *us as the source* by construction -- EMCY 0x080+id, and a heartbeat data frame
+    // at 0x700+id. Not SYNC or NMT, which carry no node id and which a node is documented to act
+    // on from its own producer; not 0x600+id, where the id names the destination; and not an RPDO,
+    // whose COB-ID the application configured explicitly and may deliberately point at our own
+    // TPDO. #93 narrowed by COB-ID once already and cut off all sibling traffic doing it.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Node_Does_Not_Raise_Its_Own_Emcy_Or_Heartbeat_As_A_Peers(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
+
+        var emcyProducers = new List<byte>();
+        var heartbeatProducers = new List<byte>();
+        var gate = new object();
+        node.EmcyReceived += (_, e) => { lock (gate) emcyProducers.Add(e.Message.ProducerNodeId); };
+        node.HeartbeatReceived += (_, e) => { lock (gate) heartbeatProducers.Add(e.ProducerNodeId); };
+
+        // Ours first, the peer's second, on the one bus this node reads. Arrival order on a single
+        // subscription is the barrier: once the peer's frame has been raised, ours has already
+        // been through the dispatch and was either dropped or delivered.
+        await node.SendEmcyAsync(errorCode: 0x8110, errorRegister: 0x01,
+            manufacturerSpecific: new byte[] { 0xAA, 0xBB, 0xCC });
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(20));
+
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)CanOpenCobId.Emcy(0x11),
+            new byte[] { 0x10, 0x81, 0x02, 0, 0, 0, 0, 0 }));
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)CanOpenCobId.Heartbeat(0x12), new byte[] { (byte)NmtState.Operational }));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (gate)
+            {
+                if (emcyProducers.Contains((byte)0x11) && heartbeatProducers.Contains((byte)0x12))
+                    break;
+            }
+            await Task.Delay(5);
+        }
+
+        node.StopHeartbeatProducer();
+
+        List<byte> emcy, heartbeats;
+        lock (gate) { emcy = new List<byte>(emcyProducers); heartbeats = new List<byte>(heartbeatProducers); }
+
+        emcy.Should().Contain((byte)0x11, "a peer's EMCY must still be delivered");
+        heartbeats.Should().Contain((byte)0x12, "a peer's heartbeat must still be delivered");
+        emcy.Should().NotContain((byte)0x01, "the node raised this EMCY itself");
+        heartbeats.Should().NotContain((byte)0x01, "the node produced this heartbeat itself");
+    }
+
+    // #119, Codex on the heartbeat self-drop: both AddHeartbeatConsumer and
+    // StartNodeGuardingConsumer accept the local node id, and on an echo bus that is a working
+    // configuration -- the node's own producer feeds its own consumer. A blanket drop of
+    // 0x700 + our id starves it, and the deadline fires despite the frames arriving.
+    //
+    // Same principle the dispatch already records for RPDOs: an explicitly configured consumer
+    // outranks a guess about who sent the frame. I wrote that down and then did not apply it one
+    // branch further up.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Heartbeat_Consumer_Configured_For_This_Node_Still_Gets_Fed(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
+
+        var beats = new List<byte>();
+        var gate = new object();
+        node.HeartbeatReceived += (_, e) => { lock (gate) beats.Add(e.ProducerNodeId); };
+
+        // The application asks, explicitly, to consume its own node's heartbeat.
+        node.AddHeartbeatConsumer(producerNodeId: 0x01, timeout: TimeSpan.FromSeconds(5));
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(20));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (gate) { if (beats.Count(b => b == 0x01) >= 2) break; }
+            await Task.Delay(5);
+        }
+
+        node.StopHeartbeatProducer();
+
+        List<byte> snapshot;
+        lock (gate) snapshot = new List<byte>(beats);
+        snapshot.Should().Contain((byte)0x01,
+            "a consumer registered for this node's own id was asked for on purpose; the "
+            + "self-traffic guard must not starve it");
+    }
+
+    // The node-guarding half of the same finding, and the one Codex named first. On an echo bus a
+    // consumer registered for this node's own id is a closed loop: the consumer's RTR comes back
+    // to us, HandleNodeGuardingRtrForSelf answers, and that answer must reach
+    // HandleNodeGuardingResponse. The guard dropped it, so the consumer was starved.
+    //
+    // What is asserted is *delivery*, not the deadline. The first revision also asserted that
+    // NodeGuardingTimeout had not fired, and macOS CI failed on exactly that, in both worlds. The
+    // quantity the host perturbs is the wall-clock distance from arming the life-time deadline to
+    // the first accepted reply: two timer fires and four actor hops, each of which a starved
+    // scheduler can stretch arbitrarily. The margin was guardTime 30 ms x lifeTimeFactor 3 = 90 ms,
+    // and #120 eats the first reply, leaving the second at ~60 ms to cover it. That is not large
+    // compared with the perturbation, so the deadline is not measurable here and this test stops
+    // gating on it (#92). Reproduced locally under 8 burners on 4 cores: 8 failures in 8, against
+    // 2 of 2 passing unloaded.
+    //
+    // Dropping it costs no evidence. The defect Codex found -- the guard swallowing the frames --
+    // produces no NodeGuardingReceived at all, which the assertions below still catch; the timeout
+    // was a second symptom of the same cause, measured through a clock.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_NodeGuarding_Consumer_Configured_For_This_Node_Still_Gets_Fed(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
+
+        var replies = new List<bool>();
+        var enough = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId != 0x01) return;
+            lock (replies)
+            {
+                replies.Add(e.Toggle);
+                if (replies.Count >= 3) enough.TrySetResult(true);
+            }
+        };
+
+        node.StartNodeGuardingConsumer(producerNodeId: 0x01,
+            guardTime: TimeSpan.FromMilliseconds(30), lifeTimeFactor: 3);
+
+        var settled = await Task.WhenAny(enough.Task, Task.Delay(ShortTimeout));
+        node.StopNodeGuardingConsumer(0x01);
+
+        settled.Should().BeSameAs(enough.Task,
+            "a node-guarding consumer registered for this node's own id was asked for on "
+            + "purpose; the self-traffic guard must not starve it");
+
+        List<bool> snapshot;
+        lock (replies) snapshot = new List<bool>(replies);
+        // HandleNodeGuardingResponse only raises an event when the toggle flips, so both values
+        // appearing is evidence that separate frames went through it rather than one being
+        // reported repeatedly.
+        snapshot.Should().Contain(true).And.Contain(false,
+            "each accepted reply alternates the toggle, so these are genuine guarding responses");
+    }
+
     // -----------------------------------------------------------------------------------------
     // FR-CO-011 — EMCY encode + receive event.
     // -----------------------------------------------------------------------------------------

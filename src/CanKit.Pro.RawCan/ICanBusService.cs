@@ -52,10 +52,18 @@ namespace CanKit.Pro.RawCan
     /// </para>
     /// <para>
     /// How far each layer takes that is a per-layer decision, not a guarantee this interface
-    /// makes. The J1939 transport rejects its own source address, and J1939 rejects its own NAME
-    /// on an Address Claim. CANopen deliberately does not filter its own non-SYNC traffic by
-    /// node-id — the state that predates the echo gate — so a CANopen node on a flagging adapter
-    /// still observes its own PDOs and heartbeats.
+    /// makes. The J1939 transport rejects its own source address; the J1939 node rejects its own
+    /// NAME on an Address Claim and its own source address on an application PGN; CANopen rejects
+    /// its own node id on an EMCY or a heartbeat.
+    /// </para>
+    /// <para>
+    /// None is a blanket self-filter, and each exception is deliberate. A J1939 frame addressed to
+    /// the node itself is still delivered, so a request against one's own address is answered.
+    /// CANopen still delivers NMT, SYNC, both SDO directions and RPDOs from its own producer — a
+    /// node acts on its own SYNC, and an RPDO's COB-ID is whatever the application configured —
+    /// and still feeds a heartbeat or node-guarding consumer registered for the local node id. The
+    /// shared rule is that an explicitly configured or explicitly addressed frame outranks a guess
+    /// about who sent it.
     /// </para>
     /// </remarks>
     public interface ICanBusService : IDisposable

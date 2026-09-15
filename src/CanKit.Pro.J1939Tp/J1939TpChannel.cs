@@ -315,8 +315,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             {
                 var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue; // J1939-TP is 29-bit only
-                var payload = frame.Data.ToArray();
-                if (payload.Length < 8) continue; // TP.CM / TP.DT are always 8 bytes on the wire
+                if (frame.Data.Length < 8) continue; // TP.CM / TP.DT are always 8 bytes on the wire
 
                 var fields = J1939Id.Decompose((uint)frame.ID);
                 // TP.CM (0xEC) and TP.DT (0xEB) are PDU1 PFs, so PduSpecific is the destination
@@ -353,6 +352,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 var pgn = fields.Pgn;
                 var sa = fields.SourceAddress;
                 var da = destination;
+                // Copied here rather than above the filters (#103). The copy is needed: it is
+                // captured into a post that runs later on the actor loop, and HandleIncoming's
+                // chain keeps the array in an RxSession across await points. What it is not
+                // needed for is a frame this reader rejects, and on a busy J1939 segment the
+                // destination and source-address filters above reject most of them -- every
+                // non-TP frame, every session addressed elsewhere, and every one of our own.
+                var payload = frame.Data.ToArray();
                 _actor.Post(() => HandleIncoming(pgn, sa, da, payload));
             }
         }

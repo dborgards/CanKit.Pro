@@ -81,9 +81,17 @@ that echoes without setting it delivers the echo anyway (`CanKit.Adapter.Virtual
 `ChannelWorkMode.Echo` is one). And `IsEcho` is *host-scoped*: it means something on this host sent
 the frame, not that **you** sent it — so if you run several protocol instances over one service,
 withholding echoes also withholds your siblings' traffic. That is why the protocol layers in this
-repository opt in and then apply their own check where they need one — J1939-TP on its source
-address, J1939 on its NAME. CANopen opts in without filtering its own non-SYNC traffic, so a
-CANopen node on a flagging adapter does see its own PDOs and heartbeats.
+repository opt in and then apply their own check where they need one, on something they own rather
+than on the flag: J1939-TP and the J1939 node on their source address, the node additionally on its
+NAME for Address Claims, CANopen on the node id inside the COB-ID.
+
+Those checks are deliberately partial, because for some message classes hearing yourself is the
+point. CANopen still delivers NMT, SYNC, both SDO directions and RPDOs from its own producer — a
+node acts on its own SYNC, and an RPDO's COB-ID is whatever the application configured — and it
+still feeds a heartbeat or node-guarding consumer registered for the node's own id. J1939 still
+delivers a frame addressed to the node itself, which is what makes `RequestPgnAsync` against your
+own address work. What each layer drops is its own *unsolicited* traffic coming back: a J1939
+application PGN carrying your source address, a CANopen EMCY or heartbeat carrying your node id.
 
 If two instances were meant to have disjoint ID spaces, you can check rather than hope:
 

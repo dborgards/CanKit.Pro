@@ -98,6 +98,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // most recently committed value; writes happen only on the actor loop.
     private int _addressStore = -1;
 
+    // The address the node is in the middle of giving up, or -1. See WriteAddress.
+    private int _vacatedAddressStore = -1;
+
     /// <inheritdoc />
     public J1939Name Name => _name;
 
@@ -510,9 +513,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // SAE J1939-81 §4.4.3.2: numerically lower NAME wins.
             if (peerName.HasHigherClaimPriorityThan(_name))
             {
-                // We lose this contest. Arbitrary-address fallback (FR-J1939-004 /
-                // SAE J1939-81 §4.5): retry with the next candidate from the arbitrary
-                // address field before giving up with Cannot-Claim.
+                // We lose this contest, so the address is the peer's now. On a same-address
+                // re-claim that is also the address we were draining echoes for, and the marker
+                // has to go with it -- the fallback round below stays Claiming, so nothing else
+                // would clear it.
+                ClearVacatedIfMatches(peerSa);
+
+                // Arbitrary-address fallback (FR-J1939-004 / SAE J1939-81 §4.5): retry with the
+                // next candidate from the arbitrary address field before giving up with
+                // Cannot-Claim.
                 _pendingClaim = null;
                 pending.Deadline?.Dispose();
                 var scanStart = pending.ArbitraryScanStart;
@@ -539,10 +548,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
             }
 
             // Peer's NAME is >= ours: they lose. Re-announce our own claim so they hear it,
-            // then keep waiting on our deadline.
+            // then keep waiting on our deadline. The vacated marker deliberately stays: on a
+            // same-address re-claim the contested address *is* the one we are giving up and
+            // re-taking, and a peer that just lost it has not taken anything (#119, Codex and
+            // Bugbot). Clearing here would reopen the window on this node's own draining echo
+            // for the rest of an arbitration this node is winning.
             SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
             return;
         }
+
+        // Somebody else has taken the address this node is giving up (#119, Codex), and we are
+        // not contesting it -- either there is no claim in flight or it is for a different
+        // address. Either way it ends the reason to treat traffic from the old one as our own
+        // draining echo. Without this the marker outlives its truth: the new owner's application
+        // PGNs would be discarded for the rest of an unrelated arbitration window, which on a
+        // long ClaimAnnounceTimeout is a sizeable hole. Reached only for a NAME that is not ours,
+        // checked above -- our own claim echo must not clear the marker it was just set for.
+        ClearVacatedIfMatches(peerSa);
 
         // We are already claimed at SA and a peer claims the same SA.
         if (ClaimState == J1939ClaimState.Claimed && _addressStore >= 0 && peerSa == (byte)_addressStore)
@@ -620,9 +642,29 @@ internal sealed class J1939NodeImpl : IJ1939Node
         });
     }
 
+    // Drops the vacated-address marker when it names `sa`. Used wherever that address stops
+    // being one this node is merely draining echoes from.
+    private void ClearVacatedIfMatches(byte sa)
+    {
+        int vacated = Volatile.Read(ref _vacatedAddressStore);
+        if (vacated >= 0 && sa == (byte)vacated) Volatile.Write(ref _vacatedAddressStore, -1);
+    }
+
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
         J1939Name? contendingName)
     {
+        // The marker is scoped to the claim sequence that set it, and this is the one place every
+        // exit from that sequence passes through. Leaving Claiming for CannotClaim or NotClaimed
+        // ends the window; without this the value survives into a *later* ClaimAddressAsync --
+        // which sets Claiming again with the address store still -1, so WriteAddress leaves the
+        // stale marker standing -- and the node goes deaf to the peer that legitimately won the
+        // old address for that whole window (#119, Codex).
+        //
+        // Claimed needs no special case: the WriteAddress that commits the new address has
+        // already cleared it. BeginClaimRound sets the marker *before* announcing Claiming, so
+        // the ordering there is safe.
+        if (state != J1939ClaimState.Claiming) Volatile.Write(ref _vacatedAddressStore, -1);
+
         Volatile.Write(ref _claimStateStore, (int)state);
         var args = new J1939ClaimEventArgs(state, address, contendingSa, contendingName);
         try
@@ -637,6 +679,26 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void WriteAddress(byte? address)
     {
+        // Remember the address being given up, so the self-traffic guard can still recognise a
+        // frame this node sent under it while the echo drains (#119, Codex). Forgotten again the
+        // moment a new address is in place; the guard additionally requires the claim to still be
+        // in flight, so the memory cannot outlive the window it exists for.
+        //
+        // Only when there *is* one to remember. BeginClaimRound clears the address on every
+        // round, so a second round while still Claiming -- an arbitrary-address fallback, or a
+        // ClaimAddressAsync replacing an in-flight claim -- arrives here with the store already
+        // -1, and copying that over the memory would forget the address this node last
+        // transmitted on (Codex and Bugbot, both on #119).
+        if (address.HasValue)
+        {
+            Volatile.Write(ref _vacatedAddressStore, -1);
+        }
+        else
+        {
+            int current = Volatile.Read(ref _addressStore);
+            if (current >= 0) Volatile.Write(ref _vacatedAddressStore, current);
+        }
+
         Volatile.Write(ref _addressStore, address.HasValue ? address.Value : -1);
     }
 
@@ -849,11 +911,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 .ConfigureAwait(false))
             {
                 // The subscription opts into echoes, so this loop sees host echoes as well as
-                // peer traffic; `frameEvent.IsEcho` distinguishes them. Nothing here filters on
-                // source address, which is why a node on a flagging adapter also observes its own
-                // application PGNs -- the behaviour that predates the echo gate entirely, tracked
-                // as #95. Address Claim is the exception: HandleIncomingAddressClaim filters by
-                // NAME.
+                // peer traffic; `frameEvent.IsEcho` distinguishes them. Nothing *here* filters on
+                // source address, and that is deliberate rather than outstanding: the two frame
+                // classes that must not be filtered by it -- Address Claim, which arbitration
+                // needs to see even from a peer wrongly using our address, and a frame addressed
+                // to this node -- are only distinguishable after the id is decomposed. So the
+                // self-traffic drop lives in HandleIncomingFrame, past the Address Claim branch,
+                // and Address Claim filters by NAME instead (#95).
                 var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue;
                 var fields = J1939Id.Decompose((uint)frame.ID);
@@ -999,8 +1063,42 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 return;
             }
 
-            // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             int myAddr = Volatile.Read(ref _addressStore);
+
+            // Our own traffic, on any bus that echoes (#95). Unconditional on the source address
+            // rather than conjoined with IsEcho, matching J1939TpChannel: the flag is an adapter
+            // detail -- CanKit.Adapter.Virtual echoes without setting it (#94) -- so a conjunction
+            // would be inert on exactly the adapters where nothing else catches this.
+            //
+            // Safe here and not in the reader because Address Claim returned above. Arbitration is
+            // the one thing that must see a peer wrongly using our address, and it runs on PGN
+            // 0xEE00, which never reaches this line. What is dropped is an application PGN
+            // carrying our own source address, and on a shared bus that is indistinguishable from
+            // our own echo in any case.
+            //
+            // Except when the frame is addressed to this node on purpose. RequestPgnAsync and
+            // SendAsync both accept the local address as the destination, and on an echo bus that
+            // is a working loopback: the request comes back and the application's responder
+            // serves it. Dropping it would break a path that worked before this guard existed
+            // (#119, Codex). Same rule the CANopen guard states for 0x600 + id -- an explicitly
+            // directed frame is ours to serve whoever sent it -- and it cannot swallow a
+            // broadcast, because a broadcast is either PDU2 or carries da == 0xFF.
+            if (myAddr >= 0 && sa == (byte)myAddr && !(isPdu1 && da == (byte)myAddr)) return;
+
+            // BeginClaimRound clears the address before announcing the new preferred SA, so for
+            // the whole arbitration window `myAddr` is -1 and the check above cannot fire -- while
+            // the echo of a frame this node sent under the old SA may still be queued behind the
+            // claim on the actor. Codex found that on #119.
+            //
+            // Gated on the claim still being in flight rather than on the memory alone: once
+            // arbitration ends, whoever transmits with that address is somebody else, and a node
+            // whose claim failed would otherwise go deaf to it for good.
+            int vacated = Volatile.Read(ref _vacatedAddressStore);
+            if (vacated >= 0 && sa == (byte)vacated
+                && (J1939ClaimState)Volatile.Read(ref _claimStateStore) == J1939ClaimState.Claiming)
+                return;
+
+            // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))
                 return;
 

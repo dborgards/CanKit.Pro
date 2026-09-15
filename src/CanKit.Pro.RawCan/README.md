@@ -74,9 +74,16 @@ it owns. `includeEcho: false` is for a single consumer that owns its bus, such a
 one-node application.
 
 How far each layer takes that differs, and this package does not promise it uniformly: J1939-TP
-rejects its own source address, J1939 rejects its own NAME on an Address Claim, and CANopen
-deliberately does not filter its own non-SYNC traffic by node-id — so a CANopen node on a flagging
-adapter still sees its own PDOs and heartbeats, exactly as it did before the echo gate existed.
+rejects its own source address, the J1939 node rejects its own NAME on an Address Claim and its own
+source address on an application PGN, and CANopen rejects its own node id on an EMCY or a
+heartbeat.
+
+None of them is a blanket self-filter, and the exceptions are the interesting part: a J1939 frame
+addressed to the node itself is delivered, so a request against your own address is answered;
+CANopen delivers NMT, SYNC, both SDO directions and RPDOs from its own producer, and still feeds a
+heartbeat or node-guarding consumer explicitly registered for the local node id. The rule each
+layer follows is that an explicitly configured or explicitly addressed frame outranks a guess about
+who sent it.
 
 `SendConfirmed` is independent of this: it matches echoes on the bus event itself, so withholding
 them from subscribers does not affect TX confirmation.

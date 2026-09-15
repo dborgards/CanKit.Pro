@@ -219,9 +219,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // the frame on the wire -- so a SYNC producer that never sees its own SYNC stops
             // emitting its own synchronous TPDOs.
             //
-            // What this does NOT do is filter out this node's own non-SYNC traffic. That matches
-            // the behaviour before echoes were ever gated; distinguishing self from sibling by
-            // node-id is a separate improvement, not something to bolt on here.
+            // What this does NOT do is filter out this node's own traffic. That is not left
+            // undone -- HandleIncoming does it per message class, where the node id inside the
+            // COB-ID can be read and where the classes that must keep hearing themselves (SYNC,
+            // NMT, both SDO directions, RPDOs, a consumer configured for the local id) can be
+            // exempted individually (#95). It cannot be done here, because at this point a frame
+            // is only an id in a range.
             _subscription = _service.Subscribe(f =>
             {
                 var frame = f.Frame;
@@ -640,6 +643,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // the actor loop so HandleIncoming can distinguish an RTR poll from a genuine
                 // heartbeat / node-guarding data frame that happens to share the same COB-ID.
                 bool isRtr = frame.IsRemoteFrame;
+                // The copy stays, and #103 asked for the reason rather than the reflex: this
+                // array is captured into a post that runs later on the actor loop, and the
+                // handlers below take byte[] and hold it -- an SDO segment lands in a transfer
+                // that spans many frames, an RPDO's bytes are unpacked into the object
+                // dictionary. Removing it means threading ReadOnlyMemory<byte> through the whole
+                // dispatch, which is a different change from the hot-path tidy-up #103 describes.
+                //
+                // Unlike the J1939-TP reader one layer over, there is no cheap filter to put in
+                // front of it: HandleIncoming's first act is to classify the COB-ID, and it needs
+                // the payload for almost every class it can land in.
                 var data = frame.Data.ToArray();
                 _actor.Post(() => HandleIncoming(id, data, isRtr));
             }
@@ -679,6 +692,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         _eventChannel.Writer.TryWrite(raise);
     }
 
+    // Self-traffic guards (#95) are per message class rather than one test at the top, because
+    // only some COB-IDs identify this node as the *source*. Deliberately unguarded:
+    //   * NMT 0x000 and SYNC 0x080 carry no node id, and a node is documented to act on both from
+    //     its own producer -- ICanOpenNode.SyncReceived says so, and #93 silenced a node's own
+    //     synchronous TPDOs by getting this wrong.
+    //   * 0x600 + id names the destination, so such a frame is ours to serve regardless of sender.
+    //   * an RPDO's COB-ID is whatever the application configured, possibly on purpose our own
+    //     TPDO; overriding that from here is the narrowing #93 had to take back out.
     private void HandleIncoming(uint cobId, byte[] data, bool isRtr)
     {
         try
@@ -696,6 +717,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // EMCY 0x081..0x0FF (0x080 is SYNC and is handled above).
             if (cobId is >= 0x081 and <= 0x0FF)
             {
+                // Our own, on a bus that echoes (#95): 0x080 + id names the *producer*, so this
+                // is the node's own emergency coming back. Raising it through EmcyReceived would
+                // report us to ourselves as a peer in fault.
+                if (cobId == CanOpenCobId.Emcy(_nodeId)) return;
                 HandleEmcy(cobId, data);
                 return;
             }
@@ -716,6 +741,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 }
 
                 byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
+                // Our own heartbeat / bootup / node-guarding response, echoed back (#95). Three
+                // things it must not swallow:
+                //   * an *RTR* at this COB-ID, which is a consumer polling us and was answered
+                //     above rather than here;
+                //   * a node-guarding consumer registered for our own id;
+                //   * a heartbeat consumer registered for our own id.
+                // Both of those APIs take a node id and accept the local one, and on an echo bus
+                // that is a working configuration -- the node's own producer feeds its own
+                // consumer. Dropping the frame starves the deadline and the timeout fires while
+                // the frames are arriving (#119, Codex). Same rule the RPDO branch below already
+                // states: an explicitly configured consumer outranks a guess about the sender.
+                if (producer == _nodeId
+                    && !_nodeGuardingConsumers.ContainsKey(producer)
+                    && !_heartbeatConsumers.ContainsKey(producer))
+                    return;
                 // Consumer role (FR-CO-009): if we have a node-guarding consumer registered
                 // for this producer, treat the incoming data frame as a node-guarding reply
                 // (toggle + state). Otherwise fall through to the heartbeat consumer, which is
@@ -747,6 +787,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 and <= CanOpenCobId.SdoTxBase + CanOpenCobId.MaxNodeId)
             {
                 byte serverNodeId = (byte)(cobId - CanOpenCobId.SdoTxBase);
+                // Neither SDO direction is self-guarded (#95), and the reason is the same both
+                // ways: nothing here reports a peer to the application, so there is nothing for
+                // an echo to misreport. 0x600 + id names the *destination*, so such a frame is
+                // ours to serve whoever sent it. 0x580 + id does name us as the sender, but both
+                // client handlers open with a lookup keyed on that id -- _sdoClients and
+                // _sdoBlockClients -- and an id with no session is already dropped.
+                //
+                // A guard here was written and taken back out: it could only subtract. When no
+                // session is keyed to our own id it does what the lookup already does, and when
+                // one is -- a node running an SDO transfer against its own server on an echo bus
+                // -- it drops the very response that transfer is waiting for.
                 // Symmetric to the server-side path above: while a client-side block session
                 // (upload or download) is in a "receiving segments" phase, incoming frames on
                 // this COB-ID are block segments rather than ordinary SDO responses.
