@@ -1070,15 +1070,17 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // to us, HandleNodeGuardingRtrForSelf answers, and that answer must reach
     // HandleNodeGuardingResponse. The guard dropped it, so the consumer was starved.
     //
-    // What is asserted is *delivery*, not the deadline. The first revision also asserted that
-    // NodeGuardingTimeout had not fired, and macOS CI failed on exactly that, in both worlds. The
-    // quantity the host perturbs is the wall-clock distance from arming the life-time deadline to
-    // the first accepted reply: two timer fires and four actor hops, each of which a starved
-    // scheduler can stretch arbitrarily. The margin was guardTime 30 ms x lifeTimeFactor 3 = 90 ms,
-    // and #120 eats the first reply, leaving the second at ~60 ms to cover it. That is not large
-    // compared with the perturbation, so the deadline is not measurable here and this test stops
-    // gating on it (#92). Reproduced locally under 8 burners on 4 cores: 8 failures in 8, against
-    // 2 of 2 passing unloaded.
+    // What is asserted is *delivery* and content, never the deadline. The first revision also
+    // asserted that NodeGuardingTimeout had not fired, and macOS CI failed on exactly that, in
+    // both worlds. The quantity the host perturbs is the wall-clock distance from arming the
+    // life-time deadline to the first accepted reply: two timer fires and four actor hops, each of
+    // which a starved scheduler can stretch arbitrarily. Against that, guardTime 30 ms x
+    // lifeTimeFactor 3 = 90 ms is not a margin, so the deadline is not measurable here and this
+    // test does not gate on it (#92). Reproduced under 8 burners on 4 cores: 8 failures in 8,
+    // against 2 of 2 passing unloaded.
+    //
+    // #43 was eating the first reply back then, halving even that budget. It is fixed now, and
+    // the assertion still does not come back: 90 ms was never measurable on its own.
     //
     // Dropping it costs no evidence. The defect Codex found -- the guard swallowing the frames --
     // produces no NodeGuardingReceived at all, which the assertions below still catch; the timeout
@@ -1090,14 +1092,14 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var echo = EchoWorldFixture.Create(world, NewSession());
         using var node = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
 
-        var replies = new List<bool>();
+        var replies = new List<(bool Toggle, NmtState State)>();
         var enough = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.NodeGuardingReceived += (_, e) =>
         {
             if (e.ProducerNodeId != 0x01) return;
             lock (replies)
             {
-                replies.Add(e.Toggle);
+                replies.Add((e.Toggle, e.State));
                 if (replies.Count >= 3) enough.TrySetResult(true);
             }
         };
@@ -1112,12 +1114,18 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
             "a node-guarding consumer registered for this node's own id was asked for on "
             + "purpose; the self-traffic guard must not starve it");
 
-        List<bool> snapshot;
-        lock (replies) snapshot = new List<bool>(replies);
+        List<(bool Toggle, NmtState State)> snapshot;
+        lock (replies) snapshot = new List<(bool, NmtState)>(replies);
+        // Every accepted frame must be a guarding reply carrying the node's actual state. This
+        // assertion was impossible until #43: the bootup this node sends on OpenNode shares the
+        // COB-ID, carries 0x00, and was raised as a reply reporting NmtState.Initializing.
+        snapshot.Should().AllSatisfy(r => r.State.Should().Be(NmtState.PreOperational),
+            "a guarding reply reports the producer's current state, and the boot-up frame that "
+            + "shares this COB-ID is not a reply at all");
         // HandleNodeGuardingResponse only raises an event when the toggle flips, so both values
         // appearing is evidence that separate frames went through it rather than one being
         // reported repeatedly.
-        snapshot.Should().Contain(true).And.Contain(false,
+        snapshot.Select(r => r.Toggle).Should().Contain(true).And.Contain(false,
             "each accepted reply alternates the toggle, so these are genuine guarding responses");
     }
 

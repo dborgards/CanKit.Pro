@@ -206,11 +206,11 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         // by default so the slave answers RTRs out of the box.
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
 
-        // Give the initial bootup frames (which share the 0x700+id COB-ID and are indistin-
-        // guishable at the wire level from a node-guarding response with toggle=0) enough time
-        // to drain before we register the consumer, otherwise a bootup captured after
-        // registration would show up as toggle=false and skew the alternation check.
-        await Task.Delay(100);
+        // No draining wait here any more. A bootup captured after registration used to show up as
+        // a toggle=false response and skew the alternation check, and this test papered over it
+        // with Task.Delay(100) -- one of the sites #114 counts. HandleNodeGuardingResponse now
+        // reads a 0x00 payload as what it is (#43), so the race it was hiding has no effect and
+        // the sleep has nothing left to buy.
 
         var toggles = new List<bool>();
         var states = new List<NmtState>();
@@ -247,6 +247,117 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         }
 
         master.StopNodeGuardingConsumer(producerNodeId: 0x11);
+    }
+
+    // #43: the boot-up message is one byte of 0x00 on the producer's heartbeat COB-ID, which is
+    // exactly the shape of a guarding response with toggle 0. Reading it as one seeded the
+    // baseline, and the producer's first *real* reply -- whose toggle also starts at 0 -- was then
+    // discarded as a repeat.
+    //
+    // Driven by injecting both frames rather than by racing a real slave's bootup, because the
+    // subject is which frame is accepted, not which arrives first. guardTime is 30 s so no second
+    // RTR is scheduled during the test: nothing here is timed, the assertion is about content.
+    [Fact]
+    public async Task A_Bootup_Does_Not_Become_The_Toggle_Baseline()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+
+        const byte producer = 0x11;
+        var seen = new List<(NmtState State, bool Toggle)>();
+        var gate = new object();
+        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        master.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId != producer) return;
+            lock (gate) { seen.Add((e.State, e.Toggle)); }
+            first.TrySetResult(true);
+        };
+
+        master.StartNodeGuardingConsumer(producer,
+            guardTime: TimeSpan.FromSeconds(30), lifeTimeFactor: 1);
+
+        void Send(byte payload) => busB.Transmit(CanFrame.Classic(
+            unchecked((int)CanOpenCobId.Heartbeat(producer)),
+            new[] { payload }, isExtendedFrame: false));
+
+        // The producer boots while this consumer is already polling it, and then answers the poll.
+        Send(0x00);
+        Send((byte)NmtState.PreOperational);
+
+        await first.Task.WithTimeoutAsync(ShortTimeout);
+        master.StopNodeGuardingConsumer(producer);
+
+        lock (gate)
+        {
+            seen[0].State.Should().Be(NmtState.PreOperational,
+                "the boot-up is not a response to the poll; the frame after it is, and it must "
+                + "not be discarded as a repeat of a baseline the boot-up should never have set");
+            seen[0].Toggle.Should().BeFalse("a producer's first reply carries toggle 0");
+        }
+    }
+
+    // The other half of the same fix: a data frame on the producer's COB-ID is a response only
+    // when a poll is outstanding. HandleNmtCommand emits a heartbeat on every state change even
+    // with the periodic producer off -- the configuration node-guarding runs in, since CiA 301
+    // 7.2.8.3 makes the two mutually exclusive -- and it carries a real state with bit 7 clear,
+    // indistinguishable from a toggle-0 reply.
+    [Fact]
+    public async Task A_Frame_Answering_No_Poll_Is_Not_A_Guarding_Response()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+
+        const byte producer = 0x11;
+        const byte barrierProducer = 0x22;
+        var seen = new List<NmtState>();
+        var gate = new object();
+        var answered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var barrier = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        master.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId != producer) return;
+            lock (gate) { seen.Add(e.State); }
+            answered.TrySetResult(true);
+        };
+        master.HeartbeatReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == barrierProducer) barrier.TrySetResult(true);
+        };
+        master.AddHeartbeatConsumer(barrierProducer, TimeSpan.FromSeconds(30));
+
+        master.StartNodeGuardingConsumer(producer,
+            guardTime: TimeSpan.FromSeconds(30), lifeTimeFactor: 1);
+
+        void Send(byte node, byte payload) => busB.Transmit(CanFrame.Classic(
+            unchecked((int)CanOpenCobId.Heartbeat(node)),
+            new[] { payload }, isExtendedFrame: false));
+
+        // Answers the initial RTR, so it consumes the poll.
+        Send(producer, (byte)NmtState.PreOperational);
+        await answered.Task.WithTimeoutAsync(ShortTimeout);
+
+        // Nothing has polled since. This frame would pass the alternation check on its own -- its
+        // toggle is 1 against a baseline of 0 -- so only the poll gate can reject it.
+        Send(producer, (byte)(0x80 | (byte)NmtState.Operational));
+
+        // The barrier is a frame that *is* delivered, on the one subscription this node reads.
+        // Arrival order makes its event proof that the frame above has already been classified.
+        Send(barrierProducer, (byte)NmtState.Operational);
+        await barrier.Task.WithTimeoutAsync(ShortTimeout);
+
+        master.StopNodeGuardingConsumer(producer);
+
+        lock (gate)
+        {
+            seen.Should().Equal(new[] { NmtState.PreOperational },
+                "the second frame answered no outstanding poll, so it is not a guarding response "
+                + "and must not rearm the life-time deadline or move the toggle baseline");
+        }
     }
 
     // -----------------------------------------------------------------------------------------
