@@ -560,10 +560,26 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     //
     // Deferred echo mode is required: with the synchronous default, Transmit's own echo re-enters
     // the lock on the transmitting thread while OnTransmitting still holds it.
+    //
+    // Two things make the echo half a real pin rather than a coincidence, both from review:
+    // an *entry* signal, so "not yet delivered" cannot be satisfied by a Task.Run that has simply
+    // not started; and a `finally` that releases the driver, because a failed assertion before the
+    // release would otherwise leave the send inside Transmit holding the lock -- and Dispose wants
+    // that same lock, so the process would hang instead of reporting the failure.
     [Fact]
     public async Task A_Blocking_Transmit_Stalls_An_Echo_Frame_But_Not_A_Plain_One()
     {
         using var bus = OpenDeferredEcho();
+
+        // Registered before the service, so this handler runs first in the multicast and marks the
+        // moment the RX callback for the echo has begun. Without it, `echoArrival.IsCompleted ==
+        // false` is equally true of a task the thread pool has not started, and the assertion would
+        // pass against an implementation that no longer holds the lock across Transmit (Codex and
+        // Bugbot, both on #124). What remains between this signal and the lock is a handful of
+        // straight-line instructions with no await in them.
+        var echoCallbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.FrameObserved += (_, e) => { if (e.IsEcho) echoCallbackEntered.TrySetResult(); };
+
         using var service = new CanBusService(bus);
 
         const int watchedId = 0x321;
@@ -582,33 +598,44 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         var insideTransmit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var releaseDriver = new ManualResetEventSlim(false);
+        // Bounded even so: if the release is somehow missed, the driver returns and the test fails
+        // on an assertion instead of wedging the run.
         bus.OnTransmitting = _ =>
         {
             insideTransmit.TrySetResult();
-            releaseDriver.Wait();
+            releaseDriver.Wait(ShortTimeout);
         };
 
         // On its own thread: SendConfirmed runs synchronously up to its first await, and the
         // register-plus-transmit step is inside that stretch, so the *caller's* thread is what sits
         // in the blocking driver call. Worth knowing on its own -- it is the same lock scope seen
-        // from the sending side.
+        // from the sending side. (The first version of this test called it inline and deadlocked.)
         var send = Task.Run(() => service.SendConfirmed(CanFrame.Classic(0x111, new byte[] { 1 })));
-        await insideTransmit.Task.WaitAsync(ShortTimeout);
-        // The driver is now inside Transmit, so the service holds _pendingGate.
+        Task echoArrival;
+        try
+        {
+            await insideTransmit.Task.WaitAsync(ShortTimeout);
+            // The driver is now inside Transmit, so the service holds _pendingGate.
 
-        var echoArrival = Task.Run(() => bus.RaiseObserved(
-            CanFrame.Classic(watchedId, new byte[] { 2 }), isEcho: true));
-        bus.RaiseObserved(CanFrame.Classic(watchedId, new byte[] { 3 }), isEcho: false);
+            echoArrival = Task.Run(() => bus.RaiseObserved(
+                CanFrame.Classic(watchedId, new byte[] { 2 }), isEcho: true));
+            bus.RaiseObserved(CanFrame.Classic(watchedId, new byte[] { 3 }), isEcho: false);
 
-        await plain.Task.WaitAsync(ShortTimeout);
-        plain.Task.IsCompletedSuccessfully.Should().BeTrue(
-            "a plain frame is dispatched without ever taking the pending-send lock, so a blocking "
-            + "driver does not hold it up");
-        echoArrival.IsCompleted.Should().BeFalse(
-            "an echo frame is matched against pending sends under the very lock the driver call "
-            + "is holding, so it cannot be delivered until the driver returns (#102)");
+            // Completing at all is the assertion: a plain frame never takes the pending-send lock,
+            // so a blocking driver does not hold it up.
+            await plain.Task.WaitAsync(ShortTimeout);
 
-        releaseDriver.Set();
+            await echoCallbackEntered.Task.WaitAsync(ShortTimeout);
+            echoArrival.IsCompleted.Should().BeFalse(
+                "the echo's RX callback has started and an echo frame is matched against pending "
+                + "sends under the very lock the driver call is holding, so it cannot get through "
+                + "until the driver returns (#102)");
+        }
+        finally
+        {
+            releaseDriver.Set();
+        }
+
         await echoArrival.WaitAsync(ShortTimeout);
         await echoed.Task.WaitAsync(ShortTimeout);
 
