@@ -205,10 +205,19 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
 
 ### 6. Zwei offene Defekte, jetzt am Normtext bestätigt
 
-- **#38** — §7.2.4.3.3: *„e: transfer type 0: normal transfer, 1: expedited transfer"* und
-  *„e = 0, s = 0: d is reserved for further use."* Ein Download-Initiate mit `e=0, s=0` (also cs
-  `0x20`) ist ein legaler segmentierter Transfer ohne Größenangabe. `CanOpenNode.cs:1037` fängt ihn
-  über die Expedited-Maske ab und committet vier Nullbytes. Bestätigt.
+- **#38 — beide Hälften, nicht nur die Server-Seite (Codex auf #127).** Die Norm trennt `e` und `s`
+  auf beiden Wegen, und das Ticket führt beide; mein erster Entwurf hat nur die erste bestätigt.
+  - **Server**, §7.2.4.3.3: *„e: transfer type 0: normal transfer, 1: expedited transfer"* und
+    *„e = 0, s = 0: d is reserved for further use."* Ein Download-Initiate mit `e=0, s=0` (cs
+    `0x20`) ist ein legaler segmentierter Transfer ohne Größenangabe. `CanOpenNode.cs:1037` fängt
+    ihn über die Expedited-Maske ab und committet vier Nullbytes.
+  - **Client**, §7.2.4.3.6: dieselbe Trennung für die Upload-Initiate-Antwort (`scs = 2`). Ein
+    Server, der mit `0x40` antwortet — normal, Größe unbekannt —, ist konform.
+    `CanOpenNode.cs:1564` vergleicht exakt auf `0x41`, lässt die Antwort also liegen, und der
+    Transfer läuft in den Timeout.
+
+  Beide Hälften gehören in eine Anforderung. Sonst lässt sich #38 schließen, während Uploads von
+  konformen Peers weiterhin nicht funktionieren — genau die Lücke, die der Befund benennt.
 - **#39, erste Hälfte** — §7.2.4.3.10 und Figur 28: ein Sub-Block ist eine Folge von Segmenten,
   abgeschlossen durch **ein** *Confirm block*; `ackseq` nennt das letzte korrekt empfangene
   Segment, und der Client sendet ab `ackseq + 1` erneut. Ein ACK je Segment außer der Reihe ist
