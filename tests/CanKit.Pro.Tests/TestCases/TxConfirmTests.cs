@@ -545,4 +545,80 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             "the stamp must be taken when the frame arrived, which was before this test let the "
             + "transmitting thread out of Transmit");
     }
+
+    // #102 says a blocking driver makes "every subscription stall with it -- including
+    // subscriptions that have nothing to do with the frame being sent". Half of that is already
+    // pinned, one test up: Frame_Arrival_Is_Stamped_Before_The_Pending_Send_Lock parks an echo on
+    // a dedicated thread and asserts it cannot be delivered while the driver holds the lock.
+    //
+    // This is the complement, and it is what makes the ticket's claim precise. OnFrameObserved
+    // takes that lock only via TryMatchEcho, i.e. only for a frame flagged as an echo while a send
+    // is pending; dispatch itself reads a volatile snapshot and takes no lock. So a *plain* frame
+    // goes through untouched, and the blanket stall is a consequence of one RX thread queueing
+    // behind the blocked echo rather than of subscriptions being serialised against sends.
+    //
+    // Note what this is not: it passes whether or not Transmit holds the lock, so it documents the
+    // lock-free path rather than guarding #102. The test above is the regression pin.
+    [Fact]
+    public async Task A_Blocking_Transmit_Does_Not_Hold_Up_A_Plain_Frame()
+    {
+        using var sender = OpenEcho();
+        // The test raises every frame itself, so nothing arrives except when it says so.
+        sender.EchoAcceptedFrames = false;
+        using var service = new CanBusService(sender);
+
+        const int watchedId = 0x321;
+        using var subscription = service.Subscribe(
+            CanIdFilter.Range(watchedId, watchedId, CanFilterIDType.Standard), includeEcho: true);
+
+        using var transmitting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        // Deliberately much larger than ShortTimeout, and a hang bound rather than a tolerance:
+        // the assertion below must be the thing that expires first if dispatch ever starts taking
+        // the lock, so that the test fails on it instead of outliving the block and passing.
+        var driverBlockBound = TimeSpan.FromSeconds(30);
+        sender.OnTransmitting = _ =>
+        {
+            transmitting.Set();
+            release.Wait(driverBlockBound);
+        };
+
+        var sent = CanFrame.Classic(0x500, new byte[] { 42 });
+        // Off the test thread, for the same reason as the test above: SendConfirmed runs
+        // synchronously as far as Transmit, so calling it here would park *this* thread in
+        // OnTransmitting with nobody left to release it.
+        var send = Task.Run(() => service.SendConfirmed(sent, TimeSpan.FromSeconds(30)));
+        try
+        {
+            transmitting.Wait(ShortTimeout).Should().BeTrue("the send must reach Transmit");
+
+            // On another thread, and awaited *before* the driver is released: raising it here
+            // would only block the test thread, and dispatch would then complete once the driver
+            // gave up on its own bound -- so `TryRead` would succeed and the test would pass for
+            // the very stall it claims to rule out (Codex and Bugbot, on #124).
+            //
+            // Completing this await while the transmitting thread is still parked in the driver is
+            // the assertion. Not an echo, so OnFrameObserved never calls TryMatchEcho.
+            var dispatch = Task.Run(() => sender.RaiseObserved(
+                CanFrame.Classic(watchedId, new byte[] { 7 }), isEcho: false));
+            await dispatch.WaitAsync(ShortTimeout);
+
+            subscription.TryRead(out var delivered).Should().BeTrue(
+                "a plain frame's dispatch never takes the pending-send lock, so it goes through "
+                + "while a driver is blocked inside Transmit (#102)");
+            delivered.Frame.ID.Should().Be(watchedId);
+        }
+        finally
+        {
+            // Unconditional: a failed assertion above would otherwise leave the send inside
+            // Transmit holding the lock, and Dispose wants that same lock -- so the run would wedge
+            // instead of reporting what actually broke (Codex and Bugbot, on #124).
+            release.Set();
+        }
+
+        // The send is still waiting on an echo that never came; give it one so the test leaves
+        // nothing outstanding.
+        sender.RaiseObserved(sent, isEcho: true);
+        (await send.WaitAsync(ShortTimeout)).Confirmed.Should().BeTrue();
+    }
 }
