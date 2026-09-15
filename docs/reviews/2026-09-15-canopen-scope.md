@@ -10,13 +10,18 @@ Das ist der Unterschied, auf den es ankommt. Im Gap-Dokument stand über dieselb
 ausdrücklich, sie seien meine Erinnerung. Zwei davon haben sich beim Nachlesen verschoben, einer
 in jede Richtung.
 
-**Und ein zweiter Fehler, der erst im Review aufflog.** Die erste Fassung dieses Dokuments hat an
-drei Stellen „die Norm definiert X" mit „die Implementierung muss X haben" gleichgesetzt — beim
+**Und ein zweiter Fehler, der erst im Review aufflog.** Dieses Dokument hat „die Norm definiert X"
+mit „die Implementierung muss X haben" gleichgesetzt — in der ersten Fassung an drei Stellen, und
+nachdem ich diese korrigiert hatte, **noch zweimal in der Korrektur selbst** — beim
 leeren Objektverzeichnis, bei der Übertragungsart und bei den Abort-Codes. Codex hat alle drei
 auseinandergenommen, und alle drei zu Recht: CiA 301 bindet ein *Gerät*, diese Pakete sind eine
 *Bibliothek*, und eine Protokolltabelle ist kein Implementierungsauftrag. Die betroffenen
-Abschnitte sind entsprechend zurückgenommen; was übrig bleibt, ist schmaler und belastbarer. Den
-Normtext zu haben schützt also nicht davor, ihn zu überdehnen.
+Abschnitte sind entsprechend zurückgenommen; was übrig bleibt, ist schmaler und belastbarer.
+
+Den Normtext zu haben schützt also nicht davor, ihn zu überdehnen — und einmal darauf hingewiesen
+zu werden offenbar auch nicht. Die Frage, die bei jeder Zeile zu stellen ist, lautet nicht „steht
+das in der Norm", sondern **„was genau kann die Anwendung hier nicht selbst tun"**. Erst die
+zweite Frage trennt einen Bibliotheksdefekt von einer Tabellenzeile.
 
 ## Was die Norm entscheidet — und was das über zwei Codebasen sagt
 
@@ -83,8 +88,25 @@ Die Fußnoten der Objektübersicht sind hier eindeutig:
 | `1400h`/`1800h` | PDO **communication** | M (bei PDO-Support) | **je 0** |
 | `1200h` | SDO server parameter | M (bei SDO-Support) | **0** |
 
-Ein fremder Master kann heute über SDO umkonfigurieren, *was* in einem PDO steckt, aber nichts
-darüber, *wie* es gesendet wird — und die Objekte, die das tragen müssten, existieren nicht.
+**Auch hier gilt die Einschränkung aus Punkt 1 (Codex auf #127), und sie ändert den Befund:** die
+Anwendung *kann* `1200h`, `1400h`, `1800h` über `ObjectDictionary.AddU*` anlegen — die Fußnote
+erlaubt sie sogar `ro`. Null Quelltext-Treffer belegen also nicht, dass der Stack ein konformes
+Gerät verhindert.
+
+Was er verhindert, ist ein **stimmiges** Gerät, und das kann die Anwendung nicht ausgleichen:
+
+| Record | Per SDO beschreibbar? | Wirkt es? |
+|---|---|---|
+| `1600h`/`1A00h` | ja | **ja** — `ApplyTpdoMappingFromSdo` ersetzt das Mapping des laufenden TPDO-Slots (`CanOpenNode.PdoMapping.cs:282`) |
+| `1400h`/`1800h` | nur als selbst angelegte OD-Einträge | **nein** — kein Pfad liest sie; Übertragungsart, Inhibit Time und Event Timer leben ausschließlich in `ConfigureTpdo` |
+
+Ein von der Anwendung angelegtes `1800h:02` wäre also ein Wert, den der SDO-Server ausliefert und
+annimmt, während der Knoten weiter sendet wie zuvor. Der Master liest eine Zusage, die das Gerät
+nicht einhält — schlechter als das Fehlen des Objekts, und die fehlende Verdrahtung liegt innen,
+wo die Anwendung nicht hinkommt.
+
+Der Posten heißt damit nicht „Objekte anlegen", sondern **„OD und PDO-Engine für die
+Kommunikationsparameter zusammenschließen, so wie es für das Mapping bereits geschieht"**.
 
 ### 3. Die Übertragungsart ist falsch kodiert, nicht nur zu grob
 
@@ -120,10 +142,16 @@ API-Baseline (`CanKit.Pro.CANopen.approved.txt:241`) und dient in `ConfigureTpdo
 Default-Parameter `transmission = 0`. Umnummerieren wäre ein Bruch für jeden, der sich auf die
 Zahlenwerte verlässt.
 
-Was **bleibt**: drei Werte können `02h`–`F0h` („jeder n-te SYNC") und `FCh`/`FDh` (RTR-only) nicht
-ausdrücken. Irgendetwas muss also dazu — aber als **explizite Kodierung in der OD-Schicht** oder
-als zusätzliche byte-wertige API, nicht als Umnummerierung des bestehenden Enums. Die
-Reihenfolge-Behauptung „erst Enum, dann `1800h`" fällt damit weg; sie stand auf der falschen
+**Und noch eine Überdehnung, im zweiten Anlauf (Codex auf #127):** dass die Tabelle `02h`–`F0h` und
+`FCh`/`FDh` *definiert*, verpflichtet kein Gerät, sie zu *unterstützen*. Eine Wertetabelle legt
+Bedeutungen fest, keine Pflichten. Ein Knoten, der nur „jeder SYNC" und ereignisgesteuert kann, ist
+zulässig — er muss das nur in seinem Kommunikationsrecord korrekt angeben, und zwar `ro`.
+
+Solange keine Konformitätsklausel zitiert ist, die diese Modi verlangt, sind sie **Kandidaten für
+den Zuschnitt, keine `Must`-Anforderung.** Was normativ bleibt, ist nur die Stimmigkeit: was das
+Gerät kann, muss im Record stehen — und damit fällt dieser Punkt in Punkt 2 hinein statt daneben.
+
+Die Reihenfolge-Behauptung „erst Enum, dann `1800h`" fällt ohnehin weg; sie stand auf der falschen
 Prämisse.
 
 ### 4. Abort-Codes: 17 von 31
@@ -178,8 +206,8 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
 | | Was | Normlage | Vorschlag |
 |---|---|---|---|
 | 1 | `1000h`, `1001h`, `1018h` | Pflicht **für das fertige Gerät** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h`. Zusätzlich das README-Beispiel auf alle drei erweitern — es zeigt heute nur `1000h` |
-| 2 | `1400h`/`1800h`, `1200h` | **Pflicht bei PDO-/SDO-Support** | der eigentliche Konformitätsposten dieser Runde |
-| 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` ausdrückbar machen | Wertetabelle | als **explizite OD-Kodierung** bzw. zusätzliche byte-wertige API — das bestehende öffentliche Enum *nicht* umnummerieren |
+| 2 | `1400h`/`1800h`, `1200h` **an die PDO-Engine anschließen** | Pflicht bei PDO-/SDO-Support; die Verdrahtung liegt innen | der eigentliche Posten dieser Runde — nicht „Objekte anlegen", sondern sie wirksam machen, wie es `1600h`/`1A00h` bereits sind |
+| 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` | Wertetabelle definiert, verpflichtet nicht | **Kandidat, keine `Must`** — was unterstützt wird, muss im Record stehen; mehr verlangt CiA 301 hier nicht |
 | 4 | Abort-Code `0504 0003h` | normativ, und der Blocktransfer erkennt den Zustand | klein; die übrigen 13 erst, wenn ein Verhalten sie auslöst |
 | 5 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial, gehört zu 4 |
 | 6 | TIME `1012h` | **optional** | in den Ausnahmekatalog, nicht bauen |
