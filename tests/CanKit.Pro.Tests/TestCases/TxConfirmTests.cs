@@ -573,10 +573,14 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         using var transmitting = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
+        // Deliberately much larger than ShortTimeout, and a hang bound rather than a tolerance:
+        // the assertion below must be the thing that expires first if dispatch ever starts taking
+        // the lock, so that the test fails on it instead of outliving the block and passing.
+        var driverBlockBound = TimeSpan.FromSeconds(30);
         sender.OnTransmitting = _ =>
         {
             transmitting.Set();
-            release.Wait(ShortTimeout);
+            release.Wait(driverBlockBound);
         };
 
         var sent = CanFrame.Classic(0x500, new byte[] { 42 });
@@ -588,13 +592,20 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         {
             transmitting.Wait(ShortTimeout).Should().BeTrue("the send must reach Transmit");
 
-            // Raised on this thread while the transmitting thread is inside the driver, holding
-            // the pending-send lock. Not an echo, so OnFrameObserved never calls TryMatchEcho.
-            sender.RaiseObserved(CanFrame.Classic(watchedId, new byte[] { 7 }), isEcho: false);
+            // On another thread, and awaited *before* the driver is released: raising it here
+            // would only block the test thread, and dispatch would then complete once the driver
+            // gave up on its own bound -- so `TryRead` would succeed and the test would pass for
+            // the very stall it claims to rule out (Codex and Bugbot, on #124).
+            //
+            // Completing this await while the transmitting thread is still parked in the driver is
+            // the assertion. Not an echo, so OnFrameObserved never calls TryMatchEcho.
+            var dispatch = Task.Run(() => sender.RaiseObserved(
+                CanFrame.Classic(watchedId, new byte[] { 7 }), isEcho: false));
+            await dispatch.WaitAsync(ShortTimeout);
 
             subscription.TryRead(out var delivered).Should().BeTrue(
-                "a plain frame's dispatch never takes the pending-send lock, so a driver blocked "
-                + "inside Transmit does not hold it up (#102)");
+                "a plain frame's dispatch never takes the pending-send lock, so it goes through "
+                + "while a driver is blocked inside Transmit (#102)");
             delivered.Frame.ID.Should().Be(watchedId);
         }
         finally
