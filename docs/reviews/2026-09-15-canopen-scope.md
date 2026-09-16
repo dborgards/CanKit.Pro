@@ -40,7 +40,14 @@ Anhang führt es als `1018h RECORD Identity Object IDENTITY (23h) ro M`. Ebenso
 **Folge für CanKit.Pro — enger gefasst, als ich sie zuerst geschrieben hatte (Codex auf #127):**
 CiA 301 bindet das *fertige Gerät*, nicht eine wiederverwendbare Bibliothek. Vendor-ID, Produktcode
 und Seriennummer kann ein Stack gar nicht kennen; sie zu erfinden wäre schlimmer als sie
-wegzulassen. Das Paket ist also nicht dadurch nicht konform, dass `_od` leer startet
+wegzulassen. **Ein Minimum-Record ist trotzdem möglich, und zwar wahrheitsgemäß** — die Norm gibt
+die Vokabel dafür: für Sub `01h` gilt *„The value 0000 0000h shall indicate an invalid vendor-ID"*,
+also ist 0 dort ein **definierter** Wert und keine Erfindung. Für die Subs `02h`–`04h` ist
+`0000 0000h` dagegen *reserved*. Und Sub `00h` („Highest sub-index supported") hat Wertebereich
+`01h`–`04h`. Ein Record mit **sub0 = `01h` und Vendor-ID = 0** ist damit strukturell konform und
+sagt genau das, was zutrifft: keine Vendor-ID zugeteilt. Die Subs 02–04 gehören dann
+**weggelassen, nicht genullt** — das ist der Unterschied zwischen „unbekannt" und einem
+reservierten Wert. Das Paket ist also nicht dadurch nicht konform, dass `_od` leer startet
 (`CanOpenNode.cs:65`) — die Anwendung *kann* die Objekte anlegen, und `ObjectDictionary.AddU32`
 ist genau dafür öffentlich.
 
@@ -68,8 +75,19 @@ if (index == 0x1000 || index == 0x1001)
 ist nicht betroffen: er parst die `[MandatoryObjects]`-Sektion der Datei und nimmt keine eigene
 Position ein. Betroffen ist nur die Klassifizierung beim XDD-Import.
 
-Das ist ein Befund in *deinem* Repository, gefunden durch das Gegeneinanderhalten zweier Quellen —
-und der Grund, warum die Antwort „0x1000, 0x1001, 0x1018" vorher als unbelegt markiert war.
+Der Befund entstand durch das Gegeneinanderhalten zweier Quellen — und er ist der Grund, warum die
+Antwort „0x1000, 0x1001, 0x1018" vorher als unbelegt markiert war.
+
+**Er gehört aber nicht in diesen Zuschnitt (Maintainer, 16.09.).** EdsDcfNet ist für CanKit.Pro
+eine externe Abhängigkeit, wie `pkuyo/CanKit` es für L0/L1 ist — sie liefert, was sie liefert. Tut
+sie etwas nicht, bauen wir notfalls einen Workaround; wir führen keine Erwartungen an sie als
+unsere Mängel. `CLAUDE.md` schreibt dieselbe Haltung für den Upstream bereits fest: *als NuGet-Paket
+konsumiert, nicht geforkt … lies nach, statt anzunehmen.*
+
+Was für **uns** daraus folgt, ist eine Randbedingung und kein Ticket: wer ein Objektverzeichnis aus
+einer **XDD** befüllt, darf sich auf deren `MandatoryObjects` nicht verlassen und prüft die
+Pflichtobjekte selbst. Beim Lesen aus **EDS/DCF** entfällt das — dort parst die Bibliothek die
+Sektion der Datei und nimmt keine eigene Position ein.
 
 ### 2. PDO- und SDO-Records sind Pflicht, sobald das Gerät PDOs bzw. SDOs kann
 
@@ -129,6 +147,10 @@ Paket-README sagt es selbst: *„a change-of-state TPDO is not rate-limited"* (`
 lebt also nicht „ausschließlich in `ConfigureTpdo`", wie ich geschrieben hatte, sondern nirgends.
 Ein wirksames `1800h:03` verlangt **neues Scheduling-Verhalten**, nicht das Anschließen vorhandener
 Zustände. In einem Posten namens „verdrahten" sähe sie erledigt aus und bliebe wirkungslos.
+
+**Nachgeschlagen (16.09.):** der Sub-Eintrag selbst ist `Entry category: **Optional**`. Aus der
+Norm folgt also keine Pflicht, ihn anzubieten — die Hälfte hatte im ersten Entwurf gefehlt. Dass er
+trotzdem gebaut wird, folgt aus der Architekturentscheidung unten, nicht aus CiA 301.
 
 **`1200h` gehört nicht in denselben Posten (Codex auf #127).** Es ist der SDO-Server-Parameter und
 hat mit der PDO-Engine nichts zu tun: `CanOpenNode.cs:774` erkennt eine Anfrage am Vergleich
@@ -191,6 +213,19 @@ Gerät kann, muss im Record stehen — und damit fällt dieser Punkt in Punkt 2 
 Die Reihenfolge-Behauptung „erst Enum, dann `1800h`" fällt ohnehin weg; sie stand auf der falschen
 Prämisse.
 
+**Zwei Nachträge vom 16.09., beide gemessen:**
+
+- **`FCh`/`FDh` ist nicht dasselbe wie `02h`–`F0h`.** „Jeder n-te SYNC" ist ein Zahlenwert, den die
+  API nicht ausdrücken kann; RTR-only ist ein *Verhalten*, das der Stack nicht hat — kein TPDO-Pfad
+  antwortet auf Remote-Frames. Die Verrohrung steht allerdings: `frame.IsRemoteFrame` wird gelesen
+  und als `isRtr` bis in den Dispatcher gereicht (`CanOpenNode.cs:645`, `:703`), genutzt bisher nur
+  vom Node Guarding. Also eine Erweiterung an vorhandener Naht, keine neue Naht — aber ein anderer
+  Aufwand als der Zahlenwert, und deshalb ein eigener Posten.
+- **Die Wertetabelle ist ohne API-Bruch erreichbar.** Der EDS-Pfad nimmt das rohe Byte aus der
+  Gerätebeschreibung; `TpdoTransmission` bleibt unverändert die Komfort-API für Handkonfiguration.
+  Damit erledigt sich die Umnummerierungs-Frage endgültig: es gibt keinen Grund, ein öffentliches
+  Enum anzufassen, dessen Werte ohnehin niemand serialisiert.
+
 ### 4. Abort-Codes: 17 von 31
 
 Tabelle 22 definiert 31 Codes. `Sdo/SdoAbortCode.cs` enthält 17 — alle 17 korrekt, keiner
@@ -247,21 +282,64 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
   Segment, und der Client sendet ab `ackseq + 1` erneut. Ein ACK je Segment außer der Reihe ist
   nicht das Protokoll. Bestätigt.
 
-## Vorschlag für den Zuschnitt
+## Entschieden (16.09.): EDS speist beides, Fallback nur ohne EDS
 
-| | Was | Normlage | Vorschlag |
+Der Zuschnitt ist keine Liste von Einzelfällen mehr, sondern folgt aus einer Architekturentscheidung
+des Maintainers:
+
+1. **Der Normalfall ist die EDS.** Sie speist **das Objektverzeichnis *und* die
+   PDO-Konfiguration** — eine Quelle für beides.
+2. **Ein codiertes Minimum greift nur, wenn keine EDS vorliegt.** Dessen Records sind statisch
+   `ro`: die Anwendung hält dort beide Enden, der Record beschreibt genau das eine Verhalten, das
+   der Stack kann, und `ro` sagt dem Master wahrheitsgemäß, dass daran nichts zu drehen ist.
+3. **Was eine EDS angibt und der Stack nicht umsetzen kann, wird degradiert und gemeldet** — nicht
+   abgelehnt (sonst ist der Pfad unbrauchbar, bis alles gebaut ist) und vor allem nicht
+   stillschweigend ignoriert. Das wäre wieder die Zusage ohne Deckung, um die sich die halbe
+   Reviewrunde gedreht hat.
+
+### Was diese Entscheidung auflöst
+
+**Posten 2a verschwindet als Frage.** Die Wahl „statisch `ro` oder verdrahtet" bestand nur, solange
+Record und Verhalten aus zwei Händen kamen. Speist dieselbe EDS beides, stimmen sie per
+Konstruktion überein, und es gibt nichts abzugleichen.
+
+**Posten 1 löst sich weitgehend auf.** `1000h`, `1001h` und `1018h` kommen aus der EDS — dort
+gehören sie hin, die Datei hat eine `[MandatoryObjects]`-Sektion. Das codierte Minimum deckt nur
+noch den Fall ohne EDS.
+
+### Was sie hinzufügt
+
+Und das ist die interessantere Richtung: **die Posten 3 und 2c werden nötig, obwohl CiA 301 sie
+nicht verlangt.** Eine reale EDS enthält Werte, die `ConfigureTpdo` nicht entgegennehmen kann —
+Übertragungsart `02h`–`F0h` kennt das Enum nicht, und eine Inhibit Time hat die Signatur gar nicht
+(`ICanOpenNode.cs:184-187`). Wer solche Dateien einliest, steht vor derselben Wahl wie bei 2a, nur
+eine Ebene tiefer: umsetzen, oder beim Laden melden, was nicht umsetzbar ist.
+
+Die Norm bleibt, was sie ist — der Inhibit-Time-Eintrag ist `Optional`, die Wertetabelle
+verpflichtet niemanden. **Notwendig werden beide durch die Architektur, nicht durch CiA 301**, und
+diese Unterscheidung gehört in die Anforderungen, damit später niemand eine Pflicht daraus liest,
+die dort nicht steht.
+
+### Die Posten
+
+| | Was | Woher die Notwendigkeit kommt | Art der Arbeit |
 |---|---|---|---|
-| 1 | `1000h`, `1001h`, `1018h` | Pflicht **für das fertige Gerät** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h`. Zusätzlich das README-Beispiel auf alle drei erweitern — es zeigt heute nur `1000h` |
-| 2a | `1400h`/`1800h`: **entweder** statisch `ro` und dokumentiert, **oder** beschreibbar und dann verdrahtet | Pflicht bei PDO-Support, aber statisch-`ro` erfüllbar | keine zwingende Verdrahtung. Zu entscheiden ist, welche der beiden Formen das Produkt anbietet — und wie Drift zwischen OD und `ConfigureTpdo` verhindert wird |
-| 2c | Inhibit Time (`1800h:03`) | Wertetabelle; heute weder in OD noch in der Engine | **eigener Posten, kein Verdrahten** — verlangt neues Scheduling. README nennt die Lücke bereits |
-| 2b | `1200h` als SDO-Server-Record | Pflicht bei SDO-Support; **anderer Pfad als 2a** | minimal: schreibgeschützter Record über die festen `0x600`/`0x580 + Node-ID`. Größer wäre, die COB-IDs wirklich daraus zu lesen — separat zu entscheiden, nicht mit 2a zu verwechseln |
-| 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` | Wertetabelle definiert, verpflichtet nicht | **Kandidat, keine `Must`** — was unterstützt wird, muss im Record stehen; mehr verlangt CiA 301 hier nicht |
-| 4 | Abort-Code `0504 0003h` | normativ, und der Blocktransfer erkennt den Zustand | klein; die übrigen 13 erst, wenn ein Verhalten sie auslöst |
-| 5 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial, gehört zu 4 |
-| 6 | TIME `1012h` | **optional** | in den Ausnahmekatalog, nicht bauen |
+| 1 | EDS → Objektverzeichnis **und** PDO-Konfiguration | Architekturentscheidung | neuer Pfad, Abhängigkeit auf EdsDcfNet |
+| 2 | Degradieren mit Meldung, wenn eine EDS Nicht-Umsetzbares angibt | Architekturentscheidung | gehört zu 1, aber eigene Anforderung — sonst wird es zum stillen Ignorieren |
+| 3 | Fallback: `1000h`, `1001h`, `1018h` (sub0 = `01h`, Vendor-ID = 0) | CiA 301 §7.5.2.21, Objektübersicht `ro M` | klein, additiv. Subs 02–04 weglassen, nicht nullen |
+| 4 | Fallback: `1400h`/`1800h`/`1200h` statisch `ro` | Fußnoten der Objektübersicht (Pflicht bei PDO-/SDO-Support) | klein |
+| 5 | Übertragungsart `02h`–`F0h` | **Architektur** (die Norm verpflichtet nicht) | API-Erweiterung **ohne Bruch**: EDS-Pfad nimmt das rohe Byte |
+| 6 | Übertragungsart `FCh`/`FDh` (RTR-only) | **Architektur** | Verhaltenserweiterung an vorhandener Naht (`isRtr` erreicht den Dispatcher) |
+| 7 | Inhibit Time `1800h:03` | **Architektur** (Norm: `Entry category: Optional`) | **das größte Stück** — neues Scheduling im TPDO-Pfad |
+| 8 | Abort-Code `0504 0003h` | normativ; der Blocktransfer erkennt den Zustand | trivial |
+| 9 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial |
+| 10 | TIME `1012h` | `rw O` — **optional** | nicht bauen, in den Ausnahmekatalog |
 
-Das ergäbe etwa sechs bis acht neue `Must`-Anforderungen zu den heutigen zwölf — und damit wäre
-„CANopen vollständig" erstmals eine prüfbare Aussage statt einer Einschätzung.
+### Was offen bleibt
+
+**Ein Master, der zur Laufzeit auf `1800h:02` schreibt.** Das ist unabhängig davon, woher der
+Record beim Start kam: wer die Records `rw` anbietet, muss den Schreibzugriff bis zur Engine
+führen. Die EDS-Entscheidung berührt das nicht, weil sie nur die Befüllung regelt.
 
 Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und die
 CiA-302/304/305-Themen aus der GAP-Analyse. Die stehen in anderen Dokumenten.
