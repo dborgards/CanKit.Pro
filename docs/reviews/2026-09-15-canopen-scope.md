@@ -336,21 +336,25 @@ die dort nicht steht.
 | 3 | Fallback: `1000h`, `1001h`, `1018h` (sub0 = `01h`, Vendor-ID = 0) | CiA 301 §7.5.2.21, Objektübersicht `ro M` | klein, additiv. Subs 02–04 weglassen, nicht nullen |
 | 4 | Fallback: `1400h`/`1800h`/`1200h` statisch `ro` | Fußnoten der Objektübersicht (Pflicht bei PDO-/SDO-Support) | klein |
 | 5 | Übertragungsart `02h`–`F0h` | **Architektur** (die Norm verpflichtet nicht) | zwei Hälften: Byte annehmen (API-Erweiterung **ohne Bruch**, EDS-Pfad nimmt das rohe Byte) **und** je TPDO SYNCs zählen — `HandleSync` sendet heute jedes synchrone TPDO bei **jedem** SYNC (`CanOpenNode.cs:868-880`) |
-| 6 | Übertragungsart `FCh`/`FDh` (RTR-only) | **Architektur** | Verhaltenserweiterung an vorhandener Naht (`isRtr` erreicht den Dispatcher) |
-| 7 | Inhibit Time `1800h:03` | **Architektur** (Norm: `Entry category: Optional`) | **das größte Stück** — neues Scheduling im TPDO-Pfad |
+| 6a | Übertragungsart `FDh` (RTR-only, **event-driven**) | **Architektur** | Sampling bei Empfang des RTR, sofort senden. Verhaltenserweiterung an vorhandener Naht (`isRtr` erreicht den Dispatcher) |
+| 6b | Übertragungsart `FCh` (RTR-only, **synchron**) | **Architektur** | **anderes Verhalten als 6a**: Sampling bei *jedem* SYNC, Wert puffern, den gepufferten Wert auf RTR senden — ein gemeinsamer „OD lesen und antworten"-Handler erfüllt 6a und verletzt 6b (Tabelle 72, Erläuterung) |
+| 7 | Inhibit Time `1800h:03` | **Architektur** (Norm: `Entry category: Optional`) | **das größte Stück** — neues Scheduling im TPDO-Pfad. Normativ ist sie „the minimum interval for PDO transmission **if the transmission type is set to FEh and FFh**" — gilt also nicht für die synchronen Arten |
 | 8 | Abort-Code `0504 0003h` | normativ; der Blocktransfer erkennt den Zustand | trivial |
 | 9 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial |
 | 10 | TIME `1012h` | `rw O` — **optional** | nicht bauen, in den Ausnahmekatalog |
-| 11 | Übertragungsart `00h` (synchron-azyklisch) | **Architektur** | eigenes Verhalten: auf SYNC senden, aber nur bei Änderung — weder `EventDriven` noch `Synchronous` tut das |
+| 11 | Übertragungsart `00h` (synchron-azyklisch) | **Architektur** | eigenes Verhalten: **beim nächsten SYNC senden, sofern vorher ein Ereignis auftrat** — ein Latch, gesetzt von Zustandsänderung *und* von `TriggerTpdoAsync`, verbraucht beim SYNC. Weder `EventDriven` noch `Synchronous` tut das |
 | 12 | Synchrone **RPDO** (`1400h:02`) | **Architektur** | Empfangsseite: `ConfigureRpdo` hat kein Übertragungsart-Argument (`ICanOpenNode.cs:192`), `HandleRpdo` schreibt sofort ins OD statt bis SYNC zu halten (`CanOpenNode.cs:1697`) |
 | 13 | EDS-Zugriffsrechte auf `1600h`/`1A00h` durchsetzen | **Architektur** | der Mapping-Pfad wird **vor** der generischen OD-Prüfung abgezweigt (`CanOpenNode.cs:1022`) und fragt `OdAccess` nie — geladene `ro`-Flags wären wirkungslos |
 | 14 | Schreibbare Kommunikationsrecords zur Laufzeit | **offene Entscheidung des Maintainers** (siehe unten) | entweder Schreibzugriff bis zur Engine führen **oder** die Records beim Laden auf `ro` zwingen |
-| 15 | Reset Communication stellt aus der EDS wieder her | **Architektur** | der Handler wechselt nur den Zustand und sendet Bootup (`CanOpenNode.cs:848-857`); nach einem Remapping bliebe die geänderte Laufzeitkonfiguration stehen |
+| 15 | Reset Communication stellt wieder her — **aus der EDS und aus dem codierten Fallback** | **Architektur** | der Handler wechselt nur den Zustand und sendet Bootup (`CanOpenNode.cs:848-857`); sonst bliebe nach einem Remapping oder einem `ConfigureTpdo`-Aufruf die geänderte Laufzeitkonfiguration stehen — im Fallback-Fall ohne jede Quelle, aus der sie zurückzuholen wäre |
+| 16 | Fallback: auch `1600h`/`1A00h` statisch `ro` | **Architektur** | Posten 4 deckt nur `1400h`/`1800h`/`1200h`, Posten 13 nur EDS-Flags — ohne diesen Posten bleibt gerade das Fallback dynamisch remappbar, obwohl die Entscheidung für es `ro` zusagt |
+| 17 | SDO-Abort `0609 0030h` bei nicht unterstützter Übertragungsart | **normativ** | „An attempt to change the value of the transmission type to any not supported value shall be responded with the SDO abort transfer service (abort code: 0609 0030h)" — die Kehrseite des Degradierens: was der Stack nicht kann, lehnt er beim Schreiben ab. **Der Code fehlt im Enum** (`Sdo/SdoAbortCode.cs` führt von den `0609h`-Codes nur `0609 0011h`), gehört also zu Posten 8 |
+| 18 | `1800h:04` nicht implementieren, Zugriff mit `0609 0011h` abweisen | **normativ** | „Sub-index 04h is reserved. It shall not be implemented; in this case read or write access leads to the SDO abort transfer service (abort code: 0609 0011h)" — betrifft Fallback-Record und EDS-Befüllung gleichermaßen. Der Code **ist** vorhanden (`SubIndexDoesNotExist`), nur das Verhalten fehlt |
 
 **Posten 15 ist keine Altlast, sondern eine Folge der Entscheidung selbst** (Codex auf #129).
 Die README des Pakets begründet heute, warum Reset Communication nichts wiederherstellt
 (`src/CanKit.Pro.CANopen/README.md:56-57`): *„communication parameters are not re-initialized from
-the OD, because they do not live in the OD“*. Diese Begründung trägt, solange es keine Quelle gibt,
+the OD, because they do not live in the OD"*. Diese Begründung trägt, solange es keine Quelle gibt,
 aus der sie sich wiederherstellen ließen. Mit der EDS gibt es sie — und damit wird aus einer
 dokumentierten Einschränkung eine offene Anforderung: nach einem Remapping durch den Master und
 einem anschließenden Reset Communication bliebe sonst die geänderte Laufzeitkonfiguration stehen,
@@ -368,7 +372,7 @@ nicht, weil sie nur die Befüllung regelt.
 
 Es steht deshalb **als Posten in der Tabelle und nicht nur hier** (Codex auf #129): der nächste
 Schritt schreibt die Tabelle in die SRS, und was dort nicht steht, deckt die Ratsche nicht ab —
-ein Punkt unter „Was offen bleibt“ wäre genau die Art Notiz, die beim Übersetzen verlorengeht.
+ein Punkt unter „Was offen bleibt" wäre genau die Art Notiz, die beim Übersetzen verlorengeht.
 Die Wahl selbst bleibt die des Maintainers: **Schreibzugriff durchreichen** (mehr Arbeit, aber ein
 Gerät, das `rw` ehrlich anbietet) **oder beim Laden auf `ro` zwingen** (billig, und der Master
 erfährt die Wahrheit sofort). Was nicht geht, ist die dritte Variante von heute: `rw` anbieten und
