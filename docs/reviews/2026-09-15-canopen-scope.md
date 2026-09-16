@@ -370,6 +370,32 @@ obwohl der Zuschnitt den EDS-Pfad als vollständig führt.
 Die README selbst bleibt unverändert richtig, weil sie das heutige Verhalten beschreibt und der
 EDS-Pfad noch nicht existiert. Sie wird mit dessen Umsetzung nachzuführen sein, nicht vorher.
 
+### Vier Prüffragen je Posten
+
+Die Liste oben ist im Review von #129 auf ein Vielfaches ihres ersten Entwurfs gewachsen, und
+**jeder Zuwachs kam aus demselben kleinen Satz von Fehlern.** Sie stehen hier, weil der nächste Schritt die
+Liste in Anforderungen übersetzt — und weil J1939, UDS und ISO-TP dieselbe Übung noch vor sich
+haben. Wer einen Posten ergänzt, beantwortet sie:
+
+1. **Beschreibt die Zeile Verhalten oder nur eine API?** Dreimal stand hier eine Signatur, wo die
+   eigentliche Arbeit in der Engine liegt: `02h`–`F0h` braucht einen SYNC-Zähler, nicht nur ein
+   Byte; die synchrone RPDO braucht die Empfangsseite, die `TpdoTransmission` gar nicht kennt;
+   `FCh` braucht einen gepufferten Wert, den ein Antwort-Handler nie festhält. Wo eine Zeile eine
+   API nennt, lautet die offene Frage: was muss die **Engine** zusätzlich tun?
+2. **Gilt der Posten für beide Pfade — EDS *und* Fallback?** Dreimal deckte ein Posten nur einen:
+   `ro`-Flags nur aus der EDS, Reset nur aus der EDS, Mappingrecords nur außerhalb des Fallbacks.
+   Der Fallback ist der jüngere Pfad und fällt deshalb zuerst durch.
+3. **Gilt er in beide Richtungen — OD → Laufzeit *und* Laufzeit → OD?** Die Liste fragte lange nur,
+   ob ein Schreibzugriff die Engine erreicht. `StartSyncProducer` ändert die Laufzeit, ohne dass das
+   OD davon erfährt — dieselbe Inkonsistenz, nur andersherum.
+4. **Deckt der Beleg die Zusage, oder nur einen Teil davon?** Die `ro`-Fußnote gilt für
+   PDO-Records; daraus wurde hier kurzzeitig ein `ro` für alle Fallback-Records, samt eines
+   Widerspruchs zur eigenen Zeile zwanzig Zeilen weiter oben. Die Herkunftsspalte ist genau dafür
+   da: Was sie behauptet, muss die genannte Stelle auch hergeben.
+
+Keine der vier ist ein CANopen-Thema. Sie fragen, ob eine Anforderung das Ganze beschreibt oder
+nur den Ausschnitt, den man beim Schreiben vor Augen hatte.
+
 ### Was offen bleibt
 
 **Ein Master, der zur Laufzeit auf `1800h:02` oder `1400h:*` schreibt** — Posten 14 der Tabelle.
