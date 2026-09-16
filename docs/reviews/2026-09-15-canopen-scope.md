@@ -126,7 +126,8 @@ das Gerät nicht einhält. Das stimmt nicht für den statischen Fall: `AddU8`/`A
 `OdAccess.ReadOnly`, der SDO-Server weist Schreibzugriffe darauf ab (`CanOpenNode.cs:1063`), und
 dieselbe Anwendung kann `ConfigureTpdo` dieselben Werte geben. Dann liest der Master einen
 zutreffenden Record — **ganz ohne Verdrahtung zwischen OD und Engine.** Ein kohärentes Gerät ist
-also baubar, und 2a ist keine zwingende Anforderung.
+also baubar, und eine zwingende Verdrahtung von `1400h`/`1800h` gegen die Engine folgt daraus
+nicht.
 
 Die Sorge schrumpft damit auf **einen** Fall, den die Anwendung nicht auflösen kann, und einen, den
 sie mit Disziplin auflösen kann:
@@ -299,21 +300,22 @@ des Maintainers:
 
 ### Was diese Entscheidung auflöst
 
-**Posten 2a verschwindet als Frage.** Die Wahl „statisch `ro` oder verdrahtet" bestand nur, solange
+**Die Wahl „statisch `ro` oder verdrahtet" verschwindet als Frage.** Sie bestand nur, solange
 Record und Verhalten aus zwei Händen kamen. Speist dieselbe EDS beides, stimmen sie per
 Konstruktion überein, und es gibt nichts abzugleichen.
 
-**Posten 1 löst sich weitgehend auf.** `1000h`, `1001h` und `1018h` kommen aus der EDS — dort
-gehören sie hin, die Datei hat eine `[MandatoryObjects]`-Sektion. Das codierte Minimum deckt nur
-noch den Fall ohne EDS.
+**Das codierte Minimum für `1000h`, `1001h` und `1018h` schrumpft auf den Ausnahmefall.** Im
+Normalfall kommen sie aus der EDS — dort gehören sie hin, die Datei hat eine
+`[MandatoryObjects]`-Sektion. Das codierte Minimum deckt nur noch den Fall ohne EDS.
 
 ### Was sie hinzufügt
 
-Und das ist die interessantere Richtung: **die Posten 3 und 2c werden nötig, obwohl CiA 301 sie
-nicht verlangt.** Eine reale EDS enthält Werte, die `ConfigureTpdo` nicht entgegennehmen kann —
-Übertragungsart `02h`–`F0h` kennt das Enum nicht, und eine Inhibit Time hat die Signatur gar nicht
-(`ICanOpenNode.cs:184-187`). Wer solche Dateien einliest, steht vor derselben Wahl wie bei 2a, nur
-eine Ebene tiefer: umsetzen, oder beim Laden melden, was nicht umsetzbar ist.
+Und das ist die interessantere Richtung: **Übertragungsart und Inhibit Time werden nötig, obwohl
+CiA 301 beides nicht verlangt.** Eine reale EDS enthält Werte, die `ConfigureTpdo` nicht
+entgegennehmen kann — Übertragungsart `02h`–`F0h` kennt das Enum nicht, und eine Inhibit Time
+hat die Signatur gar nicht (`ICanOpenNode.cs:184-187`). Wer solche Dateien einliest, steht vor
+derselben Wahl wie oben beim Record, nur eine Ebene tiefer: umsetzen, oder beim Laden melden, was
+nicht umsetzbar ist.
 
 Die Norm bleibt, was sie ist — der Inhibit-Time-Eintrag ist `Optional`, die Wertetabelle
 verpflichtet niemanden. **Notwendig werden beide durch die Architektur, nicht durch CiA 301**, und
