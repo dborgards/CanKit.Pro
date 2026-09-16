@@ -285,6 +285,20 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
 
 ## Entschieden (16.09.): EDS speist beides, Fallback nur ohne EDS
 
+**Zuerst, was dieser Zuschnitt *nicht* ist.** Alles hier schneidet die **Geräterolle** zu: den
+Knoten, der ein eigenes Objektverzeichnis führt, von einem fremden Master konfiguriert wird und PDOs
+produziert. Die SRS kennt daneben ausdrücklich die **Master-/Tool-Rolle** — die Stakeholder-Tabelle
+nennt *„CANopen-Master/-Node-Anwendung"*, FR-CO-007 verlangt beide Seiten, FR-CO-002/003 sprechen
+von *„entfernten OD-Einträgen"* — und die API trägt sie: `SendNmtCommandAsync(…, targetNodeId)`,
+`SdoUploadAsync(serverNodeId, …)`, `AddHeartbeatConsumer`, `StartSyncProducer`.
+
+**Diese zweite Rolle ist hier nicht zugeschnitten**, und ihre offenen Fragen liegen absehbar anders:
+die EDS des *fremden* Knotens statt der eigenen, das Dekodieren fremder PDOs beim Beobachten des
+Busses, ein Knoten-Scan über `1000h`/`1018h` — und ob Flying Master (CiA 302) noch der
+Ausnahmekandidat ist, als den die GAP-Analyse ihn führt; jenes Urteil ist unter der Geräteannahme
+gefällt worden. Sie bekommt eine **eigene Runde nach der Übersetzung dieser Liste in Anforderungen**
+(Maintainer, 16.09.). Wer unten liest „CANopen ist zugeschnitten", lese es mit dieser Einschränkung.
+
 Der Zuschnitt ist keine Liste von Einzelfällen mehr, sondern folgt aus einer Architekturentscheidung
 des Maintainers:
 
