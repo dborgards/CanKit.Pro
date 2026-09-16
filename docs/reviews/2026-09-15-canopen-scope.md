@@ -335,7 +335,7 @@ die dort nicht steht.
 | 2 | Degradieren mit Meldung, wenn eine EDS Nicht-Umsetzbares angibt — **einschließlich Korrektur des OD-Eintrags** | Architekturentscheidung | gehört zu 1, aber eigene Anforderung — sonst wird es zum stillen Ignorieren |
 | 3 | Fallback: `1000h`, `1001h`, `1018h` (sub0 = `01h`, Vendor-ID = 0) | CiA 301 §7.5.2.21, Objektübersicht `ro M` | klein, additiv. Subs 02–04 weglassen, nicht nullen |
 | 4 | Fallback: `1400h`/`1800h`/`1200h` statisch `ro` | Fußnoten der Objektübersicht (Pflicht bei PDO-/SDO-Support) | klein |
-| 5 | Übertragungsart `02h`–`F0h` | **Architektur** (die Norm verpflichtet nicht) | API-Erweiterung **ohne Bruch**: EDS-Pfad nimmt das rohe Byte |
+| 5 | Übertragungsart `02h`–`F0h` | **Architektur** (die Norm verpflichtet nicht) | zwei Hälften: Byte annehmen (API-Erweiterung **ohne Bruch**, EDS-Pfad nimmt das rohe Byte) **und** je TPDO SYNCs zählen — `HandleSync` sendet heute jedes synchrone TPDO bei **jedem** SYNC (`CanOpenNode.cs:868-880`) |
 | 6 | Übertragungsart `FCh`/`FDh` (RTR-only) | **Architektur** | Verhaltenserweiterung an vorhandener Naht (`isRtr` erreicht den Dispatcher) |
 | 7 | Inhibit Time `1800h:03` | **Architektur** (Norm: `Entry category: Optional`) | **das größte Stück** — neues Scheduling im TPDO-Pfad |
 | 8 | Abort-Code `0504 0003h` | normativ; der Blocktransfer erkennt den Zustand | trivial |
@@ -345,6 +345,19 @@ die dort nicht steht.
 | 12 | Synchrone **RPDO** (`1400h:02`) | **Architektur** | Empfangsseite: `ConfigureRpdo` hat kein Übertragungsart-Argument (`ICanOpenNode.cs:192`), `HandleRpdo` schreibt sofort ins OD statt bis SYNC zu halten (`CanOpenNode.cs:1697`) |
 | 13 | EDS-Zugriffsrechte auf `1600h`/`1A00h` durchsetzen | **Architektur** | der Mapping-Pfad wird **vor** der generischen OD-Prüfung abgezweigt (`CanOpenNode.cs:1022`) und fragt `OdAccess` nie — geladene `ro`-Flags wären wirkungslos |
 | 14 | Schreibbare Kommunikationsrecords zur Laufzeit | **offene Entscheidung des Maintainers** (siehe unten) | entweder Schreibzugriff bis zur Engine führen **oder** die Records beim Laden auf `ro` zwingen |
+| 15 | Reset Communication stellt aus der EDS wieder her | **Architektur** | der Handler wechselt nur den Zustand und sendet Bootup (`CanOpenNode.cs:848-857`); nach einem Remapping bliebe die geänderte Laufzeitkonfiguration stehen |
+
+**Posten 15 ist keine Altlast, sondern eine Folge der Entscheidung selbst** (Codex auf #129).
+Die README des Pakets begründet heute, warum Reset Communication nichts wiederherstellt
+(`src/CanKit.Pro.CANopen/README.md:56-57`): *„communication parameters are not re-initialized from
+the OD, because they do not live in the OD“*. Diese Begründung trägt, solange es keine Quelle gibt,
+aus der sie sich wiederherstellen ließen. Mit der EDS gibt es sie — und damit wird aus einer
+dokumentierten Einschränkung eine offene Anforderung: nach einem Remapping durch den Master und
+einem anschließenden Reset Communication bliebe sonst die geänderte Laufzeitkonfiguration stehen,
+obwohl der Zuschnitt den EDS-Pfad als vollständig führt.
+
+Die README selbst bleibt unverändert richtig, weil sie das heutige Verhalten beschreibt und der
+EDS-Pfad noch nicht existiert. Sie wird mit dessen Umsetzung nachzuführen sein, nicht vorher.
 
 ### Was offen bleibt
 
