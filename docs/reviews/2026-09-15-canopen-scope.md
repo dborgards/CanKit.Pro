@@ -306,6 +306,10 @@ des Maintainers:
    Inkonsistenz, gegen die Punkt 1 geschrieben ist — der Master läse dann die Zusage, die das
    Gerät nicht einhält. Betroffene Einträge werden also auf den umgesetzten Wert korrigiert,
    weggelassen oder das PDO wird deaktiviert; die Meldung sagt, was davon geschah.
+5. **Schreibzugriffe auf die Kommunikationsrecords werden bis zur Engine durchgereicht** — sie
+   wirken wirklich (Maintainer, 16.09., auf die Frage aus der ersten Fassung dieses Dokuments).
+   Ein fremder Master kann den Knoten also über den Bus konfigurieren, so wie er es erwartet. Die
+   billigere Gegenvariante — die Records beim Laden auf `ro` zwingen — ist damit **nicht** gewählt.
 
 ### Was diese Entscheidung auflöst
 
@@ -350,13 +354,13 @@ die dort nicht steht.
 | 11 | Übertragungsart `00h` (synchron-azyklisch) | **Architektur** | eigenes Verhalten: **beim nächsten SYNC senden, sofern vorher ein Ereignis auftrat** — ein Latch, gesetzt von Zustandsänderung *und* von `TriggerTpdoAsync`, verbraucht beim SYNC. Weder `EventDriven` noch `Synchronous` tut das |
 | 12 | Synchrone **RPDO** (`1400h:02`) | **Architektur** | Empfangsseite: `ConfigureRpdo` hat kein Übertragungsart-Argument (`ICanOpenNode.cs:192`), `HandleRpdo` schreibt sofort ins OD statt bis SYNC zu halten (`CanOpenNode.cs:1697`) |
 | 13 | EDS-Zugriffsrechte auf `1600h`/`1A00h` durchsetzen | **Architektur** | der Mapping-Pfad wird **vor** der generischen OD-Prüfung abgezweigt (`CanOpenNode.cs:1022`) und fragt `OdAccess` nie — geladene `ro`-Flags wären wirkungslos |
-| 14 | Schreibbare Kommunikationsrecords zur Laufzeit | **offene Entscheidung des Maintainers** (siehe unten) | entweder Schreibzugriff bis zur Engine führen **oder** die Records beim Laden auf `ro` zwingen |
+| 14 | Schreibbare Kommunikationsrecords zur Laufzeit — **entschieden: durchreichen** | **Architekturentscheidung (16.09.)** | Der generische SDO-Server übernimmt den Wert heute ins OD, und kein Pfad trägt ihn weiter in die PDO-Engine. Genau dieser Weg ist zu bauen — für `1800h:02`, `1800h:03`, `1400h:02` und die COB-ID-Subs. Das ist die OD → Laufzeit-Hälfte von Posten 23; die Gegenrichtung deckt Posten 20 ab |
 | 15 | Reset **Node und** Reset Communication stellen wieder her — **aus der EDS und aus dem codierten Fallback** | **Architektur** | beide Kommandos teilen sich heute denselben Zweig (`CanOpenNode.cs:848-857`), der nur den Zustand wechselt und Bootup sendet; `ResetNode` ist dabei der weitergehende — *„full application reset (implies reset communication)"* (`Nmt/NmtState.cs:39`). Sonst bliebe nach einem Remapping oder einem `ConfigureTpdo`-Aufruf die geänderte Laufzeitkonfiguration stehen — im Fallback-Fall ohne jede Quelle, aus der sie zurückzuholen wäre |
 | 16 | Fallback: auch `1600h`/`1A00h` statisch `ro` | **Architektur** | Posten 4 deckt nur `1400h`/`1800h`/`1200h`, Posten 13 nur EDS-Flags — ohne diesen Posten bleibt gerade das Fallback dynamisch remappbar, obwohl die Entscheidung für es `ro` zusagt |
-| 17 | SDO-Abort `0609 0030h` bei nicht unterstützter Übertragungsart | **normativ** | „An attempt to change the value of the transmission type to any not supported value shall be responded with the SDO abort transfer service (abort code: 0609 0030h)" — die Kehrseite des Degradierens: was der Stack nicht kann, lehnt er beim Schreiben ab. **Gilt nur für beschreibbare Einträge** — ist der Record `ro` (Posten 4, oder Posten 14 je nach Entscheidung), scheitert der Download vorher an der Zugriffsprüfung mit `0601 0002h` (`AttemptWriteReadOnly`, vorhanden). **`0609 0030h` fehlt im Enum** (`Sdo/SdoAbortCode.cs` führt von den `0609h`-Codes nur `0609 0011h`), gehört also zu Posten 8 |
+| 17 | SDO-Abort `0609 0030h` bei nicht unterstützter Übertragungsart | **normativ** | „An attempt to change the value of the transmission type to any not supported value shall be responded with the SDO abort transfer service (abort code: 0609 0030h)" — die Kehrseite des Degradierens: was der Stack nicht kann, lehnt er beim Schreiben ab. **Gilt nur für beschreibbare Einträge** — ist der Record `ro`, also im Fallback (Posten 4 und 16), scheitert der Download vorher an der Zugriffsprüfung mit `0601 0002h` (`AttemptWriteReadOnly`, vorhanden). **`0609 0030h` fehlt im Enum** (`Sdo/SdoAbortCode.cs` führt von den `0609h`-Codes nur `0609 0011h`), gehört also zu Posten 8 |
 | 18 | `1800h:04` nicht implementieren, Zugriff mit `0609 0011h` abweisen | **normativ** | „Sub-index 04h is reserved. It shall not be implemented; in this case read or write access leads to the SDO abort transfer service (abort code: 0609 0011h)" — betrifft Fallback-Record und EDS-Befüllung gleichermaßen. Der Code **ist** vorhanden (`SubIndexDoesNotExist`), nur das Verhalten fehlt |
-| 19 | Fallback: `1005h`, `1006h`, `1014h` | **normativ** — dieselbe Fußnotenlogik wie Posten 4 | `1005h` *„Mandatory, if PDO communication on a synchronous base is supported"*, `1006h` *„Mandatory for SYNC producers"*, `1014h` *„Mandatory, if Emergency is supported"*. Der Stack kann alle drei (`StartSyncProducer`, `SendEmcyAsync`, synchrone TPDOs) — ohne die Records hätte auch der Fallback Verhalten, das sein OD nicht beschreibt. **Achtung:** alle drei sind laut Objektdefinition `rw` (`1005h` *„rw; const, if the COB-ID is not changeable"*, `1006h` `rw`, `1014h` `rw`), und die `ro`-Fußnote gilt nur für PDO-Records. **Die `ro`-Variante aus Posten 14 steht für sie deshalb nicht offen** — sie wäre die Abweichung, die zwei Absätze weiter oben ausgeschlossen wird. Ihre Schreibzugriffe müssen den zugehörigen Dienst erreichen; einzige Ausnahme ist `1005h`, das die Norm als `const` zulässt, *„if the COB-ID is not changeable"* |
-| 20 | `1006h` und der SYNC-Produzent bleiben im Gleichschritt | **Architektur** | Gegenrichtung zu Posten 14: `StartSyncProducer` setzt nur `_syncProducerInterval` und plant den Tick (`CanOpenNode.cs:320-330`), `StopSyncProducer` ebenso (`:333-341`) — das OD erfährt nichts. `1006h` bliebe auf seinem Anfangswert, und **`0000 0000h` heißt normativ „transmission of SYNC messages shall be disabled"**, während der Knoten sendet. Entweder Start/Stop schreiben `1006h` mit, oder der Zeitplan wird aus `1006h` abgeleitet |
+| 19 | Fallback: `1005h`, `1006h`, `1014h` | **normativ** — dieselbe Fußnotenlogik wie Posten 4 | `1005h` *„Mandatory, if PDO communication on a synchronous base is supported"*, `1006h` *„Mandatory for SYNC producers"*, `1014h` *„Mandatory, if Emergency is supported"*. Der Stack kann alle drei (`StartSyncProducer`, `SendEmcyAsync`, synchrone TPDOs) — ohne die Records hätte auch der Fallback Verhalten, das sein OD nicht beschreibt. **Achtung:** alle drei sind laut Objektdefinition `rw` (`1005h` *„rw; const, if the COB-ID is not changeable"*, `1006h` `rw`, `1014h` `rw`), und die `ro`-Fußnote gilt nur für PDO-Records. Sie auf `ro` zu zwingen wäre also eine Abweichung — was die Entscheidung zu Posten 14 ohnehin erledigt, sie zeigt in dieselbe Richtung. Ihre Schreibzugriffe müssen den zugehörigen Dienst erreichen; einzige Ausnahme ist `1005h`, das die Norm als `const` zulässt, *„if the COB-ID is not changeable"* |
+| 20 | `1006h` und der SYNC-Produzent bleiben im Gleichschritt | **Architektur** | Gegenrichtung zu Posten 14 (dort OD → Laufzeit, hier Laufzeit → OD): `StartSyncProducer` setzt nur `_syncProducerInterval` und plant den Tick (`CanOpenNode.cs:320-330`), `StopSyncProducer` ebenso (`:333-341`) — das OD erfährt nichts. `1006h` bliebe auf seinem Anfangswert, und **`0000 0000h` heißt normativ „transmission of SYNC messages shall be disabled"**, während der Knoten sendet. Entweder Start/Stop schreiben `1006h` mit, oder der Zeitplan wird aus `1006h` abgeleitet |
 | 21 | Heartbeat `1016h`/`1017h` — **in beiden Pfaden**, nicht nur im Fallback | **Architektur** — *nicht* normativ, siehe rechts | `1016h` ist `Category: Optional`; `1017h` ist `Conditional; **Mandatory, if guarding not supported**`, und dieser Knoten *unterstützt* Guarding (er beantwortet Guarding-RTRs, README § Life guarding) — die Klausel greift also nicht. Gebaut wird es trotzdem, weil `StartHeartbeatProducer` (`CanOpenNode.cs:265-275`) und `AddHeartbeatConsumer` (`:290`) nur internen Zustand ändern. Eine EDS mit `1016h`-Konsumenten oder `1017h` ≠ 0 muss die Engine erreichen — Posten 1 befüllt nur die PDO-Konfiguration, und Heartbeat ist keine |
 | 22 | `1001h` und der EMCY-Fehlerregister bleiben im Gleichschritt | **gemessene Invariante des Pakets** | Gegenrichtung wie Posten 20: `SendEmcyAsync` (`CanOpenNode.cs:352-358`) baut die Nachricht und sendet, ohne das OD zu berühren — während `Emcy/EmcyMessage.cs:13` Byte 2 ausdrücklich als *„mirror of OD 0x1001"* dokumentiert. Ein SDO-Read läse den Anfangswert, während die EMCY einen anderen Fehlerzustand meldet. Betrifft Fallback **und** EDS-Pfad |
 | 23 | **Die Regel hinter 20, 21 und 22:** für jedes Kommunikationsobjekt, das der Knoten anbietet, stimmen OD und Laufzeit in **beiden Richtungen** und in **beiden Pfaden** überein | **Architektur** | Das Kriterium ist **die tatsächlich erfolgte Änderung**, nicht der versuchte Zugriff. OD → Laufzeit: *jede* Änderung, die das OD übernimmt, erreicht den Dienst — also der angenommene SDO-Download **und** der direkte Anwendungszugriff über das öffentliche `ObjectDictionary` (`ICanOpenNode.cs:33`), dessen `WriteRaw` nur die Existenz prüft und `OdAccess` nie (`ObjectDictionary.cs:131-142`); `EntryWritten` (`:141`) ist dafür eine **halbe** Naht: sie feuert bei `WriteRaw`/`WriteUnsigned`, aber ausdrücklich **nicht** bei den `Add*`-Methoden (`:33`) — und `Add` ersetzt einen bestehenden Eintrag per Indexer-Zuweisung stillschweigend (`:210-218`). Ein `AddU32(0x1006, …)` ändert das OD also, ohne dass irgendetwas davon erfährt. Entweder wird die Naht auf das Ersetzen erweitert, oder das Ersetzen verwalteter Kommunikationsrecords wird unterbunden; die Zeile verlangt das Ergebnis, nicht den Weg. Laufzeit → OD: jede API, die den Dienst ändert, schreibt den Wert zurück. Ein an der Zugriffsprüfung mit `0601 0002h` abgewiesener Download (Posten 17) fällt nicht darunter — er ändert nichts, und die Ablehnung ist das richtige Verhalten, sonst machte diese Zeile die Records aus den Posten 3, 4 und 16 beschreibbar. Bisher bekannte Instanzen: `1006h`/SYNC-Produzent (20), `1016h`/`1017h`/Heartbeat (21), `1001h`/EMCY (22), PDO-Records (13/14/16). Die Liste ist hier dreimal in Folge je Dienst nachgezogen worden — sie steht als Regel, damit der nächste Dienst nicht als vierter Befund auffällt |
@@ -399,20 +403,30 @@ vor sich haben. Wer einen Posten ergänzt, beantwortet sie:
 Keine der vier ist ein CANopen-Thema. Sie fragen, ob eine Anforderung das Ganze beschreibt oder
 nur den Ausschnitt, den man beim Schreiben vor Augen hatte.
 
+**Posten 14 war die letzte offene Frage dieses Dokuments — am 16.09. entschieden.** Ein Master, der
+zur Laufzeit auf `1800h:02` oder `1400h:*` schreibt, bekommt heute den Wert ins OD übernommen und
+eine Bestätigung zurück, während kein Pfad ihn weiter in die PDO-Engine trägt. Das ist unabhängig
+davon, woher der Record beim Start kam; die EDS-Entscheidung berührt es nicht, weil sie nur die
+Befüllung regelt.
+
+Zur Wahl standen **durchreichen** — mehr Arbeit, dafür ein Gerät, das `rw` ehrlich anbietet — und
+**beim Laden auf `ro` zwingen**, billig, und der Master erfährt die Wahrheit sofort. Nicht zur Wahl
+stand die dritte Variante, nämlich der heutige Zustand: `rw` anbieten und den Schreibzugriff
+wirkungslos quittieren.
+
+**Entschieden wurde durchreichen.** Damit schließt der Zuschnitt die Interop-Lücke, die die README
+des Pakets bisher als bekannte Einschränkung führt — *„a master cannot configure this node purely
+over the OD"* — statt sie durch einen Schreibschutz zu zementieren. Der Preis ist Arbeit in beiden
+Richtungen: Posten 14 ist die OD → Laufzeit-Hälfte, Posten 20 und 22 sind die Gegenrichtung, und
+Posten 23 ist die Regel, die beide zusammenhält.
+
+Dass der Punkt als **Posten in der Tabelle** steht und nicht nur in diesem Abschnitt, geht auf einen
+Codex-Befund auf #129 zurück: der nächste Schritt schreibt die Tabelle in die SRS, und was dort
+nicht steht, deckt die Ratsche nicht ab. Ein Punkt unter einer Überschrift namens „Was offen
+bleibt" wäre genau die Art Notiz, die beim Übersetzen verlorengeht — und wäre hier nun sogar
+falsch, weil nichts mehr offen ist.
+
 ### Was offen bleibt
-
-**Ein Master, der zur Laufzeit auf `1800h:02` oder `1400h:*` schreibt** — Posten 14 der Tabelle.
-Das ist unabhängig davon, woher der Record beim Start kam: der generische SDO-Server übernimmt den
-Wert ins OD, und kein Pfad trägt ihn weiter in die PDO-Engine. Die EDS-Entscheidung berührt das
-nicht, weil sie nur die Befüllung regelt.
-
-Es steht deshalb **als Posten in der Tabelle und nicht nur hier** (Codex auf #129): der nächste
-Schritt schreibt die Tabelle in die SRS, und was dort nicht steht, deckt die Ratsche nicht ab —
-ein Punkt unter „Was offen bleibt" wäre genau die Art Notiz, die beim Übersetzen verlorengeht.
-Die Wahl selbst bleibt die des Maintainers: **Schreibzugriff durchreichen** (mehr Arbeit, aber ein
-Gerät, das `rw` ehrlich anbietet) **oder beim Laden auf `ro` zwingen** (billig, und der Master
-erfährt die Wahrheit sofort). Was nicht geht, ist die dritte Variante von heute: `rw` anbieten und
-den Schreibzugriff wirkungslos quittieren.
 
 Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und die
 CiA-302/304/305-Themen aus der GAP-Analyse. Die stehen in anderen Dokumenten.
