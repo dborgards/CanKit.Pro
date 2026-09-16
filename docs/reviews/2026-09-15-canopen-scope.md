@@ -290,9 +290,13 @@ des Maintainers:
 
 1. **Der Normalfall ist die EDS.** Sie speist **das Objektverzeichnis *und* die
    PDO-Konfiguration** — eine Quelle für beides.
-2. **Ein codiertes Minimum greift nur, wenn keine EDS vorliegt.** Dessen Records sind statisch
-   `ro`: die Anwendung hält dort beide Enden, der Record beschreibt genau das eine Verhalten, das
-   der Stack kann, und `ro` sagt dem Master wahrheitsgemäß, dass daran nichts zu drehen ist.
+2. **Ein codiertes Minimum greift nur, wenn keine EDS vorliegt.** Dessen **PDO-Records** sind
+   statisch `ro`: die Anwendung hält dort beide Enden, der Record beschreibt genau das eine
+   Verhalten, das der Stack kann, und `ro` sagt dem Master wahrheitsgemäß, dass daran nichts zu
+   drehen ist. **Nur für sie trägt das die Norm:** Fußnote `*` der Objektübersicht erlaubt `ro`
+   ausdrücklich für *„PDO communication parameter and PDO mapping object entries"* — und für
+   sonst nichts. Wo ein Objekt selbst `rw` vorschreibt, ist `ro` keine zulässige Vereinfachung,
+   sondern eine Abweichung; siehe Posten 19.
 3. **Was eine EDS angibt und der Stack nicht umsetzen kann, wird degradiert und gemeldet** — nicht
    abgelehnt (sonst ist der Pfad unbrauchbar, bis alles gebaut ist) und vor allem nicht
    stillschweigend ignoriert. Das wäre wieder die Zusage ohne Deckung, um die sich die halbe
@@ -334,23 +338,24 @@ die dort nicht steht.
 | 1 | EDS → Objektverzeichnis **und** PDO-Konfiguration | Architekturentscheidung | neuer Pfad, Abhängigkeit auf EdsDcfNet |
 | 2 | Degradieren mit Meldung, wenn eine EDS Nicht-Umsetzbares angibt — **einschließlich Korrektur des OD-Eintrags** | Architekturentscheidung | gehört zu 1, aber eigene Anforderung — sonst wird es zum stillen Ignorieren |
 | 3 | Fallback: `1000h`, `1001h`, `1018h` (sub0 = `01h`, Vendor-ID = 0) | CiA 301 §7.5.2.21, Objektübersicht `ro M` | klein, additiv. Subs 02–04 weglassen, nicht nullen |
-| 4 | Fallback: `1400h`/`1800h`/`1200h` statisch `ro` | Fußnoten der Objektübersicht (Pflicht bei PDO-/SDO-Support) | klein |
+| 4 | Fallback: `1400h`/`1800h` statisch `ro` | Fußnote `*` der Objektübersicht: bei PDO-Support Pflicht, *„These may be ro"* | klein |
+| 4b | Fallback: `1200h` | **korrigiert (16.09.):** die Objektdefinition sagt `Category Conditional` / *„Index 1200h: **Optional**"* — Pflicht sind erst `1201h`–`127Fh` je weiterem SDO-Server | klein, und *kann* entfallen. Wird er gebaut, sind sub0 und sub01 ohnehin `const` laut Objektdefinition — nicht über die PDO-Fußnote, die für SDO-Parameter kein `ro` erlaubt |
 | 5 | Übertragungsart `02h`–`F0h` | **Architektur** (die Norm verpflichtet nicht) | zwei Hälften: Byte annehmen (API-Erweiterung **ohne Bruch**, EDS-Pfad nimmt das rohe Byte) **und** je TPDO SYNCs zählen — `HandleSync` sendet heute jedes synchrone TPDO bei **jedem** SYNC (`CanOpenNode.cs:868-880`) |
 | 6a | Übertragungsart `FDh` (RTR-only, **event-driven**) | **Architektur** | Sampling bei Empfang des RTR, sofort senden. Verhaltenserweiterung an vorhandener Naht (`isRtr` erreicht den Dispatcher) |
 | 6b | Übertragungsart `FCh` (RTR-only, **synchron**) | **Architektur** | **anderes Verhalten als 6a**: Sampling bei *jedem* SYNC, Wert puffern, den gepufferten Wert auf RTR senden — ein gemeinsamer „OD lesen und antworten"-Handler erfüllt 6a und verletzt 6b (Tabelle 72, Erläuterung) |
 | 7 | Inhibit Time `1800h:03` | **Architektur** (Norm: `Entry category: Optional`) | **das größte Stück** — neues Scheduling im TPDO-Pfad. Normativ ist sie „the minimum interval for PDO transmission **if the transmission type is set to FEh and FFh**" — gilt also nicht für die synchronen Arten |
-| 8 | Abort-Code `0504 0003h` | normativ; der Blocktransfer erkennt den Zustand | trivial |
+| 8 | Abort-Codes `0504 0003h` und `0609 0030h` | normativ; den ersten erkennt der Blocktransfer, den zweiten verlangt Posten 17 | trivial — beide fehlen im Enum |
 | 9 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial |
 | 10 | TIME `1012h` | `rw O` — **optional** | nicht bauen, in den Ausnahmekatalog |
 | 11 | Übertragungsart `00h` (synchron-azyklisch) | **Architektur** | eigenes Verhalten: **beim nächsten SYNC senden, sofern vorher ein Ereignis auftrat** — ein Latch, gesetzt von Zustandsänderung *und* von `TriggerTpdoAsync`, verbraucht beim SYNC. Weder `EventDriven` noch `Synchronous` tut das |
 | 12 | Synchrone **RPDO** (`1400h:02`) | **Architektur** | Empfangsseite: `ConfigureRpdo` hat kein Übertragungsart-Argument (`ICanOpenNode.cs:192`), `HandleRpdo` schreibt sofort ins OD statt bis SYNC zu halten (`CanOpenNode.cs:1697`) |
 | 13 | EDS-Zugriffsrechte auf `1600h`/`1A00h` durchsetzen | **Architektur** | der Mapping-Pfad wird **vor** der generischen OD-Prüfung abgezweigt (`CanOpenNode.cs:1022`) und fragt `OdAccess` nie — geladene `ro`-Flags wären wirkungslos |
 | 14 | Schreibbare Kommunikationsrecords zur Laufzeit | **offene Entscheidung des Maintainers** (siehe unten) | entweder Schreibzugriff bis zur Engine führen **oder** die Records beim Laden auf `ro` zwingen |
-| 15 | Reset **Node und** Reset Communication stellen wieder her — **aus der EDS und aus dem codierten Fallback** | **Architektur** | der Handler wechselt nur den Zustand und sendet Bootup (`CanOpenNode.cs:848-857`); sonst bliebe nach einem Remapping oder einem `ConfigureTpdo`-Aufruf die geänderte Laufzeitkonfiguration stehen — im Fallback-Fall ohne jede Quelle, aus der sie zurückzuholen wäre. Beide Kommandos teilen sich heute denselben Zweig (`CanOpenNode.cs:848-857`), und `ResetNode` ist der weitergehende — *„full application reset (implies reset communication)"* (`Nmt/NmtState.cs:39`) |
+| 15 | Reset **Node und** Reset Communication stellen wieder her — **aus der EDS und aus dem codierten Fallback** | **Architektur** | beide Kommandos teilen sich heute denselben Zweig (`CanOpenNode.cs:848-857`), der nur den Zustand wechselt und Bootup sendet; `ResetNode` ist dabei der weitergehende — *„full application reset (implies reset communication)"* (`Nmt/NmtState.cs:39`). Sonst bliebe nach einem Remapping oder einem `ConfigureTpdo`-Aufruf die geänderte Laufzeitkonfiguration stehen — im Fallback-Fall ohne jede Quelle, aus der sie zurückzuholen wäre |
 | 16 | Fallback: auch `1600h`/`1A00h` statisch `ro` | **Architektur** | Posten 4 deckt nur `1400h`/`1800h`/`1200h`, Posten 13 nur EDS-Flags — ohne diesen Posten bleibt gerade das Fallback dynamisch remappbar, obwohl die Entscheidung für es `ro` zusagt |
 | 17 | SDO-Abort `0609 0030h` bei nicht unterstützter Übertragungsart | **normativ** | „An attempt to change the value of the transmission type to any not supported value shall be responded with the SDO abort transfer service (abort code: 0609 0030h)" — die Kehrseite des Degradierens: was der Stack nicht kann, lehnt er beim Schreiben ab. **Gilt nur für beschreibbare Einträge** — ist der Record `ro` (Posten 4, oder Posten 14 je nach Entscheidung), scheitert der Download vorher an der Zugriffsprüfung mit `0601 0002h` (`AttemptWriteReadOnly`, vorhanden). **`0609 0030h` fehlt im Enum** (`Sdo/SdoAbortCode.cs` führt von den `0609h`-Codes nur `0609 0011h`), gehört also zu Posten 8 |
 | 18 | `1800h:04` nicht implementieren, Zugriff mit `0609 0011h` abweisen | **normativ** | „Sub-index 04h is reserved. It shall not be implemented; in this case read or write access leads to the SDO abort transfer service (abort code: 0609 0011h)" — betrifft Fallback-Record und EDS-Befüllung gleichermaßen. Der Code **ist** vorhanden (`SubIndexDoesNotExist`), nur das Verhalten fehlt |
-| 19 | Fallback: `1005h`, `1006h`, `1014h` | **normativ** — dieselbe Fußnotenlogik wie Posten 4 | `1005h` *„Mandatory, if PDO communication on a synchronous base is supported"*, `1006h` *„Mandatory for SYNC producers"*, `1014h` *„Mandatory, if Emergency is supported"*. Der Stack kann alle drei (`StartSyncProducer`, `SendEmcyAsync`, synchrone TPDOs) — ohne die Records hätte auch der Fallback Verhalten, das sein OD nicht beschreibt |
+| 19 | Fallback: `1005h`, `1006h`, `1014h` | **normativ** — dieselbe Fußnotenlogik wie Posten 4 | `1005h` *„Mandatory, if PDO communication on a synchronous base is supported"*, `1006h` *„Mandatory for SYNC producers"*, `1014h` *„Mandatory, if Emergency is supported"*. Der Stack kann alle drei (`StartSyncProducer`, `SendEmcyAsync`, synchrone TPDOs) — ohne die Records hätte auch der Fallback Verhalten, das sein OD nicht beschreibt. **Achtung:** alle drei sind laut Objektdefinition `rw` (`1005h` *„rw; const, if the COB-ID is not changeable"*, `1006h` `rw`, `1014h` `rw`), und die `ro`-Fußnote gilt nur für PDO-Records. Sie fallen damit unter dieselbe Frage wie Posten 14 |
 
 **Posten 15 ist keine Altlast, sondern eine Folge der Entscheidung selbst** (Codex auf #129).
 Die README des Pakets begründet heute, warum Reset Communication nichts wiederherstellt
