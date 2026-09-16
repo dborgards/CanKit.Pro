@@ -297,6 +297,11 @@ des Maintainers:
    abgelehnt (sonst ist der Pfad unbrauchbar, bis alles gebaut ist) und vor allem nicht
    stillschweigend ignoriert. Das wäre wieder die Zusage ohne Deckung, um die sich die halbe
    Reviewrunde gedreht hat.
+4. **Degradieren heißt: auch das Objektverzeichnis trägt den degradierten Wert** (Codex auf #129).
+   Den Originalwert aus der EDS ins OD zu kopieren und daneben anders zu laufen wäre genau die
+   Inkonsistenz, gegen die Punkt 1 geschrieben ist — der Master läse dann die Zusage, die das
+   Gerät nicht einhält. Betroffene Einträge werden also auf den umgesetzten Wert korrigiert,
+   weggelassen oder das PDO wird deaktiviert; die Meldung sagt, was davon geschah.
 
 ### Was diese Entscheidung auflöst
 
@@ -327,7 +332,7 @@ die dort nicht steht.
 | | Was | Woher die Notwendigkeit kommt | Art der Arbeit |
 |---|---|---|---|
 | 1 | EDS → Objektverzeichnis **und** PDO-Konfiguration | Architekturentscheidung | neuer Pfad, Abhängigkeit auf EdsDcfNet |
-| 2 | Degradieren mit Meldung, wenn eine EDS Nicht-Umsetzbares angibt | Architekturentscheidung | gehört zu 1, aber eigene Anforderung — sonst wird es zum stillen Ignorieren |
+| 2 | Degradieren mit Meldung, wenn eine EDS Nicht-Umsetzbares angibt — **einschließlich Korrektur des OD-Eintrags** | Architekturentscheidung | gehört zu 1, aber eigene Anforderung — sonst wird es zum stillen Ignorieren |
 | 3 | Fallback: `1000h`, `1001h`, `1018h` (sub0 = `01h`, Vendor-ID = 0) | CiA 301 §7.5.2.21, Objektübersicht `ro M` | klein, additiv. Subs 02–04 weglassen, nicht nullen |
 | 4 | Fallback: `1400h`/`1800h`/`1200h` statisch `ro` | Fußnoten der Objektübersicht (Pflicht bei PDO-/SDO-Support) | klein |
 | 5 | Übertragungsart `02h`–`F0h` | **Architektur** (die Norm verpflichtet nicht) | API-Erweiterung **ohne Bruch**: EDS-Pfad nimmt das rohe Byte |
@@ -336,12 +341,25 @@ die dort nicht steht.
 | 8 | Abort-Code `0504 0003h` | normativ; der Blocktransfer erkennt den Zustand | trivial |
 | 9 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial |
 | 10 | TIME `1012h` | `rw O` — **optional** | nicht bauen, in den Ausnahmekatalog |
+| 11 | Übertragungsart `00h` (synchron-azyklisch) | **Architektur** | eigenes Verhalten: auf SYNC senden, aber nur bei Änderung — weder `EventDriven` noch `Synchronous` tut das |
+| 12 | Synchrone **RPDO** (`1400h:02`) | **Architektur** | Empfangsseite: `ConfigureRpdo` hat kein Übertragungsart-Argument (`ICanOpenNode.cs:192`), `HandleRpdo` schreibt sofort ins OD statt bis SYNC zu halten (`CanOpenNode.cs:1697`) |
+| 13 | EDS-Zugriffsrechte auf `1600h`/`1A00h` durchsetzen | **Architektur** | der Mapping-Pfad wird **vor** der generischen OD-Prüfung abgezweigt (`CanOpenNode.cs:1022`) und fragt `OdAccess` nie — geladene `ro`-Flags wären wirkungslos |
+| 14 | Schreibbare Kommunikationsrecords zur Laufzeit | **offene Entscheidung des Maintainers** (siehe unten) | entweder Schreibzugriff bis zur Engine führen **oder** die Records beim Laden auf `ro` zwingen |
 
 ### Was offen bleibt
 
-**Ein Master, der zur Laufzeit auf `1800h:02` schreibt.** Das ist unabhängig davon, woher der
-Record beim Start kam: wer die Records `rw` anbietet, muss den Schreibzugriff bis zur Engine
-führen. Die EDS-Entscheidung berührt das nicht, weil sie nur die Befüllung regelt.
+**Ein Master, der zur Laufzeit auf `1800h:02` oder `1400h:*` schreibt** — Posten 14 der Tabelle.
+Das ist unabhängig davon, woher der Record beim Start kam: der generische SDO-Server übernimmt den
+Wert ins OD, und kein Pfad trägt ihn weiter in die PDO-Engine. Die EDS-Entscheidung berührt das
+nicht, weil sie nur die Befüllung regelt.
+
+Es steht deshalb **als Posten in der Tabelle und nicht nur hier** (Codex auf #129): der nächste
+Schritt schreibt die Tabelle in die SRS, und was dort nicht steht, deckt die Ratsche nicht ab —
+ein Punkt unter „Was offen bleibt“ wäre genau die Art Notiz, die beim Übersetzen verlorengeht.
+Die Wahl selbst bleibt die des Maintainers: **Schreibzugriff durchreichen** (mehr Arbeit, aber ein
+Gerät, das `rw` ehrlich anbietet) **oder beim Laden auf `ro` zwingen** (billig, und der Master
+erfährt die Wahrheit sofort). Was nicht geht, ist die dritte Variante von heute: `rw` anbieten und
+den Schreibzugriff wirkungslos quittieren.
 
 Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und die
 CiA-302/304/305-Themen aus der GAP-Analyse. Die stehen in anderen Dokumenten.
