@@ -1,6 +1,8 @@
 # CANopen: Zuschnitt gegen CiA 301 — gegen den Normtext geprüft
 
-Stand: 15.09.2026, `main` @ `2109967`. Erste von vier Zuschnitt-Runden.
+Stand: 15.09.2026, `main` @ `2109967`. Erste Zuschnitt-Runde — CANopen, Geräterolle.
+Die Reihenfolge der übrigen Runden steht in
+[`2026-09-15-norm-gap.md`](2026-09-15-norm-gap.md), damit sie nicht an zwei Stellen veraltet.
 
 Quelle: **CiA 301 v4.2.0 (CiA 2011), Volltext**, vom Maintainer bereitgestellt. Damit ist die
 „zu prüfen"-Spalte aus [`2026-09-15-norm-gap.md`](2026-09-15-norm-gap.md) für CANopen aufgelöst:
@@ -40,7 +42,14 @@ Anhang führt es als `1018h RECORD Identity Object IDENTITY (23h) ro M`. Ebenso
 **Folge für CanKit.Pro — enger gefasst, als ich sie zuerst geschrieben hatte (Codex auf #127):**
 CiA 301 bindet das *fertige Gerät*, nicht eine wiederverwendbare Bibliothek. Vendor-ID, Produktcode
 und Seriennummer kann ein Stack gar nicht kennen; sie zu erfinden wäre schlimmer als sie
-wegzulassen. Das Paket ist also nicht dadurch nicht konform, dass `_od` leer startet
+wegzulassen. **Ein Minimum-Record ist trotzdem möglich, und zwar wahrheitsgemäß** — die Norm gibt
+die Vokabel dafür: für Sub `01h` gilt *„The value 0000 0000h shall indicate an invalid vendor-ID"*,
+also ist 0 dort ein **definierter** Wert und keine Erfindung. Für die Subs `02h`–`04h` ist
+`0000 0000h` dagegen *reserved*. Und Sub `00h` („Highest sub-index supported") hat Wertebereich
+`01h`–`04h`. Ein Record mit **sub0 = `01h` und Vendor-ID = 0** ist damit strukturell konform und
+sagt genau das, was zutrifft: keine Vendor-ID zugeteilt. Die Subs 02–04 gehören dann
+**weggelassen, nicht genullt** — das ist der Unterschied zwischen „unbekannt" und einem
+reservierten Wert. Das Paket ist also nicht dadurch nicht konform, dass `_od` leer startet
 (`CanOpenNode.cs:65`) — die Anwendung *kann* die Objekte anlegen, und `ObjectDictionary.AddU32`
 ist genau dafür öffentlich.
 
@@ -68,8 +77,19 @@ if (index == 0x1000 || index == 0x1001)
 ist nicht betroffen: er parst die `[MandatoryObjects]`-Sektion der Datei und nimmt keine eigene
 Position ein. Betroffen ist nur die Klassifizierung beim XDD-Import.
 
-Das ist ein Befund in *deinem* Repository, gefunden durch das Gegeneinanderhalten zweier Quellen —
-und der Grund, warum die Antwort „0x1000, 0x1001, 0x1018" vorher als unbelegt markiert war.
+Der Befund entstand durch das Gegeneinanderhalten zweier Quellen — und er ist der Grund, warum die
+Antwort „0x1000, 0x1001, 0x1018" vorher als unbelegt markiert war.
+
+**Er gehört aber nicht in diesen Zuschnitt (Maintainer, 16.09.).** EdsDcfNet ist für CanKit.Pro
+eine externe Abhängigkeit, wie `pkuyo/CanKit` es für L0/L1 ist — sie liefert, was sie liefert. Tut
+sie etwas nicht, bauen wir notfalls einen Workaround; wir führen keine Erwartungen an sie als
+unsere Mängel. `CLAUDE.md` schreibt dieselbe Haltung für den Upstream bereits fest: *als NuGet-Paket
+konsumiert, nicht geforkt … lies nach, statt anzunehmen.*
+
+Was für **uns** daraus folgt, ist eine Randbedingung und kein Ticket: wer ein Objektverzeichnis aus
+einer **XDD** befüllt, darf sich auf deren `MandatoryObjects` nicht verlassen und prüft die
+Pflichtobjekte selbst. Beim Lesen aus **EDS/DCF** entfällt das — dort parst die Bibliothek die
+Sektion der Datei und nimmt keine eigene Position ein.
 
 ### 2. PDO- und SDO-Records sind Pflicht, sobald das Gerät PDOs bzw. SDOs kann
 
@@ -108,7 +128,8 @@ das Gerät nicht einhält. Das stimmt nicht für den statischen Fall: `AddU8`/`A
 `OdAccess.ReadOnly`, der SDO-Server weist Schreibzugriffe darauf ab (`CanOpenNode.cs:1063`), und
 dieselbe Anwendung kann `ConfigureTpdo` dieselben Werte geben. Dann liest der Master einen
 zutreffenden Record — **ganz ohne Verdrahtung zwischen OD und Engine.** Ein kohärentes Gerät ist
-also baubar, und 2a ist keine zwingende Anforderung.
+also baubar, und eine zwingende Verdrahtung von `1400h`/`1800h` gegen die Engine folgt daraus
+nicht.
 
 Die Sorge schrumpft damit auf **einen** Fall, den die Anwendung nicht auflösen kann, und einen, den
 sie mit Disziplin auflösen kann:
@@ -129,6 +150,10 @@ Paket-README sagt es selbst: *„a change-of-state TPDO is not rate-limited"* (`
 lebt also nicht „ausschließlich in `ConfigureTpdo`", wie ich geschrieben hatte, sondern nirgends.
 Ein wirksames `1800h:03` verlangt **neues Scheduling-Verhalten**, nicht das Anschließen vorhandener
 Zustände. In einem Posten namens „verdrahten" sähe sie erledigt aus und bliebe wirkungslos.
+
+**Nachgeschlagen (16.09.):** der Sub-Eintrag selbst ist `Entry category: **Optional**`. Aus der
+Norm folgt also keine Pflicht, ihn anzubieten — die Hälfte hatte im ersten Entwurf gefehlt. Dass er
+trotzdem gebaut wird, folgt aus der Architekturentscheidung unten, nicht aus CiA 301.
 
 **`1200h` gehört nicht in denselben Posten (Codex auf #127).** Es ist der SDO-Server-Parameter und
 hat mit der PDO-Engine nichts zu tun: `CanOpenNode.cs:774` erkennt eine Anfrage am Vergleich
@@ -191,6 +216,19 @@ Gerät kann, muss im Record stehen — und damit fällt dieser Punkt in Punkt 2 
 Die Reihenfolge-Behauptung „erst Enum, dann `1800h`" fällt ohnehin weg; sie stand auf der falschen
 Prämisse.
 
+**Zwei Nachträge vom 16.09., beide gemessen:**
+
+- **`FCh`/`FDh` ist nicht dasselbe wie `02h`–`F0h`.** „Jeder n-te SYNC" ist ein Zahlenwert, den die
+  API nicht ausdrücken kann; RTR-only ist ein *Verhalten*, das der Stack nicht hat — kein TPDO-Pfad
+  antwortet auf Remote-Frames. Die Verrohrung steht allerdings: `frame.IsRemoteFrame` wird gelesen
+  und als `isRtr` bis in den Dispatcher gereicht (`CanOpenNode.cs:645`, `:703`), genutzt bisher nur
+  vom Node Guarding. Also eine Erweiterung an vorhandener Naht, keine neue Naht — aber ein anderer
+  Aufwand als der Zahlenwert, und deshalb ein eigener Posten.
+- **Die Wertetabelle ist ohne API-Bruch erreichbar.** Der EDS-Pfad nimmt das rohe Byte aus der
+  Gerätebeschreibung; `TpdoTransmission` bleibt unverändert die Komfort-API für Handkonfiguration.
+  Damit erledigt sich die Umnummerierungs-Frage endgültig: es gibt keinen Grund, ein öffentliches
+  Enum anzufassen, dessen Werte ohnehin niemand serialisiert.
+
 ### 4. Abort-Codes: 17 von 31
 
 Tabelle 22 definiert 31 Codes. `Sdo/SdoAbortCode.cs` enthält 17 — alle 17 korrekt, keiner
@@ -247,21 +285,176 @@ wenn ein solches Verhalten dazukommt, und vorher nicht.
   Segment, und der Client sendet ab `ackseq + 1` erneut. Ein ACK je Segment außer der Reihe ist
   nicht das Protokoll. Bestätigt.
 
-## Vorschlag für den Zuschnitt
+## Entschieden (16.09.): EDS speist beides, Fallback nur ohne EDS
 
-| | Was | Normlage | Vorschlag |
+**Zuerst, was dieser Zuschnitt *nicht* ist.** Alles hier schneidet die **Geräterolle** zu: den
+Knoten, der ein eigenes Objektverzeichnis führt, von einem fremden Master konfiguriert wird und PDOs
+produziert. Die SRS kennt daneben ausdrücklich die **Master-/Tool-Rolle** — die Stakeholder-Tabelle
+nennt *„CANopen-Master/-Node-Anwendung"*, FR-CO-007 verlangt beide Seiten, FR-CO-002/003 sprechen
+von *„entfernten OD-Einträgen"* — und die API trägt sie: `SendNmtCommandAsync(…, targetNodeId)`,
+`SdoUploadAsync(serverNodeId, …)`, `AddHeartbeatConsumer`, `StartSyncProducer`.
+
+**Diese zweite Rolle ist hier nicht zugeschnitten**, und ihre offenen Fragen liegen absehbar anders:
+die EDS des *fremden* Knotens statt der eigenen, das Dekodieren fremder PDOs beim Beobachten des
+Busses, ein Knoten-Scan über `1000h`/`1018h` — und ob Flying Master (CiA 302) noch der
+Ausnahmekandidat ist, als den die GAP-Analyse ihn führt; jenes Urteil ist unter der Geräteannahme
+gefällt worden. Sie bekommt eine **eigene Runde nach der Übersetzung dieser Liste in Anforderungen**
+(Maintainer, 16.09.). Wer unten liest „CANopen ist zugeschnitten", lese es mit dieser Einschränkung.
+
+**Die Grenze gilt für die Entscheidung und die Postenliste, nicht rückwirkend für die Befunde
+darüber** (Codex auf #129). Die Abschnitte oben prüfen den Normtext gegen den Code, und #38 wird
+dort ausdrücklich **mit beiden Hälften** geführt — die Client-Seite (`CanOpenNode.cs:1564`,
+Upload-Initiate-Antwort) gehört zur Master-Rolle und ist trotzdem hier belegt und begründet.
+Sie fällt damit **nicht** in die zweite Runde zurück; was dort neu zu entscheiden ist, steht in
+#131. Nur der **Zuschnitt** unten ist geräteseitig, nicht jede Aussage dieses Dokuments.
+
+Der Zuschnitt ist keine Liste von Einzelfällen mehr, sondern folgt aus einer Architekturentscheidung
+des Maintainers:
+
+1. **Der Normalfall ist die EDS.** Sie speist **das Objektverzeichnis *und* die
+   PDO-Konfiguration** — eine Quelle für beides.
+2. **Ein codiertes Minimum greift nur, wenn keine EDS vorliegt.** Dessen **PDO-Records** sind
+   statisch `ro`: die Anwendung hält dort beide Enden, der Record beschreibt genau das eine
+   Verhalten, das der Stack kann, und `ro` sagt dem Master wahrheitsgemäß, dass daran nichts zu
+   drehen ist. **Nur für sie trägt das die Norm:** Fußnote `*` der Objektübersicht erlaubt `ro`
+   ausdrücklich für *„PDO communication parameter and PDO mapping object entries"* — und für
+   sonst nichts. Wo ein Objekt selbst `rw` vorschreibt, ist `ro` keine zulässige Vereinfachung,
+   sondern eine Abweichung; siehe Posten 19.
+3. **Was eine EDS angibt und der Stack nicht umsetzen kann, wird degradiert und gemeldet** — nicht
+   abgelehnt (sonst ist der Pfad unbrauchbar, bis alles gebaut ist) und vor allem nicht
+   stillschweigend ignoriert. Das wäre wieder die Zusage ohne Deckung, um die sich die halbe
+   Reviewrunde gedreht hat.
+4. **Degradieren heißt: auch das Objektverzeichnis trägt den degradierten Wert** (Codex auf #129).
+   Den Originalwert aus der EDS ins OD zu kopieren und daneben anders zu laufen wäre genau die
+   Inkonsistenz, gegen die Punkt 1 geschrieben ist — der Master läse dann die Zusage, die das
+   Gerät nicht einhält. Betroffene Einträge werden also auf den umgesetzten Wert korrigiert,
+   weggelassen oder das PDO wird deaktiviert; die Meldung sagt, was davon geschah.
+5. **Schreibzugriffe auf die Kommunikationsrecords werden bis zur Engine durchgereicht** — sie
+   wirken wirklich (Maintainer, 16.09., auf die Frage aus der ersten Fassung dieses Dokuments).
+   Ein fremder Master kann den Knoten also über den Bus konfigurieren, so wie er es erwartet. Die
+   billigere Gegenvariante — die Records beim Laden auf `ro` zwingen — ist damit **nicht** gewählt.
+
+### Was diese Entscheidung auflöst
+
+**Die Wahl „statisch `ro` oder verdrahtet" verschwindet als Frage.** Sie bestand nur, solange
+Record und Verhalten aus zwei Händen kamen. Speist dieselbe EDS beides, stimmen sie per
+Konstruktion überein, und es gibt nichts abzugleichen.
+
+**Das codierte Minimum für `1000h`, `1001h` und `1018h` schrumpft auf den Ausnahmefall.** Im
+Normalfall kommen sie aus der EDS — dort gehören sie hin, die Datei hat eine
+`[MandatoryObjects]`-Sektion. Das codierte Minimum deckt nur noch den Fall ohne EDS.
+
+### Was sie hinzufügt
+
+Und das ist die interessantere Richtung: **Übertragungsart und Inhibit Time werden nötig, obwohl
+CiA 301 beides nicht verlangt.** Eine reale EDS enthält Werte, die `ConfigureTpdo` nicht
+entgegennehmen kann — Übertragungsart `02h`–`F0h` kennt das Enum nicht, und eine Inhibit Time
+hat die Signatur gar nicht (`ICanOpenNode.cs:184-187`). Wer solche Dateien einliest, steht vor
+derselben Wahl wie oben beim Record, nur eine Ebene tiefer: umsetzen, oder beim Laden melden, was
+nicht umsetzbar ist.
+
+Die Norm bleibt, was sie ist — der Inhibit-Time-Eintrag ist `Optional`, die Wertetabelle
+verpflichtet niemanden. **Notwendig werden beide durch die Architektur, nicht durch CiA 301**, und
+diese Unterscheidung gehört in die Anforderungen, damit später niemand eine Pflicht daraus liest,
+die dort nicht steht.
+
+### Die Posten
+
+| | Was | Woher die Notwendigkeit kommt | Art der Arbeit |
 |---|---|---|---|
-| 1 | `1000h`, `1001h`, `1018h` | Pflicht **für das fertige Gerät** | wie entschieden: Stack füllt `1000h`/`1001h`, benannter Helfer für `1018h`. Zusätzlich das README-Beispiel auf alle drei erweitern — es zeigt heute nur `1000h` |
-| 2a | `1400h`/`1800h`: **entweder** statisch `ro` und dokumentiert, **oder** beschreibbar und dann verdrahtet | Pflicht bei PDO-Support, aber statisch-`ro` erfüllbar | keine zwingende Verdrahtung. Zu entscheiden ist, welche der beiden Formen das Produkt anbietet — und wie Drift zwischen OD und `ConfigureTpdo` verhindert wird |
-| 2c | Inhibit Time (`1800h:03`) | Wertetabelle; heute weder in OD noch in der Engine | **eigener Posten, kein Verdrahten** — verlangt neues Scheduling. README nennt die Lücke bereits |
-| 2b | `1200h` als SDO-Server-Record | Pflicht bei SDO-Support; **anderer Pfad als 2a** | minimal: schreibgeschützter Record über die festen `0x600`/`0x580 + Node-ID`. Größer wäre, die COB-IDs wirklich daraus zu lesen — separat zu entscheiden, nicht mit 2a zu verwechseln |
-| 3 | Übertragungsart `02h`–`F0h`, `FCh`/`FDh` | Wertetabelle definiert, verpflichtet nicht | **Kandidat, keine `Must`** — was unterstützt wird, muss im Record stehen; mehr verlangt CiA 301 hier nicht |
-| 4 | Abort-Code `0504 0003h` | normativ, und der Blocktransfer erkennt den Zustand | klein; die übrigen 13 erst, wenn ein Verhalten sie auslöst |
-| 5 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial, gehört zu 4 |
-| 6 | TIME `1012h` | **optional** | in den Ausnahmekatalog, nicht bauen |
+| 1 | EDS → Objektverzeichnis **und** PDO-Konfiguration | Architekturentscheidung | neuer Pfad, Abhängigkeit auf EdsDcfNet |
+| 2 | Degradieren mit Meldung, wenn eine EDS Nicht-Umsetzbares angibt — **einschließlich Korrektur des OD-Eintrags** | Architekturentscheidung | gehört zu 1, aber eigene Anforderung — sonst wird es zum stillen Ignorieren |
+| 3 | Fallback: `1000h`, `1001h`, `1018h` (sub0 = `01h`, Vendor-ID = 0) | CiA 301 §7.5.2.21, Objektübersicht `ro M` | klein, additiv. Subs 02–04 weglassen, nicht nullen |
+| 4 | Fallback: `1400h`/`1800h` statisch `ro` | Fußnote `*` der Objektübersicht: bei PDO-Support Pflicht, *„These may be ro"* | klein |
+| 4b | Fallback: `1200h` — **wird gebaut, aber nicht wegen der Norm** | normativ ist es `Category Conditional` / *„Index 1200h: **Optional**"*, Pflicht erst `1201h`–`127Fh` je weiterem SDO-Server (nachgeprüft am Normtext, Codex auf #129 behauptete hier die umgekehrte Reihenfolge). Gebaut wird er aus **Architektur**: der Knoten betreibt den Default-Server auf `0x600`/`0x580 + Node-ID` (`CanOpenNode.cs:774`) immer, und ein Fallback-OD ohne `1200h` beschreibt weniger, als der Knoten tut — dieselbe Begründung wie bei Posten 19 und 21 | klein. Wird er gebaut, sind sub0 und sub01 ohnehin `const` laut Objektdefinition — nicht über die PDO-Fußnote, die für SDO-Parameter kein `ro` erlaubt |
+| 5 | Übertragungsart `01h`–`F0h` — **`01h` eingeschlossen, und es ist die gefährlichste Zahl der Tabelle** | **Architektur** (die Norm verpflichtet nicht) | zwei Hälften: Byte annehmen (API-Erweiterung **ohne Bruch**, EDS-Pfad nimmt das rohe Byte) **und** je TPDO SYNCs zählen — `HandleSync` sendet heute jedes synchrone TPDO bei **jedem** SYNC (`CanOpenNode.cs:868-880`) — das ist genau das Verhalten von `01h`. **Ein roher Cast des EDS-Bytes ist hier aktiv falsch, nicht nur unvollständig:** die Norm meint mit `01h` „jeder SYNC", das Enum vergibt die **1** aber an `EventTimer` (`Pdo/PdoMapping.cs:70`), also periodisches Senden per Timer; „jeder SYNC" ist dort die **2**. Der EDS-Pfad braucht eine vollständige Abbildung Rohbyte → Engine, keine Zuweisung — und weil „vollständig" sonst Auslegungssache bleibt, hier ausgeschrieben: `00h` → Posten 11 (neues Verhalten), `01h` → vorhandenes `Synchronous`, `02h`–`F0h` → SYNC-Zähler (neu), `FCh`/`FDh` → Posten 6b/6a (neu), **`FEh`/`FFh` → vorhandenes `EventDriven`**. Das letzte Paar ist das einzige, das auf bestehendes Verhalten trifft, und stand vorher nirgends |
+| 6a | Übertragungsart `FDh` (RTR-only, **event-driven**) | **Architektur** | Sampling bei Empfang des RTR, sofort senden. Verhaltenserweiterung an vorhandener Naht (`isRtr` erreicht den Dispatcher) |
+| 6b | Übertragungsart `FCh` (RTR-only, **synchron**) | **Architektur** | **anderes Verhalten als 6a**: Sampling bei *jedem* SYNC, Wert puffern, den gepufferten Wert auf RTR senden — ein gemeinsamer „OD lesen und antworten"-Handler erfüllt 6a und verletzt 6b (Tabelle 72, Erläuterung) |
+| 7 | Inhibit Time `1800h:03` | **Architektur** (Norm: `Entry category: Optional`) | **das größte Stück** — neues Scheduling im TPDO-Pfad. Normativ ist sie „the minimum interval for PDO transmission **if the transmission type is set to FEh and FFh**" — gilt also nicht für die synchronen Arten |
+| 8 | Abort-Codes `0504 0003h` und `0609 0030h` | normativ; den ersten erkennt der Blocktransfer, den zweiten verlangt Posten 17 | trivial — beide fehlen im Enum |
+| 9 | CRC-Test auf `31C3h`, Zitat auf §7.2.4.3.16 | Testvektor liefert die Norm | trivial |
+| 10 | TIME `1012h`, Sync Window Length `1007h` | beide `Category: **Optional**` | nicht bauen, in den Ausnahmekatalog. `1007h` steht in derselben README-Zeile wie `1005h`/`1006h` — geprüft und bewusst draußen, damit es nicht als Übersehen wieder aufkommt |
+| 11 | Übertragungsart `00h` (synchron-azyklisch) | **Architektur** | eigenes Verhalten: **beim nächsten SYNC senden, sofern vorher ein Ereignis auftrat** — ein Latch, gesetzt von Zustandsänderung *und* von `TriggerTpdoAsync`, verbraucht beim SYNC. Weder `EventDriven` noch `Synchronous` tut das |
+| 12 | Synchrone **RPDO** (`1400h:02`) | **Architektur** | Empfangsseite: `ConfigureRpdo` hat kein Übertragungsart-Argument (`ICanOpenNode.cs:192`), `HandleRpdo` schreibt sofort ins OD statt bis SYNC zu halten (`CanOpenNode.cs:1697`) |
+| 13 | EDS-Zugriffsrechte auf `1600h`/`1A00h` durchsetzen | **Architektur** | der Mapping-Pfad wird **vor** der generischen OD-Prüfung abgezweigt (`CanOpenNode.cs:1022`) und fragt `OdAccess` nie — geladene `ro`-Flags wären wirkungslos |
+| 14 | Schreibbare Kommunikationsrecords zur Laufzeit — **entschieden: durchreichen** | **Architekturentscheidung (16.09.)** | Der generische SDO-Server übernimmt den Wert heute ins OD, und kein Pfad trägt ihn weiter in die PDO-Engine. Genau dieser Weg ist zu bauen — für `1800h:02`, `1800h:03`, `1400h:02` und die COB-ID-Subs. Das ist die OD → Laufzeit-Hälfte von Posten 23; die Gegenrichtung für **diese** Records deckt ebenfalls Posten 23 ab — nicht Posten 20, der nur `1006h` und den SYNC-Produzenten betrifft. Ein späterer `ConfigureTpdo`-Aufruf, der COB-ID oder Übertragungsart ändert, fällt unter die allgemeine Regel |
+| 15 | Reset **Node und** Reset Communication stellen wieder her — **aus der EDS und aus dem codierten Fallback**, aber **je Kommando verschieden weit** | **Architektur**; die Reichweite ist normativ | **Reset Communication** setzt *„the parameters of the **communication profile area**"* auf ihre Einschaltwerte — also `1000h`–`1FFFh`, und **nicht** die Anwendungsobjekte ab `2000h`, die eine reale EDS mitbringt. **Reset Node** schließt die Anwendung ein; `1011h` trennt beides über die Sub-Indizes (Reset Node für `01h`–`7Fh`, Reset Communication nur für `02h`). Eine Anforderung, die beide Kommandos gleich behandelt, wirft in einem Fall Anwendungszustand weg und ist im anderen zu kurz. Dazu: beide Kommandos teilen sich heute denselben Zweig (`CanOpenNode.cs:848-857`), der nur den Zustand wechselt und Bootup sendet; `ResetNode` ist dabei der weitergehende — *„full application reset (implies reset communication)"* (`Nmt/NmtState.cs:39`). Sonst bliebe nach einem Remapping oder einem `ConfigureTpdo`-Aufruf die geänderte Laufzeitkonfiguration stehen — im Fallback-Fall ohne jede Quelle, aus der sie zurückzuholen wäre |
+| 16 | Fallback: auch `1600h`/`1A00h` statisch `ro` | **Architektur** | Posten 4 deckt nur `1400h`/`1800h`/`1200h`, Posten 13 nur EDS-Flags — ohne diesen Posten bleibt gerade das Fallback dynamisch remappbar, obwohl die Entscheidung für es `ro` zusagt |
+| 17 | SDO-Abort `0609 0030h` bei nicht unterstützter Übertragungsart | **normativ** | „An attempt to change the value of the transmission type to any not supported value shall be responded with the SDO abort transfer service (abort code: 0609 0030h)" — die Kehrseite des Degradierens: was der Stack nicht kann, lehnt er beim Schreiben ab. **Gilt nur für beschreibbare Einträge** — ist der Record `ro`, also im Fallback (Posten 4 und 16), scheitert der Download vorher an der Zugriffsprüfung mit `0601 0002h` (`AttemptWriteReadOnly`, vorhanden). **`0609 0030h` fehlt im Enum** (`Sdo/SdoAbortCode.cs` führt von den `0609h`-Codes nur `0609 0011h`), gehört also zu Posten 8 |
+| 18 | `1800h:04` nicht implementieren, Zugriff mit `0609 0011h` abweisen | **normativ** | „Sub-index 04h is reserved. It shall not be implemented; in this case read or write access leads to the SDO abort transfer service (abort code: 0609 0011h)" — betrifft Fallback-Record und EDS-Befüllung gleichermaßen. Der Code **ist** vorhanden (`SubIndexDoesNotExist`), nur das Verhalten fehlt |
+| 19 | Fallback: `1005h`, `1006h`, `1014h` | **normativ** — dieselbe Fußnotenlogik wie Posten 4 | `1005h` *„Mandatory, if PDO communication on a synchronous base is supported"*, `1006h` *„Mandatory for SYNC producers"*, `1014h` *„Mandatory, if Emergency is supported"*. Der Stack kann alle drei (`StartSyncProducer`, `SendEmcyAsync`, synchrone TPDOs) — ohne die Records hätte auch der Fallback Verhalten, das sein OD nicht beschreibt. **Achtung:** alle drei sind laut Objektdefinition `rw` (`1005h` *„rw; const, if the COB-ID is not changeable"*, `1006h` `rw`, `1014h` `rw`), und die `ro`-Fußnote gilt nur für PDO-Records. Sie auf `ro` zu zwingen wäre also eine Abweichung — was die Entscheidung zu Posten 14 ohnehin erledigt, sie zeigt in dieselbe Richtung. Ihre Schreibzugriffe müssen den zugehörigen Dienst erreichen; einzige Ausnahme ist `1005h`, das die Norm als `const` zulässt, *„if the COB-ID is not changeable"* |
+| 20 | `1006h` und der SYNC-Produzent bleiben im Gleichschritt | **Architektur** | Gegenrichtung zu Posten 14 (dort OD → Laufzeit, hier Laufzeit → OD): `StartSyncProducer` setzt nur `_syncProducerInterval` und plant den Tick (`CanOpenNode.cs:320-330`), `StopSyncProducer` ebenso (`:333-341`) — das OD erfährt nichts. `1006h` bliebe auf seinem Anfangswert, und **`0000 0000h` heißt normativ „transmission of SYNC messages shall be disabled"**, während der Knoten sendet. Entweder Start/Stop schreiben `1006h` mit, oder der Zeitplan wird aus `1006h` abgeleitet |
+| 21 | Heartbeat `1016h`/`1017h` — **in beiden Pfaden**, nicht nur im Fallback | **Architektur** — *nicht* normativ, siehe rechts | `1016h` ist `Category: Optional`; `1017h` ist `Conditional; **Mandatory, if guarding not supported**`, und dieser Knoten *unterstützt* Guarding (er beantwortet Guarding-RTRs, README § Life guarding) — die Klausel greift also nicht. **Diese Berufung hat einen Preis, siehe Posten 24.** Gebaut wird es trotzdem, weil `StartHeartbeatProducer` (`CanOpenNode.cs:265-275`) und `AddHeartbeatConsumer` (`:290`) nur internen Zustand ändern. Eine EDS mit `1016h`-Konsumenten oder `1017h` ≠ 0 muss die Engine erreichen — Posten 1 befüllt nur die PDO-Konfiguration, und Heartbeat ist keine |
+| 22 | `1001h` und der EMCY-Fehlerregister bleiben im Gleichschritt | **gemessene Invariante des Pakets** | Gegenrichtung wie Posten 20: `SendEmcyAsync` (`CanOpenNode.cs:352-358`) baut die Nachricht und sendet, ohne das OD zu berühren — während `Emcy/EmcyMessage.cs:13` Byte 2 ausdrücklich als *„mirror of OD 0x1001"* dokumentiert. Ein SDO-Read läse den Anfangswert, während die EMCY einen anderen Fehlerzustand meldet. Betrifft Fallback **und** EDS-Pfad |
+| 23 | **Die Regel hinter 20, 21 und 22:** für jedes Kommunikationsobjekt, das der Knoten anbietet, stimmen OD und Laufzeit in **beiden Richtungen** und in **beiden Pfaden** überein | **Architektur** | Das Kriterium ist **die tatsächlich erfolgte Änderung**, nicht der versuchte Zugriff. OD → Laufzeit: *jede* Änderung, die das OD übernimmt, erreicht den Dienst — also der angenommene SDO-Download **und** der direkte Anwendungszugriff über das öffentliche `ObjectDictionary` (`ICanOpenNode.cs:33`), dessen `WriteRaw` nur die Existenz prüft und `OdAccess` nie (`ObjectDictionary.cs:131-142`); `EntryWritten` (`:141`) ist dafür eine **halbe** Naht: sie feuert bei `WriteRaw`/`WriteUnsigned`, aber ausdrücklich **nicht** bei den `Add*`-Methoden (`:33`) — und `Add` ersetzt einen bestehenden Eintrag per Indexer-Zuweisung stillschweigend (`:210-218`). Ein `AddU32(0x1006, …)` ändert das OD also, ohne dass irgendetwas davon erfährt. Entweder wird die Naht auf das Ersetzen erweitert, oder das Ersetzen verwalteter Kommunikationsrecords wird unterbunden; die Zeile verlangt das Ergebnis, nicht den Weg. Laufzeit → OD: jede API, die den Dienst ändert, schreibt den Wert zurück. Ein an der Zugriffsprüfung mit `0601 0002h` abgewiesener Download (Posten 17) fällt nicht darunter — er ändert nichts, und die Ablehnung ist das richtige Verhalten, sonst machte diese Zeile die Records aus den Posten 3, 4 und 16 beschreibbar. Bisher bekannte Instanzen: `1006h`/SYNC-Produzent (20), `1016h`/`1017h`/Heartbeat (21), `1001h`/EMCY (22), PDO-Records (13/14/16). Die Liste ist hier dreimal in Folge je Dienst nachgezogen worden — sie steht als Regel, damit der nächste Dienst nicht als vierter Befund auffällt |
+| 24 | Fallback: Guard Time `100Ch` und Life Time Factor `100Dh`, beide `ro` | **normativ**, und zwar als **Folge** von Posten 21 (Codex auf #129) | Beide sind `Category: Conditional; **Mandatory, if node guarding is supported**`. Posten 21 beruft sich darauf, dass dieser Knoten Guarding unterstützt — dann sind sie Pflicht, und die Berufung kann nicht die eine Folge nehmen und die andere lassen. Die Zugriffsart fällt dabei von selbst: *„rw; **ro, if life guarding is not supported**"*, und produzentenseitiges Life Guarding hat der Stack nicht (`README.md:54-55`). Also **beide Objekte anlegen, beide `ro`** — ohne neues Verhalten |
+| 25 | COB-ID-**Steuerbits** in `1400h:01`/`1800h:01` | **normativ** (Tabelle 70) | Der Eintrag ist keine CAN-ID, sondern ein 32-Bit-Wort: *valid* `1b` = *„PDO does not exist / is not valid"*, *RTR* `1b` = *„no RTR allowed on this PDO"*, *frame* `1b` = 29-Bit-Extended. `ConfigureTpdo`/`ConfigureRpdo` nehmen ihr `uint?` als blanken Bezeichner. Eine EDS, die ein ungenutztes PDO über Bit 31 abschaltet, würde beim rohen Durchreichen **eingeschaltet** — mit dem Flag-Wort als CAN-ID. Die Bits sind zu dekodieren: *valid* legt das PDO an oder entfernt es, *RTR* hängt an den Posten 6a/6b, *frame* am Rahmentyp; was der Stack nicht kann, geht über Posten 2 |
+| 26 | EDS-Attribut `PDOMapping` erhalten und durchsetzen | **Architektur** | Heute prüft `HandlePdoMappingEntryWrite` die **Richtungs-Zugriffsart** als Ersatz für Mappbarkeit (`CanOpenNode.PdoMapping.cs:229-233`): lesbar genügt für ein TPDO. Ein Eintrag, den die EDS mit `PDOMapping=0` führt, ginge also durch. Der Abort-Code ist vorhanden und verdrahtet (`ObjectCannotBeMapped`, `:232`) — es fehlt das Kriterium, nicht der Code. **Anderer Posten als 13/16**: dort geht es um die Zugriffsart des Mapping-**Records**, hier um die Mappbarkeit des **Ziels** |
+| 27 | Steuerbits auch in den **Nicht-PDO**-COB-IDs `1005h` und `1014h` | **normativ** (Tabelle 55 für `1005h`) | Posten 25 deckt nur die PDO-COB-IDs. `1005h` ist ebenso ein Wort und kein Bezeichner: Bit 30 *gen.* — `1b` = *„CANopen device generates SYNC message"* —, Bit 29 *frame*, Bits 10–0 die CAN-ID. Im Code ist die SYNC-COB-ID dagegen **fest verdrahtet**: `CanOpenCobId.Sync = 0x080` als `const`, geprüft beim Empfang (`CanOpenNode.cs:712`) und benutzt beim Senden (`:348`, `:891`). Eine EDS mit abweichender SYNC-COB-ID oder gesetztem *frame*-Bit bläbe also wirkungslos. **Bit 30 hängt an Posten 20**: es ist der Ein-/Ausschalter des SYNC-Produzenten, denselben Zustand, den `StartSyncProducer` setzt. **Bit 31 ist bei `1005h` ausdrücklich *„x — do not care"*** (Tabelle 55) — anders als bei den PDO-Records, und deshalb hier vermerkt, damit es niemand als vergessenes *valid*-Bit nachträgt. **`1014h` hat dagegen eines** (Tabelle 59): Bit 31 *valid* (`1b` = *„EMCY does not exist / is not valid"*), Bit 30 reserviert und immer `0b`, Bit 29 *frame*. Auch dort ist der Bezeichner fest: `SendEmcyAsync` sendet auf `CanOpenCobId.Emcy(_nodeId)` (`CanOpenNode.cs:352-358`), eine abweichende EMCY-COB-ID aus der EDS bliebe also wirkungslos |
+| 28 | Gemappte Bitlänge gegen die deklarierte Größe des Ziels prüfen | **Architektur** | `HandlePdoMappingEntryWrite` prüft die Bitlänge nur gegen sich selbst (`0 < n ≤ 64`, Vielfaches von 8, `:217`) und die Summe gegen die 8-Byte-Grenze (`:241`) — **nie gegen `OdEntry.Size`**. 16 Bit aus einem 8-Bit-Eintrag zu mappen wird also quittiert; der TPDO-Pfad polstert oder schneidet still, der RPDO-Pfad fängt den Größenfehler und ignoriert ihn. **Anderer Posten als 26**: dort *ob* das Ziel mappbar ist, hier *wie breit* |
 
-Das ergäbe etwa sechs bis acht neue `Must`-Anforderungen zu den heutigen zwölf — und damit wäre
-„CANopen vollständig" erstmals eine prüfbare Aussage statt einer Einschätzung.
+**Posten 15 ist keine Altlast, sondern eine Folge der Entscheidung selbst** (Codex auf #129).
+Die README des Pakets begründet heute, warum Reset Communication nichts wiederherstellt
+(`src/CanKit.Pro.CANopen/README.md:56-57`): *„communication parameters are not re-initialized from
+the OD, because they do not live in the OD"*. Diese Begründung trägt, solange es keine Quelle gibt,
+aus der sie sich wiederherstellen ließen. Mit der EDS gibt es sie — und damit wird aus einer
+dokumentierten Einschränkung eine offene Anforderung: nach einem Remapping durch den Master und
+einem anschließenden Reset Communication bliebe sonst die geänderte Laufzeitkonfiguration stehen,
+obwohl der Zuschnitt den EDS-Pfad als vollständig führt.
+
+Die README selbst bleibt unverändert richtig, weil sie das heutige Verhalten beschreibt und der
+EDS-Pfad noch nicht existiert. Sie wird mit dessen Umsetzung nachzuführen sein, nicht vorher.
+
+### Vier Prüffragen je Posten
+
+Die Liste oben ist im Review von #129 auf ein Vielfaches ihres ersten Entwurfs gewachsen, und
+**jeder Zuwachs kam aus demselben kleinen Satz von Fehlern.** Sie stehen hier, weil der nächste
+Schritt die Liste in Anforderungen übersetzt — und weil J1939, UDS und ISO-TP dieselbe Übung noch
+vor sich haben. Wer einen Posten ergänzt, beantwortet sie:
+
+1. **Beschreibt die Zeile Verhalten oder nur eine API?** Dreimal stand hier eine Signatur, wo die
+   eigentliche Arbeit in der Engine liegt: `02h`–`F0h` braucht einen SYNC-Zähler, nicht nur ein
+   Byte; die synchrone RPDO braucht die Empfangsseite, die `TpdoTransmission` gar nicht kennt;
+   `FCh` braucht einen gepufferten Wert, den ein Antwort-Handler nie festhält. Wo eine Zeile eine
+   API nennt, lautet die offene Frage: was muss die **Engine** zusätzlich tun?
+2. **Gilt der Posten für beide Pfade — EDS *und* Fallback?** Dreimal deckte ein Posten nur einen:
+   `ro`-Flags nur aus der EDS, Reset nur aus der EDS, Mappingrecords nur außerhalb des Fallbacks.
+   Der Fallback ist der jüngere Pfad und fällt deshalb zuerst durch.
+3. **Gilt er in beide Richtungen — OD → Laufzeit *und* Laufzeit → OD?** Die Liste fragte lange nur,
+   ob ein Schreibzugriff die Engine erreicht. `StartSyncProducer` ändert die Laufzeit, ohne dass das
+   OD davon erfährt — dieselbe Inkonsistenz, nur andersherum.
+4. **Deckt der Beleg die Zusage, oder nur einen Teil davon?** Die `ro`-Fußnote gilt für
+   PDO-Records; daraus wurde hier kurzzeitig ein `ro` für alle Fallback-Records, samt eines
+   Widerspruchs zur eigenen Zeile zwanzig Zeilen weiter oben. Die Herkunftsspalte ist genau dafür
+   da: Was sie behauptet, muss die genannte Stelle auch hergeben.
+
+Keine der vier ist ein CANopen-Thema. Sie fragen, ob eine Anforderung das Ganze beschreibt oder
+nur den Ausschnitt, den man beim Schreiben vor Augen hatte.
+
+**Posten 14 war die letzte offene Frage dieses Dokuments — am 16.09. entschieden.** Ein Master, der
+zur Laufzeit auf `1800h:02` oder `1400h:*` schreibt, bekommt heute den Wert ins OD übernommen und
+eine Bestätigung zurück, während kein Pfad ihn weiter in die PDO-Engine trägt. Das ist unabhängig
+davon, woher der Record beim Start kam; die EDS-Entscheidung berührt es nicht, weil sie nur die
+Befüllung regelt.
+
+Zur Wahl standen **durchreichen** — mehr Arbeit, dafür ein Gerät, das `rw` ehrlich anbietet — und
+**beim Laden auf `ro` zwingen**, billig, und der Master erfährt die Wahrheit sofort. Nicht zur Wahl
+stand die dritte Variante, nämlich der heutige Zustand: `rw` anbieten und den Schreibzugriff
+wirkungslos quittieren.
+
+**Entschieden wurde durchreichen.** Damit schließt der Zuschnitt die Interop-Lücke, die die README
+des Pakets bisher als bekannte Einschränkung führt — *„a master cannot configure this node purely
+over the OD"* — statt sie durch einen Schreibschutz zu zementieren. Der Preis ist Arbeit in beiden
+Richtungen: Posten 14 ist die OD → Laufzeit-Hälfte, Posten 20 und 22 sind die Gegenrichtung, und
+Posten 23 ist die Regel, die beide zusammenhält.
+
+Dass der Punkt als **Posten in der Tabelle** steht und nicht nur in diesem Abschnitt, geht auf einen
+Codex-Befund auf #129 zurück: der nächste Schritt schreibt die Tabelle in die SRS, und was dort
+nicht steht, deckt die Ratsche nicht ab. Ein Punkt unter einer Überschrift namens „Was offen
+bleibt" wäre genau die Art Notiz, die beim Übersetzen verlorengeht — und wäre hier nun sogar
+falsch, weil nichts mehr offen ist.
+
+### Was offen bleibt
 
 Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und die
 CiA-302/304/305-Themen aus der GAP-Analyse. Die stehen in anderen Dokumenten.
