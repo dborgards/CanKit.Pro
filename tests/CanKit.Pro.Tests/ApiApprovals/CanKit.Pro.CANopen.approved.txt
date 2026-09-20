@@ -329,10 +329,18 @@ namespace CanKit.Pro.CANopen.Sdo
     public sealed class SdoAbortException : CanKit.Core.Exceptions.CanKitException
     {
         public SdoAbortException(ushort index, byte subindex, CanKit.Pro.CANopen.Sdo.SdoAbortCode abortCode) { }
+        public SdoAbortException(ushort index, byte subindex, CanKit.Pro.CANopen.Sdo.SdoAbortCode abortCode, CanKit.Pro.CANopen.Sdo.SdoAbortOrigin origin) { }
         public SdoAbortException(ushort index, byte subindex, uint abortCode, string message) { }
+        public SdoAbortException(ushort index, byte subindex, uint abortCode, CanKit.Pro.CANopen.Sdo.SdoAbortOrigin origin, string message) { }
         public uint AbortCode { get; }
         public ushort Index { get; }
+        public CanKit.Pro.CANopen.Sdo.SdoAbortOrigin Origin { get; }
         public byte Subindex { get; }
+    }
+    public enum SdoAbortOrigin
+    {
+        Peer = 0,
+        Local = 1,
     }
     public enum SdoTransferMode
     {

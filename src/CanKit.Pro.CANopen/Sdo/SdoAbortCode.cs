@@ -24,8 +24,10 @@ public enum SdoAbortCode : uint
     /// <summary>Invalid block size (only used by block transfer).</summary>
     InvalidBlockSize = 0x05040002u,
 
-    /// <summary>Invalid sequence number (block mode only, CiA 301 Table 22): a block segment
-    /// carried a sequence number of 0 or above the negotiated block size.</summary>
+    /// <summary>Invalid sequence number (block mode only) — CiA 301 Table 22, 0504 0003h. A block
+    /// segment's seqno must satisfy <c>0 &lt; seqno &lt; 128</c> (§7.2.4.3.10 / §7.2.4.3.14) and
+    /// cannot exceed the blksize in force for the sub-block; a receiver aborts with this code when
+    /// it does.</summary>
     InvalidSequenceNumber = 0x05040003u,
 
     /// <summary>CRC error (block transfer only). Set when the CRC-16 carried in the end-of-block
@@ -75,11 +77,13 @@ public enum SdoAbortCode : uint
     /// <summary>Sub-index does not exist.</summary>
     SubIndexDoesNotExist = 0x06090011u,
 
-    /// <summary>Value range of parameter exceeded, only for write access (CiA 301 Table 22).
-    /// The code CiA 301 prescribes for an unsupported transmission type (§7.5.2.35 / §7.5.2.37),
-    /// for setting the 29-bit frame bit on a node that supports base frames only (§7.5.2.5,
-    /// §7.5.2.17, §7.5.2.33), and for changing the CAN-ID part of a COB-ID while the object
-    /// exists and is valid.</summary>
+    /// <summary>Value range of parameter exceeded, write access only — CiA 301 Table 22 words it
+    /// "0609 0030h Invalid value for parameter (download only)"; the member name keeps the older,
+    /// more widely quoted phrasing. The code the profile text prescribes for a download whose
+    /// value is outside what the object accepts: an unsupported transmission type (§7.5.2.35 /
+    /// §7.5.2.37), the 29-bit frame bit on a node that supports base frames only (§7.5.2.5,
+    /// §7.5.2.17, §7.5.2.33), a reserved bit set in a communication parameter, and a change to
+    /// the CAN-ID part of a COB-ID while the object exists and is valid.</summary>
     ValueRangeExceeded = 0x06090030u,
 
     /// <summary>General error / unspecified.</summary>
