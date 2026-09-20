@@ -161,6 +161,20 @@ internal sealed partial class CanOpenNode
             return true;
         }
 
+        // Attribution before the deadline is touched (#18). While the initiate response is
+        // awaited, every legitimate frame carries the multiplexer in bytes 1..3 — the block
+        // download initiate response (CiA 301 §7.2.4.3.9, Figure 27) and the block upload
+        // initiate response (§7.2.4.3.13, Figure 31) alike — so a frame naming another object
+        // is somebody else's response (a late answer to an earlier request of ours, or the reply
+        // to a second client on the same server) and is consumed without effect: no abort, no
+        // phase change, no re-arm. The later phases exchange sub-block ACKs and end frames,
+        // which carry no multiplexer (Figures 28, 29, 32, 33) and are matched by phase alone.
+        if (session.Phase == SdoBlockClientPhase.AwaitInitResponse)
+        {
+            var (idx, sub) = SdoFrames.ReadIndex(data);
+            if (idx != session.Index || sub != session.Subindex) return true;
+        }
+
         RearmBlockClient(session, serverNodeId);
 
         if (session.IsDownload)

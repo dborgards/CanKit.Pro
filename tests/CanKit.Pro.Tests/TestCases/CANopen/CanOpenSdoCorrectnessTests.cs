@@ -127,6 +127,206 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         received.Should().Equal(payload);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // FR-CO-002 (#18): a success response that names a different object is not this session's.
+    // Before the fix the client matched an upload response by command specifier only, so a late
+    // answer to a request that had already timed out — or a second master's exchange with the
+    // same server, since 0x580 + id is seen by every client on the bus — completed the next
+    // request with the wrong object's value and no exception.
+    //
+    // The stray frame is injected ahead of the right one on the same COB-ID from the same bus,
+    // and the node's actor processes frames in arrival order (the existing
+    // A_Bootup_Does_Not_Become_The_Toggle_Baseline relies on the same ordering). So the final
+    // value is the discriminator: had the stray completed the session, the result would be its
+    // bytes; had it aborted the session, the task would throw. No "is it still pending" probe is
+    // used because such a probe can pass under the bug as well.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Sdo_Client_Ignores_An_Upload_Response_That_Names_Another_Object()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00);
+        var init = tap.Next(ShortTimeout);
+        init[0].Should().Be(SdoFrames.CcsUploadInit);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        // Expedited upload response (scs=2, e=1, s=1, n=0) for 0x2000:00 — well-formed, wrong object.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x43, 0x00, 0x20, 0x00, 0xAA, 0xBB, 0xCC, 0xDD });
+        // The response the session is waiting for.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x43, 0x01, 0x20, 0x00, 0x11, 0x22, 0x33, 0x44 });
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 },
+            "the response for 0x2000 must neither complete nor abort a session waiting on 0x2001");
+    }
+
+    // FR-CO-002 (#18): the download initiate response (0x60) carries the multiplexer too and
+    // used to be accepted for any object — for an expedited download that is a silent success
+    // with nothing written. The discriminator is positive on both sides: after the stray ack the
+    // fake server aborts the object the session actually asked about. With the fix the abort
+    // reaches a still-open session and the task throws with that code; under the bug the stray
+    // ack has already completed the task successfully, and the abort finds no session.
+    [Fact]
+    public async Task Sdo_Client_Ignores_A_Download_Ack_That_Names_Another_Object()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
+            new byte[] { 0xDE, 0xAD });
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE0).Should().Be(SdoFrames.CcsDownloadInitExpeditedBase);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        // Download initiate response for 0x2000:00 — wrong object — then an abort for 0x2001:00.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { SdoFrames.ScsDownloadInitAck, 0x00, 0x20, 0x00, 0, 0, 0, 0 });
+        Send(rawBus, CanOpenCobId.SdoTx(0x11),
+            SdoFrames.BuildAbort(0x2001, 0x00, (uint)SdoAbortCode.AttemptWriteReadOnly));
+
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => download.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.AttemptWriteReadOnly,
+            "the session must still be open when its own object's abort arrives, i.e. the ack for 0x2000 must not have completed it");
+        ex.Index.Should().Be(0x2001);
+    }
+
+    // FR-CO-003 (#18): the other half of attribution is the phase. A segmented download client
+    // that has accepted its initiate response exchanges segment acks, which carry no multiplexer;
+    // an initiate response arriving now — a duplicate, or a late one — belongs to no phase the
+    // session is in and must be ignored. Before the fix a second 0x60 pushed another segment out
+    // regardless. The discriminator is on the wire: the second segment goes out only after the
+    // fake server acknowledged the first, so it must carry toggle 1. Under the bug the duplicate
+    // ack triggers it back to back with the first, still with toggle 0, before this test's own
+    // segment ack could even be processed — deterministic, whatever the timing.
+    [Fact]
+    public async Task Sdo_Client_Ignores_A_Duplicate_Download_Ack_In_The_Segment_Phase()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var payload = Enumerable.Range(1, 10).Select(i => (byte)(0x10 * i)).ToArray(); // 7 + 3
+        var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00, payload);
+        var init = tap.Next(ShortTimeout);
+        init[0].Should().Be(SdoFrames.CcsDownloadInitSegmented);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        // The initiate response for our object — twice.
+        var ack = new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 };
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), ack);
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), ack);
+
+        var seg1 = SdoFrames.ReadSegment(tap.Next(ShortTimeout));
+        seg1.Toggle.Should().BeFalse();
+        seg1.LastSegment.Should().BeFalse();
+        seg1.Data.Should().Equal(payload.Take(7));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { SdoFrames.ScsDownloadSegmentBase, 0, 0, 0, 0, 0, 0, 0 });
+        var seg2 = SdoFrames.ReadSegment(tap.Next(ShortTimeout));
+        seg2.Toggle.Should().BeTrue(
+            "the second segment goes out only after our segment ack, so it must carry the alternated toggle; " +
+            "a segment already on the wire with toggle 0 was triggered by the duplicate initiate ack");
+        seg2.LastSegment.Should().BeTrue();
+        seg2.Data.Should().Equal(payload.Skip(7));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11),
+            new byte[] { SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit, 0, 0, 0, 0, 0, 0, 0 });
+        await download.WithTimeoutAsync(ShortTimeout);
+    }
+
+    // FR-CO-004 (#18): the block upload initiate response carries the multiplexer (CiA 301
+    // §7.2.4.3.13, Figure 31). Under the bug the stray response moves the client into its
+    // segment-receiving phase, where the right response (0xC2: c=1, seqno 66) is mistaken for
+    // an out-of-order segment and NACKed; with the fix the client's next frame after both
+    // responses is the "start upload" request, and it ACKs the one real segment with ackseq 1.
+    [Fact]
+    public async Task Sdo_BlockClient_Ignores_An_Upload_Initiate_Response_That_Names_Another_Object()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        var payload = new byte[] { 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77 };
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2000, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 7));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 7));
+
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart,
+            "the client answers the response for its own object, and only that one");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, payload));
+        var ack = tap.Next(ShortTimeout);
+        ack[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        SdoBlockFrames.ReadSubBlockAck(ack).AckSeq.Should().Be(1,
+            "a session still awaiting its initiate response accepts seqno 1 as the first segment");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
+            unusedBytesInLastSegment: 0, crc: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse);
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#18): the block download initiate response carries the multiplexer (CiA 301
+    // §7.2.4.3.9, Figure 27). Under the bug the stray response starts the sub-block, and the
+    // right response then lands in the ACK-await phase, where its command specifier aborts the
+    // transfer; with the fix the transfer completes.
+    [Fact]
+    public async Task Sdo_BlockClient_Ignores_A_Download_Initiate_Response_That_Names_Another_Object()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var payload = Enumerable.Range(0, 20).Select(i => (byte)(0x30 + i)).ToArray();
+        var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00, payload,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE1).Should().Be(SdoBlockFrames.CcsBlockDownloadInitBase);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
+            0x2000, 0x00, serverCrcSupported: false, blockSize: 3));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, blockSize: 3));
+
+        var segs = new List<byte[]>();
+        for (var i = 0; i < 3; i++) segs.Add(tap.Next(ShortTimeout));
+        segs.Select(s => s[0] & 0x7F).Should().Equal(1, 2, 3);
+        (segs[2][0] & 0x80).Should().Be(0x80, "20 bytes fit in three segments, so the third is the last");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSubBlockAck(
+            SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 3, nextBlockSize: 3));
+        var end = tap.Next(ShortTimeout);
+        (end[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockDownloadEndBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x11),
+            SdoBlockFrames.BuildEndResponse(SdoBlockFrames.ScsBlockDownloadEndResponse));
+
+        await download.WithTimeoutAsync(ShortTimeout);
+        segs.SelectMany(s => s.Skip(1)).Take(payload.Length).Should().Equal(payload);
+    }
+
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
     // peer deterministically from its own thread (no in-handler transmits).
     private sealed class FrameTap : IDisposable

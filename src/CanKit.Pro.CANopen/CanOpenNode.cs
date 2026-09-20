@@ -1502,18 +1502,26 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return;
         }
 
-        // Rearm the client timeout on any valid response byte we see.
-        var deadline = session.Deadline;
-        if (deadline is null || deadline.IsExpired || deadline.IsCancelled || !deadline.Rearm(_options.SdoTimeout))
+        // Attribution before anything else (#18). A frame is this session's only when the
+        // phase, the command specifier and — while an initiate response is awaited — the
+        // multiplexer all agree with it. Only an attributed frame re-arms the deadline or moves
+        // the session; every other frame is ignored, not aborted: a stray response must not kill
+        // a healthy transfer.
+        if (!session.InSegmentPhase)
         {
-            deadline?.Dispose();
-            session.Deadline = _deadlines.Arm(_options.SdoTimeout, () => OnSdoClientTimeout(serverNodeId));
-        }
+            // Every legitimate frame in this phase carries the object it answers for in bytes
+            // 1..3 — the download initiate response (CiA 301 §7.2.4.3.3, Figure 21), the upload
+            // initiate response, expedited or segmented (§7.2.4.3.6, Figure 23). A frame naming
+            // another object is somebody else's response: a late answer to a request of ours
+            // that already timed out, or the reply to a second client on the same server (the
+            // default SDO channel 0x580 + id is seen by every client on the bus). Accepting it
+            // completed the session with the wrong object's value and no exception.
+            var (idx, sub) = SdoFrames.ReadIndex(data);
+            if (idx != session.Index || sub != session.Subindex) return;
 
-        if (session.IsDownload)
-        {
-            if (cs == SdoFrames.ScsDownloadInitAck)
+            if (session.IsDownload)
             {
+                if (cs != SdoFrames.ScsDownloadInitAck) return;
                 // For expedited download this completes the transfer. For segmented, start
                 // sending segments (or complete if the payload is empty, though we always used
                 // expedited for zero-length data).
@@ -1524,34 +1532,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     session.Tcs.TrySetResult(Array.Empty<byte>());
                     return;
                 }
+                RearmSdoClientDeadline(session);
+                session.InSegmentPhase = true;
                 SendNextClientDownloadSegment(session);
                 return;
             }
-            // Server segment ack.
-            if ((cs & 0xE0) == SdoFrames.ScsDownloadSegmentBase)
-            {
-                bool toggleAck = (cs & SdoFrames.ToggleBit) != 0;
-                if (toggleAck != session.Toggle)
-                {
-                    AbortClient(session, SdoAbortCode.ToggleBitNotAlternated);
-                    return;
-                }
-                session.Toggle = !session.Toggle;
-                if (session.Offset >= session.Payload!.Length)
-                {
-                    session.Deadline?.Dispose();
-                    _sdoClients.Remove(serverNodeId);
-                    session.Tcs.TrySetResult(Array.Empty<byte>());
-                    return;
-                }
-                SendNextClientDownloadSegment(session);
-                return;
-            }
-        }
-        else
-        {
-            // Upload path — expected: expedited response 0x43/0x4B/0x4F/0x47/0x4B, or segmented
-            // init 0x41, or segment 0x00/0x10/0x0X/0x1X.
+
+            // Upload path — expected: expedited response 0x43/0x47/0x4B/0x4F, or segmented
+            // init 0x41.
             if ((cs & 0xE0) == SdoFrames.ScsUploadInitExpeditedBase && (cs & 0x02) != 0)
             {
                 // Expedited upload complete.
@@ -1576,56 +1564,106 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     AbortClient(session, SdoAbortCode.OutOfMemory);
                     return;
                 }
+                RearmSdoClientDeadline(session);
+                session.InSegmentPhase = true;
                 session.Payload = declared > 0 ? new byte[declared] : Array.Empty<byte>();
                 session.Offset = 0;
                 session.Toggle = false;
                 SendNextClientUploadSegmentRequest(session);
                 return;
             }
-            if ((cs & 0xE0) == SdoFrames.ScsUploadSegmentBase && (cs & 0x40) == 0)
+            return;
+        }
+
+        // Segment phase. Segment frames and segment acks carry no multiplexer (§7.2.4.3.4,
+        // §7.2.4.3.7), so they are matched by phase and command specifier alone; an initiate
+        // response arriving now (a duplicate ack, a late answer to an earlier request) does not
+        // belong to this phase and is ignored.
+        if (session.IsDownload)
+        {
+            // Server segment ack.
+            if ((cs & 0xE0) != SdoFrames.ScsDownloadSegmentBase) return;
+            bool toggleAck = (cs & SdoFrames.ToggleBit) != 0;
+            if (toggleAck != session.Toggle)
             {
-                var (payload, last, toggle) = SdoFrames.ReadSegment(data);
-                if (toggle != session.Toggle)
-                {
-                    AbortClient(session, SdoAbortCode.ToggleBitNotAlternated);
-                    return;
-                }
-                // If we did not know the length up front (declared=0), grow lazily — but still
-                // enforce MaxSdoTransferBytes so a zero-size init cannot bypass the cap by
-                // streaming unbounded segments (Bugbot 3600783860).
-                int needed = session.Offset + payload.Length;
-                if (needed > _options.MaxSdoTransferBytes)
-                {
-                    AbortClient(session, SdoAbortCode.OutOfMemory);
-                    return;
-                }
-                if (session.Payload!.Length < needed)
-                {
-                    var grown = new byte[needed];
-                    Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
-                    session.Payload = grown;
-                }
-                Buffer.BlockCopy(payload, 0, session.Payload, session.Offset, payload.Length);
-                session.Offset += payload.Length;
-                session.Toggle = !session.Toggle;
-                if (last)
-                {
-                    var final = session.Payload;
-                    if (session.Offset != final.Length)
-                    {
-                        // Server declared a size but sent less. Trim.
-                        var trimmed = new byte[session.Offset];
-                        Buffer.BlockCopy(final, 0, trimmed, 0, session.Offset);
-                        final = trimmed;
-                    }
-                    session.Deadline?.Dispose();
-                    _sdoClients.Remove(serverNodeId);
-                    session.Tcs.TrySetResult(final);
-                    return;
-                }
-                SendNextClientUploadSegmentRequest(session);
+                AbortClient(session, SdoAbortCode.ToggleBitNotAlternated);
                 return;
             }
+            session.Toggle = !session.Toggle;
+            if (session.Offset >= session.Payload!.Length)
+            {
+                session.Deadline?.Dispose();
+                _sdoClients.Remove(serverNodeId);
+                session.Tcs.TrySetResult(Array.Empty<byte>());
+                return;
+            }
+            RearmSdoClientDeadline(session);
+            SendNextClientDownloadSegment(session);
+            return;
+        }
+
+        // Upload segment 0x00/0x10/0x0X/0x1X.
+        if ((cs & 0xE0) != SdoFrames.ScsUploadSegmentBase) return;
+        {
+            var (payload, last, toggle) = SdoFrames.ReadSegment(data);
+            if (toggle != session.Toggle)
+            {
+                AbortClient(session, SdoAbortCode.ToggleBitNotAlternated);
+                return;
+            }
+            // If we did not know the length up front (declared=0), grow lazily — but still
+            // enforce MaxSdoTransferBytes so a zero-size init cannot bypass the cap by
+            // streaming unbounded segments (Bugbot 3600783860).
+            int needed = session.Offset + payload.Length;
+            if (needed > _options.MaxSdoTransferBytes)
+            {
+                AbortClient(session, SdoAbortCode.OutOfMemory);
+                return;
+            }
+            if (session.Payload!.Length < needed)
+            {
+                var grown = new byte[needed];
+                Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
+                session.Payload = grown;
+            }
+            Buffer.BlockCopy(payload, 0, session.Payload, session.Offset, payload.Length);
+            session.Offset += payload.Length;
+            session.Toggle = !session.Toggle;
+            if (last)
+            {
+                var final = session.Payload;
+                if (session.Offset != final.Length)
+                {
+                    // Server declared a size but sent less. Trim.
+                    var trimmed = new byte[session.Offset];
+                    Buffer.BlockCopy(final, 0, trimmed, 0, session.Offset);
+                    final = trimmed;
+                }
+                session.Deadline?.Dispose();
+                _sdoClients.Remove(serverNodeId);
+                session.Tcs.TrySetResult(final);
+                return;
+            }
+            RearmSdoClientDeadline(session);
+            SendNextClientUploadSegmentRequest(session);
+        }
+    }
+
+    /// <summary>
+    /// Restarts the client's request timer after a frame that was attributed to
+    /// <paramref name="session"/> and leaves it open. Not called for frames the session ignores
+    /// (#18): a stray response must not keep a transfer alive that its own server has gone
+    /// silent on.
+    /// </summary>
+    private void RearmSdoClientDeadline(SdoClientSession session)
+    {
+        var deadline = session.Deadline;
+        if (deadline is null || deadline.IsExpired || deadline.IsCancelled
+            || !deadline.Rearm(_options.SdoTimeout))
+        {
+            deadline?.Dispose();
+            byte serverNodeId = session.ServerNodeId;
+            session.Deadline = _deadlines.Arm(_options.SdoTimeout, () => OnSdoClientTimeout(serverNodeId));
         }
     }
 
@@ -2043,6 +2081,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public byte[]? Payload { get; set; }
         public int Offset { get; set; }
         public bool Toggle { get; set; }
+
+        /// <summary>
+        /// False while the initiate response is awaited, true once it has been accepted and
+        /// segments (or segment acks) are exchanged. Decides which frames can belong to the
+        /// session at all (#18): initiate responses carry a multiplexer and are checked against
+        /// <see cref="Index"/>/<see cref="Subindex"/>; segment-phase frames carry none and are
+        /// matched by phase and command specifier.
+        /// </summary>
+        public bool InSegmentPhase { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
         public IDeadline? Deadline { get; set; }
     }
