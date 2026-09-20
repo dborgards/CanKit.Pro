@@ -3,9 +3,10 @@ using System;
 namespace CanKit.Pro.CANopen.Sdo;
 
 /// <summary>
-/// Encode/decode helpers for the SDO transfer protocols the MVP supports (CiA 301 §7.2.4):
+/// Encode/decode helpers for the classic SDO transfer protocols (CiA 301 §7.2.4.3.2–§7.2.4.3.7):
 /// expedited upload/download (payloads ≤ 4 bytes) and segmented upload/download (payloads > 4
-/// bytes with the toggle bit). Block transfer is out of scope for the MVP.
+/// bytes with the toggle bit), plus the abort frame. Block transfer has its own codec in
+/// <see cref="SdoBlockFrames"/>.
 /// </summary>
 /// <remarks>
 /// All frames are exactly eight bytes on the wire (per the SDO spec). Frames shorter than eight
