@@ -11,6 +11,7 @@ using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -196,6 +197,10 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         ex.AbortCode.Should().Be((uint)SdoAbortCode.AttemptWriteReadOnly,
             "the session must still be open when its own object's abort arrives, i.e. the ack for 0x2000 must not have completed it");
         ex.Index.Should().Be(0x2001);
+        // #59: the abort frame came from the peer, and the exception says so.
+        ex.Origin.Should().Be(SdoAbortOrigin.Peer);
+        ex.ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
+        ex.Message.Should().StartWith("Peer server 0x11 aborted");
     }
 
     // FR-CO-003 (#18): the other half of attribution is the phase. A segmented download client
@@ -547,6 +552,11 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.InvalidSequenceNumber);
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
         ex.AbortCode.Should().Be((uint)SdoAbortCode.InvalidSequenceNumber);
+        // #59: this node detected the violation and sent the abort; the code names the mechanism
+        // (an SDO abort ended the exchange) and Origin names the side.
+        ex.Origin.Should().Be(SdoAbortOrigin.Local);
+        ex.ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
+        ex.Message.Should().StartWith("This node aborted");
     }
 
     // -----------------------------------------------------------------------------------------
@@ -684,6 +694,37 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             Thread.Yield();
         } while (DateTime.UtcNow < bound);
         return false;
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // FR-CO-002 (#59): SdoAbortException could not tell "the peer aborted" from "we gave up" —
+    // both carried ProtocolPeerAbort, and 0504 0000h is the code either side sends when its own
+    // timer expires. Origin names the side; the ErrorCode follows the mechanism, so this node's
+    // own request timer expiring is ProtocolTimeout, as an ISO-TP or J1939-TP timer expiry is.
+    // The transfer targets a server that does not exist, so nothing but the client's own timer
+    // can end it; the wait is for that signal, bounded by ShortTimeout, not a measurement.
+    // Its sibling assertions: a peer's abort is Origin.Peer / ProtocolPeerAbort in
+    // Sdo_Client_Ignores_A_Download_Ack_That_Names_Another_Object, and a violation this node
+    // detects is Origin.Local / ProtocolPeerAbort in
+    // Sdo_BlockUpload_Client_Aborts_An_Invalid_Sequence_Number.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Sdo_Client_Timeout_Is_Reported_As_A_Local_Abort_With_ProtocolTimeout()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01,
+            new CanOpenNodeOptions().With(sdoTimeout: TimeSpan.FromMilliseconds(50)));
+
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master
+            .SdoUploadAsync(serverNodeId: 0x7E, index: 0x1000, subindex: 0x00)
+            .WithTimeoutAsync(ShortTimeout));
+
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
+        ex.Origin.Should().Be(SdoAbortOrigin.Local, "nobody answered; this node gave up");
+        ex.ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolTimeout,
+            "a request timer expiring on a still-active exchange is a protocol timeout, whatever the layer");
+        ex.Message.Should().StartWith("This node aborted");
     }
 
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake

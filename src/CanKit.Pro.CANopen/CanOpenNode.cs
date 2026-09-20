@@ -1476,7 +1476,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId),
             SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)SdoAbortCode.SdoProtocolTimedOut));
         session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex,
-            SdoAbortCode.SdoProtocolTimedOut));
+            SdoAbortCode.SdoProtocolTimedOut, SdoAbortOrigin.Local));
     }
 
     private void HandleSdoClientResponse(byte serverNodeId, byte[] data)
@@ -1708,7 +1708,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         session.Deadline?.Dispose();
         _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
             SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)code));
-        session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex, code));
+        session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex, code,
+            SdoAbortOrigin.Local));
     }
 
     // =========================================================================================

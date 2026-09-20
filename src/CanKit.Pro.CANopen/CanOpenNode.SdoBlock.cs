@@ -45,7 +45,8 @@ internal sealed partial class CanOpenNode
         }
         if (payload.Length > _options.MaxSdoTransferBytes)
         {
-            tcs.TrySetException(new SdoAbortException(index, subindex, SdoAbortCode.OutOfMemory));
+            tcs.TrySetException(new SdoAbortException(index, subindex, SdoAbortCode.OutOfMemory,
+                SdoAbortOrigin.Local));
             return;
         }
 
@@ -105,7 +106,7 @@ internal sealed partial class CanOpenNode
         _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId),
             SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)SdoAbortCode.SdoProtocolTimedOut));
         session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex,
-            SdoAbortCode.SdoProtocolTimedOut));
+            SdoAbortCode.SdoProtocolTimedOut, SdoAbortOrigin.Local));
     }
 
     private void RearmBlockClient(SdoBlockClientSession session, byte serverNodeId)
@@ -124,7 +125,8 @@ internal sealed partial class CanOpenNode
         session.Deadline?.Dispose();
         _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
             SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)code));
-        session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex, code));
+        session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex, code,
+            SdoAbortOrigin.Local));
     }
 
     /// <summary>
