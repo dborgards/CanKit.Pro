@@ -305,7 +305,7 @@ internal sealed partial class CanOpenNode
                     session.Payload = declared > 0 ? new byte[declared] : Array.Empty<byte>();
                     session.Offset = 0;
                     session.NextExpectedSeq = 1;
-                    session.SegmentsInFlight = 0;
+                    session.SubBlockDamaged = false;
                     session.Phase = SdoBlockClientPhase.ReceivingSegments;
 
                     // Tell the server to begin streaming segments.
@@ -385,54 +385,68 @@ internal sealed partial class CanOpenNode
         byte seq = (byte)(cs & 0x7F);
         bool last = (cs & 0x80) != 0;
 
-        if (seq != session.NextExpectedSeq)
+        // The upload receiver mirrors the download server's rules (HandleBlockDownloadServerSegment)
+        // with the client's own sub-block confirm (CiA 301 §7.2.4.3.14, Figure 32): the seqno is
+        // "0 < seqno < 128" and never past the blksize we asked for.
+        if (seq == 0 || seq > session.LocalBlockSize)
         {
-            // Out-of-order segment: NACK by sending an ack for the last good seq and
-            // requesting the same blksize again. The peer restarts at ackseq + 1 within
-            // the same sub-block (CiA 301), so keep NextExpectedSeq / SegmentsInFlight —
-            // resetting them to 1/0 would reject the retransmission stream.
-            var ack = SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck,
-                lastAckedSeq: (byte)(session.NextExpectedSeq - 1),
-                nextBlockSize: session.LocalBlockSize);
-            _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), ack);
+            AbortBlockClient(session, SdoAbortCode.InvalidSequenceNumber);
             return true;
         }
 
-        int room = _options.MaxSdoTransferBytes - session.Offset;
-        if (room < 7)
+        if (!session.SubBlockDamaged && seq == session.NextExpectedSeq)
         {
-            AbortBlockClient(session, SdoAbortCode.OutOfMemory);
-            return true;
-        }
-        if (session.Payload!.Length - session.Offset < 7)
-        {
-            // Grow when the declared size was 0 (unbounded) or when the payload was under-declared.
-            int needed = session.Offset + 7;
-            if (needed > _options.MaxSdoTransferBytes)
+            int room = _options.MaxSdoTransferBytes - session.Offset;
+            if (room < 7)
             {
                 AbortBlockClient(session, SdoAbortCode.OutOfMemory);
                 return true;
             }
-            var grown = new byte[needed];
-            Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
-            session.Payload = grown;
+            if (session.Payload!.Length - session.Offset < 7)
+            {
+                // Grow when the declared size was 0 (unbounded) or when the payload was under-declared.
+                int needed = session.Offset + 7;
+                if (needed > _options.MaxSdoTransferBytes)
+                {
+                    AbortBlockClient(session, SdoAbortCode.OutOfMemory);
+                    return true;
+                }
+                var grown = new byte[needed];
+                Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
+                session.Payload = grown;
+            }
+            // Copy the full 7 data bytes; unused bytes in the *last* segment are trimmed off later
+            // using the "n" field from the end-of-block frame.
+            Buffer.BlockCopy(data, 1, session.Payload, session.Offset, 7);
+            session.Offset += 7;
+            session.NextExpectedSeq = (byte)(seq + 1);
         }
-        // Copy the full 7 data bytes; unused bytes in the *last* segment are trimmed off later
-        // using the "n" field from the end-of-block frame.
-        Buffer.BlockCopy(data, 1, session.Payload, session.Offset, 7);
-        session.Offset += 7;
-        session.NextExpectedSeq = (byte)(seq + 1);
-        session.SegmentsInFlight++;
-
-        if (last || session.SegmentsInFlight >= session.LocalBlockSize)
+        else
         {
-            // Send sub-block ACK (last successfully received seqno, next blksize we want).
+            // A lost or reordered segment: ignore the rest of the sub-block and let the one
+            // confirm at its end carry ackseq, "sequence number of last segment that was received
+            // successfully during the last block upload" (§7.2.4.3.14); the server resumes at
+            // ackseq + 1 (#39). Answering each further segment with its own confirm was the same
+            // storm as on the download server.
+            session.SubBlockDamaged = true;
+        }
+
+        // The sub-block ends with the segment numbered blksize or with c = 1, recognised on the
+        // sender's numbering so a damaged sub-block ends where the sender ends it.
+        if (last || seq >= session.LocalBlockSize)
+        {
             var ack = SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck,
-                lastAckedSeq: seq,
+                lastAckedSeq: (byte)(session.NextExpectedSeq - 1),
                 nextBlockSize: session.LocalBlockSize);
             _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), ack);
+            if (session.SubBlockDamaged)
+            {
+                // Partial confirm: NextExpectedSeq stays where the gap was; the server resends
+                // from there with the original numbering (as this package's upload server does).
+                session.SubBlockDamaged = false;
+                return true;
+            }
             session.NextExpectedSeq = 1;
-            session.SegmentsInFlight = 0;
             if (last)
             {
                 session.Phase = SdoBlockClientPhase.AwaitEnd;
@@ -539,22 +553,22 @@ internal sealed partial class CanOpenNode
             return true;
         }
 
-        // A block-server session in a segment-receiving phase intercepts segment frames on our
-        // SDO Rx. Byte 0 = (c<<7)|seq overlaps command specifiers, so a peer that starts a
-        // fresh SDO initiate mid-transfer would otherwise be NACK'd as an out-of-order segment.
-        // When seq is 0 (never valid) or the CS looks like a client initiate *and* does not
-        // match the next expected seq, fall through so block/classic initiate handlers can
-        // supersede this session (CiA 301 §7.2.4.3.4).
+        // A block-server session in its segment-receiving phase owns every frame on our SDO Rx
+        // (#39). The phase says what to expect: byte 0 is (c << 7) | seqno (CiA 301 §7.2.4.3.10,
+        // Figure 28), not a command specifier, and a value that happens to spell an initiate —
+        // 0x21, 0x23, 0x40, 0xC2, ... — is an ordinary sequence number in that position. The
+        // previous code guessed "initiate" from that byte pattern and let the classic server
+        // supersede the running transfer, so a reordered or stray segment killed it. The one
+        // frame that is not a segment here is the abort, taken above, and it stays
+        // distinguishable without any guessing: its byte 0x80 decodes to seqno 0, which
+        // §7.2.4.3.10 rules out ("0 < seqno < 128"). Seqno 0 with c = 0, or a seqno past the
+        // blksize we announced, is a protocol error and is aborted inside the handler. A peer
+        // that wants to start something else while a block download is open says so with an
+        // abort first.
         if (_sdoBlockServer is { Phase: SdoBlockServerPhase.ReceivingSegments } rx)
         {
-            byte seq = (byte)(cs & 0x7F);
-            bool maybeSupersedingInitiate = seq == 0
-                || (seq != rx.NextExpectedSeq && LooksLikeSdoClientInitiate(cs));
-            if (!maybeSupersedingInitiate)
-            {
-                HandleBlockDownloadServerSegment(rx, data, cs);
-                return true;
-            }
+            HandleBlockDownloadServerSegment(rx, data, cs);
+            return true;
         }
         if (_sdoBlockServer is { Phase: SdoBlockServerPhase.AwaitEnd } awaitingEnd
             && (cs & 0xE3) == CcsBlockDownloadEndMask)
@@ -597,24 +611,6 @@ internal sealed partial class CanOpenNode
             upEndResp.Deadline?.Dispose();
             return true;
         }
-        return false;
-    }
-
-    /// <summary>
-    /// True when <paramref name="cs"/> matches a client→server SDO initiate (or abort) command
-    /// specifier. Used to distinguish a mid-transfer supersede from an ordinary block segment
-    /// when the seq field happens to collide with a CS value.
-    /// </summary>
-    private static bool LooksLikeSdoClientInitiate(byte cs)
-    {
-        if (cs == SdoFrames.CsAbort) return true;
-        if (cs == SdoFrames.CcsUploadInit) return true;
-        if (cs == SdoFrames.CcsDownloadInitSegmented) return true;
-        // Expedited download init: ccs=1 with e=1,s=1 (low two bits set).
-        if ((cs & 0xE0) == SdoFrames.CcsDownloadInitExpeditedBase && (cs & 0x03) == 0x03)
-            return true;
-        if ((cs & 0xE1) == CcsBlockDownloadInitMask) return true;
-        if ((cs & 0xE3) == CcsBlockUploadInitMask) return true;
         return false;
     }
 
@@ -664,7 +660,6 @@ internal sealed partial class CanOpenNode
             CrcActive = crcActive,
             NegotiatedBlockSize = blkSize,
             NextExpectedSeq = 1,
-            SegmentsInSubBlock = 0,
             DeclaredTotalSize = declaredLen,
             SizeIndicated = sizeIndicated,
             Phase = SdoBlockServerPhase.ReceivingSegments,
@@ -686,51 +681,79 @@ internal sealed partial class CanOpenNode
         byte seq = (byte)(cs & 0x7F);
         bool last = (cs & 0x80) != 0;
 
-        if (seq != session.NextExpectedSeq)
+        // CiA 301 §7.2.4.3.10: "seqno: sequence number of segment 0 < seqno < 128", numbered
+        // "starting by 1, which is increased for each segment by 1 up to blksize" (§7.2.4.2.10).
+        // Zero — the abort's byte pattern, so never a segment — or a value past the blksize we
+        // announced cannot belong to this sub-block: Table 22, 0504 0003h.
+        if (seq == 0 || seq > session.NegotiatedBlockSize)
         {
-            // NACK by sub-block ACK with lastAckedSeq = NextExpectedSeq - 1, prompting
-            // retransmission from ackseq + 1 within the current sub-block (CiA 301). Keep
-            // NextExpectedSeq / SegmentsInSubBlock so a compliant retransmission is accepted.
-            var nack = SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.ScsBlockDownloadSubBlockAck,
-                lastAckedSeq: (byte)(session.NextExpectedSeq - 1),
-                nextBlockSize: session.NegotiatedBlockSize);
-            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), nack);
+            AbortBlockServer(session, SdoAbortCode.InvalidSequenceNumber);
             return;
         }
 
-        // Ensure room for 7 bytes; grow if declared size was under-specified or unbounded.
-        if (session.Offset + 7 > session.Buffer.Length)
-        {
-            int newLen = session.Offset + 7;
-            if (newLen > _options.MaxSdoTransferBytes)
-            {
-                _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
-                    SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)SdoAbortCode.OutOfMemory));
-                _sdoBlockServer = null;
-                session.Deadline?.Dispose();
-                return;
-            }
-            var grown = new byte[newLen];
-            Buffer.BlockCopy(session.Buffer, 0, grown, 0, session.Offset);
-            session.Buffer = grown;
-        }
-        Buffer.BlockCopy(data, 1, session.Buffer, session.Offset, 7);
-        session.Offset += 7;
-        session.NextExpectedSeq = (byte)(seq + 1);
-        session.SegmentsInSubBlock++;
-
+        // The peer is still talking, whatever it sent: the idle deadline restarts.
         RearmBlockServer(session);
 
-        if (last || session.SegmentsInSubBlock >= session.NegotiatedBlockSize)
+        if (!session.SubBlockDamaged && seq == session.NextExpectedSeq)
+        {
+            // Ensure room for 7 bytes; grow if declared size was under-specified or unbounded.
+            if (session.Offset + 7 > session.Buffer.Length)
+            {
+                int newLen = session.Offset + 7;
+                if (newLen > _options.MaxSdoTransferBytes)
+                {
+                    AbortBlockServer(session, SdoAbortCode.OutOfMemory);
+                    return;
+                }
+                var grown = new byte[newLen];
+                Buffer.BlockCopy(session.Buffer, 0, grown, 0, session.Offset);
+                session.Buffer = grown;
+            }
+            Buffer.BlockCopy(data, 1, session.Buffer, session.Offset, 7);
+            session.Offset += 7;
+            session.NextExpectedSeq = (byte)(seq + 1);
+        }
+        else
+        {
+            // A lost or reordered segment. §7.2.4.3.10 answers a sub-block with one confirm whose
+            // "ackseq: sequence number of last segment that was received successfully during the
+            // last block download" tells the client where to resume; nothing in the protocol
+            // answers individual segments. So the rest of this sub-block is ignored and the one
+            // confirm at its end carries the news (#39). Before this, every further segment of
+            // the sub-block drew its own confirm — up to 126 control frames for one lost frame,
+            // on a bus that was already dropping frames.
+            session.SubBlockDamaged = true;
+        }
+
+        // A sub-block ends with the segment numbered blksize or with c = 1 (§7.2.4.2.10), and
+        // the end is recognised on the numbering the sender used, not on what was accepted, so
+        // a damaged sub-block ends where the sender ends it.
+        if (last || seq >= session.NegotiatedBlockSize)
         {
             var ack = SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.ScsBlockDownloadSubBlockAck,
-                lastAckedSeq: seq,
+                lastAckedSeq: (byte)(session.NextExpectedSeq - 1),
                 nextBlockSize: session.NegotiatedBlockSize);
             _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), ack);
-            session.SegmentsInSubBlock = 0;
+            if (session.SubBlockDamaged)
+            {
+                // Partial confirm: the client resumes at ackseq + 1 with the original numbering
+                // (this package's own client does, see SdoBlockClientSession.ResumeSeqno), so
+                // NextExpectedSeq stays where the gap was and the sub-block continues.
+                session.SubBlockDamaged = false;
+                return;
+            }
             session.NextExpectedSeq = 1;
             if (last) session.Phase = SdoBlockServerPhase.AwaitEnd;
         }
+    }
+
+    /// <summary>Aborts the open block-server session on the wire and drops it locally.</summary>
+    private void AbortBlockServer(SdoBlockServerSession session, SdoAbortCode code)
+    {
+        _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+            SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)code));
+        _sdoBlockServer = null;
+        session.Deadline?.Dispose();
     }
 
     private void HandleBlockDownloadServerEnd(SdoBlockServerSession session, byte[] data, byte cs)
@@ -1101,7 +1124,9 @@ internal sealed partial class CanOpenNode
         public byte LocalBlockSize = 127;
         public byte NextExpectedSeq = 1;
         public uint DeclaredTotalSize;
-        public byte SegmentsInFlight; // accepted segments in the current sub-block (receiver side)
+        // A segment of the current sub-block was lost or reordered: the rest of the sub-block
+        // is ignored and its one confirm carries the last good seqno (#39, CiA 301 §7.2.4.3.14).
+        public bool SubBlockDamaged;
 
         public IDeadline? Deadline;
     }
@@ -1125,7 +1150,9 @@ internal sealed partial class CanOpenNode
         public SdoBlockServerPhase Phase { get; set; }
         public byte NegotiatedBlockSize { get; set; }
         public byte NextExpectedSeq { get; set; }
-        public byte SegmentsInSubBlock { get; set; }
+        // A segment of the current sub-block was lost or reordered: the rest of the sub-block
+        // is ignored and its one confirm carries the last good seqno (#39, CiA 301 §7.2.4.3.10).
+        public bool SubBlockDamaged { get; set; }
         public byte LastSegmentUnusedBytes { get; set; }
         public bool CrcActive { get; set; }
         public uint DeclaredTotalSize { get; set; }

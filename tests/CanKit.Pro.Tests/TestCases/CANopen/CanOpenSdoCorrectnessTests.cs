@@ -327,6 +327,227 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         segs.SelectMany(s => s.Skip(1)).Take(payload.Length).Should().Equal(payload);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // FR-CO-004 (#39): one lost segment must draw exactly one confirm, at the end of the
+    // sub-block, carrying the last good seqno. CiA 301 §7.2.4.3.10 (Figure 28) confirms a
+    // sub-block with a single frame whose "ackseq: sequence number of last segment that was
+    // received successfully during the last block download" tells the client where to resume;
+    // before the fix every segment after the gap drew its own confirm — up to 126 for one lost
+    // frame. The discriminator is the *second* control frame the server sends: with the fix it
+    // is the confirm of the retransmitted remainder (ackseq 5); under the bug it is the second
+    // NACK (ackseq 2), already on the wire before the retransmission started.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Sdo_BlockDownload_Server_Confirms_A_Damaged_SubBlock_Once_And_Completes_After_Retransmission()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+
+        var opts = new CanOpenNodeOptions().With(sdoBlockSize: 5);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02, opts);
+        var payload = Enumerable.Range(0, 35).Select(i => (byte)(0x40 + i)).ToArray(); // 5 segments
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[35]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildBlockDownloadInit(
+            0x2100, 0x00, clientCrcSupported: false, sizeIndicated: true, totalSize: 35));
+        var initResp = tap.Next(ShortTimeout);
+        (initResp[0] & 0xE3).Should().Be(SdoBlockFrames.ScsBlockDownloadInitResponseBase);
+        initResp[4].Should().Be(5, "the server announces its blksize");
+
+        byte[] Segment(int seqno, bool lastOverall) => SdoBlockFrames.BuildSegment(
+            (byte)seqno, isLastSegment: lastOverall, payload.AsSpan((seqno - 1) * 7, 7));
+
+        // Sub-block with segment 3 lost: 1, 2, 4, 5 (c = 1).
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(1, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(2, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(4, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(5, true));
+
+        var confirm = tap.Next(ShortTimeout);
+        confirm[0].Should().Be(SdoBlockFrames.ScsBlockDownloadSubBlockAck);
+        SdoBlockFrames.ReadSubBlockAck(confirm).Should().Be(((byte)2, (byte)5),
+            "ackseq is the last segment received successfully, and the blksize is unchanged");
+
+        // Retransmission from ackseq + 1 with the original numbering.
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(3, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(4, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(5, true));
+
+        var confirm2 = tap.Next(ShortTimeout);
+        confirm2[0].Should().Be(SdoBlockFrames.ScsBlockDownloadSubBlockAck);
+        SdoBlockFrames.ReadSubBlockAck(confirm2).AckSeq.Should().Be(5,
+            "the damaged sub-block drew exactly one confirm, so the next control frame confirms the retransmission");
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildEnd(
+            SdoBlockFrames.CcsBlockDownloadEndBase, unusedBytesInLastSegment: 0, crc: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.ScsBlockDownloadEndResponse);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#39): in the segment phase, byte 0 is (c << 7) | seqno and nothing else. A
+    // segment whose byte 0 happens to spell a classic initiate — 0x21 is seqno 33 — used to be
+    // handed to the classic server, which superseded the running transfer with an abort. It is
+    // an out-of-order segment like any other: the sub-block is confirmed once with the last
+    // good seqno, the sender resumes, and the transfer completes.
+    [Fact]
+    public async Task Sdo_BlockDownload_Server_Reads_A_Segment_Spelling_An_Initiate_As_A_Segment()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02); // blksize 127: seqno 33 is in range
+        var payload = Enumerable.Range(0, 21).Select(i => (byte)(0x90 + i)).ToArray(); // 3 segments
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[21]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildBlockDownloadInit(
+            0x2100, 0x00, clientCrcSupported: false, sizeIndicated: true, totalSize: 21));
+        (tap.Next(ShortTimeout)[0] & 0xE3).Should().Be(SdoBlockFrames.ScsBlockDownloadInitResponseBase);
+
+        byte[] Segment(int seqno, bool lastOverall) => SdoBlockFrames.BuildSegment(
+            (byte)seqno, isLastSegment: lastOverall, payload.AsSpan((seqno - 1) * 7, 7));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(1, false));
+        // Segment 2 is lost; what arrives instead is a segment numbered 33, whose byte 0 (0x21)
+        // is also the classic "initiate download, segmented" command specifier. Bytes 1..3 would
+        // read as index 0x2000:00 if anyone mistook it for one.
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { 0x21, 0x00, 0x20, 0x00, 0x11, 0x22, 0x33, 0x44 });
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(2, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(3, true));
+
+        var confirm = tap.Next(ShortTimeout);
+        confirm[0].Should().Be(SdoBlockFrames.ScsBlockDownloadSubBlockAck,
+            "the session must survive a segment that merely looks like an initiate");
+        SdoBlockFrames.ReadSubBlockAck(confirm).AckSeq.Should().Be(1);
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(2, false));
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), Segment(3, true));
+        SdoBlockFrames.ReadSubBlockAck(tap.Next(ShortTimeout)).AckSeq.Should().Be(3);
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildEnd(
+            SdoBlockFrames.CcsBlockDownloadEndBase, unusedBytesInLastSegment: 0, crc: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.ScsBlockDownloadEndResponse);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#39): CiA 301 §7.2.4.3.10 requires "0 < seqno < 128" and a sub-block never
+    // numbers past blksize (§7.2.4.2.10). Seqno 0 with c = 0 (byte 0x00) and a seqno beyond
+    // the announced blksize are protocol errors, answered with Table 22 0504 0003h against the
+    // transfer's own object. Byte 0x80, seqno 0 with c = 1, is the abort and is handled as one.
+    [Theory]
+    [InlineData((byte)0x00)] // seqno 0
+    [InlineData((byte)0x06)] // seqno 6 with blksize 5
+    public async Task Sdo_BlockDownload_Server_Aborts_An_Invalid_Sequence_Number(byte byte0)
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+
+        var opts = new CanOpenNodeOptions().With(sdoBlockSize: 5);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02, opts);
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[35]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildBlockDownloadInit(
+            0x2100, 0x00, clientCrcSupported: false, sizeIndicated: true, totalSize: 35));
+        (tap.Next(ShortTimeout)[0] & 0xE3).Should().Be(SdoBlockFrames.ScsBlockDownloadInitResponseBase);
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { byte0, 1, 2, 3, 4, 5, 6, 7 });
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadIndex(abort).Should().Be(((ushort)0x2100, (byte)0x00), "the abort names the transfer's object");
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.InvalidSequenceNumber);
+        await Task.CompletedTask;
+    }
+
+    // FR-CO-004 (#39): the block-upload client receives segments the same way, with its own
+    // confirm (CiA 301 §7.2.4.3.14, Figure 32), and had the same storm. Same discriminator as
+    // the server test: the second control frame after the damaged sub-block confirms the
+    // retransmission (ackseq 5), not the gap again.
+    [Fact]
+    public async Task Sdo_BlockUpload_Client_Confirms_A_Damaged_SubBlock_Once_And_Completes_After_Retransmission()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+
+        var opts = new CanOpenNodeOptions().With(sdoBlockSize: 5);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01, opts);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+        var payload = Enumerable.Range(0, 35).Select(i => (byte)(0x60 + i)).ToArray(); // 5 segments
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2100, subindex: 0x00,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+        init[4].Should().Be(5, "the client announces its blksize");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2100, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 35));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart);
+
+        byte[] Segment(int seqno, bool lastOverall) => SdoBlockFrames.BuildSegment(
+            (byte)seqno, isLastSegment: lastOverall, payload.AsSpan((seqno - 1) * 7, 7));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(1, false));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(2, false));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(4, false));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(5, true));
+
+        var confirm = tap.Next(ShortTimeout);
+        confirm[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        SdoBlockFrames.ReadSubBlockAck(confirm).Should().Be(((byte)2, (byte)5));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(3, false));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(4, false));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), Segment(5, true));
+
+        var confirm2 = tap.Next(ShortTimeout);
+        confirm2[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        SdoBlockFrames.ReadSubBlockAck(confirm2).AckSeq.Should().Be(5,
+            "the damaged sub-block drew exactly one confirm, so the next control frame confirms the retransmission");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildEnd(
+            SdoBlockFrames.ScsBlockUploadEndBase, unusedBytesInLastSegment: 0, crc: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse);
+        (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#39): the block-upload client aborts an invalid seqno with 0504 0003h on the
+    // wire, and the caller's task fails with that same code.
+    [Theory]
+    [InlineData((byte)0x00)] // seqno 0
+    [InlineData((byte)0x06)] // seqno 6 with blksize 5
+    public async Task Sdo_BlockUpload_Client_Aborts_An_Invalid_Sequence_Number(byte byte0)
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+
+        var opts = new CanOpenNodeOptions().With(sdoBlockSize: 5);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01, opts);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2100, subindex: 0x00,
+            mode: SdoTransferMode.Block);
+        (tap.Next(ShortTimeout)[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2100, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 35));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart);
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { byte0, 1, 2, 3, 4, 5, 6, 7 });
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.InvalidSequenceNumber);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.InvalidSequenceNumber);
+    }
+
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
     // peer deterministically from its own thread (no in-handler transmits).
     private sealed class FrameTap : IDisposable
