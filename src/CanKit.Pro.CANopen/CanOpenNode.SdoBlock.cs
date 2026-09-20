@@ -656,7 +656,9 @@ internal sealed partial class CanOpenNode
             Phase = SdoBlockServerPhase.ReceivingSegments,
         };
         _sdoBlockServer = session;
-        session.Deadline = _deadlines.Arm(_options.SdoTimeout, OnSdoBlockServerTimeout);
+        // Server-side sessions idle against SdoServerTimeout, the value the options document
+        // for exactly this guard; SdoTimeout is the client's request timer (#17).
+        session.Deadline = _deadlines.Arm(_options.SdoServerTimeout, OnSdoBlockServerTimeout);
 
         // Advertise local CRC capability (CiA 301 "sc" bit); CRC stays inactive for this
         // transfer unless both endpoints set their bits (captured in crcActive above).
@@ -826,7 +828,8 @@ internal sealed partial class CanOpenNode
             Phase = SdoBlockServerPhase.AwaitStart,
         };
         _sdoBlockServer = session;
-        session.Deadline = _deadlines.Arm(_options.SdoTimeout, OnSdoBlockServerTimeout);
+        // Server-side sessions idle against SdoServerTimeout (see HandleBlockDownloadServerInit).
+        session.Deadline = _deadlines.Arm(_options.SdoServerTimeout, OnSdoBlockServerTimeout);
 
         // Advertise local CRC capability (CiA 301 "sc" bit); CRC stays inactive for this
         // transfer unless both endpoints set their bits (captured in crcActive above).
@@ -837,12 +840,15 @@ internal sealed partial class CanOpenNode
 
     private void HandleBlockUploadServerStart(SdoBlockServerSession session)
     {
+        // The peer spoke: the idle deadline restarts here and on every sub-block ACK (#17).
+        RearmBlockServer(session);
         session.Phase = SdoBlockServerPhase.SendingSegments;
         SendNextBlockUploadSubBlock(session);
     }
 
     private void HandleBlockUploadServerSubBlockAck(SdoBlockServerSession session, byte[] data)
     {
+        RearmBlockServer(session);
         var (ackseq, nextBlkSize) = SdoBlockFrames.ReadSubBlockAck(data);
         // ackseq counts cumulatively from the start of the current sub-block
         // (CiA 301 §7.2.4.3.15). More than sent is a protocol violation; less asks for
@@ -958,13 +964,23 @@ internal sealed partial class CanOpenNode
             SdoFrames.BuildAbort(s.Index, s.Subindex, (uint)SdoAbortCode.SdoProtocolTimedOut));
     }
 
+    /// <summary>
+    /// Re-arms the block server's idle deadline after any frame from the peer, so it measures
+    /// how long the peer has been silent rather than how long the transfer has been running.
+    /// Called on the download path per accepted segment and on the upload path per "start" and
+    /// per sub-block ACK; before #17 the upload path never re-armed, so a transfer longer than
+    /// the initial arm timed out while perfectly healthy (about 50 KB at 1 Mbit/s with the
+    /// 1 s value that was armed then). Uses <see cref="CanOpenNodeOptions.SdoServerTimeout"/>,
+    /// the value documented for this guard.
+    /// </summary>
     private void RearmBlockServer(SdoBlockServerSession session)
     {
         var deadline = session.Deadline;
-        if (deadline is null || deadline.IsExpired || deadline.IsCancelled || !deadline.Rearm(_options.SdoTimeout))
+        if (deadline is null || deadline.IsExpired || deadline.IsCancelled
+            || !deadline.Rearm(_options.SdoServerTimeout))
         {
             deadline?.Dispose();
-            session.Deadline = _deadlines.Arm(_options.SdoTimeout, OnSdoBlockServerTimeout);
+            session.Deadline = _deadlines.Arm(_options.SdoServerTimeout, OnSdoBlockServerTimeout);
         }
     }
 
