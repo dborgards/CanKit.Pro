@@ -40,7 +40,7 @@ currently available.
 | --- | --- |
 | [`CanKit.Pro.IsoTp`](src/CanKit.Pro.IsoTp) | ISO 15765-2: SF/FF/CF/FC codec, bounds-checked PCI parsing, STmin handling, and an actor-driven `IIsoTpChannel` over CAN and CAN FD. |
 | [`CanKit.Pro.J1939Tp`](src/CanKit.Pro.J1939Tp) | SAE J1939-21 transport: TP.BAM broadcast and TP.CM connection mode (RTS/CTS/EndOfMsgAck), multi-session. |
-| [`CanKit.Pro.CANopen`](src/CanKit.Pro.CANopen) | CiA 301: SDO client/server incl. block transfer, static and dynamic PDO mapping, NMT, heartbeat and node guarding, EMCY, object dictionary. |
+| [`CanKit.Pro.CANopen`](src/CanKit.Pro.CANopen) | CiA 301: an object dictionary that carries the communication profile and drives the node, SDO client/server incl. block transfer, a PDO engine with every Table 72 transmission type and SDO-configurable mapping, NMT, heartbeat, node and life guarding, EMCY. |
 | [`CanKit.Pro.J1939`](src/CanKit.Pro.J1939) | J1939 node: address claim with arbitrary-address fallback, fixed-rate periodic send, SPN catalogue over J1939-71. |
 | [`CanKit.Pro.Uds`](src/CanKit.Pro.Uds) | ISO 14229-1 client over ISO-TP: session control, security access, read/write by identifier, routine control, upload/download, P2/P2\* timing and 0x78 response-pending. |
 

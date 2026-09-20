@@ -93,8 +93,9 @@ scheduler that guarantees an expired deadline is actually fired.
 
     ---
 
-    CiA 301 node: object dictionary, SDO client and server including block transfer, static and
-    dynamic PDO mapping, NMT, heartbeat, node guarding, SYNC and EMCY.
+    CiA 301 node: an object dictionary that carries the communication profile and drives the
+    node, SDO client and server including block transfer, a PDO engine with every transmission
+    type and SDO-configurable mapping, NMT, heartbeat, node and life guarding, SYNC and EMCY.
 
     [:octicons-arrow-right-24: CanKit.Pro.CANopen](packages/canopen.md)
 
