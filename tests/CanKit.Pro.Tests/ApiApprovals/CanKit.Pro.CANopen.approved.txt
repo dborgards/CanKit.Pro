@@ -253,6 +253,7 @@ namespace CanKit.Pro.CANopen.Sdo
         SdoProtocolTimedOut = 84148224u,
         CommandSpecifierInvalid = 84148225u,
         InvalidBlockSize = 84148226u,
+        InvalidSequenceNumber = 84148227u,
         CrcError = 84148228u,
         OutOfMemory = 84148229u,
         UnsupportedAccess = 100728832u,
@@ -265,6 +266,7 @@ namespace CanKit.Pro.CANopen.Sdo
         LengthTooHigh = 101122066u,
         LengthTooLow = 101122067u,
         SubIndexDoesNotExist = 101253137u,
+        ValueRangeExceeded = 101253168u,
         General = 134217728u,
     }
     public sealed class SdoAbortException : CanKit.Core.Exceptions.CanKitException
