@@ -351,6 +351,13 @@ internal sealed partial class CanOpenNode
                                 : SdoAbortCode.LengthTooLow);
                         return true;
                     }
+                    // With n applied the data must be within the cap (#59); a declared size was
+                    // capped at the initiate response, so this bites for unbounded uploads only.
+                    if (session.Offset > _options.MaxSdoTransferBytes)
+                    {
+                        AbortBlockClient(session, SdoAbortCode.OutOfMemory);
+                        return true;
+                    }
 
                     var final = new byte[session.Offset];
                     Buffer.BlockCopy(session.Payload!, 0, final, 0, session.Offset);
@@ -396,8 +403,13 @@ internal sealed partial class CanOpenNode
 
         if (!session.SubBlockDamaged && seq == session.NextExpectedSeq)
         {
-            int room = _options.MaxSdoTransferBytes - session.Offset;
-            if (room < 7)
+            // Same boundary rule as HandleBlockDownloadServerSegment (#59): the cap is on the
+            // data, the last segment's data length is unknown until the end frame's "n"
+            // (CiA 301 §7.2.4.3.15), so a segment is refused only when the cap is already full,
+            // and the AwaitEnd handler checks the trimmed length. Refusing whenever fewer than
+            // seven bytes of cap remained aborted an upload of exactly MaxSdoTransferBytes at
+            // its last segment.
+            if (session.Offset >= _options.MaxSdoTransferBytes)
             {
                 AbortBlockClient(session, SdoAbortCode.OutOfMemory);
                 return true;
@@ -405,13 +417,7 @@ internal sealed partial class CanOpenNode
             if (session.Payload!.Length - session.Offset < 7)
             {
                 // Grow when the declared size was 0 (unbounded) or when the payload was under-declared.
-                int needed = session.Offset + 7;
-                if (needed > _options.MaxSdoTransferBytes)
-                {
-                    AbortBlockClient(session, SdoAbortCode.OutOfMemory);
-                    return true;
-                }
-                var grown = new byte[needed];
+                var grown = new byte[session.Offset + 7];
                 Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
                 session.Payload = grown;
             }
@@ -696,16 +702,22 @@ internal sealed partial class CanOpenNode
 
         if (!session.SubBlockDamaged && seq == session.NextExpectedSeq)
         {
+            // MaxSdoTransferBytes caps the data, and how much of the last segment is data is
+            // unknown until the end frame's "n" says how many of its seven bytes are unused
+            // (CiA 301 §7.2.4.3.11). So a segment is refused only once no byte of it could
+            // still be within the cap — the cap is already full — and the buffer may run up to
+            // six bytes past it until HandleBlockDownloadServerEnd checks the trimmed length.
+            // Refusing whenever the whole seven-byte window would not fit aborted a transfer of
+            // exactly MaxSdoTransferBytes at its last segment (#59).
+            if (session.Offset >= _options.MaxSdoTransferBytes)
+            {
+                AbortBlockServer(session, SdoAbortCode.OutOfMemory);
+                return;
+            }
             // Ensure room for 7 bytes; grow if declared size was under-specified or unbounded.
             if (session.Offset + 7 > session.Buffer.Length)
             {
-                int newLen = session.Offset + 7;
-                if (newLen > _options.MaxSdoTransferBytes)
-                {
-                    AbortBlockServer(session, SdoAbortCode.OutOfMemory);
-                    return;
-                }
-                var grown = new byte[newLen];
+                var grown = new byte[session.Offset + 7];
                 Buffer.BlockCopy(session.Buffer, 0, grown, 0, session.Offset);
                 session.Buffer = grown;
             }
@@ -780,6 +792,14 @@ internal sealed partial class CanOpenNode
                 SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)reason));
             _sdoBlockServer = null;
             session.Deadline?.Dispose();
+            return;
+        }
+        // The segment handler lets the last segment's window run past the cap because it cannot
+        // know n yet (#59); with n applied, the data itself must be within the cap. A declared
+        // size was capped at the initiate, so this only bites for an unbounded transfer.
+        if (session.Offset > _options.MaxSdoTransferBytes)
+        {
+            AbortBlockServer(session, SdoAbortCode.OutOfMemory);
             return;
         }
 

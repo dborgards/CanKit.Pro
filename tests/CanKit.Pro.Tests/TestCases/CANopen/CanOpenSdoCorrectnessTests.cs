@@ -548,6 +548,58 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         ex.AbortCode.Should().Be((uint)SdoAbortCode.InvalidSequenceNumber);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // FR-CO-004 (#59): MaxSdoTransferBytes is the boundary the option names, so a block
+    // transfer of exactly that many bytes succeeds and one byte more is refused with
+    // OutOfMemory. Before the fix both block receivers refused a segment whenever its whole
+    // seven-byte window would not fit under the cap, which for 1024 = 146 * 7 + 2 aborted the
+    // transfer at its last segment — the one whose two data bytes were within the cap.
+    // Both nodes are real; the receiving side carries the cap.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Sdo_BlockDownload_Of_Exactly_MaxSdoTransferBytes_Succeeds_And_One_More_Is_Refused()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, new CanOpenNodeOptions().With(maxSdoTransferBytes: 1024));
+
+        var exact = Enumerable.Range(0, 1024).Select(i => (byte)(i * 7)).ToArray();
+        slave.ObjectDictionary.AddDomain(0x2A10, 0x00, new byte[1024]);
+        await master.SdoDownloadAsync(0x11, 0x2A10, 0x00, exact, mode: SdoTransferMode.Block)
+            .WithTimeoutAsync(ShortTimeout);
+        slave.ObjectDictionary.ReadRaw(0x2A10, 0x00).Should().Equal(exact);
+
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master
+            .SdoDownloadAsync(0x11, 0x2A10, 0x00, new byte[1025], mode: SdoTransferMode.Block)
+            .WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.OutOfMemory);
+    }
+
+    [Fact]
+    public async Task Sdo_BlockUpload_Of_Exactly_MaxSdoTransferBytes_Succeeds_And_One_More_Is_Refused()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01, new CanOpenNodeOptions().With(maxSdoTransferBytes: 1024));
+        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+
+        var exact = Enumerable.Range(0, 1024).Select(i => (byte)(i * 11)).ToArray();
+        slave.ObjectDictionary.AddDomain(0x2B20, 0x00, exact, OdAccess.ReadOnly);
+        slave.ObjectDictionary.AddDomain(0x2B21, 0x00, new byte[1025], OdAccess.ReadOnly);
+
+        var raw = await master.SdoUploadAsync(0x11, 0x2B20, 0x00, mode: SdoTransferMode.Block)
+            .WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(exact);
+
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master
+            .SdoUploadAsync(0x11, 0x2B21, 0x00, mode: SdoTransferMode.Block)
+            .WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.OutOfMemory);
+    }
+
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
     // peer deterministically from its own thread (no in-handler transmits).
     private sealed class FrameTap : IDisposable
