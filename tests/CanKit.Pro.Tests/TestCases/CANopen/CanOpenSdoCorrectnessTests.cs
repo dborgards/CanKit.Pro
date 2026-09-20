@@ -600,6 +600,35 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         ex.AbortCode.Should().Be((uint)SdoAbortCode.OutOfMemory);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // FR-CO-004 (#59): CiA 301 §7.2.4.3.13 (Figure 31) defines the block-upload initiate's
+    // blksize as "0 < blksize < 128". A value outside that range is answered with Table 22
+    // 0504 0002h, invalid block size, against the requested object — not repaired: 0 used to
+    // be replaced by the server's own default and 128 and above clamped to 127, so a client
+    // sending an invalid initiate got a transfer it never asked for.
+    // -----------------------------------------------------------------------------------------
+    [Theory]
+    [InlineData((byte)0)]
+    [InlineData((byte)128)]
+    public async Task Sdo_BlockUpload_Server_Aborts_An_Initiate_With_An_Invalid_Blksize(byte blksize)
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[20], OdAccess.ReadOnly);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildBlockUploadInit(
+            0x2100, 0x00, clientCrcSupported: false, blockSize: blksize, pst: 0));
+
+        var reply = tap.Next(ShortTimeout);
+        reply[0].Should().Be(SdoFrames.CsAbort, "an invalid blksize is refused, not repaired");
+        SdoFrames.ReadIndex(reply).Should().Be(((ushort)0x2100, (byte)0x00));
+        SdoFrames.ReadAbortCode(reply).Should().Be((uint)SdoAbortCode.InvalidBlockSize);
+        await Task.CompletedTask;
+    }
+
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
     // peer deterministically from its own thread (no in-handler transmits).
     private sealed class FrameTap : IDisposable

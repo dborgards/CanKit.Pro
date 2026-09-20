@@ -865,10 +865,17 @@ internal sealed partial class CanOpenNode
             return;
         }
 
-        // Peer's requested blksize is byte 4; clamp to [1,127].
+        // The peer's blksize is byte 4. CiA 301 §7.2.4.3.13 (Figure 31): "blksize: Number of
+        // segments per block with 0 < blksize < 128." A value outside that range is not a
+        // request to be repaired with a guess — 0 used to be replaced by our own default and
+        // anything above 127 clamped — it is an invalid block size, Table 22 0504 0002h (#59).
         byte peerBlkSize = data[4];
-        if (peerBlkSize < 1) peerBlkSize = _options.SdoBlockSize;
-        if (peerBlkSize > 127) peerBlkSize = 127;
+        if (peerBlkSize is < 1 or > 127)
+        {
+            _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
+                SdoFrames.BuildAbort(index, subindex, (uint)SdoAbortCode.InvalidBlockSize));
+            return;
+        }
 
         bool crcActive = _options.SdoBlockCrcSupported && SdoBlockFrames.ReadCrcSupportedBit(cs);
 
