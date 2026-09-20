@@ -1374,7 +1374,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         byte serverNodeId)
     {
         if (!ct.CanBeCanceled) return;
-        ct.Register(static state =>
+        var registration = ct.Register(static state =>
         {
             var (self, sid, boxed, token) = ((CanOpenNode, byte, object, CancellationToken))state!;
             try
@@ -1386,6 +1386,20 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (boxed is TaskCompletionSource<byte[]> tcs1) tcs1.TrySetCanceled(token);
             }
         }, (this, serverNodeId, (object)tcs, ct));
+
+        // The registration holds this transfer's tcs through its state for as long as the token
+        // lives, and an application-lifetime token shared by every request is the normal case:
+        // without a release, each transfer left one registration and, through it, one completed
+        // task with its result behind, for as long as the token lived (#59). The transfer's own
+        // task is the one thing every ending goes through — result, peer abort, local abort,
+        // timeout, cancellation, disposal — so the release rides on it as a continuation rather
+        // than on each of those paths.
+        tcs.Task.ContinueWith(
+            static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+            registration,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private void CancelSdoClient(byte serverNodeId, object tcsBoxed, CancellationToken token)

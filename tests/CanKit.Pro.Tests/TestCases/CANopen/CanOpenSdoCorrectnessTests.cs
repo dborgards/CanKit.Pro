@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -627,6 +628,62 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         SdoFrames.ReadIndex(reply).Should().Be(((ushort)0x2100, (byte)0x00));
         SdoFrames.ReadAbortCode(reply).Should().Be((uint)SdoAbortCode.InvalidBlockSize);
         await Task.CompletedTask;
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // FR-CO-002 (#59): the per-transfer CancellationTokenRegistration was never disposed. On a
+    // long-lived token — an application-lifetime CancellationTokenSource shared by every
+    // request — each transfer left one registration behind, and through the registration's
+    // state one completed task with its result, for as long as the token lived. Once a transfer
+    // is over the registration is the only thing that still references its task, so
+    // reachability is the discriminator: with the token still alive, the completed task must
+    // become collectable.
+    //
+    // The release runs as a continuation on the task, which the TaskCompletionSource schedules
+    // asynchronously, so "collectable" is an eventual property: it is polled with full
+    // collections up to ShortTimeout, the bound the wire taps already use for asynchronous
+    // effects, against a thread-pool hop measured in microseconds. Under the defect the task
+    // stays reachable however long one waits, so the bound cannot make a broken build pass.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public void Sdo_Transfer_Releases_Its_Cancellation_Registration_When_It_Completes()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        slave.ObjectDictionary.AddU32(0x1000, 0x00, 0x00030191u, OdAccess.ReadOnly);
+        using var cts = new CancellationTokenSource(); // outlives the transfer, as an app-lifetime token does
+
+        var completed = RunOneUpload(master, cts.Token);
+
+        BecomesCollectable(completed).Should().BeTrue(
+            "a finished transfer must not stay reachable from a token that outlives it");
+        GC.KeepAlive(cts);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference RunOneUpload(ICanOpenNode master, CancellationToken token)
+    {
+        var task = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x1000, subindex: 0x00, cancellationToken: token);
+        task.Wait(ShortTimeout).Should().BeTrue("the upload completes on a healthy virtual bus");
+        task.Result.Should().Equal(0x91, 0x01, 0x03, 0x00);
+        return new WeakReference(task);
+    }
+
+    private static bool BecomesCollectable(WeakReference target)
+    {
+        var bound = DateTime.UtcNow + ShortTimeout;
+        do
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            if (!target.IsAlive) return true;
+            Thread.Yield();
+        } while (DateTime.UtcNow < bound);
+        return false;
     }
 
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
