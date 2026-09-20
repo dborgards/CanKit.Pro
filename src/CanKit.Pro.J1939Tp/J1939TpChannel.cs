@@ -395,6 +395,17 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         byte control = payload[0];
         uint dataPgn = J1939TpFrames.ReadDataPgn(payload);
 
+        // The reader lets frames addressed to us or to the global address through; which of the
+        // two a control frame may carry depends on the control byte (#30). A BAM is a broadcast
+        // and only ever global. Every connection-mode frame -- RTS, CTS, EndOfMsgAck, Abort --
+        // addresses one node: an RTS sent to 0xFF would open a session on every node on the bus
+        // and each would answer, and a global CTS or Abort would drive or tear down sessions it
+        // was never part of. Such frames are not for us and are dropped without a reply; an
+        // abort in answer to a global RTS would be one more frame of the same storm.
+        bool global = da == J1939Pgn.GlobalAddress;
+        if (control == J1939TpFrames.ControlBam ? !global : global)
+            return;
+
         switch (control)
         {
             case J1939TpFrames.ControlBam:
