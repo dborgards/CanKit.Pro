@@ -1,13 +1,15 @@
 namespace CanKit.Pro.CANopen.Nmt;
 
 /// <summary>
-/// CANopen NMT slave state (CiA 301 §7.3.2). The bootup message carries the byte
-/// <c>0x00</c> which is treated as an unsolicited transition into
-/// <see cref="PreOperational"/> in this MVP.
+/// CANopen NMT state (CiA 301 §7.3.2.2) as this node reports it and as a heartbeat or guarding
+/// reply carries it in bits 0..6. The values are the wire encoding of §7.2.8.3.2.2 Figure 45.
 /// </summary>
 public enum NmtState : byte
 {
-    /// <summary>Node has just powered up or been reset and has not yet sent a heartbeat.</summary>
+    /// <summary>NMT state Initialisation (§7.3.2.2.1): the node is being (re)initialised and has
+    /// not yet entered Pre-Operational. On the wire this is the boot-up message, a single
+    /// <c>0x00</c> byte on <c>0x700 + node-id</c> (§7.2.8.3.3); a node never reports it in a
+    /// heartbeat or guarding reply.</summary>
     Initializing = 0x00,
 
     /// <summary>Node reports itself as <c>Stopped</c> in a heartbeat (0x04).</summary>
@@ -36,9 +38,15 @@ public enum NmtCommand : byte
     /// <see cref="NmtState.PreOperational"/>.</summary>
     EnterPreOperational = 0x80,
 
-    /// <summary>Reset Node — full application reset (implies reset communication).</summary>
+    /// <summary>Reset Node (§7.2.8.2.1.5): the application and the communication profile return
+    /// to their power-on values, then the node sends boot-up and enters Pre-Operational. Without
+    /// a device description this node has no source for the application objects' power-on
+    /// values, so it restores the communication profile and leaves the application objects to
+    /// the application (see <c>ICanOpenNode.NmtCommandReceived</c>).</summary>
     ResetNode = 0x81,
 
-    /// <summary>Reset Communication — reset only the communication profile / heartbeats.</summary>
+    /// <summary>Reset Communication (§7.2.8.2.1.6): the communication-profile objects
+    /// (<c>1000h</c>–<c>1FFFh</c>) return to their power-on values, the guarding toggle is reset,
+    /// then the node sends boot-up and enters Pre-Operational.</summary>
     ResetCommunication = 0x82,
 }

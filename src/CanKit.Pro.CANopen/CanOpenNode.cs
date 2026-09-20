@@ -859,7 +859,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         if (data.Length < 1) return;
         byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
-        byte stateByte = (byte)(data[0] & 0x7F); // Toggle bit is bit 7; we do not use it in MVP.
+        // Bit 7 is the node-guarding toggle; a heartbeat carries 0 there (§7.2.8.3.2.2, "r:
+        // reserved (always 0)"), and a guarding reply is routed to HandleNodeGuardingResponse
+        // before it gets here, so the bit is masked rather than interpreted.
+        byte stateByte = (byte)(data[0] & 0x7F);
         NmtState state = stateByte switch
         {
             0x00 => NmtState.Initializing,      // Bootup frame.
