@@ -192,6 +192,16 @@ internal sealed partial class CanOpenNode
 
     private OdWriteDecision ValidatePdoMappingWrite(ushort index, byte subindex, byte[] value, bool isTpdo)
     {
+        // Steps 1 and 5 of the re-mapping procedure (§7.5.2.36 / §7.5.2.38) bracket every
+        // mapping change with the PDO destroyed: bit 31 of the communication record set. A
+        // mapping written into a live PDO would rebuild it mid-transfer — a TPDO with an
+        // empty mapping transmits empty frames — so the count and the entries are accepted
+        // only while the PDO does not exist. ConfigureTpdo / ConfigureRpdo follow the
+        // procedure; a master must too.
+        var commIndex = (ushort)(index - (isTpdo ? Co.TpdoMap : Co.RpdoMap) + (isTpdo ? Co.TpdoComm : Co.RpdoComm));
+        if ((_od.ReadUnsigned(commIndex, 0x01) & CanOpenCobId.InvalidBit) == 0)
+            return OdWriteDecision.Reject(SdoAbortCode.UnsupportedAccess);
+
         if (subindex == 0x00)
         {
             byte count = value[0];
@@ -274,6 +284,10 @@ internal sealed partial class CanOpenNode
 
         if (_tpdosByCobId.TryGetValue(rt.CobId, out var registered) && ReferenceEquals(registered, rt))
             _tpdosByCobId.Remove(rt.CobId);
+        // A transmission waiting out the inhibit time is an event the application already
+        // raised; a record write that leaves the PDO valid (an event-timer change, say) must not
+        // lose it, so it is re-requested against the rebuilt configuration below.
+        bool inhibitedEventPending = rt.InhibitPending;
         rt.EventTimerHandle?.Dispose();
         rt.EventTimerHandle = null;
         rt.InhibitHandle?.Dispose();
@@ -298,6 +312,8 @@ internal sealed partial class CanOpenNode
             _tpdosByCobId[rt.CobId] = rt;
             if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType) && rt.EventTimer > TimeSpan.Zero)
                 ScheduleTpdoEventTimer(rt);
+            if (inhibitedEventPending && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType))
+                RequestEventDrivenTransmission(rt);
         }
         RebuildCosRelevantEntries();
     }
@@ -428,7 +444,10 @@ internal sealed partial class CanOpenNode
         {
             if (_disposed != 0 || !ReferenceEquals(_tpdos[rt.PdoIndex], rt) || !rt.Valid) return;
             if (!CanOpenTransmissionType.IsEventDriven(rt.TransmissionType) || rt.EventTimer <= TimeSpan.Zero) return;
-            if (_state == NmtState.Operational) EmitTpdo(rt); // re-arms the timer itself
+            // The elapsed timer is an event like any other: it transmits now, or — when the
+            // inhibit time is the longer of the two — once that has elapsed. Either
+            // transmission re-arms the timer; outside Operational the timer keeps its cycle.
+            if (_state == NmtState.Operational) RequestEventDrivenTransmission(rt);
             else ScheduleTpdoEventTimer(rt);
         });
     }
@@ -450,7 +469,10 @@ internal sealed partial class CanOpenNode
             }
             return;
         }
-        EmitTpdo(rt);
+        // §7.5.2.37: the inhibit time bounds every transmission of an event-driven TPDO, and a
+        // PDO read is one of them; the RTR-only and synchronous types are outside its scope.
+        if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)) RequestEventDrivenTransmission(rt);
+        else EmitTpdo(rt);
     }
 
     private void TriggerTpdoOnActor(int pdoIndex)
@@ -550,12 +572,15 @@ internal sealed partial class CanOpenNode
                 var chunk = new byte[entry.ByteLength];
                 Buffer.BlockCopy(payload, offset, chunk, 0, entry.ByteLength);
                 // Under the OD lock (WriteRaw) so readers on other threads see whole values.
-                // The mapping was validated against the entry's width when it was written; a
-                // Domain entry simply takes the mapped bytes.
+                // The mapping was validated against the entry's width when it was written, so a
+                // rejected write here means the entry was re-declared since; that is reported
+                // rather than swallowed, because a PDO whose data silently never lands is the
+                // kind of defect nothing else would show.
                 try { _od.WriteRaw(entry.Index, entry.Subindex, chunk); }
                 catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or KeyNotFoundException)
                 {
-                    // An entry re-declared with another width since the mapping was validated.
+                    RaiseBackgroundException(new InvalidOperationException(
+                        $"RPDO{rp.PdoIndex}: the mapped object 0x{entry.Index:X4}:{entry.Subindex:X2} rejected {entry.ByteLength} byte(s): {ex.Message}", ex));
                 }
             }
             offset += entry.ByteLength;

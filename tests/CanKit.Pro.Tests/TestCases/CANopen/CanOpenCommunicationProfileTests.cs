@@ -1047,4 +1047,59 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         var timeoutsBeforeWitness = await witness.Task.WithTimeoutAsync(ShortTimeout);
         timeoutsBeforeWitness.Should().BeEmpty("an unused entry is no consumer and reports nothing");
     }
+
+    // FR-CO-019 (#133 review) — a store after "load" is the newer instruction: the next reset
+    // restores what was stored last, not the defaults the earlier "load" asked for.
+    [Fact]
+    public async Task A_Store_After_A_Load_Is_What_The_Next_Reset_Restores()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+
+        slave.RestoreDefaultParameters();
+        slave.ObjectDictionary.AddU16(0x2000, 0x00, 0xBEEF);
+        slave.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+        slave.StoreParameters();
+        await bootups.First;
+
+        await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, Slave);
+        await bootups.Second;
+
+        (await UploadUnsignedAsync(master, Slave, 0x1800, 0x01)).Should().Be(CanOpenCobId.TpdoDefault(Slave, 1),
+            "the store came after the load, so it is the store the reset restores");
+        (await UploadUnsignedAsync(master, Slave, 0x1A00, 0x00)).Should().Be(1u);
+    }
+
+    // FR-CO-014 (#133 review) — SendSyncAsync transmits on the CAN-ID the dictionary holds when
+    // it is called. The apply that updates the runtime's copy of 1005h is posted to the actor, so
+    // a caller that has just written 1005h could otherwise race it; reading the dictionary
+    // directly closes that by construction — this test pins the behaviour, it cannot time the race.
+    [Fact]
+    public async Task SendSyncAsync_Transmits_On_The_CanId_Just_Written_To_1005h()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var observer = Open(session, 1);
+        using var producer = CanOpen.OpenNode(busA, nodeId: Slave);
+
+        var onNewId = NewTcs<bool>();
+        int onOldId = 0;
+        observer.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (frame.IsExtendedFrame || frame.IsRemoteFrame || frame.Data.Length != 0) return;
+            if ((uint)frame.ID == 0x0F0) onNewId.TrySetResult(true);
+            if ((uint)frame.ID == 0x080) Interlocked.Increment(ref onOldId);
+        };
+
+        producer.ObjectDictionary.WriteUnsigned(0x1005, 0x00, 0x0F0);
+        await producer.SendSyncAsync();
+
+        await onNewId.Task.WithTimeoutAsync(ShortTimeout);
+        onOldId.Should().Be(0, "the one SYNC sent went to the CAN-ID the dictionary already held");
+    }
 }

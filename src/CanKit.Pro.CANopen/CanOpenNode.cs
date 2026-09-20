@@ -356,7 +356,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     public Task SendSyncAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        return SendControlFrame(_syncCobId, Array.Empty<byte>(), cancellationToken);
+        // The dictionary, not the actor's copy of it: a caller that has just written 1005h sees
+        // its own write here, while the runtime copy is updated by a posted apply that may not
+        // have run yet. The value was validated when the dictionary accepted it.
+        uint cobId = _od.ReadUnsigned(Co.SyncCobId, 0x00) & CanOpenCobId.CanIdMask;
+        return SendControlFrame(cobId, Array.Empty<byte>(), cancellationToken);
     }
 
     /// <inheritdoc />

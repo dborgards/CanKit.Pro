@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -696,11 +698,17 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         {
             if (e.CobId == Rpdo1) received.TrySetResult(e.Payload);
         };
+        // A write the RPDO could not land is reported here rather than swallowed; the assertion
+        // below names it, so a failure says why the value is missing instead of only that it is.
+        var background = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        device.BackgroundExceptionOccurred += (_, ex) => background.Enqueue(ex);
 
         await StartAsync(wire, device);
         wire.Transmit(Rpdo1, new byte[] { 0x34, 0x12 });
         (await received.Task.WithTimeoutAsync(ShortTimeout)).Should().Equal(0x34, 0x12);
-        od.ReadUnsigned(0x2100, 0x00).Should().Be(0x1234u);
+        od.ReadUnsigned(0x2100, 0x00).Should().Be(0x1234u,
+            "the received bytes land in the mapped object (background: {0})", string.Join(" | ", background.Select(x => x.ToString())));
+        background.Should().BeEmpty();
     }
 
     // =========================================================================================
@@ -1044,5 +1052,138 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         (await received.Task.WithTimeoutAsync(ShortTimeout)).Should().HaveCount(6);
         od.ReadUnsigned(0x2100, 0x00).Should().Be(0x1234u);
         od.ReadUnsigned(0x2101, 0x00).Should().Be(0x5678u, "the first data bytes up to the mapped length are used");
+    }
+
+    // =========================================================================================
+    // Findings of the #133 review.
+    // =========================================================================================
+
+    // FR-CO-020 — steps 1 and 5 of the re-mapping procedure (§7.5.2.38) bracket every mapping
+    // change with the PDO destroyed (bit 31 of 1800h:01 set). A mapping written into a live PDO
+    // would rebuild it mid-transfer — an emptied mapping transmits empty frames until the master
+    // reaches step 4 — so the count and the entries are refused while the PDO exists, and the
+    // same writes go through once it is destroyed.
+    [Fact]
+    public async Task Mapping_Records_Change_Only_While_The_Pdo_Is_Destroyed()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        device.ObjectDictionary.AddU8(0x2000, 0x00, 0xAA);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 8));
+
+        (await DownloadShouldAbortAsync(master, 0x1A00, 0x00, new byte[] { 0x00 }))
+            .AbortCode.Should().Be((uint)SdoAbortCode.UnsupportedAccess, "TPDO1 exists; step 1 (destroy) has not happened");
+        (await DownloadShouldAbortAsync(master, 0x1A00, 0x01, MappingEntryBytes(0x2000, 0x00, 8)))
+            .AbortCode.Should().Be((uint)SdoAbortCode.UnsupportedAccess);
+        (await UploadAsync(master, 0x1A00, 0x00)).Should().Equal(new byte[] { 0x01 }, "the live mapping is untouched");
+
+        await DownloadAsync(master, 0x1800, 0x01, U32Bytes(CanOpenCobId.InvalidBit | Tpdo1));
+        await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x00 });
+        await DownloadAsync(master, 0x1A00, 0x01, MappingEntryBytes(0x2000, 0x00, 8));
+        await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x01 });
+        await DownloadAsync(master, 0x1800, 0x01, U32Bytes(Tpdo1));
+        (await UploadAsync(master, 0x1A00, 0x00)).Should().Equal(0x01);
+    }
+
+    // FR-CO-016 — a PDO read (an RTR) of an event-driven TPDO is a transmission of that TPDO,
+    // and §7.5.2.37 makes the inhibit time the minimum interval between its transmissions. The
+    // SYNC after the RTR is the witness that the RTR was handled (same bus, same subscription,
+    // same mailbox); TPDO2's trigger is the witness for the send path, as in the inhibit test.
+    [Fact]
+    public async Task An_Rtr_On_An_Event_Driven_Tpdo_Respects_The_Inhibit_Time()
+    {
+        var clock = new ManualTimeSource();
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = OpenClocked(busB, Device, clock, new CanOpenNodeOptions { EnableChangeOfStateTpdo = false });
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 1);
+        od.AddU8(0x2001, 0x00, 0);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), TpdoTransmission.EventDriven,
+            inhibitTime: TimeSpan.FromMilliseconds(50));
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0x00, 8), TpdoTransmission.EventDriven);
+        var syncs = new SemaphoreSlim(0);
+        device.SyncReceived += (_, _) => syncs.Release();
+
+        await StartAsync(wire, device);
+        await device.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+
+        wire.SendRtr(Tpdo1);
+        wire.SendSync();
+        (await syncs.WaitAsync(ShortTimeout)).Should().BeTrue("the SYNC behind the RTR proves the RTR was handled");
+        await device.TriggerTpdoAsync(2);
+        await wire.WaitForCountAsync(Tpdo2, 1);
+        wire.Count(Tpdo1).Should().Be(1, "the RTR arrived inside the 50 ms inhibit time");
+
+        Advance(clock, device, TimeSpan.FromMilliseconds(50));
+        await wire.WaitForCountAsync(Tpdo1, 2);
+        wire.Payloads(Tpdo1)[1].Should().Equal(0x01, 0x00);
+    }
+
+    // FR-CO-016 — an event timer shorter than the inhibit time cannot undercut it: the timer's
+    // expiry is an event like any other, and the transmission it asks for waits for the inhibit
+    // time to elapse.
+    [Fact]
+    public async Task An_Event_Timer_Shorter_Than_The_Inhibit_Time_Does_Not_Undercut_It()
+    {
+        var clock = new ManualTimeSource();
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = OpenClocked(busB, Device, clock, new CanOpenNodeOptions { EnableChangeOfStateTpdo = false });
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 1);
+        od.AddU8(0x2001, 0x00, 0);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), TpdoTransmission.EventTimer,
+            eventTimerInterval: TimeSpan.FromMilliseconds(20), inhibitTime: TimeSpan.FromMilliseconds(50));
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0x00, 8), TpdoTransmission.EventDriven);
+
+        await StartAsync(wire, device);
+        await device.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+
+        Advance(clock, device, TimeSpan.FromMilliseconds(20));
+        await device.TriggerTpdoAsync(2);
+        await wire.WaitForCountAsync(Tpdo2, 1);
+        wire.Count(Tpdo1).Should().Be(1, "the timer elapsed 20 ms after a transmission, inside the 50 ms inhibit time");
+
+        Advance(clock, device, TimeSpan.FromMilliseconds(30));
+        await wire.WaitForCountAsync(Tpdo1, 2);
+    }
+
+    // FR-CO-016 — a transmission waiting out the inhibit time is an event the application raised;
+    // a record write that leaves the PDO valid (the event timer, 1800h:05, may change while the
+    // PDO exists) rebuilds the TPDO but must not lose it.
+    [Fact]
+    public async Task A_Transmission_Waiting_Out_The_Inhibit_Time_Survives_An_Event_Timer_Write()
+    {
+        var clock = new ManualTimeSource();
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = OpenClocked(busB, Device, clock, new CanOpenNodeOptions { EnableChangeOfStateTpdo = false });
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 1);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), TpdoTransmission.EventDriven,
+            inhibitTime: TimeSpan.FromMilliseconds(50));
+
+        await StartAsync(wire, device);
+        await device.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+        od.WriteUnsigned(0x2000, 0x00, 2);
+        await device.TriggerTpdoAsync(1); // inside the inhibit time: waits
+
+        od.WriteUnsigned(0x1800, 0x05, 500); // allowed while the PDO is valid; rebuilds the TPDO
+        Settle(device);
+        od.ReadUnsigned(0x1800, 0x05).Should().Be(500u);
+
+        Advance(clock, device, TimeSpan.FromMilliseconds(50));
+        await wire.WaitForCountAsync(Tpdo1, 2);
+        wire.Payloads(Tpdo1)[1].Should().Equal(new byte[] { 0x02, 0x00 }, "the waiting transmission went out with the current value");
     }
 }

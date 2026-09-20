@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
@@ -288,7 +289,13 @@ internal sealed partial class CanOpenNode
     {
         if (!SignatureMatches(value, SaveSignature))
             return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferred);
-        RunOnActor(() => _powerOnValues = SnapshotRestorableValues());
+        RunOnActor(() =>
+        {
+            _powerOnValues = SnapshotRestorableValues();
+            // A store after "load" is the newer instruction: the next reset restores what was
+            // just stored, not the defaults the earlier "load" asked for.
+            _restoreDefaultsOnReset = false;
+        });
         return OdWriteDecision.Handled;
     }
 
@@ -452,7 +459,14 @@ internal sealed partial class CanOpenNode
         _heartbeatProducerHandle?.Dispose();
         _heartbeatProducerHandle = null;
         _heartbeatProducerInterval = interval;
-        if (interval > TimeSpan.Zero) ScheduleHeartbeatProducerTick();
+        if (interval > TimeSpan.Zero)
+        {
+            // §7.2.8.3.2.2: with 1017h ≠ 0 the heartbeat protocol is used, so guarding ends here
+            // — a node life time still running from the last poll, and an event that occurred,
+            // would otherwise outlive the switch and report a master that was told to stop polling.
+            ResetLifeGuardingState();
+            ScheduleHeartbeatProducerTick();
+        }
     }
 
     // §7.5.2.19: every sub-index with a node-id in 1..127 and a non-zero time is a consumer.
@@ -469,20 +483,17 @@ internal sealed partial class CanOpenNode
             desired[nodeId] = TimeSpan.FromMilliseconds(ms);
         }
 
-        var stale = new List<byte>();
-        foreach (var kv in _heartbeatConsumers)
-        {
-            if (!desired.TryGetValue(kv.Key, out var timeout) || timeout != kv.Value.Timeout)
-                stale.Add(kv.Key);
-        }
+        var stale = _heartbeatConsumers
+            .Where(kv => !desired.TryGetValue(kv.Key, out var timeout) || timeout != kv.Value.Timeout)
+            .Select(kv => kv.Key)
+            .ToList();
         foreach (var nodeId in stale)
         {
             _heartbeatConsumers[nodeId].Deadline?.Dispose();
             _heartbeatConsumers.Remove(nodeId);
         }
-        foreach (var kv in desired)
+        foreach (var kv in desired.Where(kv => !_heartbeatConsumers.ContainsKey(kv.Key)))
         {
-            if (_heartbeatConsumers.ContainsKey(kv.Key)) continue;
             var producer = kv.Key;
             var consumer = new HeartbeatConsumer(producer, kv.Value);
             consumer.Deadline = _deadlines.Arm(kv.Value, () => OnHeartbeatMissed(producer));
@@ -555,16 +566,11 @@ internal sealed partial class CanOpenNode
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat.
-        if (_heartbeatProducerInterval > TimeSpan.Zero)
-        {
-            _ = SendOrderedControlFrames(
+        _ = _heartbeatProducerInterval > TimeSpan.Zero
+            ? SendOrderedControlFrames(
                 (CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 }),
-                (CanOpenCobId.Heartbeat(_nodeId), new[] { (byte)NmtState.PreOperational }));
-        }
-        else
-        {
-            _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 });
-        }
+                (CanOpenCobId.Heartbeat(_nodeId), new[] { (byte)NmtState.PreOperational }))
+            : SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 });
     }
 
     private void AbortServerSessions(SdoAbortCode code)

@@ -601,10 +601,12 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         (await heartbeatTap.NextAsync())[0].Should().Be(0x00, "boot-up");
 
         SendNmt(masterBus, NmtCommand.Start, NodeId);
+        // One poll at a time: each reply leaves the node on its own send task, and two replies
+        // in flight at once may reach the bus in either order. The reply to the first poll is the
+        // witness that the Start was processed and put nothing on this COB-ID before it.
         SendRtr(masterBus, NodeId);
-        SendRtr(masterBus, NodeId);
-
         (await heartbeatTap.NextAsync())[0].Should().Be(0x05, "the first frame after the Start is the reply: Operational, toggle 0");
+        SendRtr(masterBus, NodeId);
         (await heartbeatTap.NextAsync())[0].Should().Be(0x85, "the second is the next reply, toggle 1: no heartbeat sat in front of them");
         node.State.Should().Be(NmtState.Operational);
     }
@@ -846,5 +848,44 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
             _clock.Advance(by);
             await SettleAsync().ConfigureAwait(false);
         }
+    }
+
+    // FR-CO-021 (#133 review) — starting the heartbeat producer ends a node life time that is
+    // already running: once 1017h is non-zero "the heartbeat protocol is used" (§7.2.8.3.2.2), and
+    // the deadline armed by the last poll must not report a master that was told to stop polling.
+    // Guarding starts afresh with the next poll after the producer stops.
+    [Fact]
+    public async Task LifeGuarding_Ends_When_The_Heartbeat_Producer_Starts_And_Resumes_With_The_Next_Poll()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 1);
+        using var masterBus = Open(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, NodeId, clock);
+        var witness = new ActorWitness(node, masterBus, clock);
+        var events = new AsyncQueue<LifeGuardingEventArgs>();
+        node.LifeGuardingEvent += (_, e) => events.Add(e);
+
+        node.ObjectDictionary.WriteUnsigned(GuardTimeIndex, 0x00, 50);
+        node.ObjectDictionary.WriteUnsigned(LifeTimeFactorIndex, 0x00, 3);
+        await witness.SettleAsync();
+        SendRtr(masterBus, NodeId);
+        await witness.SettleAsync();
+
+        // The life time is running; the switch to heartbeat ends it.
+        node.StartHeartbeatProducer(TimeSpan.FromSeconds(10));
+        await witness.SettleAsync();
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(500));
+        events.Count.Should().Be(0, "the life time armed by the last poll ended with the switch to the heartbeat protocol");
+
+        node.StopHeartbeatProducer();
+        await witness.SettleAsync();
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(500));
+        events.Count.Should().Be(0, "guarding starts with the first RTR after the producer stopped, not with the stop");
+
+        SendRtr(masterBus, NodeId);
+        await witness.SettleAsync();
+        await witness.AdvanceAsync(TimeSpan.FromMilliseconds(150));
+        (await events.NextAsync(ShortTimeout, "life guarding event")).State.Should().Be(LifeGuardingState.Occurred);
     }
 }
