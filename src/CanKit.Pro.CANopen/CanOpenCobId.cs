@@ -69,6 +69,47 @@ public static class CanOpenCobId
     /// <summary>Base COB-ID for NMT error control (heartbeat + bootup): <c>0x700 + node-id</c>.</summary>
     public const uint HeartbeatBase = 0x700;
 
+    /// <summary>Bit 31 of a COB-ID object (<c>1014h</c>, <c>1200h</c>, <c>1400h:01</c>,
+    /// <c>1800h:01</c>): set means the communication object "does not exist / is not valid"
+    /// (CiA 301 Tables 59, 64, 66, 70).</summary>
+    public const uint InvalidBit = 0x8000_0000;
+
+    /// <summary>Bit 30 of a TPDO COB-ID (<c>1800h:01</c>): set means "no RTR allowed on this PDO"
+    /// (CiA 301 Table 70).</summary>
+    public const uint NoRtrBit = 0x4000_0000;
+
+    /// <summary>Bit 30 of the SYNC COB-ID (<c>1005h</c>): set means "CANopen device generates
+    /// SYNC message" (CiA 301 Table 55).</summary>
+    public const uint SyncGenerateBit = 0x4000_0000;
+
+    /// <summary>Bit 29 of a COB-ID object: set means the CAN-ID is a 29-bit extended identifier.
+    /// This node supports CAN base frames only and rejects the bit with SDO abort
+    /// <c>0609 0030h</c>, as CiA 301 prescribes.</summary>
+    public const uint ExtendedFrameBit = 0x2000_0000;
+
+    /// <summary>Mask of the 11-bit CAN-ID in a COB-ID object.</summary>
+    public const uint CanIdMask = 0x7FF;
+
+    /// <summary>
+    /// Whether <paramref name="canId"/> is one of the restricted CAN-IDs of CiA 301 §7.3.5
+    /// Table 40, which no configurable communication object (SYNC, TIME, EMCY, PDO, SDO) may use:
+    /// <c>000h</c> (NMT), <c>001h</c>–<c>07Fh</c>, <c>101h</c>–<c>180h</c>, <c>581h</c>–<c>5FFh</c>
+    /// (default SDO tx), <c>601h</c>–<c>67Fh</c> (default SDO rx), <c>6E0h</c>–<c>6FFh</c>,
+    /// <c>701h</c>–<c>77Fh</c> (NMT error control) and <c>780h</c>–<c>7FFh</c>.
+    /// </summary>
+    public static bool IsRestricted(uint canId) => canId switch
+    {
+        0x000 => true,
+        >= 0x001 and <= 0x07F => true,
+        >= 0x101 and <= 0x180 => true,
+        >= 0x581 and <= 0x5FF => true,
+        >= 0x601 and <= 0x67F => true,
+        >= 0x6E0 and <= 0x6FF => true,
+        >= 0x701 and <= 0x77F => true,
+        >= 0x780 => true,
+        _ => false,
+    };
+
     /// <summary>Validates that <paramref name="nodeId"/> falls in the legal CiA 301 range.</summary>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="nodeId"/> is
     /// outside <c>[1, 127]</c>.</exception>

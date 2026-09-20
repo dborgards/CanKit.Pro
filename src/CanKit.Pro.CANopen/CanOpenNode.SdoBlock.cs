@@ -760,11 +760,10 @@ internal sealed partial class CanOpenNode
             }
         }
 
-        try { _od.WriteRaw(session.Index, session.Subindex, final); }
-        catch
+        if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort))
         {
             _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
-                SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)SdoAbortCode.General));
+                SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)(abort ?? SdoAbortCode.General)));
             _sdoBlockServer = null;
             session.Deadline?.Dispose();
             return;

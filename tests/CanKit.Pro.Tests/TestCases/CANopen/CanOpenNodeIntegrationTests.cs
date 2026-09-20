@@ -690,6 +690,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        // The state-change heartbeat belongs to the heartbeat protocol (CiA 301 §7.2.8.3.2.2): it
+        // announces the transition only while 1017h is non-zero, so the slave runs the producer.
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(500));
 
         var observed = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
         master.HeartbeatReceived += (s, e) =>
@@ -739,6 +742,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        // The state-change heartbeat belongs to the heartbeat protocol (CiA 301 §7.2.8.3.2.2): it
+        // announces the transition only while 1017h is non-zero, so the slave runs the producer.
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(500));
 
         // One handler for the whole test: each step arms the state it is waiting for. The slave
         // also emits an unsolicited boot-up heartbeat, which no step waits for and which the
@@ -1206,14 +1212,37 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         consumer.ObjectDictionary.ReadUnsigned(0x2100, 0x01).Should().Be((uint)0xDEAD);
     }
 
-    // Regression for PR #30 Bugbot 3600571636 (TPDO skips mapping slot offset). When a mapped
-    // OD entry is missing on the producer side, EmitTpdo used to `continue` without advancing
-    // the payload offset, so every subsequent value packed one slot left of where the mapping
-    // said it should land. Verify the second slot lands at its configured byte offset even
-    // when the first slot's OD entry is absent -- the missing slot's window is emitted as its
-    // default zero bytes, and later slots are decoded correctly by the peer.
+    // A mapping entry that names an object the OD does not hold is rejected when the mapping is
+    // written, with the abort code CiA 301 §7.5.2.38 step 3 prescribes (0602 0000h) -- through
+    // ConfigureTpdo exactly as over SDO, because both are writes to the same 1A00h record. The
+    // earlier behaviour (emit zeros for the missing slot) is what Bugbot 3600571636 on PR #30
+    // patched around; a mapping the OD cannot serve is a configuration error, not a frame layout.
     [Fact]
-    public async Task Tpdo_MissingMappingSlot_KeepsSubsequentSlotOffsets()
+    public void Tpdo_Mapping_Of_A_Missing_Object_Is_Rejected_At_Configuration()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var producer = CanOpen.OpenNode(busA, nodeId: 0x11);
+        producer.ObjectDictionary.AddU16(0x2000, 0x01, 0xDEAD);
+
+        var mapping = new PdoMapping()
+            .Add(0x2000, 0x00, 16)   // absent from the producer's OD
+            .Add(0x2000, 0x01, 16);
+
+        Action configure = () => producer.ConfigureTpdo(pdoIndex: 1, mapping);
+
+        configure.Should().Throw<ArgumentException>()
+            .Which.Message.Should().Contain("06020000", "the rejection names the SDO abort code the same write would produce on the bus");
+        // The PDO stays destroyed rather than half-configured (bit 31 of 1800h:01 set).
+        (producer.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.InvalidBit).Should().Be(CanOpenCobId.InvalidBit);
+    }
+
+    // FR-CO-005 -- dummy mapping (CiA 301 §7.5.2.36): an entry on one of the static data types
+    // 0002h..0007h occupies its bytes without an OD object behind it. The second slot must land at
+    // its configured byte offset; if the offset were not advanced the payload would read
+    // [0xAD, 0xDE, 0x00, 0x00].
+    [Fact]
+    public async Task Tpdo_DummyMapping_KeepsSubsequentSlotOffsets()
     {
         var session = NewSession();
         using var busA = Open(session, 0);
@@ -1222,24 +1251,17 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var producer = CanOpen.OpenNode(busA, nodeId: 0x11);
         using var consumer = CanOpen.OpenNode(busB, nodeId: 0x01);
 
-        // Producer OD is intentionally missing 0x2000:00; only the second mapped slot
-        // (0x2000:01) exists. The mapping still declares two 16-bit slots so total frame
-        // length is 4 bytes.
         producer.ObjectDictionary.AddU16(0x2000, 0x01, 0xDEAD);
-
         consumer.ObjectDictionary.AddU16(0x2100, 0x00, 0);
         consumer.ObjectDictionary.AddU16(0x2100, 0x01, 0);
 
         var producerCobId = CanOpenCobId.TpdoDefault(nodeId: 0x11, pdoIndex: 1);
-        var producerMapping = new PdoMapping()
-            .Add(0x2000, 0x00, 16)   // missing on the producer's OD
-            .Add(0x2000, 0x01, 16);  // present -- must land at byte offset 2, not 0
-        producer.ConfigureTpdo(pdoIndex: 1, producerMapping);
-
-        var consumerMapping = new PdoMapping()
-            .Add(0x2100, 0x00, 16)
-            .Add(0x2100, 0x01, 16);
-        consumer.ConfigureRpdo(pdoIndex: 1, consumerMapping, cobId: producerCobId);
+        producer.ConfigureTpdo(pdoIndex: 1, new PdoMapping()
+            .Add(0x0006, 0x00, 16)   // dummy UNSIGNED16: two bytes of padding
+            .Add(0x2000, 0x01, 16)); // must land at byte offset 2, not 0
+        consumer.ConfigureRpdo(pdoIndex: 1, new PdoMapping()
+            .Add(0x0006, 0x00, 16)   // the consumer skips the padding the same way
+            .Add(0x2100, 0x01, 16), cobId: producerCobId);
 
         var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         consumer.RpdoReceived += (s, e) =>
@@ -1253,8 +1275,6 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await producer.TriggerTpdoAsync(1);
 
         var payload = await received.Task.WithTimeoutAsync(ShortTimeout);
-        // Missing first slot -> two default zero bytes; then 0xDEAD little-endian.
-        // If the bug regresses (offset not advanced), the payload would be [0xAD, 0xDE, 0x00, 0x00].
         payload.Should().Equal(0x00, 0x00, 0xAD, 0xDE);
 
         consumer.ObjectDictionary.ReadUnsigned(0x2100, 0x00).Should().Be((uint)0x0000);

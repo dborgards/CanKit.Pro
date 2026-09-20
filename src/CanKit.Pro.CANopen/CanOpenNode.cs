@@ -103,19 +103,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private IDisposable? _syncProducerHandle;
     private TimeSpan _syncProducerInterval;
 
-    // PDO tables.
-    private readonly Dictionary<int, TpdoConfig> _tpdos = new();
-    private readonly Dictionary<uint, RpdoConfig> _rpdosByCobId = new();
-
-    // Change-of-state TPDO support (FR-CO-006): volatile pre-filter snapshot of OD entries
-    // mapped in at least one event-driven TPDO (rebuilt on the actor by
-    // RebuildCosRelevantEntries), plus the dirty-set coalescing state that bounds CoS posts
-    // to at most one queued evaluation (see OnOdEntryWrittenForCoS).
-    private volatile HashSet<uint> _cosRelevantEntries = new();
-    private readonly object _cosGate = new();
-    private HashSet<uint>? _cosDirty;
-    private bool _cosPosted;
-
     // Node-guarding producer toggle bit (FR-CO-009). CiA 301 §7.2.8.3.3 requires the producer
     // to start with toggle=0 and flip it on every reply so the consumer can distinguish a
     // fresh answer from a stale duplicate.
@@ -167,10 +154,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// <inheritdoc />
     public event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout;
     /// <inheritdoc />
+    public event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent;
+    /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
     internal CanOpenNode(ICanBusService service, byte nodeId, CanOpenNodeOptions options,
-        bool ownsService)
+        bool ownsService, ITimeSource? timeSource = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         CanOpenCobId.ValidateNodeId(nodeId);
@@ -179,9 +168,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         _options.Validate();
         _ownsService = ownsService;
 
-        _actor = new ProtocolActor();
+        // The time source is a test seam (#113): inhibit times, event timers and every deadline
+        // are measured against the actor's monotonic source, which a test can drive by hand.
+        _actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, synchronizationContext: null,
+            timeSource, shutdownTimeout: null);
         _actor.BackgroundExceptionOccurred += (_, ex) => RaiseBackgroundException(ex);
         _deadlines = new DeadlineScheduler(_actor);
+
+        // The communication-profile objects at their CiA 301 defaults, plus the OD hooks that
+        // validate writes to them and carry accepted values into the runtime
+        // (CanOpenNode.CommunicationProfile.cs).
+        PopulateCommunicationProfile();
 
         // Change-of-state TPDOs (FR-CO-006): application-originated OD writes trigger
         // event-driven TPDOs whose mapping contains the written entry.
@@ -247,6 +244,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // (CiA 301 §7.2.8.3.2). We do it here at construction so tests can observe it.
         _actor.Post(() =>
         {
+            ApplyAllCommunicationObjects();
             _state = NmtState.PreOperational;
             _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 });
         });
@@ -266,24 +264,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         if (interval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(interval));
-        _actor.Post(() =>
-        {
-            _heartbeatProducerHandle?.Dispose();
-            _heartbeatProducerInterval = interval;
-            ScheduleHeartbeatProducerTick();
-        });
+        // 1017h producer heartbeat time (CiA 301 §7.5.2.20); the runtime follows the OD.
+        _od.WriteUnsigned(Co.ProducerHeartbeat, 0x00, ToMilliseconds16(interval, nameof(interval), allowZero: false));
     }
 
     /// <inheritdoc />
     public void StopHeartbeatProducer()
     {
         if (_disposed != 0) return;
-        _actor.Post(() =>
-        {
-            _heartbeatProducerHandle?.Dispose();
-            _heartbeatProducerHandle = null;
-            _heartbeatProducerInterval = TimeSpan.Zero;
-        });
+        _od.WriteUnsigned(Co.ProducerHeartbeat, 0x00, 0);
     }
 
     /// <inheritdoc />
@@ -292,28 +281,58 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(producerNodeId);
         if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
-        _actor.Post(() =>
+        ushort ms = ToMilliseconds16(timeout, nameof(timeout), allowZero: false);
+
+        // 1016h consumer heartbeat time (CiA 301 §7.5.2.19): reuse the sub-index already
+        // monitoring this producer, else the first unused one, else grow the array. Serialised
+        // so two threads cannot both grow into the same sub-index.
+        lock (_heartbeatTableGate)
         {
-            if (_heartbeatConsumers.TryGetValue(producerNodeId, out var existing))
-                existing.Deadline?.Dispose();
-            var consumer = new HeartbeatConsumer(producerNodeId, timeout);
-            consumer.Deadline = _deadlines.Arm(timeout, () => OnHeartbeatMissed(producerNodeId));
-            _heartbeatConsumers[producerNodeId] = consumer;
-        });
+            byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
+            int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
+            if (slot < 0)
+            {
+                for (byte s = 1; s <= count; s++)
+                {
+                    if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, s, out var v) && (ushort)(v & 0xFFFF) == 0)
+                    {
+                        slot = s;
+                        break;
+                    }
+                }
+            }
+            if (slot < 0)
+            {
+                if (count >= 0x7F)
+                    throw new InvalidOperationException("1016h holds at most 127 consumer heartbeat times (CiA 301 §7.5.2.19).");
+                slot = count + 1;
+                _od.AddU32(Co.ConsumerHeartbeat, (byte)slot, 0, OdAccess.ReadWrite, pdoMappable: false);
+                _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
+            }
+            _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
+        }
     }
 
     /// <inheritdoc />
     public void RemoveHeartbeatConsumer(byte producerNodeId)
     {
         if (_disposed != 0) return;
-        _actor.Post(() =>
+        lock (_heartbeatTableGate)
         {
-            if (_heartbeatConsumers.TryGetValue(producerNodeId, out var consumer))
-            {
-                consumer.Deadline?.Dispose();
-                _heartbeatConsumers.Remove(producerNodeId);
-            }
-        });
+            byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
+            int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
+            if (slot > 0) _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, 0);
+        }
+    }
+
+    private int FindHeartbeatConsumerSlot(byte producerNodeId, byte count)
+    {
+        for (byte s = 1; s <= count; s++)
+        {
+            if (!_od.TryReadUnsigned(Co.ConsumerHeartbeat, s, out var v)) continue;
+            if ((ushort)(v & 0xFFFF) != 0 && (byte)((v >> 16) & 0xFF) == producerNodeId) return s;
+        }
+        return -1;
     }
 
     /// <inheritdoc />
@@ -321,31 +340,23 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         if (interval <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(interval));
-        _actor.Post(() =>
-        {
-            _syncProducerHandle?.Dispose();
-            _syncProducerInterval = interval;
-            ScheduleSyncProducerTick();
-        });
+        // 1006h communication cycle period, then bit 30 of 1005h (CiA 301 §7.5.2.5 / §7.5.2.6).
+        _od.WriteUnsigned(Co.CyclePeriod, 0x00, ToMicroseconds32(interval, nameof(interval)));
+        _od.WriteUnsigned(Co.SyncCobId, 0x00, _od.ReadUnsigned(Co.SyncCobId, 0x00) | CanOpenCobId.SyncGenerateBit);
     }
 
     /// <inheritdoc />
     public void StopSyncProducer()
     {
         if (_disposed != 0) return;
-        _actor.Post(() =>
-        {
-            _syncProducerHandle?.Dispose();
-            _syncProducerHandle = null;
-            _syncProducerInterval = TimeSpan.Zero;
-        });
+        _od.WriteUnsigned(Co.SyncCobId, 0x00, _od.ReadUnsigned(Co.SyncCobId, 0x00) & ~CanOpenCobId.SyncGenerateBit);
     }
 
     /// <inheritdoc />
     public Task SendSyncAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        return SendControlFrame(CanOpenCobId.Sync, Array.Empty<byte>(), cancellationToken);
+        return SendControlFrame(_syncCobId, Array.Empty<byte>(), cancellationToken);
     }
 
     /// <inheritdoc />
@@ -355,83 +366,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         var msg = new EmcyMessage(_nodeId, errorCode, errorRegister, manufacturerSpecific.Span);
-        return SendControlFrame(CanOpenCobId.Emcy(_nodeId), msg.Encode(), cancellationToken);
-    }
-
-    /// <inheritdoc />
-    public void ConfigureTpdo(int pdoIndex, PdoMapping mapping,
-        TpdoTransmission transmission = TpdoTransmission.EventDriven, uint? cobId = null,
-        TimeSpan? eventTimerInterval = null)
-    {
-        ThrowIfDisposed();
-        if (pdoIndex is < 1 or > 4)
-            throw new ArgumentOutOfRangeException(nameof(pdoIndex), pdoIndex, "PDO index must be 1..4.");
-        if (mapping is null) throw new ArgumentNullException(nameof(mapping));
-        var actualCobId = cobId ?? CanOpenCobId.TpdoDefault(_nodeId, pdoIndex);
-        var interval = eventTimerInterval ?? _options.DefaultTpdoEventTimerInterval;
-
-        void Apply()
-        {
-            if (_tpdos.TryGetValue(pdoIndex, out var existing))
-                existing.EventTimerHandle?.Dispose();
-            var config = new TpdoConfig(pdoIndex, actualCobId, mapping, transmission, interval);
-            _tpdos[pdoIndex] = config;
-            if (transmission == TpdoTransmission.EventTimer)
-                ScheduleTpdoEventTimer(config);
-            RebuildCosRelevantEntries();
-        }
-
-        // A caller already running on the actor loop (e.g. reconfiguring a TPDO from within a
-        // SyncReceived / NmtCommandReceived handler) would deadlock the loop against itself if
-        // we synchronously waited on PostAsync -- the posted item cannot execute until the
-        // current callback returns, but the current callback is stuck waiting for it. Apply
-        // inline in that case; it is still the same single-writer thread that any other TPDO
-        // config mutation would run on, so no coordination is needed.
-        if (_actor.IsOnCurrentActor) Apply();
-        else _actor.PostAsync(Apply).GetAwaiter().GetResult();
-    }
-
-    /// <inheritdoc />
-    public void ConfigureRpdo(int pdoIndex, PdoMapping mapping, uint? cobId = null)
-    {
-        ThrowIfDisposed();
-        if (pdoIndex is < 1 or > 4)
-            throw new ArgumentOutOfRangeException(nameof(pdoIndex), pdoIndex, "PDO index must be 1..4.");
-        if (mapping is null) throw new ArgumentNullException(nameof(mapping));
-        var actualCobId = cobId ?? CanOpenCobId.RpdoDefault(_nodeId, pdoIndex);
-
-        void Apply()
-        {
-            // Clean out any previous entry that had a different COB-ID for the same slot.
-            uint[] existingKeys = new uint[_rpdosByCobId.Count];
-            int i = 0;
-            foreach (var kv in _rpdosByCobId) existingKeys[i++] = kv.Key;
-            foreach (var key in existingKeys.Where(key => _rpdosByCobId[key].PdoIndex == pdoIndex))
-            {
-                _rpdosByCobId.Remove(key);
-            }
-            _rpdosByCobId[actualCobId] = new RpdoConfig(pdoIndex, actualCobId, mapping);
-        }
-
-        // See ConfigureTpdo above: a caller already on the actor loop (e.g. re-mapping an RPDO
-        // from within an NmtCommandReceived handler that transitions the node into Operational)
-        // would deadlock the loop against itself if we synchronously waited on PostAsync. Apply
-        // inline in that case -- still the same single-writer thread that any other RPDO table
-        // mutation would run on.
-        if (_actor.IsOnCurrentActor) Apply();
-        else _actor.PostAsync(Apply).GetAwaiter().GetResult();
-    }
-
-    /// <inheritdoc />
-    public Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default)
-    {
-        ThrowIfDisposed();
+        // 1001h is "a part of an emergency object" (CiA 301 §7.5.2.2): the register a master
+        // reads is the one the EMCY carried.
+        _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
         return _actor.PostAsync(() =>
         {
-            if (_state != NmtState.Operational) return;
-            if (!_tpdos.TryGetValue(pdoIndex, out var config)) return;
-            EmitTpdo(config);
-        });
+            if (!_emcyValid)
+                throw new InvalidOperationException("EMCY is disabled: bit 31 of 1014h (COB-ID EMCY) is set.");
+            if (_state == NmtState.Stopped)
+            {
+                // §7.3.2.2.4: EMCY triggered in Stopped is pending; the most recent one goes out
+                // after the transition into another NMT state.
+                _pendingEmcy = msg;
+                return Task.CompletedTask;
+            }
+            return SendControlFrame(_emcyCobId, msg.Encode(), cancellationToken);
+        }).Unwrap();
     }
 
     /// <inheritdoc />
@@ -573,9 +523,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 _syncProducerHandle = null;
                 foreach (var kv in _heartbeatConsumers) kv.Value.Deadline?.Dispose();
                 _heartbeatConsumers.Clear();
-                foreach (var kv in _tpdos) kv.Value.EventTimerHandle?.Dispose();
-                _tpdos.Clear();
-                _rpdosByCobId.Clear();
+                DisposePdoRuntime();
+                _lifeGuardingDeadline?.Dispose();
+                _lifeGuardingDeadline = null;
 
                 _sdoServer?.Deadline?.Dispose();
                 _sdoServer = null;
@@ -709,18 +659,41 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 HandleNmtCommand(data);
                 return;
             }
-            if (cobId == CanOpenCobId.Sync)
+            // SYNC on the COB-ID configured in 1005h (0x080 unless a device description or a
+            // master moved it).
+            if (cobId == _syncCobId && !isRtr)
             {
                 HandleSync();
                 return;
             }
-            // EMCY 0x081..0x0FF (0x080 is SYNC and is handled above).
+            // A remote frame is either a PDO read request for one of our valid TPDOs
+            // (CiA 301 §7.2.2.5.2) or a node-guarding poll addressed to us; nothing else answers
+            // an RTR.
+            if (isRtr)
+            {
+                if (_tpdosByCobId.TryGetValue(cobId, out var requested))
+                {
+                    HandleTpdoRtr(requested);
+                    return;
+                }
+                if (cobId == CanOpenCobId.Heartbeat(_nodeId)) HandleNodeGuardingRtrForSelf();
+                return;
+            }
+            // A valid RPDO's COB-ID is whatever the application or a master configured, possibly
+            // on purpose our own TPDO (#93); an explicitly configured consumer outranks the
+            // range-based guesses below.
+            if (_rpdosByCobId.TryGetValue(cobId, out var rpdo))
+            {
+                HandleRpdo(rpdo, data);
+                return;
+            }
+            // EMCY 0x081..0x0FF.
             if (cobId is >= 0x081 and <= 0x0FF)
             {
-                // Our own, on a bus that echoes (#95): 0x080 + id names the *producer*, so this
-                // is the node's own emergency coming back. Raising it through EmcyReceived would
-                // report us to ourselves as a peer in fault.
-                if (cobId == CanOpenCobId.Emcy(_nodeId)) return;
+                // Our own, on a bus that echoes (#95): the EMCY COB-ID names the *producer*, so
+                // this is the node's own emergency coming back. Raising it through EmcyReceived
+                // would report us to ourselves as a peer in fault.
+                if (cobId == _emcyCobId) return;
                 HandleEmcy(cobId, data);
                 return;
             }
@@ -732,14 +705,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // bit — the existing heartbeat consumer already masks it off via <c>data[0] &amp; 0x7F</c>.
             if (cobId is >= 0x701 and <= 0x77F)
             {
-                if (isRtr)
-                {
-                    // Producer role (FR-CO-009): only answer polls addressed to *our* node id.
-                    if (cobId == CanOpenCobId.Heartbeat(_nodeId))
-                        HandleNodeGuardingRtrForSelf();
-                    return;
-                }
-
                 byte producer = (byte)(cobId - CanOpenCobId.HeartbeatBase);
                 // Our own heartbeat / bootup / node-guarding response, echoed back (#95). Three
                 // things it must not swallow:
@@ -805,12 +770,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 HandleSdoClientResponse(serverNodeId, data);
                 return;
             }
-            // RPDO?
-            if (_rpdosByCobId.TryGetValue(cobId, out var rpdo))
-            {
-                HandleRpdo(rpdo, data);
-                return;
-            }
         }
         catch (Exception ex)
         {
@@ -834,51 +793,32 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (!forUs) return;
         RaiseNmtCommandReceived(cmd, target);
 
+        // The transitions themselves live in CanOpenNode.CommunicationProfile.cs, next to the
+        // reset that restores the communication-profile objects (CiA 301 §7.3.2).
         switch (cmd)
         {
             case NmtCommand.Start:
-                _state = NmtState.Operational;
+                ApplyNmtTransition(NmtState.Operational);
                 break;
             case NmtCommand.Stop:
-                _state = NmtState.Stopped;
+                ApplyNmtTransition(NmtState.Stopped);
                 break;
             case NmtCommand.EnterPreOperational:
-                _state = NmtState.PreOperational;
+                ApplyNmtTransition(NmtState.PreOperational);
                 break;
             case NmtCommand.ResetNode:
+                PerformNmtReset(communicationOnly: false);
+                break;
             case NmtCommand.ResetCommunication:
-                // MVP: reset acts like re-init → emit a bootup and settle in Pre-Op.
-                // Send bootup (0x00) then Pre-Operational (0x7F) *sequentially* on one Task
-                // so thread-pool reordering cannot put 0x7F ahead of bootup (Bugbot 3600879326).
-                _state = NmtState.Initializing;
-                _state = NmtState.PreOperational;
-                _ = SendOrderedControlFrames(
-                    (CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 }),
-                    (CanOpenCobId.Heartbeat(_nodeId), new byte[] { (byte)NmtState.PreOperational }));
-                return;
+                PerformNmtReset(communicationOnly: true);
+                break;
         }
-        // Send a heartbeat immediately reflecting the new state so consumers see the transition
-        // without waiting on the periodic tick.
-        _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { (byte)_state });
     }
 
     // =========================================================================================
     // SYNC (FR-CO-010)
     // =========================================================================================
-    private void HandleSync()
-    {
-        RaiseSyncReceived(DateTime.UtcNow);
-        // Emit every synchronous TPDO in a deterministic (index-ascending) order.
-        var indices = new int[_tpdos.Count];
-        int i = 0;
-        foreach (var key in _tpdos.Keys) indices[i++] = key;
-        Array.Sort(indices);
-        foreach (var t in indices.Select(idx => _tpdos[idx])
-            .Where(t => t.Transmission == TpdoTransmission.Synchronous && _state == NmtState.Operational))
-        {
-            EmitTpdo(t);
-        }
-    }
+    // HandleSync lives in CanOpenNode.Pdo.cs: the SYNC is the trigger of every synchronous PDO.
 
     private void ScheduleSyncProducerTick()
     {
@@ -888,7 +828,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             try
             {
                 if (_disposed != 0) return;
-                _ = SendControlFrame(CanOpenCobId.Sync, Array.Empty<byte>());
+                // CiA 301 Table 37: SYNC is not active in Stopped; the producer keeps its cycle
+                // and resumes transmitting when the node leaves Stopped.
+                if (_state is NmtState.Stopped or NmtState.Initializing) return;
+                _ = SendControlFrame(_syncCobId, Array.Empty<byte>());
             }
             finally
             {
@@ -1017,14 +960,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
         var (index, subindex) = SdoFrames.ReadIndex(data);
 
-        // Dynamic PDO mapping (FR-CO-005): SDO access to the mapping records 0x1600..0x1603 /
-        // 0x1A00..0x1A03 is served by the dedicated mapping handler, not the generic OD path.
-        if (IsPdoMappingIndex(index, out var mappingIsTpdo, out var mappingPdoIndex))
-        {
-            HandlePdoMappingSdoRequest(index, subindex, cs, data, mappingIsTpdo, mappingPdoIndex);
-            return;
-        }
-
+        // Every object, the PDO communication and mapping records included, is served by the
+        // generic OD path: the dictionary validates a write against the object's CiA 301 rules
+        // and the runtime follows the dictionary (CanOpenNode.CommunicationProfile.cs).
         _od.TryGet(index, subindex, out var entry);
 
         // Upload init (client → server).
@@ -1057,7 +995,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
         if (entry is null)
         {
-            SendSdoServerAbort(index, subindex, SdoAbortCode.ObjectDoesNotExist);
+            // CiA 301 Table 22 distinguishes an unknown object (0602 0000h) from an unknown
+            // sub-index of a known one (0609 0011h) — the latter is also what §7.5.2.37 prescribes
+            // for the reserved sub-index 04h of a PDO communication record.
+            SendSdoServerAbort(index, subindex, _od.ContainsIndex(index)
+                ? SdoAbortCode.SubIndexDoesNotExist : SdoAbortCode.ObjectDoesNotExist);
             return;
         }
         if ((entry.Access & OdAccess.ReadOnly) == 0)
@@ -1159,7 +1101,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
         if (entry is null)
         {
-            SendSdoServerAbort(index, subindex, SdoAbortCode.ObjectDoesNotExist);
+            // CiA 301 Table 22 distinguishes an unknown object (0602 0000h) from an unknown
+            // sub-index of a known one (0609 0011h) — the latter is also what §7.5.2.37 prescribes
+            // for the reserved sub-index 04h of a PDO communication record.
+            SendSdoServerAbort(index, subindex, _od.ContainsIndex(index)
+                ? SdoAbortCode.SubIndexDoesNotExist : SdoAbortCode.ObjectDoesNotExist);
             return;
         }
         if ((entry.Access & OdAccess.WriteOnly) == 0)
@@ -1224,8 +1170,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // Route the write through ObjectDictionary.WriteRaw so it lands under the OD's
         // internal lock, giving readers on other threads a proper acquire/release pairing
         // rather than relying on OdEntry field-level memory ordering.
-        try { _od.WriteRaw(index, subindex, payload); }
-        catch { SendSdoServerAbort(index, subindex, SdoAbortCode.General); return; }
+        if (!_od.TryWriteRaw(index, subindex, payload, out var abort))
+        {
+            SendSdoServerAbort(index, subindex, abort ?? SdoAbortCode.General);
+            return;
+        }
 
         // Expedited download owns no ongoing segmented state — no server-side session survives
         // the initiate. Supersede handling for any previously open segmented transfer already
@@ -1280,10 +1229,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             var final = new byte[session.Offset];
             Buffer.BlockCopy(session.Buffer, 0, final, 0, session.Offset);
-            try { _od.WriteRaw(session.Index, session.Subindex, final); }
-            catch
+            if (!_od.TryWriteRaw(session.Index, session.Subindex, final, out var abort))
             {
-                SendSdoServerAbort(session.Index, session.Subindex, SdoAbortCode.General);
+                SendSdoServerAbort(session.Index, session.Subindex, abort ?? SdoAbortCode.General);
                 return;
             }
         }
@@ -1660,204 +1608,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     }
 
     // =========================================================================================
-    // PDO (FR-CO-005 / FR-CO-006)
-    // =========================================================================================
-    private void EmitTpdo(TpdoConfig config)
-    {
-        // Assemble the payload by concatenating the current OD values in mapping order. Each
-        // mapping slot occupies its configured ByteLength window in the frame regardless of
-        // whether the OD entry is present -- a missing entry leaves its window as the buffer's
-        // default zero bytes and the next slot lands at its correct offset. The previous
-        // behaviour skipped `offset += entry.ByteLength` on missing entries, which shifted
-        // every subsequent value left of its configured byte position while total length
-        // stayed the same, so consumers decoded the wrong fields even though the frame was
-        // the "right size". See Bugbot 3600571636.
-        var mapping = config.Mapping;
-        var payload = new byte[mapping.TotalBytes];
-        int offset = 0;
-        foreach (var entry in mapping.Entries)
-        {
-            // Snapshot the OD entry's raw value under the OD's internal lock (via TryReadRaw)
-            // so a concurrent WriteRaw from another thread cannot tear the byte-copy below.
-            // The previous TryGet + OdEntry.GetRawValue() sequence read the entry outside the
-            // lock, and GetRawValue itself dereferences the shared _value field twice (once
-            // for its length, once for the BlockCopy source), which can straddle a WriteRaw
-            // that swaps the backing array — mixing the pre-write length with the post-write
-            // bytes. See Bugbot 3600644170.
-            if (_od.TryReadRaw(entry.Index, entry.Subindex, out var raw))
-            {
-                int copy = Math.Min(raw.Length, entry.ByteLength);
-                Buffer.BlockCopy(raw, 0, payload, offset, copy);
-            }
-            offset += entry.ByteLength;
-        }
-        _ = SendControlFrame(config.CobId, payload);
-    }
-
-    private void HandleRpdo(RpdoConfig config, byte[] payload)
-    {
-        // CiA 301 disables PDO communication outside Operational — do not unpack or raise
-        // RpdoReceived in Pre-Operational / Stopped (Bugbot 3600879330).
-        if (_state != NmtState.Operational)
-            return;
-
-        // Unpack into OD in mapping order (skip missing OD entries silently — mapping mismatch
-        // is a config issue, not a protocol error). Route the write through
-        // ObjectDictionary.WriteRaw so it happens under the OD's lock, giving readers on
-        // other threads a proper release/acquire pairing. Honour OdAccess so read-only
-        // entries cannot be mutated by PDO traffic (Bugbot 3600879347); still advance the
-        // mapping offset so later writable slots stay aligned.
-        int offset = 0;
-        foreach (var entry in config.Mapping.Entries)
-        {
-            if (offset + entry.ByteLength > payload.Length) break;
-            if (_od.TryGet(entry.Index, entry.Subindex, out var odEntry)
-                && (odEntry.Access & OdAccess.WriteOnly) != 0)
-            {
-                var chunk = new byte[entry.ByteLength];
-                Buffer.BlockCopy(payload, offset, chunk, 0, entry.ByteLength);
-                try { _od.WriteRaw(entry.Index, entry.Subindex, chunk); }
-                catch { /* ignore mapping/OD size mismatch */ }
-            }
-            offset += entry.ByteLength;
-        }
-        RaiseRpdoReceived(config.PdoIndex, config.CobId, payload);
-    }
-
-    private void ScheduleTpdoEventTimer(TpdoConfig config)
-    {
-        if (config.EventTimerInterval <= TimeSpan.Zero) return;
-        config.EventTimerHandle = _actor.Schedule(config.EventTimerInterval, () =>
-        {
-            try
-            {
-                if (_disposed != 0) return;
-                if (!_tpdos.TryGetValue(config.PdoIndex, out var current) || !ReferenceEquals(current, config))
-                    return; // replaced or removed while we slept
-                if (_state == NmtState.Operational)
-                    EmitTpdo(config);
-            }
-            finally
-            {
-                if (_disposed == 0 && _tpdos.TryGetValue(config.PdoIndex, out var still)
-                    && ReferenceEquals(still, config)
-                    && config.Transmission == TpdoTransmission.EventTimer)
-                {
-                    ScheduleTpdoEventTimer(config);
-                }
-            }
-        });
-    }
-
-    /// <summary>
-    /// Change-of-state TPDO triggering (FR-CO-006 / CiA 301 §7.3.6): an application-originated
-    /// OD write emits every event-driven TPDO whose mapping contains the written entry.
-    /// Runs synchronously on the writer's thread (invoked from <see cref="ObjectDictionary"/>).
-    /// </summary>
-    /// <remarks>
-    /// Only application writes count: bus-originated OD writes (SDO server download commit,
-    /// RPDO unpack) run on the node's actor thread and are filtered out here via
-    /// <c>ProtocolActor.IsOnCurrentActor</c>, so an RPDO mapped to the same entry as a
-    /// TPDO cannot produce a feedback loop with the peer that sent it.
-    /// <para>
-    /// This is a provenance check, not a TX-echo check, and #23 did not remove it. The writes it
-    /// suppresses come from a <em>peer</em> — a real SDO download, a real RPDO — so the bus's
-    /// echo flag says nothing about them; what distinguishes them from an application write is
-    /// only that they are applied on the actor loop. The subscription opts into echoes, so it
-    /// closes no path into here at all: this node's own TPDO coming back on an echo-capable bus
-    /// and being unpacked as an RPDO is suppressed by this provenance check and by nothing else.
-    /// The check is sound now that #19 has
-    /// moved <c>IsOnCurrentActor</c> off <c>AsyncLocal</c> onto a thread-static, so a send task
-    /// started from actor work no longer reports true and no longer swallows a legitimate
-    /// application write.
-    /// </para>
-    /// Load safety: the actor mailbox is intentionally unbounded, so this path must never
-    /// post per write. A volatile snapshot of the mapped entries filters irrelevant writes
-    /// with zero actor traffic, and relevant writes are coalesced into a bounded dirty set —
-    /// at most one evaluation is queued at any time (an unthrottled writer otherwise grows
-    /// the mailbox without bound, which is exactly what killed the
-    /// <c>Tpdo_Emission_UnderConcurrentOdWrites_NeverTears</c> stress test).
-    /// </remarks>
-    private void OnOdEntryWrittenForCoS(ushort index, byte subindex)
-    {
-        if (!_options.EnableChangeOfStateTpdo) return;
-        if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (see remarks)
-        if (Volatile.Read(ref _disposed) != 0) return;
-
-        var key = CosKey(index, subindex);
-        if (!_cosRelevantEntries.Contains(key)) return; // no event-driven TPDO maps it — done
-
-        lock (_cosGate)
-        {
-            (_cosDirty ??= new HashSet<uint>()).Add(key);
-            if (_cosPosted) return;
-            _cosPosted = true;
-        }
-
-        try
-        {
-            _actor.Post(EvaluateCoSOnActor);
-        }
-        catch (ObjectDisposedException)
-        {
-            lock (_cosGate)
-            {
-                _cosPosted = false;
-            }
-        }
-    }
-
-    // Actor-side evaluation of the coalesced dirty set: emits every event-driven TPDO that
-    // maps at least one entry written since the last evaluation. Writes landing during the
-    // evaluation re-arm the dirty set and re-post, so nothing is lost.
-    private void EvaluateCoSOnActor()
-    {
-        HashSet<uint>? dirty;
-        lock (_cosGate)
-        {
-            dirty = _cosDirty;
-            _cosDirty = null;
-            _cosPosted = false;
-        }
-        if (dirty is null || dirty.Count == 0) return;
-        if (_disposed != 0 || _state != NmtState.Operational) return;
-
-        foreach (var config in _tpdos.Values.Where(config => config.Transmission == TpdoTransmission.EventDriven))
-        {
-            var entries = config.Mapping.Entries;
-            for (int i = 0; i < entries.Count; i++)
-            {
-                if (dirty.Contains(CosKey(entries[i].Index, entries[i].Subindex)))
-                {
-                    EmitTpdo(config);
-                    break;
-                }
-            }
-        }
-    }
-
-    // Rebuilds the volatile pre-filter snapshot of OD entries mapped in at least one
-    // event-driven TPDO. Called on the actor whenever the TPDO table or a mapping changes
-    // (ConfigureTpdo, dynamic SDO re-mapping).
-    private void RebuildCosRelevantEntries()
-    {
-        var set = new HashSet<uint>();
-        if (_options.EnableChangeOfStateTpdo)
-        {
-            foreach (var kv in _tpdos.Where(kv => kv.Value.Transmission == TpdoTransmission.EventDriven))
-            {
-                foreach (var e in kv.Value.Mapping.Entries)
-                {
-                    set.Add(CosKey(e.Index, e.Subindex));
-                }
-            }
-        }
-        _cosRelevantEntries = set;
-    }
-
-    private static uint CosKey(ushort index, byte subindex) => ((uint)index << 8) | subindex;
-
-    // =========================================================================================
     // Wire helpers
     // =========================================================================================
     private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default)
@@ -2058,39 +1808,5 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public byte ProducerNodeId { get; }
         public TimeSpan Timeout { get; }
         public IDeadline? Deadline { get; set; }
-    }
-
-    private sealed class TpdoConfig
-    {
-        public TpdoConfig(int pdoIndex, uint cobId, PdoMapping mapping,
-            TpdoTransmission transmission, TimeSpan eventTimerInterval)
-        {
-            PdoIndex = pdoIndex;
-            CobId = cobId;
-            Mapping = mapping;
-            Transmission = transmission;
-            EventTimerInterval = eventTimerInterval;
-        }
-
-        public int PdoIndex { get; }
-        public uint CobId { get; }
-        public PdoMapping Mapping { get; }
-        public TpdoTransmission Transmission { get; }
-        public TimeSpan EventTimerInterval { get; }
-        public IDisposable? EventTimerHandle { get; set; }
-    }
-
-    private sealed class RpdoConfig
-    {
-        public RpdoConfig(int pdoIndex, uint cobId, PdoMapping mapping)
-        {
-            PdoIndex = pdoIndex;
-            CobId = cobId;
-            Mapping = mapping;
-        }
-
-        public int PdoIndex { get; }
-        public uint CobId { get; }
-        public PdoMapping Mapping { get; }
     }
 }

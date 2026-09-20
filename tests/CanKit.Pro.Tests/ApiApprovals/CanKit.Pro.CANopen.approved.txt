@@ -7,11 +7,15 @@ namespace CanKit.Pro.CANopen
     }
     public static class CanOpenCobId
     {
+        public const uint CanIdMask = 2047u;
         public const uint EmcyBase = 128u;
+        public const uint ExtendedFrameBit = 536870912u;
         public const uint HeartbeatBase = 1792u;
+        public const uint InvalidBit = 2147483648u;
         public const byte MaxNodeId = 127;
         public const byte MinNodeId = 1;
         public const uint NmtCommand = 0u;
+        public const uint NoRtrBit = 1073741824u;
         public const uint Rpdo1Base = 512u;
         public const uint Rpdo2Base = 768u;
         public const uint Rpdo3Base = 1024u;
@@ -19,12 +23,14 @@ namespace CanKit.Pro.CANopen
         public const uint SdoRxBase = 1536u;
         public const uint SdoTxBase = 1408u;
         public const uint Sync = 128u;
+        public const uint SyncGenerateBit = 1073741824u;
         public const uint Tpdo1Base = 384u;
         public const uint Tpdo2Base = 640u;
         public const uint Tpdo3Base = 896u;
         public const uint Tpdo4Base = 1152u;
         public static uint Emcy(byte nodeId) { }
         public static uint Heartbeat(byte nodeId) { }
+        public static bool IsRestricted(uint canId) { }
         public static uint RpdoDefault(byte nodeId, int pdoIndex) { }
         public static uint SdoRx(byte nodeId) { }
         public static uint SdoTx(byte nodeId) { }
@@ -45,7 +51,8 @@ namespace CanKit.Pro.CANopen
         public int SdoBlockThresholdBytes { get; init; }
         public System.TimeSpan SdoServerTimeout { get; init; }
         public System.TimeSpan SdoTimeout { get; init; }
-        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default) { }
+        public bool WritableCommunicationParameters { get; init; }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default) { }
     }
     public sealed class CanOpenTransportException : CanKit.Core.Exceptions.CanKitException
     {
@@ -81,15 +88,17 @@ namespace CanKit.Pro.CANopen
         event System.EventHandler<CanKit.Pro.CANopen.EmcyReceivedEventArgs>? EmcyReceived;
         event System.EventHandler<CanKit.Pro.CANopen.HeartbeatReceivedEventArgs>? HeartbeatReceived;
         event System.EventHandler<CanKit.Pro.CANopen.HeartbeatTimeoutEventArgs>? HeartbeatTimeout;
+        event System.EventHandler<CanKit.Pro.CANopen.LifeGuardingEventArgs>? LifeGuardingEvent;
         event System.EventHandler<CanKit.Pro.CANopen.NmtCommandReceivedEventArgs>? NmtCommandReceived;
         event System.EventHandler<CanKit.Pro.CANopen.NodeGuardingReceivedEventArgs>? NodeGuardingReceived;
         event System.EventHandler<CanKit.Pro.CANopen.NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout;
         event System.EventHandler<CanKit.Pro.CANopen.RpdoReceivedEventArgs>? RpdoReceived;
         event System.EventHandler<CanKit.Pro.CANopen.SyncReceivedEventArgs>? SyncReceived;
         void AddHeartbeatConsumer(byte producerNodeId, System.TimeSpan timeout);
-        void ConfigureRpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, uint? cobId = default);
-        void ConfigureTpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, CanKit.Pro.CANopen.Pdo.TpdoTransmission transmission = 0, uint? cobId = default, System.TimeSpan? eventTimerInterval = default);
+        void ConfigureRpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, uint? cobId = default, CanKit.Pro.CANopen.Pdo.RpdoTransmission transmission = 0);
+        void ConfigureTpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, CanKit.Pro.CANopen.Pdo.TpdoTransmission transmission = 0, uint? cobId = default, System.TimeSpan? eventTimerInterval = default, System.TimeSpan? inhibitTime = default);
         void RemoveHeartbeatConsumer(byte producerNodeId);
+        void RestoreDefaultParameters();
         System.Threading.Tasks.Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, System.ReadOnlyMemory<byte> data, System.Threading.CancellationToken cancellationToken);
         System.Threading.Tasks.Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, System.ReadOnlyMemory<byte> data, CanKit.Pro.CANopen.Sdo.SdoTransferMode mode = 0, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex, System.Threading.CancellationToken cancellationToken);
@@ -103,7 +112,20 @@ namespace CanKit.Pro.CANopen
         void StopHeartbeatProducer();
         void StopNodeGuardingConsumer(byte producerNodeId);
         void StopSyncProducer();
+        void StoreParameters();
         System.Threading.Tasks.Task TriggerTpdoAsync(int pdoIndex, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public sealed class LifeGuardingEventArgs : System.EventArgs
+    {
+        public LifeGuardingEventArgs(CanKit.Pro.CANopen.LifeGuardingState state, System.TimeSpan guardTime, byte lifeTimeFactor) { }
+        public System.TimeSpan GuardTime { get; }
+        public byte LifeTimeFactor { get; }
+        public CanKit.Pro.CANopen.LifeGuardingState State { get; }
+    }
+    public enum LifeGuardingState
+    {
+        Occurred = 0,
+        Resolved = 1,
     }
     public sealed class NmtCommandReceivedEventArgs : System.EventArgs
     {
@@ -130,18 +152,20 @@ namespace CanKit.Pro.CANopen
     {
         public ObjectDictionary() { }
         public int Count { get; }
-        public CanKit.Pro.CANopen.OdEntry AddDomain(ushort index, byte subindex, byte[] value, CanKit.Pro.CANopen.OdAccess access = 3) { }
-        public CanKit.Pro.CANopen.OdEntry AddI16(ushort index, byte subindex, short value, CanKit.Pro.CANopen.OdAccess access = 3) { }
-        public CanKit.Pro.CANopen.OdEntry AddI32(ushort index, byte subindex, int value, CanKit.Pro.CANopen.OdAccess access = 3) { }
-        public CanKit.Pro.CANopen.OdEntry AddI8(ushort index, byte subindex, sbyte value, CanKit.Pro.CANopen.OdAccess access = 3) { }
-        public CanKit.Pro.CANopen.OdEntry AddU16(ushort index, byte subindex, ushort value, CanKit.Pro.CANopen.OdAccess access = 3) { }
-        public CanKit.Pro.CANopen.OdEntry AddU32(ushort index, byte subindex, uint value, CanKit.Pro.CANopen.OdAccess access = 3) { }
-        public CanKit.Pro.CANopen.OdEntry AddU8(ushort index, byte subindex, byte value, CanKit.Pro.CANopen.OdAccess access = 3) { }
+        public CanKit.Pro.CANopen.OdEntry AddDomain(ushort index, byte subindex, byte[] value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddI16(ushort index, byte subindex, short value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddI32(ushort index, byte subindex, int value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddI8(ushort index, byte subindex, sbyte value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddU16(ushort index, byte subindex, ushort value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddU32(ushort index, byte subindex, uint value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddU8(ushort index, byte subindex, byte value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public bool ContainsIndex(ushort index) { }
         public byte[] ReadRaw(ushort index, byte subindex) { }
         public int ReadSigned(ushort index, byte subindex) { }
         public uint ReadUnsigned(ushort index, byte subindex) { }
         public bool TryGet(ushort index, byte subindex, out CanKit.Pro.CANopen.OdEntry entry) { }
         public bool TryReadRaw(ushort index, byte subindex, out byte[] value) { }
+        public bool TryReadUnsigned(ushort index, byte subindex, out uint value) { }
         public void WriteRaw(ushort index, byte subindex, byte[] value) { }
         public void WriteUnsigned(ushort index, byte subindex, uint value) { }
     }
@@ -166,6 +190,7 @@ namespace CanKit.Pro.CANopen
     {
         public CanKit.Pro.CANopen.OdAccess Access { get; }
         public CanKit.Pro.CANopen.OdDataType DataType { get; }
+        public bool PdoMappable { get; }
         public int Size { get; }
         public byte[] GetRawValue() { }
     }
@@ -217,8 +242,27 @@ namespace CanKit.Pro.CANopen.Nmt
 }
 namespace CanKit.Pro.CANopen.Pdo
 {
+    public static class CanOpenTransmissionType
+    {
+        public const byte EventDrivenManufacturer = 254;
+        public const byte EventDrivenProfile = 255;
+        public const byte RtrOnlyEventDriven = 253;
+        public const byte RtrOnlySynchronous = 252;
+        public const byte SynchronousAcyclic = 0;
+        public const byte SynchronousCyclicMax = 240;
+        public const byte SynchronousEverySync = 1;
+        public static byte FromRpdoTransmission(CanKit.Pro.CANopen.Pdo.RpdoTransmission transmission) { }
+        public static byte FromTpdoTransmission(CanKit.Pro.CANopen.Pdo.TpdoTransmission transmission) { }
+        public static bool IsEventDriven(byte type) { }
+        public static bool IsReservedForRpdo(byte type) { }
+        public static bool IsReservedForTpdo(byte type) { }
+        public static bool IsRtrOnly(byte type) { }
+        public static bool IsSynchronous(byte type) { }
+        public static byte SynchronousEveryNthSync(int n) { }
+    }
     public sealed class PdoMapping
     {
+        public const int MaxEntries = 8;
         public PdoMapping() { }
         public PdoMapping(System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> entries) { }
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Entries { get; }
@@ -233,16 +277,26 @@ namespace CanKit.Pro.CANopen.Pdo
         public byte BitLength { get; }
         public int ByteLength { get; }
         public ushort Index { get; }
+        public bool IsDummy { get; }
         public byte Subindex { get; }
         public bool Equals(CanKit.Pro.CANopen.Pdo.PdoMappingEntry other) { }
         public override bool Equals(object? obj) { }
         public override int GetHashCode() { }
+        public static byte DummyBitLength(ushort index) { }
+    }
+    public enum RpdoTransmission : byte
+    {
+        EventDriven = 0,
+        Synchronous = 1,
     }
     public enum TpdoTransmission : byte
     {
         EventDriven = 0,
         EventTimer = 1,
         Synchronous = 2,
+        SynchronousAcyclic = 3,
+        RtrOnlySynchronous = 4,
+        RtrOnlyEventDriven = 5,
     }
 }
 namespace CanKit.Pro.CANopen.Sdo
@@ -253,6 +307,7 @@ namespace CanKit.Pro.CANopen.Sdo
         SdoProtocolTimedOut = 84148224u,
         CommandSpecifierInvalid = 84148225u,
         InvalidBlockSize = 84148226u,
+        InvalidSequenceNumber = 84148227u,
         CrcError = 84148228u,
         OutOfMemory = 84148229u,
         UnsupportedAccess = 100728832u,
@@ -261,11 +316,15 @@ namespace CanKit.Pro.CANopen.Sdo
         ObjectDoesNotExist = 100794368u,
         ObjectCannotBeMapped = 100925505u,
         PdoMappingLengthExceeded = 100925506u,
+        GeneralParameterIncompatibility = 100925507u,
         DataTypeLengthMismatch = 101122064u,
         LengthTooHigh = 101122066u,
         LengthTooLow = 101122067u,
         SubIndexDoesNotExist = 101253137u,
+        ValueRangeExceeded = 101253168u,
         General = 134217728u,
+        DataCannotBeTransferred = 134217760u,
+        DataCannotBeTransferredDeviceState = 134217762u,
     }
     public sealed class SdoAbortException : CanKit.Core.Exceptions.CanKitException
     {

@@ -122,6 +122,20 @@ public sealed class CanOpenNodeOptions
     /// </summary>
     public bool RespondToNodeGuardingRtr { get; init; } = true;
 
+    /// <summary>
+    /// When <c>true</c>, the PDO communication and mapping records of the node's built-in object
+    /// dictionary (<c>1400h</c>–<c>1403h</c>, <c>1600h</c>–<c>1603h</c>, <c>1800h</c>–<c>1803h</c>,
+    /// <c>1A00h</c>–<c>1A03h</c>) are writable over SDO, so a master or configuration tool can
+    /// configure this node's PDOs over the bus; every accepted write takes effect in the PDO
+    /// engine. When <c>false</c> (default) those records are read-only on the bus: the
+    /// application configures its PDOs through <c>ConfigureTpdo</c> / <c>ConfigureRpdo</c>, and
+    /// the records describe that configuration truthfully to a master without offering to change
+    /// it (CiA 301 permits <c>ro</c> PDO parameter records, objects overview footnote). The
+    /// SYNC, EMCY, heartbeat and guarding objects are writable in either case, as CiA 301
+    /// prescribes for them.
+    /// </summary>
+    public bool WritableCommunicationParameters { get; init; }
+
     /// <summary>Returns a copy of this options record with the provided overrides.</summary>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -134,7 +148,8 @@ public sealed class CanOpenNodeOptions
         bool? sdoBlockCrcSupported = null,
         int? sdoBlockMaxRetransmissions = null,
         bool? respondToNodeGuardingRtr = null,
-        bool? enableChangeOfStateTpdo = null)
+        bool? enableChangeOfStateTpdo = null,
+        bool? writableCommunicationParameters = null)
     {
         return new CanOpenNodeOptions
         {
@@ -149,6 +164,7 @@ public sealed class CanOpenNodeOptions
             SdoBlockMaxRetransmissions = sdoBlockMaxRetransmissions ?? SdoBlockMaxRetransmissions,
             RespondToNodeGuardingRtr = respondToNodeGuardingRtr ?? RespondToNodeGuardingRtr,
             EnableChangeOfStateTpdo = enableChangeOfStateTpdo ?? EnableChangeOfStateTpdo,
+            WritableCommunicationParameters = writableCommunicationParameters ?? WritableCommunicationParameters,
         };
     }
 

@@ -182,3 +182,41 @@ public sealed class NmtCommandReceivedEventArgs : EventArgs
         TargetNodeId = targetNodeId;
     }
 }
+
+/// <summary>
+/// State reported by the <c>LifeGuardingEvent</c> (CiA 301 §7.2.8.2.2.2 Table 34).
+/// </summary>
+public enum LifeGuardingState
+{
+    /// <summary>The node was not polled with a guarding RTR within its node life time
+    /// (guard time × life time factor).</summary>
+    Occurred,
+
+    /// <summary>A guarding RTR arrived again after the event had occurred.</summary>
+    Resolved,
+}
+
+/// <summary>
+/// Argument type for the <c>LifeGuardingEvent</c>: the producer-side (NMT slave) life guarding
+/// of CiA 301 §7.2.8.3.2.1, driven by <c>100Ch</c> (guard time) and <c>100Dh</c> (life time
+/// factor) of this node's object dictionary.
+/// </summary>
+public sealed class LifeGuardingEventArgs : EventArgs
+{
+    /// <summary>Whether the remote error occurred or was resolved.</summary>
+    public LifeGuardingState State { get; }
+
+    /// <summary>The guard time (<c>100Ch</c>) in effect when the event was raised.</summary>
+    public TimeSpan GuardTime { get; }
+
+    /// <summary>The life time factor (<c>100Dh</c>) in effect when the event was raised.</summary>
+    public byte LifeTimeFactor { get; }
+
+    /// <summary>Constructs a new event.</summary>
+    public LifeGuardingEventArgs(LifeGuardingState state, TimeSpan guardTime, byte lifeTimeFactor)
+    {
+        State = state;
+        GuardTime = guardTime;
+        LifeTimeFactor = lifeTimeFactor;
+    }
+}

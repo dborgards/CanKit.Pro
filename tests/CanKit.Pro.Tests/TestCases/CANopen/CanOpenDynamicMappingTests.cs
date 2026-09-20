@@ -31,6 +31,23 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
+    // A node whose PDO communication and mapping records a master may write over SDO. By
+    // default they are read-only -- the application holds both ends of its PDOs -- so every
+    // test that configures a PDO over the bus opens the device side with this.
+    private static readonly CanOpenNodeOptions MasterConfigurable =
+        new() { WritableCommunicationParameters = true };
+
+    private static byte[] U32Bytes(uint value) => new[]
+    {
+        (byte)(value & 0xFF), (byte)((value >> 8) & 0xFF), (byte)((value >> 16) & 0xFF), (byte)((value >> 24) & 0xFF),
+    };
+
+    // Step 5 of the CiA 301 §7.5.2.38 re-mapping procedure: "Create TPDO by setting bit valid to
+    // 0b of sub-index 01h of the according TPDO communication parameter." A mapping alone does
+    // not make a PDO exist.
+    private static Task CreatePdoAsync(ICanOpenNode client, byte serverNodeId, ushort commIndex, uint cobId)
+        => client.SdoDownloadAsync(serverNodeId, commIndex, 0x01, U32Bytes(cobId)).WithTimeoutAsync(ShortTimeout);
+
     private static byte[] MappingEntryBytes(ushort index, byte subindex, byte bitLength)
     {
         uint raw = ((uint)index << 16) | ((uint)subindex << 8) | bitLength;
@@ -65,7 +82,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var producer = CanOpen.OpenNode(busA, nodeId: 0x11);
+        using var producer = CanOpen.OpenNode(busA, nodeId: 0x11, MasterConfigurable);
         using var consumer = CanOpen.OpenNode(busB, nodeId: 0x01);
 
         producer.ObjectDictionary.AddU16(0x2000, 0x00, 0xBEEF);
@@ -82,9 +99,12 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
             MappingEntryBytes(0x2000, 0x00, 16),
             MappingEntryBytes(0x2000, 0x01, 16));
 
-        // Read-back: sub0 must report the active entry count, sub1 the encoded first entry.
+        await CreatePdoAsync(consumer, serverNodeId: 0x11, commIndex: 0x1800, producerCobId);
+
+        // Read-back: sub0 must report the active entry count as the UNSIGNED8 CiA 301 §7.5.2.38
+        // defines it (#40), sub1 the encoded first entry.
         var sub0 = await consumer.SdoUploadAsync(0x11, 0x1A00, 0x00).WithTimeoutAsync(ShortTimeout);
-        sub0.Should().Equal(0x02, 0x00, 0x00, 0x00);
+        sub0.Should().Equal(0x02);
         var sub1 = await consumer.SdoUploadAsync(0x11, 0x1A00, 0x01).WithTimeoutAsync(ShortTimeout);
         sub1.Should().Equal(MappingEntryBytes(0x2000, 0x00, 16));
 
@@ -116,20 +136,23 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var producer = CanOpen.OpenNode(busA, nodeId: 0x11);
-        using var consumer = CanOpen.OpenNode(busB, nodeId: 0x01);
+        using var consumer = CanOpen.OpenNode(busB, nodeId: 0x01, MasterConfigurable);
 
         producer.ObjectDictionary.AddU16(0x2000, 0x00, 0x1234);
         consumer.ObjectDictionary.AddU16(0x2100, 0x00, 0);
         consumer.ObjectDictionary.AddU16(0x2100, 0x01, 0);
 
-        // The consumer's RPDO1 lives at its default COB-ID; the producer emits there.
+        // The consumer's RPDO1 lives at its default COB-ID; the producer emits there. The TPDO
+        // carries the four bytes the remapped RPDO expects (a PDO shorter than the mapping is not
+        // processed, CiA 301 §7.5.2.36): the value, then two bytes of dummy padding.
         var rpdoCobId = CanOpenCobId.RpdoDefault(nodeId: 0x01, pdoIndex: 1);
-        producer.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), cobId: rpdoCobId);
+        producer.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16).Add(0x0006, 0x00, 16), cobId: rpdoCobId);
 
         // Remap the consumer's RPDO1 over SDO (from the producer as SDO client): two U16 slots.
         await WriteMappingAsync(producer, serverNodeId: 0x01, mapIndex: 0x1600,
             MappingEntryBytes(0x2100, 0x00, 16),
             MappingEntryBytes(0x2100, 0x01, 16));
+        await CreatePdoAsync(producer, serverNodeId: 0x01, commIndex: 0x1400, rpdoCobId);
 
         var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         consumer.RpdoReceived += (s, e) =>
@@ -158,8 +181,12 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
-        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, MasterConfigurable);
         slave.ObjectDictionary.AddU16(0x2000, 0x00, 0);
+        // An active mapping (sub0 != 0): the node's records start with the mapping disabled, so
+        // the application configures one first -- the same 1A00h record a master would write.
+        slave.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+        slave.ObjectDictionary.ReadUnsigned(0x1A00, 0x00).Should().Be(1u);
 
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() =>
             master.SdoDownloadAsync(0x11, 0x1A00, 0x01, MappingEntryBytes(0x2000, 0x00, 16))
@@ -176,7 +203,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
-        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, MasterConfigurable);
 
         await master.SdoDownloadAsync(0x11, 0x1A00, 0x00, new byte[] { 0x00 })
             .WithTimeoutAsync(ShortTimeout);
@@ -195,7 +222,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
-        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, MasterConfigurable);
         slave.ObjectDictionary.AddU32(0x2000, 0x00, 0);
         slave.ObjectDictionary.AddU32(0x2000, 0x01, 0);
         slave.ObjectDictionary.AddU16(0x2001, 0x00, 0);
