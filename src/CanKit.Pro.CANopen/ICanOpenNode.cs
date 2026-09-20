@@ -236,7 +236,9 @@ public interface ICanOpenNode : IDisposable
     /// PDO validated). Values not provided use CiA 301 defaults: the COB-ID is the pre-defined
     /// connection set entry, the inhibit time is 0 (off), and the event timer is
     /// <see cref="CanOpenNodeOptions.DefaultTpdoEventTimerInterval"/> for
-    /// <see cref="TpdoTransmission.EventTimer"/> and 0 otherwise.
+    /// <see cref="TpdoTransmission.EventTimer"/> and 0 otherwise. The writes are one transaction
+    /// on the node's actor loop: the method returns with the configuration applied, and neither
+    /// another caller nor an SDO download interleaves with the sequence.
     /// </summary>
     /// <param name="pdoIndex">TPDO number 1..4.</param>
     /// <param name="mapping">The mapped objects; copied into the mapping record. Every target
@@ -267,6 +269,7 @@ public interface ICanOpenNode : IDisposable
     /// immediately, or with the next SYNC for <see cref="RpdoTransmission.Synchronous"/>.
     /// <paramref name="cobId"/> is the <c>1400h:01</c> word (bit 31 set = configured but disabled;
     /// bit 29 is not supported and throws); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
+    /// The writes are one transaction on the actor loop, as for <see cref="ConfigureTpdo"/>.
     /// </summary>
     /// <exception cref="ArgumentException">A value was rejected; see <see cref="ConfigureTpdo"/>.</exception>
     void ConfigureRpdo(int pdoIndex, PdoMapping mapping, uint? cobId = null,

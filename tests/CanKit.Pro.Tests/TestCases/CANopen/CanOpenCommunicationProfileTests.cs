@@ -435,6 +435,54 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         (await UploadUnsignedAsync(master, Slave, 0x1001, 0x00)).Should().Be(0x81u);
     }
 
+    // FR-CO-014 (#133 review) — ConfigureTpdo / ConfigureRpdo are several dictionary writes, and
+    // they are one transaction: the whole sequence runs on the node's actor loop — one dedicated
+    // thread, on which the SDO server stores its downloads too — so neither a second caller nor
+    // an SDO remap can interleave with it. The dictionary's write event fires on the writing
+    // thread; the test compares the thread of every write of the sequence with the thread an SDO
+    // download is stored on, and with the caller's.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ConfigurePdo_Writes_Its_Records_On_The_Actor_Loop_As_One_Transaction(bool isTpdo)
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+        slave.ObjectDictionary.AddU16(0x2000, 0x00, 0xBEEF);
+        ushort comm = isTpdo ? (ushort)0x1800 : (ushort)0x1400;
+        ushort map = isTpdo ? (ushort)0x1A00 : (ushort)0x1600;
+
+        var writes = new List<(ushort Index, byte Subindex, int Thread)>();
+        slave.ObjectDictionary.EntryWritten += (index, subindex) =>
+        {
+            lock (writes) writes.Add((index, subindex, Environment.CurrentManagedThreadId));
+        };
+
+        await DownloadAsync(master, Slave, 0x1017, 0x00, new byte[] { 0xE8, 0x03 });
+        int loopThread;
+        lock (writes) loopThread = writes.Single(w => w.Index == 0x1017).Thread;
+
+        int callerThread = await Task.Run(() =>
+        {
+            if (isTpdo) slave.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+            else slave.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+            return Environment.CurrentManagedThreadId;
+        });
+        callerThread.Should().NotBe(loopThread, "the caller is a pool thread, the loop a dedicated one");
+
+        (ushort Index, byte Subindex, int Thread)[] sequence;
+        lock (writes) sequence = writes.Where(w => w.Index == comm || w.Index == map).ToArray();
+        sequence.Select(w => w.Index).Distinct().Should().BeEquivalentTo(new[] { comm, map }, "both records are written");
+        sequence.Should().OnlyContain(w => w.Thread == loopThread,
+            "every write of the sequence is stored on the loop, where nothing can interleave with it; none on the caller");
+        slave.ObjectDictionary.ReadUnsigned(map, 0x00).Should().Be(1u);
+        slave.ObjectDictionary.ReadUnsigned(comm, 0x01).Should().Be(
+            isTpdo ? CanOpenCobId.TpdoDefault(Slave, 1) : CanOpenCobId.RpdoDefault(Slave, 1), "the PDO exists once the transaction ran");
+    }
+
     // =========================================================================================
     // FR-CO-018 — SYNC and EMCY COB-IDs: control bits, restricted CAN-IDs, and where the frames go.
     // =========================================================================================

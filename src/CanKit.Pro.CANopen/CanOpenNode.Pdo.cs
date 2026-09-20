@@ -71,9 +71,8 @@ internal sealed partial class CanOpenNode
             : (ushort)0;
         ushort inhibit = inhibitTime is { } ih ? ToHundredMicroseconds16(ih, nameof(inhibitTime)) : (ushort)0;
 
-        WritePdoRecords((ushort)(Co.TpdoComm + pdoIndex - 1), (ushort)(Co.TpdoMap + pdoIndex - 1),
-            mapping.ToArray(), word, type, inhibit, timerMs, isTpdo: true, pdoIndex);
-        WaitForActor();
+        RunOnActorAndWait(() => WritePdoRecords((ushort)(Co.TpdoComm + pdoIndex - 1), (ushort)(Co.TpdoMap + pdoIndex - 1),
+            mapping.ToArray(), word, type, inhibit, timerMs, isTpdo: true, pdoIndex));
     }
 
     /// <inheritdoc />
@@ -87,9 +86,8 @@ internal sealed partial class CanOpenNode
         byte type = CanOpenTransmissionType.FromRpdoTransmission(transmission);
         uint word = ValidateCobIdArgument(cobId ?? CanOpenCobId.RpdoDefault(_nodeId, pdoIndex));
 
-        WritePdoRecords((ushort)(Co.RpdoComm + pdoIndex - 1), (ushort)(Co.RpdoMap + pdoIndex - 1),
-            mapping.ToArray(), word, type, inhibit: 0, eventTimerMs: 0, isTpdo: false, pdoIndex);
-        WaitForActor();
+        RunOnActorAndWait(() => WritePdoRecords((ushort)(Co.RpdoComm + pdoIndex - 1), (ushort)(Co.RpdoMap + pdoIndex - 1),
+            mapping.ToArray(), word, type, inhibit: 0, eventTimerMs: 0, isTpdo: false, pdoIndex));
     }
 
     /// <inheritdoc />
@@ -113,6 +111,9 @@ internal sealed partial class CanOpenNode
     /// the mapping (sub0 = 0), write the entries, enable the mapping (sub0 = N), set the
     /// communication parameters, create the PDO. Each write is validated like an SDO download;
     /// a rejection surfaces as <see cref="ArgumentException"/> and leaves the PDO destroyed.
+    /// Runs on the actor loop (<see cref="RunOnActorAndWait"/>), so the sequence is one
+    /// transaction: the SDO server writes on the same loop and a second configuration queues
+    /// behind the whole sequence, neither can interleave with it (Codex on #133).
     /// </summary>
     private void WritePdoRecords(ushort comm, ushort map, PdoMappingEntry[] entries, uint cobIdWord,
         byte transmissionType, ushort inhibit, ushort eventTimerMs, bool isTpdo, int pdoIndex)

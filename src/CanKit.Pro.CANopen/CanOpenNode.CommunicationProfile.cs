@@ -359,6 +359,21 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    /// <summary>Runs <paramref name="work"/> on the actor loop and returns once it has, rethrowing
+    /// what it threw. A configuration that is several dictionary writes becomes one transaction
+    /// there: the SDO server writes on the same loop, and another caller queues behind the whole
+    /// sequence instead of interleaving with it. The applies the writes raise run inline on the
+    /// loop, so the effect is in place when this returns. Inline when already on the loop.</summary>
+    private void RunOnActorAndWait(Action work)
+    {
+        if (_actor.IsOnCurrentActor)
+        {
+            work();
+            return;
+        }
+        _actor.PostAsync(work).GetAwaiter().GetResult();
+    }
+
     /// <summary>Blocks until every apply posted so far has run, so a configuration method
     /// returns with its effect in place. Skipped when already on the actor loop, where posted
     /// work cannot run until the current callback returns anyway.</summary>
