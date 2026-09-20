@@ -16,8 +16,12 @@ namespace CanKit.Pro.J1939Tp;
 /// (sequence numbers, remaining bytes, block counters, T1..T4/Tr/Th deadlines) lives inside a
 /// single <see cref="Actor.IProtocolActor"/> mailbox and is only ever read/written on the
 /// actor's loop thread. Callers may invoke <see cref="SendBamAsync"/> or
-/// <see cref="SendCmAsync"/> concurrently from any thread; the channel serializes them per peer
-/// so one PDU at a time is on the wire per session identity (source, destination, PGN).
+/// <see cref="SendCmAsync"/> concurrently from any thread; the channel serializes them per
+/// destination address, so one PDU at a time is on the wire towards any one destination — and,
+/// since every BAM goes to the global address, one BAM at a time per channel (J1939-21 §5.10.3).
+/// A send whose destination is busy waits its turn; a second send for the same
+/// (destination, PGN) while one is in flight or waiting faults with
+/// <see cref="InvalidOperationException"/>.
 /// </para>
 /// <para>
 /// Received PDUs are delivered both as an event (<see cref="DatagramReceived"/>) and via

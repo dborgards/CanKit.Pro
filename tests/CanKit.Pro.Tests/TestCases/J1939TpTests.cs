@@ -1520,6 +1520,119 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             J1939TpFrames.BuildEomAck(payload.Length, totalPackets: 3, dataPgn: pgn), isExtendedFrame: true));
         await send.WithTimeout(ShortTimeout);
     }
+
+    // -----------------------------------------------------------------------------------------
+    // #32 -- sends to one destination go one after another. Two BAMs both go to the global
+    // address, and TP.DT carries no PGN, so interleaved DTs are indistinguishable to a receiver;
+    // J1939-21 §5.10.3 allows one BAM per source at a time (FR-TP-030).
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Parallel_Bam_Sends_Are_Transmitted_One_After_Another()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var receiverBus = Open(session, 1);
+
+        const byte senderSa = 0x10;
+        const uint firstPgn = 0xFECAu;
+        const uint secondPgn = 0xFECBu;
+        var firstPayload = RandomPayload(21, seed: 321);  // 3 TP.DT
+        var secondPayload = RandomPayload(35, seed: 322); // 5 TP.DT
+
+        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x20, options: opts);
+
+        var wire = new List<(bool isCm, byte[] data)>();
+        receiverBus.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (fields.SourceAddress != senderSa) return;
+            lock (wire) wire.Add((J1939Pgn.IsTransportCm(fields.Pgn), frame.Data.ToArray()));
+        };
+
+        var first = sender.SendBamAsync(firstPgn, firstPayload);
+        var second = sender.SendBamAsync(secondPgn, secondPayload);
+        await Task.WhenAll(first, second).WithTimeout(ShortTimeout);
+
+        var datagram1 = await receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        var datagram2 = await receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        datagram1.Pgn.Should().Be(firstPgn);
+        datagram1.Payload.Should().Equal(firstPayload);
+        datagram2.Pgn.Should().Be(secondPgn);
+        datagram2.Payload.Should().Equal(secondPayload,
+            "a receiver keeps one BAM per source; interleaved DTs would have corrupted or superseded it");
+
+        // The wire order: BAM(first), its 3 DTs, BAM(second), its 5 DTs -- nothing interleaved.
+        List<(bool isCm, byte[] data)> frames;
+        lock (wire) frames = wire.ToList();
+        var announces = frames.Select((f, i) => (f, i)).Where(t => t.f.isCm).Select(t => t.i).ToList();
+        announces.Should().HaveCount(2);
+        J1939TpFrames.ReadDataPgn(frames[announces[0]].data).Should().Be(firstPgn);
+        J1939TpFrames.ReadDataPgn(frames[announces[1]].data).Should().Be(secondPgn);
+        (announces[1] - announces[0] - 1).Should().Be(3,
+            "every DT of the first BAM is on the wire before the second BAM is announced");
+        frames.Skip(announces[0] + 1).Take(3).Select(f => f.data[0]).Should().Equal(new byte[] { 1, 2, 3 });
+        frames.Skip(announces[1] + 1).Select(f => f.data[0]).Should().Equal(new byte[] { 1, 2, 3, 4, 5 });
+    }
+
+    [Fact]
+    public async Task A_Queued_Send_Can_Be_Cancelled_Before_It_Reaches_The_Wire()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var receiverBus = Open(session, 1);
+
+        const byte senderSa = 0x10;
+        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x20, options: opts);
+
+        var announced = new List<uint>();
+        receiverBus.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (fields.SourceAddress != senderSa || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        using var cancel = new CancellationTokenSource();
+        var first = sender.SendBamAsync(0xFEC1u, RandomPayload(35, seed: 1));
+        var queued = sender.SendBamAsync(0xFEC2u, RandomPayload(21, seed: 2), cancel.Token);
+        cancel.Cancel();
+
+        Func<Task> act = async () => await queued.WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await first.WithTimeout(ShortTimeout);
+
+        // The slot is free again: a third send is announced right after the first, and the
+        // cancelled one never reaches the wire.
+        await sender.SendBamAsync(0xFEC3u, RandomPayload(21, seed: 3)).WithTimeout(ShortTimeout);
+        (await receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout)).Pgn.Should().Be(0xFEC1u);
+        (await receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout)).Pgn.Should().Be(0xFEC3u);
+        lock (announced) announced.Should().Equal(0xFEC1u, 0xFEC3u);
+    }
+
+    [Fact]
+    public async Task A_Second_Send_For_The_Same_Destination_And_Pgn_Is_Refused_While_One_Waits()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0x10,
+            options: new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5)));
+
+        var first = sender.SendBamAsync(0xFEC1u, RandomPayload(35, seed: 1));
+        var waiting = sender.SendBamAsync(0xFEC2u, RandomPayload(21, seed: 2));
+        Func<Task> duplicate = async () => await sender.SendBamAsync(0xFEC2u, RandomPayload(21, seed: 3)).WithTimeout(ShortTimeout);
+
+        await duplicate.Should().ThrowAsync<InvalidOperationException>(
+            "one send per (destination, PGN) is in flight or waiting at a time, as before the queue");
+        await Task.WhenAll(first, waiting).WithTimeout(ShortTimeout);
+    }
 }
 
 /// <summary>
