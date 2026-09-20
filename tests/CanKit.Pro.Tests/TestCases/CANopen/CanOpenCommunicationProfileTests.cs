@@ -1048,6 +1048,38 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         timeoutsBeforeWitness.Should().BeEmpty("an unused entry is no consumer and reports nothing");
     }
 
+    // FR-CO-023 (#133 review) — an NMT reset restores 1016h:00 to the stored count and zeroes the
+    // entries the array had grown by since, but the sub-indices themselves stay declared. Growing
+    // the array again must reuse them: the entry is written, not re-declared, and the count moves
+    // with it.
+    [Fact]
+    public async Task AddHeartbeatConsumer_Reuses_The_1016h_Slots_A_Reset_Hid()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var tool = CanOpen.OpenNode(busA, nodeId: Tool);
+        var bootups = new BootupWatch(tool, Master);
+        using var master = CanOpen.OpenNode(busB, nodeId: Master);
+        await bootups.First;
+
+        master.AddHeartbeatConsumer(0x11, TimeSpan.FromSeconds(1));
+        master.AddHeartbeatConsumer(0x12, TimeSpan.FromSeconds(2));
+        master.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(2u);
+
+        await tool.SendNmtCommandAsync(NmtCommand.ResetCommunication, Master);
+        await bootups.Second;
+        master.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "the count the node was created with");
+        master.ObjectDictionary.ReadUnsigned(0x1016, 0x02).Should().Be(0u, "the entry is cleared but still declared");
+
+        master.AddHeartbeatConsumer(0x13, TimeSpan.FromSeconds(3));
+        master.AddHeartbeatConsumer(0x14, TimeSpan.FromSeconds(4));
+        master.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "the second consumer grows the array into the retained slot");
+        master.ObjectDictionary.ReadUnsigned(0x1016, 0x01).Should().Be(HeartbeatEntry(0x13, 3000));
+        master.ObjectDictionary.ReadUnsigned(0x1016, 0x02).Should().Be(HeartbeatEntry(0x14, 4000));
+        (await UploadUnsignedAsync(tool, Master, 0x1016, 0x02)).Should().Be(HeartbeatEntry(0x14, 4000));
+    }
+
     // FR-CO-019 (#133 review) — a store after "load" is the newer instruction: the next reset
     // restores what was stored last, not the defaults the earlier "load" asked for.
     [Fact]

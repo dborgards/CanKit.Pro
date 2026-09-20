@@ -306,7 +306,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (count >= 0x7F)
                     throw new InvalidOperationException("1016h holds at most 127 consumer heartbeat times (CiA 301 §7.5.2.19).");
                 slot = count + 1;
-                _od.AddU32(Co.ConsumerHeartbeat, (byte)slot, 0, OdAccess.ReadWrite, pdoMappable: false);
+                // The sub-index may already exist: an NMT reset restores sub-index 00h to the
+                // stored count and zeroes the entries the array had grown by since, but keeps
+                // them, so growing again reuses such an entry rather than re-declaring it.
+                if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
+                    _od.AddU32(Co.ConsumerHeartbeat, (byte)slot, 0, OdAccess.ReadWrite, pdoMappable: false);
                 _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
             }
             _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
