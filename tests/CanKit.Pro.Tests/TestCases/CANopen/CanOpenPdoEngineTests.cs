@@ -1106,7 +1106,7 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), TpdoTransmission.EventDriven,
             inhibitTime: TimeSpan.FromMilliseconds(50));
         device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0x00, 8), TpdoTransmission.EventDriven);
-        var syncs = new SemaphoreSlim(0);
+        using var syncs = new SemaphoreSlim(0);
         device.SyncReceived += (_, _) => syncs.Release();
 
         await StartAsync(wire, device);
@@ -1185,5 +1185,38 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         Advance(clock, device, TimeSpan.FromMilliseconds(50));
         await wire.WaitForCountAsync(Tpdo1, 2);
         wire.Payloads(Tpdo1)[1].Should().Equal(new byte[] { 0x02, 0x00 }, "the waiting transmission went out with the current value");
+    }
+
+    // FR-CO-016 (#133 review) — an event timer whose expiry was deferred by the inhibit time,
+    // and whose deferred transmission was then dropped on leaving Operational, has no
+    // transmission left to re-arm it. "Transitioning to the NMT state Operational creates all
+    // PDOs" (§7.3.2.2.3): the timer is armed anew on every Start.
+    [Fact]
+    public async Task An_Event_Timer_Deferred_By_The_Inhibit_Time_Is_Armed_Again_On_The_Next_Start()
+    {
+        var clock = new ManualTimeSource();
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = OpenClocked(busB, Device, clock, new CanOpenNodeOptions { EnableChangeOfStateTpdo = false });
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 1);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), TpdoTransmission.EventTimer,
+            eventTimerInterval: TimeSpan.FromMilliseconds(20), inhibitTime: TimeSpan.FromMilliseconds(50));
+
+        await StartAsync(wire, device);
+        await device.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+
+        // The timer expires inside the inhibit time and the transmission waits; leaving
+        // Operational drops it.
+        Advance(clock, device, TimeSpan.FromMilliseconds(20));
+        wire.SendNmt(NmtCommand.Stop, Device);
+        await WaitForStateAsync(device, NmtState.Stopped);
+        wire.SendNmt(NmtCommand.Start, Device);
+        await WaitForStateAsync(device, NmtState.Operational);
+
+        Advance(clock, device, TimeSpan.FromMilliseconds(100));
+        await wire.WaitForCountAsync(Tpdo1, 2);
     }
 }

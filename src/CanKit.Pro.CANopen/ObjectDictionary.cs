@@ -37,6 +37,11 @@ public sealed class ObjectDictionary
 {
     private readonly Dictionary<uint, OdEntry> _entries = new();
     private readonly object _sync = new();
+    // Writers queue here so that a write's validation and its store are one transaction: the
+    // validators read the dictionary (a 1016h duplicate check, "not while valid" rules), and two
+    // writes validating against the same state could both pass a rule that only one of them
+    // may. Readers never take this lock, so a validator reading under _sync cannot deadlock.
+    private readonly object _writeGate = new();
 
     /// <summary>
     /// Internal hook for <see cref="CanOpenNode"/>: raised after a value-mutating write
@@ -204,6 +209,15 @@ public sealed class ObjectDictionary
         => TryWriteRaw(index, subindex, value, out abort, throwOnMissingOrSize: false);
 
     private bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
+        bool throwOnMissingOrSize)
+    {
+        lock (_writeGate)
+        {
+            return TryWriteRawLocked(index, subindex, value, out abort, throwOnMissingOrSize);
+        }
+    }
+
+    private bool TryWriteRawLocked(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
         bool throwOnMissingOrSize)
     {
         abort = null;

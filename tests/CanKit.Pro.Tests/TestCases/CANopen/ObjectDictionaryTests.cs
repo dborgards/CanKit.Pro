@@ -78,4 +78,59 @@ public class ObjectDictionaryTests
         od.TryGet(0x1000, 0x01, out var wo).Should().BeTrue();
         wo.Access.Should().Be(OdAccess.WriteOnly);
     }
+
+    // FR-CO-014 (#133 review) — a write's validation and its store are one transaction. The
+    // validators read the dictionary (the node's 1016h rule refuses a second entry for a node-id
+    // another slot already monitors), so two writes validating against the same state could both
+    // pass a rule only one of them may. Two threads released together, many rounds: exactly one
+    // write per round may succeed. Without the write gate both usually succeed.
+    [Fact]
+    public void Validation_And_Store_Are_One_Transaction()
+    {
+        var od = new ObjectDictionary();
+        od.AddU32(0x1016, 0x01, 0);
+        od.AddU32(0x1016, 0x02, 0);
+        od.WriteValidator = (index, subindex, value) =>
+        {
+            uint entry = ObjectDictionary.DecodeU32(value);
+            byte nodeId = (byte)((entry >> 16) & 0xFF);
+            for (byte s = 1; s <= 2; s++)
+            {
+                if (s == subindex) continue;
+                uint other = od.ReadUnsigned(index, s);
+                if ((ushort)(other & 0xFFFF) != 0 && (byte)((other >> 16) & 0xFF) == nodeId)
+                    return OdWriteDecision.Reject(CanKit.Pro.CANopen.Sdo.SdoAbortCode.GeneralParameterIncompatibility);
+            }
+            return OdWriteDecision.Accept;
+        };
+
+        const uint sameProducer = (0x11u << 16) | 100u;
+        for (int round = 0; round < 200; round++)
+        {
+            od.WriteRaw(0x1016, 0x01, new byte[4]);
+            od.WriteRaw(0x1016, 0x02, new byte[4]);
+            using var start = new System.Threading.Barrier(2);
+            int succeeded = 0;
+            void Write(byte slot)
+            {
+                start.SignalAndWait();
+                try
+                {
+                    od.WriteUnsigned(0x1016, slot, sameProducer);
+                    System.Threading.Interlocked.Increment(ref succeeded);
+                }
+                catch (ArgumentException)
+                {
+                    // rejected with 0604 0043h: the other slot already holds the producer
+                }
+            }
+            var first = new System.Threading.Thread(() => Write(0x01));
+            var second = new System.Threading.Thread(() => Write(0x02));
+            first.Start();
+            second.Start();
+            first.Join();
+            second.Join();
+            succeeded.Should().Be(1, $"round {round}: one of two simultaneous writes for the same producer passes, never both");
+        }
+    }
 }

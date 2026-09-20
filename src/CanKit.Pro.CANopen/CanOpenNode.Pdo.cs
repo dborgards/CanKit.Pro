@@ -593,7 +593,9 @@ internal sealed partial class CanOpenNode
     // =========================================================================================
 
     /// <summary>§7.3.2.2.3: "Transitioning to the NMT state Operational creates all PDOs" — every
-    /// SYNC counter, latch and sample starts afresh.</summary>
+    /// SYNC counter, latch and sample starts afresh, and every event timer is armed anew: a
+    /// timer whose last expiry was deferred by the inhibit time and then dropped on leaving
+    /// Operational has no transmission left to re-arm it, so this is where it comes back.</summary>
     private void OnEnterOperational()
     {
         for (int n = 1; n <= Co.PdoCount; n++)
@@ -603,6 +605,10 @@ internal sealed partial class CanOpenNode
                 rt.SyncCounter = 0;
                 rt.SyncAcyclicPending = false;
                 rt.RtrBuffer = null;
+                rt.EventTimerHandle?.Dispose();
+                rt.EventTimerHandle = null;
+                if (rt.Valid && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType))
+                    ScheduleTpdoEventTimer(rt);
             }
             if (_rpdos[n] is { } rp) rp.SyncPending = null;
         }
