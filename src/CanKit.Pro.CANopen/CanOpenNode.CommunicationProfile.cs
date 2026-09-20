@@ -85,9 +85,6 @@ internal sealed partial class CanOpenNode
     private Dictionary<uint, byte[]> _powerOnValues = new();
     private bool _restoreDefaultsOnReset;
 
-    // Serialises AddHeartbeatConsumer's find-or-grow over the 1016h array across threads.
-    private readonly object _heartbeatTableGate = new();
-
     // =========================================================================================
     // Creation.
     // =========================================================================================
@@ -216,7 +213,12 @@ internal sealed partial class CanOpenNode
             case Co.EmcyCobId:
                 return ValidateEmcyCobIdWrite(value);
             case Co.ConsumerHeartbeat:
-                return subindex == 0 ? OdWriteDecision.Accept : ValidateConsumerHeartbeatWrite(subindex, value);
+                // §7.5.2.19: sub-index 00h holds at most 127 entries. It is ro on the bus, but a
+                // local write reaches it, and a larger count would send the loops over the array
+                // round the clock on the actor — a byte 255 + 1 is 0 (Codex on #133).
+                if (subindex == 0)
+                    return value[0] <= CanOpenCobId.MaxNodeId ? OdWriteDecision.Accept : OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+                return ValidateConsumerHeartbeatWrite(subindex, value);
             case Co.StoreParameters:
                 return subindex == 1 ? HandleStoreCommand(value) : OdWriteDecision.Accept;
             case Co.RestoreDefaults:
@@ -274,9 +276,9 @@ internal sealed partial class CanOpenNode
         if (time == 0 || nodeId is < CanOpenCobId.MinNodeId or > CanOpenCobId.MaxNodeId)
             return OdWriteDecision.Accept; // "the corresponding object entry shall be not used"
         byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
-        for (byte s = 1; s <= count; s++)
+        for (int s = 1; s <= count; s++)
         {
-            if (s == subindex || !_od.TryReadUnsigned(Co.ConsumerHeartbeat, s, out var other)) continue;
+            if (s == subindex || !_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var other)) continue;
             if ((ushort)(other & 0xFFFF) != 0 && (byte)((other >> 16) & 0xFF) == nodeId)
                 return OdWriteDecision.Reject(SdoAbortCode.GeneralParameterIncompatibility);
         }
@@ -489,9 +491,9 @@ internal sealed partial class CanOpenNode
     {
         var desired = new Dictionary<byte, TimeSpan>();
         byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
-        for (byte s = 1; s <= count; s++)
+        for (int s = 1; s <= count; s++)
         {
-            if (!_od.TryReadUnsigned(Co.ConsumerHeartbeat, s, out var v)) continue;
+            if (!_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v)) continue;
             byte nodeId = (byte)((v >> 16) & 0xFF);
             ushort ms = (ushort)(v & 0xFFFF);
             if (ms == 0 || nodeId is < CanOpenCobId.MinNodeId or > CanOpenCobId.MaxNodeId) continue;

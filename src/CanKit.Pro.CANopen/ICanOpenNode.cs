@@ -237,8 +237,9 @@ public interface ICanOpenNode : IDisposable
     /// connection set entry, the inhibit time is 0 (off), and the event timer is
     /// <see cref="CanOpenNodeOptions.DefaultTpdoEventTimerInterval"/> for
     /// <see cref="TpdoTransmission.EventTimer"/> and 0 otherwise. The writes are one transaction
-    /// on the node's actor loop: the method returns with the configuration applied, and neither
-    /// another caller nor an SDO download interleaves with the sequence.
+    /// on the node's actor loop and under the dictionary's write gate: the method returns with
+    /// the configuration applied, and neither another caller, nor an SDO download, nor a direct
+    /// dictionary write interleaves with the sequence.
     /// </summary>
     /// <param name="pdoIndex">TPDO number 1..4.</param>
     /// <param name="mapping">The mapped objects; copied into the mapping record. Every target

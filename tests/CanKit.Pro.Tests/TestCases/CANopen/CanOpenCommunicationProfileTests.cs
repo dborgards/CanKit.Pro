@@ -483,6 +483,58 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
             isTpdo ? CanOpenCobId.TpdoDefault(Slave, 1) : CanOpenCobId.RpdoDefault(Slave, 1), "the PDO exists once the transaction ran");
     }
 
+    // FR-CO-014 (#133 review) — a direct dictionary write is a third writer, on its own thread, and
+    // it must not land between two writes of a configuration sequence either: the sequence holds
+    // the dictionary's write gate as one transaction. The validator runs inside the gate, so the
+    // order of its calls is the order of the writes; the test parks the sequence in the validator
+    // of its first write while four threads hammer an application object, and requires that none
+    // of their writes was validated between the sequence's first write and its last.
+    [Fact]
+    public async Task A_Direct_Write_Cannot_Land_Inside_A_ConfigureTpdo_Transaction()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var slave = CanOpen.OpenNode(bus, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0xBEEF);
+        od.AddU8(0x2001, 0x00, 0x00);
+
+        var validated = new List<ushort>();
+        var inner = od.WriteValidator!;
+        using var sequenceStarted = new ManualResetEventSlim(false);
+        od.WriteValidator = (index, subindex, value) =>
+        {
+            lock (validated) validated.Add(index);
+            if (index == 0x1800 && subindex == 0x01 && !sequenceStarted.IsSet)
+            {
+                sequenceStarted.Set();
+                Thread.Sleep(100); // the hammers are at the gate before the sequence goes on
+            }
+            return inner(index, subindex, value);
+        };
+        using var stop = new CancellationTokenSource();
+        var hammers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            sequenceStarted.Wait(ShortTimeout);
+            while (!stop.IsCancellationRequested) od.WriteUnsigned(0x2001, 0x00, 1);
+        })).ToArray();
+
+        slave.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+        stop.Cancel();
+        await Task.WhenAll(hammers).WithTimeoutAsync(ShortTimeout);
+
+        ushort[] order;
+        lock (validated) order = validated.ToArray();
+        int first = Array.IndexOf(order, (ushort)0x1800);
+        int last = Array.LastIndexOf(order, (ushort)0x1800);
+        first.Should().BeGreaterThanOrEqualTo(0);
+        order.Skip(first).Take(last - first + 1).Should().OnlyContain(index => index == 0x1800 || index == 0x1A00,
+            "between the first write of the sequence (destroy) and its last (create) no other writer got in");
+        order.Should().Contain(0x2001, "the hammers did write — before the sequence or after it");
+        od.ReadUnsigned(0x1A00, 0x00).Should().Be(1u);
+        od.ReadUnsigned(0x1800, 0x01).Should().Be(CanOpenCobId.TpdoDefault(Slave, 1));
+    }
+
     // =========================================================================================
     // FR-CO-018 — SYNC and EMCY COB-IDs: control bits, restricted CAN-IDs, and where the frames go.
     // =========================================================================================
@@ -933,6 +985,25 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         // The array is what a configuration tool reads over SDO.
         (await UploadUnsignedAsync(tool, Master, 0x1016, 0x00)).Should().Be(3u);
         (await UploadUnsignedAsync(tool, Master, 0x1016, 0x03)).Should().Be(HeartbeatEntry(0x13, 3000));
+    }
+
+    // FR-CO-023 (#133 review) — 1016h:00 is read-only on the bus, but a local write reaches it, and
+    // a count above 127 would drive the loops over the array on the actor round the clock (a byte
+    // 255 + 1 is 0). The write is refused with the value-range abort, as the SDO layer would.
+    [Theory]
+    [InlineData(0x80u)]
+    [InlineData(0xFFu)]
+    public void A_Local_Write_Of_1016h_Sub0_Above_127_Is_Rejected(uint count)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+
+        var write = () => node.ObjectDictionary.WriteUnsigned(0x1016, 0x00, count);
+        write.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06090030");
+        node.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "the count is what the node was created with");
+        node.ObjectDictionary.WriteUnsigned(0x1016, 0x00, 0x7F);
+        node.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(0x7Fu, "127 is the largest count the object can hold");
     }
 
     // FR-CO-023: RemoveHeartbeatConsumer clears the producer's slot and the consumer stops

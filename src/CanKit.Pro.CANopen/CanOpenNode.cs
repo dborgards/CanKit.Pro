@@ -284,17 +284,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         ushort ms = ToMilliseconds16(timeout, nameof(timeout), allowZero: false);
 
         // 1016h consumer heartbeat time (CiA 301 §7.5.2.19): reuse the sub-index already
-        // monitoring this producer, else the first unused one, else grow the array. Serialised
-        // so two threads cannot both grow into the same sub-index.
-        lock (_heartbeatTableGate)
+        // monitoring this producer, else the first unused one, else grow the array. One
+        // transaction on the dictionary, so two callers cannot both grow into the same sub-index
+        // and a direct write of 1016h on another thread waits for the find-or-grow to finish.
+        _od.Transaction(() =>
         {
             byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
             int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
             if (slot < 0)
             {
-                for (byte s = 1; s <= count; s++)
+                for (int s = 1; s <= count; s++)
                 {
-                    if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, s, out var v) && (ushort)(v & 0xFFFF) == 0)
+                    if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v) && (ushort)(v & 0xFFFF) == 0)
                     {
                         slot = s;
                         break;
@@ -314,26 +315,26 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
             }
             _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
-        }
+        });
     }
 
     /// <inheritdoc />
     public void RemoveHeartbeatConsumer(byte producerNodeId)
     {
         if (_disposed != 0) return;
-        lock (_heartbeatTableGate)
+        _od.Transaction(() =>
         {
             byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
             int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
             if (slot > 0) _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, 0);
-        }
+        });
     }
 
     private int FindHeartbeatConsumerSlot(byte producerNodeId, byte count)
     {
-        for (byte s = 1; s <= count; s++)
+        for (int s = 1; s <= count; s++)
         {
-            if (!_od.TryReadUnsigned(Co.ConsumerHeartbeat, s, out var v)) continue;
+            if (!_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v)) continue;
             if ((ushort)(v & 0xFFFF) != 0 && (byte)((v >> 16) & 0xFF) == producerNodeId) return s;
         }
         return -1;

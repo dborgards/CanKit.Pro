@@ -111,30 +111,35 @@ internal sealed partial class CanOpenNode
     /// the mapping (sub0 = 0), write the entries, enable the mapping (sub0 = N), set the
     /// communication parameters, create the PDO. Each write is validated like an SDO download;
     /// a rejection surfaces as <see cref="ArgumentException"/> and leaves the PDO destroyed.
-    /// Runs on the actor loop (<see cref="RunOnActorAndWait"/>), so the sequence is one
-    /// transaction: the SDO server writes on the same loop and a second configuration queues
-    /// behind the whole sequence, neither can interleave with it (Codex on #133).
+    /// Runs on the actor loop (<see cref="RunOnActorAndWait"/>) and holds the dictionary's write
+    /// gate throughout (<see cref="ObjectDictionary.Transaction"/>), so the sequence is one
+    /// transaction: the SDO server writes on the same loop, a second configuration queues behind
+    /// the whole sequence, and a direct dictionary write on another thread waits for it —
+    /// none of them lands between two of its writes (Codex on #133).
     /// </summary>
     private void WritePdoRecords(ushort comm, ushort map, PdoMappingEntry[] entries, uint cobIdWord,
         byte transmissionType, ushort inhibit, ushort eventTimerMs, bool isTpdo, int pdoIndex)
     {
         try
         {
-            uint current = _od.ReadUnsigned(comm, 0x01);
-            _od.WriteUnsigned(comm, 0x01, current | CanOpenCobId.InvalidBit);
-            _od.WriteUnsigned(map, 0x00, 0);
-            for (byte s = 1; s <= PdoMapping.MaxEntries; s++)
+            _od.Transaction(() =>
             {
-                _od.WriteUnsigned(map, s, s <= entries.Length ? EncodeMappingEntry(entries[s - 1]) : 0u);
-            }
-            _od.WriteUnsigned(map, 0x00, (uint)entries.Length);
-            _od.WriteUnsigned(comm, 0x02, transmissionType);
-            if (isTpdo)
-            {
-                _od.WriteUnsigned(comm, 0x03, inhibit);
-                _od.WriteUnsigned(comm, 0x05, eventTimerMs);
-            }
-            _od.WriteUnsigned(comm, 0x01, cobIdWord);
+                uint current = _od.ReadUnsigned(comm, 0x01);
+                _od.WriteUnsigned(comm, 0x01, current | CanOpenCobId.InvalidBit);
+                _od.WriteUnsigned(map, 0x00, 0);
+                for (byte s = 1; s <= PdoMapping.MaxEntries; s++)
+                {
+                    _od.WriteUnsigned(map, s, s <= entries.Length ? EncodeMappingEntry(entries[s - 1]) : 0u);
+                }
+                _od.WriteUnsigned(map, 0x00, (uint)entries.Length);
+                _od.WriteUnsigned(comm, 0x02, transmissionType);
+                if (isTpdo)
+                {
+                    _od.WriteUnsigned(comm, 0x03, inhibit);
+                    _od.WriteUnsigned(comm, 0x05, eventTimerMs);
+                }
+                _od.WriteUnsigned(comm, 0x01, cobIdWord);
+            });
         }
         catch (ArgumentException ex)
         {

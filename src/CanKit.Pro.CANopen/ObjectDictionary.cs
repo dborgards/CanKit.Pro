@@ -208,6 +208,20 @@ public sealed class ObjectDictionary
     internal bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort)
         => TryWriteRaw(index, subindex, value, out abort, throwOnMissingOrSize: false);
 
+    /// <summary>
+    /// Runs <paramref name="writes"/> as one transaction: the write gate is held for the whole of
+    /// it, so no other writer — an SDO download, a configuration method, a direct write on
+    /// another thread — lands between two of its writes. The writes it makes re-enter the gate,
+    /// and the validation and the apply each of them raises run inside it as always.
+    /// </summary>
+    internal void Transaction(Action writes)
+    {
+        lock (_writeGate)
+        {
+            writes();
+        }
+    }
+
     private bool TryWriteRaw(ushort index, byte subindex, byte[] value, out SdoAbortCode? abort,
         bool throwOnMissingOrSize)
     {
