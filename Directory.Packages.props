@@ -13,6 +13,15 @@
     <PackageVersion Include="CanKit.Adapter.Virtual" Version="$(CanKitVersion)" />
   </ItemGroup>
 
+  <ItemGroup Label="CiA 306 / CiA 311 device descriptions (MIT, the maintainer's own library)">
+    <!--
+      The CANopen device-description loader reads EDS/DCF (and XDD/XDC) files with EdsDcfNet.
+      Consumed as a NuGet package like CanKit itself; 1.13.0 is the first release with the
+      data-type metadata (CanOpenDataType) and the parse-diagnostics channel the loader uses.
+    -->
+    <PackageVersion Include="EdsDcfNet" Version="1.13.0" />
+  </ItemGroup>
+
   <ItemGroup Label="netstandard2.0 polyfills">
     <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.12" />
     <PackageVersion Include="System.Memory" Version="4.6.3" />

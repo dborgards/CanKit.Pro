@@ -2,8 +2,11 @@ namespace CanKit.Pro.CANopen
 {
     public static class CanOpen
     {
+        public static CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.CANopen.CanOpenDeviceDescription description, CanKit.Pro.CANopen.CanOpenNodeOptions? options = null) { }
         public static CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Abstractions.API.Can.ICanBus bus, byte nodeId, CanKit.Pro.CANopen.CanOpenNodeOptions? options = null) { }
+        public static CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Abstractions.API.Can.ICanBus bus, byte nodeId, CanKit.Pro.CANopen.CanOpenDeviceDescription description, CanKit.Pro.CANopen.CanOpenNodeOptions? options = null) { }
         public static CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Pro.RawCan.ICanBusService service, byte nodeId, CanKit.Pro.CANopen.CanOpenNodeOptions? options = null, bool leaveOpen = true) { }
+        public static CanKit.Pro.CANopen.ICanOpenNode OpenNode(CanKit.Pro.RawCan.ICanBusService service, byte nodeId, CanKit.Pro.CANopen.CanOpenDeviceDescription description, CanKit.Pro.CANopen.CanOpenNodeOptions? options = null, bool leaveOpen = true) { }
     }
     public static class CanOpenCobId
     {
@@ -37,6 +40,21 @@ namespace CanKit.Pro.CANopen
         public static uint TpdoDefault(byte nodeId, int pdoIndex) { }
         public static void ValidateNodeId(byte nodeId) { }
     }
+    public sealed class CanOpenDeviceDescription
+    {
+        public EdsDcfNet.Models.DeviceConfigurationFile? Dcf { get; }
+        public EdsDcfNet.Models.DeviceInfo DeviceInfo { get; }
+        public EdsDcfNet.Models.ElectronicDataSheet? Eds { get; }
+        public bool IsConfigurationFile { get; }
+        public byte? NodeId { get; }
+        public EdsDcfNet.Models.ObjectDictionary Objects { get; }
+        public System.Collections.Generic.IReadOnlyList<EdsDcfNet.Diagnostics.ParseDiagnostic> ParseDiagnostics { get; }
+        public static CanKit.Pro.CANopen.CanOpenDeviceDescription FromDcf(EdsDcfNet.Models.DeviceConfigurationFile dcf) { }
+        public static CanKit.Pro.CANopen.CanOpenDeviceDescription FromEds(EdsDcfNet.Models.ElectronicDataSheet eds) { }
+        public static CanKit.Pro.CANopen.CanOpenDeviceDescription Load(string path) { }
+        public static CanKit.Pro.CANopen.CanOpenDeviceDescription ParseDcf(string content) { }
+        public static CanKit.Pro.CANopen.CanOpenDeviceDescription ParseEds(string content) { }
+    }
     public sealed class CanOpenNodeOptions
     {
         public CanOpenNodeOptions() { }
@@ -59,6 +77,33 @@ namespace CanKit.Pro.CANopen
         public CanOpenTransportException(string message) { }
         public CanOpenTransportException(string message, System.Exception inner) { }
     }
+    public sealed class DeviceDescriptionFinding
+    {
+        public DeviceDescriptionFinding(ushort index, byte subindex, CanKit.Pro.CANopen.DeviceDescriptionOutcome outcome, string reason, string? describedValue = null, CanKit.Pro.CANopen.Sdo.SdoAbortCode? abortCode = default) { }
+        public CanKit.Pro.CANopen.Sdo.SdoAbortCode? AbortCode { get; }
+        public string? DescribedValue { get; }
+        public ushort Index { get; }
+        public CanKit.Pro.CANopen.DeviceDescriptionOutcome Outcome { get; }
+        public string Reason { get; }
+        public byte Subindex { get; }
+        public override string ToString() { }
+    }
+    public enum DeviceDescriptionOutcome
+    {
+        Omitted = 0,
+        Corrected = 1,
+        PdoDisabled = 2,
+        NotImplemented = 3,
+        SuppliedDefault = 4,
+    }
+    public sealed class DeviceDescriptionReport
+    {
+        public CanKit.Pro.CANopen.CanOpenDeviceDescription Description { get; }
+        public int EntriesLoaded { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.DeviceDescriptionFinding> Findings { get; }
+        public bool IsExact { get; }
+        public byte NodeId { get; }
+    }
     public sealed class EmcyReceivedEventArgs : System.EventArgs
     {
         public EmcyReceivedEventArgs(CanKit.Pro.CANopen.Emcy.EmcyMessage message, System.DateTime timestamp) { }
@@ -80,6 +125,7 @@ namespace CanKit.Pro.CANopen
     }
     public interface ICanOpenNode : System.IDisposable
     {
+        CanKit.Pro.CANopen.DeviceDescriptionReport? DeviceDescription { get; }
         byte NodeId { get; }
         CanKit.Pro.CANopen.ObjectDictionary ObjectDictionary { get; }
         CanKit.Pro.CANopen.CanOpenNodeOptions Options { get; }
@@ -163,6 +209,7 @@ namespace CanKit.Pro.CANopen
         public CanKit.Pro.CANopen.OdEntry AddI16(ushort index, byte subindex, short value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
         public CanKit.Pro.CANopen.OdEntry AddI32(ushort index, byte subindex, int value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
         public CanKit.Pro.CANopen.OdEntry AddI8(ushort index, byte subindex, sbyte value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
+        public CanKit.Pro.CANopen.OdEntry AddRaw(ushort index, byte subindex, CanKit.Pro.CANopen.OdDataType dataType, byte[] value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
         public CanKit.Pro.CANopen.OdEntry AddU16(ushort index, byte subindex, ushort value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
         public CanKit.Pro.CANopen.OdEntry AddU32(ushort index, byte subindex, uint value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
         public CanKit.Pro.CANopen.OdEntry AddU8(ushort index, byte subindex, byte value, CanKit.Pro.CANopen.OdAccess access = 3, bool pdoMappable = true) { }
@@ -185,13 +232,21 @@ namespace CanKit.Pro.CANopen
     }
     public enum OdDataType : byte
     {
+        Boolean = 1,
         Unsigned8 = 5,
         Unsigned16 = 6,
         Unsigned32 = 7,
         Integer8 = 2,
         Integer16 = 3,
         Integer32 = 4,
+        Real32 = 8,
+        VisibleString = 9,
+        OctetString = 10,
+        UnicodeString = 11,
         Domain = 15,
+        Real64 = 17,
+        Integer64 = 21,
+        Unsigned64 = 27,
     }
     public sealed class OdEntry
     {

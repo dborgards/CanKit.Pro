@@ -195,11 +195,18 @@ internal sealed partial class CanOpenNode
         _ => false,
     };
 
-    /// <summary>The managed objects an NMT reset restores: parameters, not status (1001h) and
-    /// not the constant records (1010h/1011h capabilities, 1200h).</summary>
-    private static bool IsRestorableCommunicationObject(ushort index)
-        => IsManagedCommunicationObject(index)
-           && index is not (Co.ErrorRegister or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
+    /// <summary>
+    /// The objects an NMT reset restores: every parameter in the dictionary — the managed
+    /// communication objects and the application objects alike — except status (1001h) and the
+    /// constant records (1010h/1011h capabilities, 1200h). Reset Communication restores the
+    /// communication profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301
+    /// §7.3.2.2.1). An application object has a power-on value once it was stored, or once a
+    /// device description supplied it.
+    /// </summary>
+    private static bool IsRestorableObject(ushort index)
+        => index is not (Co.ErrorRegister or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
+
+    private static bool IsCommunicationProfileArea(ushort index) => index is >= 0x1000 and <= 0x1FFF;
 
     // =========================================================================================
     // Validation — runs on the writing thread, before the value is stored.
@@ -630,7 +637,6 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void PerformNmtReset(bool communicationOnly)
     {
-        _ = communicationOnly; // the application-object half has no source without a device description
         AbortServerSessions(SdoAbortCode.DataCannotBeTransferredDeviceState);
         _pendingEmcy = null;
         // §7.2.8.3.2.1: "The toggle bit in the guarding protocol shall be reset to 0 when the NMT
@@ -645,10 +651,11 @@ internal sealed partial class CanOpenNode
             _powerOnValues = _factoryDefaults;
             _restoreDefaultsOnReset = false;
         }
-        RestoreValues(_powerOnValues);
+        RestoreValues(_powerOnValues, communicationOnly);
         // The application's turn, still in Initialisation: its objects are restored before the
         // node announces itself, so a master reacting to the boot-up never reads a value the
-        // reset had not reached.
+        // reset had not reached. With a description the node restored the described ones above;
+        // the hook lets the application restore what the description does not hold.
         RaiseApplicationReset(communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode);
 
         _state = NmtState.PreOperational;
@@ -691,18 +698,22 @@ internal sealed partial class CanOpenNode
         foreach (var key in _od.SnapshotKeys())
         {
             var index = (ushort)(key >> 8);
-            if (!IsRestorableCommunicationObject(index)) continue;
+            if (!IsRestorableObject(index)) continue;
             snapshot[key] = _od.ReadRaw(index, (byte)(key & 0xFF));
         }
         return snapshot;
     }
 
-    /// <summary>Restores every restorable object to <paramref name="values"/>; a sub-index that
-    /// was added since (a grown <c>1016h</c>) goes to zero. Each write applies to the runtime
+    /// <summary>
+    /// Restores the objects in <paramref name="values"/> — the communication profile area only
+    /// when <paramref name="communicationOnly"/>. A managed communication sub-index that was
+    /// added since (a grown <c>1016h</c>) goes to zero; an application object the snapshot does
+    /// not hold has no power-on value and is left alone. Each write applies to the runtime
     /// through the ordinary hook, inline because this runs on the actor loop. One transaction
     /// under the dictionary's write gate, so the snapshot a "save" takes on another thread sees
-    /// all restored values or all live ones, never a mix (Bugbot on #133).</summary>
-    private void RestoreValues(Dictionary<uint, byte[]> values)
+    /// all restored values or all live ones, never a mix (Bugbot on #133).
+    /// </summary>
+    private void RestoreValues(Dictionary<uint, byte[]> values, bool communicationOnly)
     {
         _od.Transaction(() =>
         {
@@ -710,12 +721,16 @@ internal sealed partial class CanOpenNode
             {
                 var index = (ushort)(key >> 8);
                 var subindex = (byte)(key & 0xFF);
-                if (!IsRestorableCommunicationObject(index)) continue;
+                if (!IsRestorableObject(index)) continue;
+                if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
                 if (values.TryGetValue(key, out var stored))
                 {
+                    if (_od.TryGet(index, subindex, out var current) && OdEntryLayout.FixedSize(current.DataType) is var size
+                        && size > 0 && stored.Length != size)
+                        continue; // re-declared with another width since the snapshot: no power-on value for it
                     _od.WriteRawUnchecked(index, subindex, stored);
                 }
-                else if (_od.TryGet(index, subindex, out var entry))
+                else if (IsManagedCommunicationObject(index) && _od.TryGet(index, subindex, out var entry))
                 {
                     _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
                 }

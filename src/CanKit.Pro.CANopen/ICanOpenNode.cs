@@ -59,6 +59,13 @@ public interface ICanOpenNode : IDisposable
     /// <summary>Current NMT slave state of this node.</summary>
     NmtState State { get; }
 
+    /// <summary>
+    /// What the device description the node was opened with produced — the entries loaded and
+    /// everything the node could not take as written — or <see langword="null"/> when the node
+    /// was opened without one and carries the built-in CiA 301 defaults.
+    /// </summary>
+    DeviceDescriptionReport? DeviceDescription { get; }
+
     // -----------------------------------------------------------------------------------------
     // Events
     // -----------------------------------------------------------------------------------------

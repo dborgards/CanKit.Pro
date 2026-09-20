@@ -162,7 +162,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
     internal CanOpenNode(ICanBusService service, byte nodeId, CanOpenNodeOptions options,
-        bool ownsService, ITimeSource? timeSource = null)
+        bool ownsService, ITimeSource? timeSource = null, CanOpenDeviceDescription? description = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         CanOpenCobId.ValidateNodeId(nodeId);
@@ -182,6 +182,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // validate writes to them and carry accepted values into the runtime
         // (CanOpenNode.CommunicationProfile.cs).
         PopulateCommunicationProfile();
+        // A device description shapes the dictionary on top of that, before the node is on the
+        // bus (CanOpenNode.DeviceDescription.cs).
+        if (description is not null) ApplyDeviceDescription(description);
 
         // Change-of-state TPDOs (FR-CO-006): application-originated OD writes trigger
         // event-driven TPDOs whose mapping contains the written entry.
