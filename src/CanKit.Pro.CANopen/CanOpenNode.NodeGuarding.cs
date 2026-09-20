@@ -190,11 +190,13 @@ internal sealed partial class CanOpenNode
             return;
         }
 
-        // An unsolicited frame that is *not* boot-up still gets through, and deliberately so
-        // after a round of review on it. HandleNmtCommand emits a heartbeat on every state
-        // change even with the periodic producer off -- the configuration node-guarding runs in,
-        // since CiA 301 7.2.8.3 makes the two mutually exclusive -- and it carries a real state
-        // with bit 7 clear, indistinguishable on the wire from a toggle-0 reply.
+        // An unsolicited frame that is *not* boot-up would still get through here, because the
+        // wire carries nothing that distinguishes it from a toggle-0 reply. This node's own
+        // producer no longer emits one in the configuration node guarding runs in: the
+        // state-change heartbeat of ApplyNmtTransition goes out only while the heartbeat
+        // protocol is in use (1017h != 0), and CiA 301 7.2.8.3.2.2 makes the two protocols
+        // mutually exclusive on a producer (#43, second half). A foreign producer that does
+        // emit such frames is judged by the toggle alone, which is what the norm provides.
         //
         // A one-bit "a poll is outstanding" gate was written here for that and taken back out:
         // it has to be spent by the frame that arrives, and the alternation check below is what
@@ -202,10 +204,6 @@ internal sealed partial class CanOpenNode
         // is known. A delayed reply or a state-change heartbeat consumed it and the producer's
         // real reply was then dropped outright -- worse than the case it was meant to catch
         // (Bugbot, plus two adjacent findings from Codex on the same mechanism).
-        //
-        // Doing it properly means telling a reply from an unsolicited frame, and the wire carries
-        // nothing that distinguishes them. That is a design question and it belongs with the
-        // producer-side life guarding in #43, not in the baseline fix above.
         bool toggle = (b & 0x80) != 0;
         byte stateByte = (byte)(b & 0x7F);
         NmtState state = stateByte switch
