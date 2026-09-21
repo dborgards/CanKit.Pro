@@ -55,9 +55,9 @@ public interface IIsoTpChannel : IDisposable
 
     /// <summary>
     /// As <see cref="SendAsync"/>, but returns the two monotonic
-    /// (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) instants of the transmission:
-    /// just before the first frame was handed to the driver, and no later than the driver
-    /// accepted the last one (see <see cref="IsoTpTransmitStamps"/>). Zero for an instant not
+    /// (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) instants bracketing the driver
+    /// call for the PDU's last frame: just before it was handed over, and no later than the
+    /// driver accepted it (see <see cref="IsoTpTransmitStamps"/>). Zero for an instant not
     /// reported.
     /// </summary>
     /// <remarks>

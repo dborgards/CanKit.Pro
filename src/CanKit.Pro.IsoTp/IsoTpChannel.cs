@@ -773,12 +773,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             Exception? failure = null;
             try
             {
-                // The PDU's first frame: stamped just before it is handed to the driver. A
-                // caller's cutoff for "could still be a response to this PDU" must not be
-                // later than the frame's wire instant, and the acceptance stamp below can be
-                // (#146, Codex on #147).
-                if (expected is not null && expectTx is TxExpect.SingleFrameConfirm or TxExpect.FirstFrameConfirm)
-                    expected.FirstFrameHandoffTimestamp = Stopwatch.GetTimestamp();
+                // Stamped just before the frame is handed to the driver; frames go out one at a
+                // time, so the last write is the last frame's. A caller's cutoff for "could
+                // still be a response to this PDU" must not be later than that frame's wire
+                // instant, and the acceptance stamp taken after the call can be (#146, Codex on
+                // #147).
+                if (expected is not null)
+                    expected.LastFrameHandoffTimestamp = Stopwatch.GetTimestamp();
                 var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
                 confirmation = c;
             }
@@ -998,7 +999,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.NBsDeadline?.Complete();
         tx.StMinTimer?.Dispose();
         _tx = null;
-        tx.Tcs.TrySetResult(new IsoTpTransmitStamps(tx.FirstFrameHandoffTimestamp, tx.LastFrameTransmitTimestamp));
+        tx.Tcs.TrySetResult(new IsoTpTransmitStamps(tx.LastFrameHandoffTimestamp, tx.LastFrameTransmitTimestamp));
     }
 
     private void FailTx(Exception ex)
@@ -1538,8 +1539,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         /// instant P2 starts.
         /// </summary>
         public long LastFrameTransmitTimestamp { get; set; }
-        /// <summary>Just before the first frame was handed to the driver (#146).</summary>
-        public long FirstFrameHandoffTimestamp { get; set; }
+        /// <summary>Just before the latest frame was handed to the driver (#146).</summary>
+        public long LastFrameHandoffTimestamp { get; set; }
 
         public TxStage State { get; set; }
         public int Offset { get; set; }

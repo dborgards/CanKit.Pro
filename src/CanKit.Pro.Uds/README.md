@@ -83,11 +83,11 @@ await uds.DownloadAsync(
   transfer is bounded by the ISO-TP `NCr` timer instead. A 4 KB record paced at STmin 5 ms
   takes seconds on the wire and is not a P2 timeout. A transfer for another service does not
   extend the budget: the peer is busy with it, so the answer cannot start in time anyway. A
-  response that began before the request's first frame was handed to the driver answers an
-  earlier request and is a stray; the bound is the channel's handoff instant, not the transmit
-  stamp — that one is "no later than the driver accepted the frame", and a fast peer can be
-  stamped before it (#146) — and not a reading taken before entering the channel, whose gate
-  and scheduling would leave a window.
+  response that began before the request's last frame was handed to the driver answers an
+  earlier request and is a stray: a peer answers only a complete request. The bound is the
+  channel's handoff instant, not the transmit stamp — that one is "no later than the driver
+  accepted the frame", and a fast peer can be stamped before it (#146) — and not a reading
+  taken before entering the channel, whose transmission would leave a window.
 * `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
   *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
   answer a key for that seed with NRC 0x24.

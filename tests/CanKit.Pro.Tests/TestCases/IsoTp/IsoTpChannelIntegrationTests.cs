@@ -1933,9 +1933,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         stamps.LastFrameTransmitTimestamp.Should().BeGreaterThan(releasedAt,
             "the stamp must be taken after the driver accepted the frame, and this test held the "
             + "driver call open until the instant above");
-        // Codex on #147: the first frame's handoff is stamped before the driver call, so a
+        // Codex on #147: the last frame's handoff is stamped before the driver call, so a
         // caller's stale-response cutoff cannot be later than the frame's wire instant.
-        stamps.FirstFrameHandoffTimestamp.Should().BeGreaterThan(0)
+        stamps.LastFrameHandoffTimestamp.Should().BeGreaterThan(0)
             .And.BeLessThanOrEqualTo(enteredAt,
                 "the handoff instant precedes the driver call this test observed entering");
     }

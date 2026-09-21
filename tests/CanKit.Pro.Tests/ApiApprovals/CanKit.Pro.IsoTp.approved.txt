@@ -171,8 +171,8 @@ namespace CanKit.Pro.IsoTp
     }
     public readonly struct IsoTpTransmitStamps : System.IEquatable<CanKit.Pro.IsoTp.IsoTpTransmitStamps>
     {
-        public IsoTpTransmitStamps(long firstFrameHandoffTimestamp, long lastFrameTransmitTimestamp) { }
-        public long FirstFrameHandoffTimestamp { get; }
+        public IsoTpTransmitStamps(long lastFrameHandoffTimestamp, long lastFrameTransmitTimestamp) { }
+        public long LastFrameHandoffTimestamp { get; }
         public long LastFrameTransmitTimestamp { get; }
         public bool Equals(CanKit.Pro.IsoTp.IsoTpTransmitStamps other) { }
         public override bool Equals(object? obj) { }
