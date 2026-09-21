@@ -49,6 +49,11 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   drop-oldest PDU inbox (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64).
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NBs` (peer-FC wait), `NCr` (next CF wait) and
   `WftMax` (max consecutive `Wait` FCs) are configurable; defaults are conservative 1 s / 10.
+- Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535
+  bytes; classic CAN is bounded at 4095 by the codec anyway) is answered with `FC(OVFLW)` and
+  nothing is allocated for it, so a CAN-FD escape First Frame cannot make the process reserve
+  the ~2 GB it may announce. A Consecutive Frame whose CAN_DL is not the First Frame's, unless
+  it is the last one, is ignored as ISO 15765-2 §9.8 requires — it is not copied short.
 
 ## Timing accuracy — STmin pacing (NFR-003)
 
