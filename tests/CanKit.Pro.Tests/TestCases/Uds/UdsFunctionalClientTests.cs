@@ -422,10 +422,10 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "P2* is counted from the 0x78's arrival");
     }
 
-    // Codex on #150: a cancelled collection cannot show what arrived; the window takes the
-    // conservative reading and the next call waits P2* from the cancellation.
+    // Codex on #150: a cancelled collection loses what it collected, but the listener that
+    // owns the window heard the 0x78 too, and the next call waits P2* from it.
     [Fact]
-    public async Task A_Cancelled_Collection_Leaves_A_Conservative_Window()
+    public async Task A_Cancelled_Collection_Does_Not_Lose_The_Pending_Answer_The_Listener_Heard()
     {
         var session = NewSession();
         using var busTester = OpenClassic(session, 0);
@@ -459,10 +459,10 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the final negative answer at 250 ms belongs to the cancelled request, whose 0x78 the cancellation hid");
     }
 
-    // Bugbot on #150: a wait-out cancelled mid-slice loses what the slice heard; a 0x78 in it
-    // would have moved the window out, so the window takes that reading.
+    // Bugbot on #150: a wait cancelled by the caller does not cancel the listener, which keeps
+    // the window and hears the 0x78 the caller left behind.
     [Fact]
-    public async Task A_Cancelled_Wait_Takes_The_Conservative_Reading_For_What_It_Heard()
+    public async Task A_Cancelled_Wait_Leaves_The_Listener_To_Hear_The_Pending_Answer()
     {
         var session = NewSession();
         using var busTester = OpenClassic(session, 0);
@@ -497,6 +497,62 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the negative at 450 ms belongs to the suppressed send; the window must have reached past it");
+    }
+
+    // Codex on #150: between a suppressed send and the next call nobody was collecting, so a
+    // 0x78 in that gap went unobserved. The listener is up before the send and stays for the
+    // window, so the gap is observed and the next call waits P2* from the 0x78.
+    [Fact]
+    public async Task A_Pending_Answer_In_The_Gap_After_A_Suppressed_Send_Is_Observed()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x78 });
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x12 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x7E, 0x00 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[2] == 0x80)
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(100); busEcus.Transmit(pending);
+                    await Task.Delay(400); busEcus.Transmit(negative);
+                });
+            else busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(600));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed; 0x78 at 100 ms, negative at 500 ms
+        await Task.Delay(200);                                              // nobody collecting: the gap
+
+        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the 0x78 in the gap moved the window past the negative at 500 ms");
+    }
+
+    // Codex on #150: a window the collector would reject is checked before anything goes out.
+    [Fact]
+    public async Task An_Invalid_Collection_Window_Transmits_Nothing()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+        int seen = 0;
+        busEcus.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) Interlocked.Increment(ref seen); };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        Func<Task> act = () => functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, TimeSpan.FromMilliseconds(-2));
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        seen.Should().Be(0, "nothing was transmitted");
     }
 
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.

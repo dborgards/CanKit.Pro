@@ -32,6 +32,7 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly TimeSpan _responseWindow;
     private readonly TimeSpan _responsePendingWindow;
     private readonly SuppressedResponseWindows _openWindows = new();
+    private readonly Dictionary<byte, Task> _listeners = new();
     // One request on the wire at a time, its collection window included: overlapping calls
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
@@ -111,47 +112,43 @@ public sealed class UdsFunctionalClient : IDisposable
     private async Task<IReadOnlyList<UdsFunctionalResponse>> SendRawLockedAsync(ReadOnlyMemory<byte> request,
         TimeSpan window, CancellationToken cancellationToken)
     {
-        if (request.Length >= 2 && HasSubFunction(request.Span[0])
+        byte sid = request.Span[0];
+        if (request.Length >= 2 && HasSubFunction(sid)
             && (request.Span[1] & SuppressPositiveResponseBit) != 0)
         {
-            // Noted before the send as well: cancelled between the driver's acceptance and
-            // the confirmation, the frame is on the bus and may still be answered (Codex on
-            // #150). Moved out to the confirmation afterwards.
-            _openWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _responseWindow);
+            // The listener is up before the frame goes out, so nothing an ECU sends back --
+            // a negative answer, a 0x78 -- goes unobserved, and a send cancelled between the
+            // driver's acceptance and the confirmation is covered (Codex on #150). Its window
+            // is moved out to the confirmation afterwards.
+            StartListening(sid, Stopwatch.GetTimestamp());
             await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            _openWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _responseWindow);
+            _openWindows.Note(sid, Stopwatch.GetTimestamp(), _responseWindow);
             return Array.Empty<UdsFunctionalResponse>();
         }
+
+        // Checked before anything is transmitted: a window the collector would reject must
+        // not leave a session change on every ECU behind an argument error (Codex on #150).
+        if (window <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(window), window,
+                "The collection window must be positive for a request that is answered.");
 
         // A read for more than one DID is answered with all of them in one PDU, which a Single
         // Frame cannot hold with their data; and only the first DID would be correlated here,
         // so two such reads sharing it could take each other's late answers (Codex on #150).
-        if (request.Span[0] == (byte)UdsServiceId.ReadDataByIdentifier && request.Length > 3)
+        if (sid == (byte)UdsServiceId.ReadDataByIdentifier && request.Length > 3)
             throw new ArgumentException(
                 "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
                 nameof(request));
 
-        // Noted before the send, so a collection that is cancelled or fails still leaves a
-        // window in place (Bugbot on #150) -- a lower bound, since the send is later. Once the
-        // collection is over, the window is moved out to the send's own instant plus P2: the
-        // collection ran for `window` from the transmit confirmation, so that instant is at
-        // least now less `window`, however long the confirmation took (Codex on #150).
-        byte sid = request.Span[0];
-        _openWindows.Note(sid, Stopwatch.GetTimestamp(), _responseWindow);
-        IReadOnlyList<IsoTpFunctionalResponse> raw;
-        try
-        {
-            raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // What arrived before the cancellation is lost with it -- an NRC 0x78 among it
-            // would have moved the window out by P2*. Not knowing, the window takes that
-            // reading (Codex on #150): the next call for this service waits P2* from now.
-            _openWindows.Extend(sid, Stopwatch.GetTimestamp() + Ticks(_responsePendingWindow));
-            throw;
-        }
+        // The listener is up before the send and outlives the collection: what the ECUs may
+        // still send after the window ends is the remainder of their P2 from the request, and
+        // a collection the caller cancels loses nothing the listener hears. Once the collection
+        // is over, the window is moved out to the send's own instant plus P2: the collection
+        // ran for `window` from the transmit confirmation, so that instant is at least now
+        // less `window`, however long the confirmation took (Codex on #150).
+        StartListening(sid, Stopwatch.GetTimestamp());
+        var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
+            .ConfigureAwait(false);
         _openWindows.Note(sid, Stopwatch.GetTimestamp() - Ticks(window), _responseWindow);
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
@@ -167,7 +164,8 @@ public sealed class UdsFunctionalClient : IDisposable
             bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed)
                 && (sid != ReadDataByPeriodicIdentifierSid || NamesARequestedPeriodicIdentifier(req, data));
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
-            // P2* runs from the 0x78's arrival, which the response carries.
+            // P2* runs from the 0x78's arrival, which the response carries. The listener sees
+            // the same frame; the earlier of the two to act moves the window, the later is idle.
             if (IsResponsePending(data, sid))
                 _openWindows.Extend(sid, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
@@ -175,49 +173,67 @@ public sealed class UdsFunctionalClient : IDisposable
         return responses;
     }
 
-    // Under the request lock. Waits out the window still open for this service, listening the
-    // while: an NRC 0x78 in it says an ECU's final answer is still coming and moves the window
-    // out by P2* (Codex on #150). Everything heard belongs to the earlier request and is dropped.
-    private async Task WaitOutOpenWindowAsync(byte sid, CancellationToken cancellationToken)
+    // One listener per service, alive for the whole window: subscribed before the send so no
+    // frame in the window goes unobserved, and owning the window so a caller's cancellation
+    // loses nothing (Codex on #150). It moves the window out on every 0x78 it hears -- for its
+    // own service in the table and for any other service with a window open -- and ends when
+    // the window has run out, forgetting it. Started under the request lock.
+    private void StartListening(byte sid, long from)
     {
-        if (!_openWindows.TryGetDeadline(sid, out var until)) return;
-        bool waitedOut = false;
+        _openWindows.Note(sid, from, _responseWindow);
+        lock (_listeners)
+        {
+            if (_listeners.ContainsKey(sid)) return; // running already; it reads the moved-out deadline
+            _listeners[sid] = ListenAsync(sid);
+        }
+    }
+
+    private async Task ListenAsync(byte sid)
+    {
         try
         {
-            while (true)
+            while (_openWindows.TryGetDeadline(sid, out var until))
             {
                 var remaining = SuppressedResponseWindows.Remaining(until);
                 if (remaining <= TimeSpan.Zero) break;
-                IReadOnlyList<IsoTpFunctionalResponse> heard;
-                try
-                {
-                    heard = await _client.CollectResponsesAsync(remaining, cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // What this slice heard is lost with it -- a 0x78 among it would have moved
-                    // the window out by P2*; the window takes that reading (Bugbot on #150).
-                    until = Math.Max(until, Stopwatch.GetTimestamp() + Ticks(_responsePendingWindow));
-                    throw;
-                }
+                var heard = await _client.CollectResponsesAsync(remaining, _lifetimeCts.Token).ConfigureAwait(false);
                 foreach (var pending in heard.Where(r => IsResponsePending(r.Data)))
                 {
-                    // A 0x78 for another service with a window open moves that one out too
-                    // (Codex on #150).
-                    var extendedUntil = pending.HostArrivalTimestamp + Ticks(_responsePendingWindow);
                     byte pendingSid = pending.Data[1];
-                    if (pendingSid == sid) until = Math.Max(until, extendedUntil);
-                    else if (_openWindows.TryGetDeadline(pendingSid, out _)) _openWindows.Extend(pendingSid, extendedUntil);
+                    if (pendingSid == sid || _openWindows.TryGetDeadline(pendingSid, out _))
+                        _openWindows.Extend(pendingSid, pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
                 }
             }
-            waitedOut = true;
+        }
+        catch (OperationCanceledException)
+        {
+            // disposed: the window dies with the client
+        }
+        catch (ObjectDisposedException)
+        {
+            // likewise
         }
         finally
         {
-            // A cancelled wait keeps what remains of the window, extensions included, for the
-            // next call (Bugbot on #150).
-            if (waitedOut) _openWindows.Forget(sid);
-            else _openWindows.Extend(sid, until);
+            _openWindows.Forget(sid);
+            lock (_listeners) _listeners.Remove(sid);
+        }
+    }
+
+    // Under the request lock. Waits for the listener still open for this service, if any: an
+    // earlier request may still be answered -- a suppressed send, or one whose collection
+    // window ended before the ECU's P2 did -- and that answer must not land in this call's
+    // window. The listener is not cancelled with the caller; it keeps the window.
+    private async Task WaitOutOpenWindowAsync(byte sid, CancellationToken cancellationToken)
+    {
+        Task? listener;
+        lock (_listeners) _listeners.TryGetValue(sid, out listener);
+        if (listener is null) return;
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), cancelled))
+        {
+            if (await Task.WhenAny(listener, cancelled.Task).ConfigureAwait(false) != listener)
+                cancellationToken.ThrowIfCancellationRequested();
         }
     }
 

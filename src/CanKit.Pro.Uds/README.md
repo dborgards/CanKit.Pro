@@ -104,10 +104,14 @@ await uds.DownloadAsync(
   as UDS (`UdsFunctionalResponse` with source identifier, bytes, `IsNegative` and the NRC). Only
   answers correlated to the request are attributed: a positive response echoing the request's
   leading bytes (sub-function, DID, routine identifier, block counter), or a negative response
-  naming the service. Calls run one at a time; a call for a service with a suppressed send
-  still open waits that window out first (`Create`'s `suppressedResponseWindow`, default P2),
-  and a read for more than one DID is refused, a Single Frame holding no more. The keep-alive
-  to everyone is `TesterPresentAsync()` (`3E 80`, not collected for) (#57).
+  naming the service. Calls run one at a time. Every send starts a listener for its service
+  that stays up for the ECUs' P2 (`Create`'s `responseWindow`, default P2) and moves the
+  window out by P2* (`responsePendingWindow`, default P2*) on each NRC 0x78 it hears, so
+  nothing in the window goes unobserved — a suppressed send included — and a call for that
+  service waits the window out before it collects, rather than taking a late answer to the
+  earlier request as its own. A read for more than one DID is refused, a Single Frame holding
+  no more. The keep-alive to everyone is `TesterPresentAsync()` (`3E 80`, not collected for)
+  (#57).
 * `Dispose` waits up to five seconds for a request in flight to release the request lock; a
   holder that outlasts the wait keeps an undisposed semaphore, so its eventual release does not
   throw into an operation that was merely slow (#57).
