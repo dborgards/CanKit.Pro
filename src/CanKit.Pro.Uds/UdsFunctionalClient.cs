@@ -29,6 +29,10 @@ public sealed class UdsFunctionalClient : IDisposable
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
     private readonly SemaphoreSlim _requestLock = new(1, 1);
+    // Cancels a wait on the lock, and a send or window in progress, when the client is
+    // disposed: a call queued behind another must not go out on a disposed client (Codex and
+    // Bugbot on #150).
+    private readonly CancellationTokenSource _lifetimeCts = new();
     private int _disposed;
 
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient)
@@ -62,10 +66,16 @@ public sealed class UdsFunctionalClient : IDisposable
         if (request.Length == 0)
             throw new ArgumentException("Request must contain at least a SID byte.", nameof(request));
 
-        await _requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, _lifetimeCts.Token);
+        var linkedToken = linked.Token;
+
+        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
         try
         {
-            return await SendRawLockedAsync(request, window, cancellationToken).ConfigureAwait(false);
+            // Disposed while queued behind another call: the lock is released, not used.
+            ThrowIfDisposed();
+            return await SendRawLockedAsync(request, window, linkedToken).ConfigureAwait(false);
         }
         finally
         {
@@ -87,15 +97,22 @@ public sealed class UdsFunctionalClient : IDisposable
             .ConfigureAwait(false);
         byte sid = request.Span[0];
         byte positiveSid = (byte)(sid + 0x40);
+        // A service with a sub-function echoes it in the positive response (bit 7 cleared), so
+        // a late answer to an earlier request for another sub-function -- a session change to
+        // Extended answered during the next one to Default -- is told apart (Codex on #150).
+        int subFunction = HasSubFunction(sid) && request.Length >= 2
+            ? request.Span[1] & ~SuppressPositiveResponseBit
+            : -1;
         var responses = new List<UdsFunctionalResponse>(raw.Count);
         foreach (var r in raw)
         {
             // Correlated to this request the way the physical client correlates: the positive
-            // response SID, or a negative response echoing the request's SID (Codex on #150).
+            // response SID (and sub-function), or a negative response echoing the request's SID.
             var data = r.Data;
-            bool ours = data.Length >= 1 && data[0] == positiveSid
-                || data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
-            if (ours) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
+            bool positive = data.Length >= 1 && data[0] == positiveSid
+                && (subFunction < 0 || data.Length >= 2 && data[1] == subFunction);
+            bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
+            if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
         return responses;
     }
@@ -154,8 +171,10 @@ public sealed class UdsFunctionalClient : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        try { _lifetimeCts.Cancel(); } catch (ObjectDisposedException) { /* torn down elsewhere */ }
         if (_ownsClient) _client.Dispose();
-        // Not disposed: a call still inside its window releases it on the way out, and a
-        // SemaphoreSlim without a wait handle holds nothing that needs disposing.
+        _lifetimeCts.Dispose();
+        // The lock is not disposed: a call still inside its window releases it on the way
+        // out, and a SemaphoreSlim without a wait handle holds nothing that needs disposing.
     }
 }

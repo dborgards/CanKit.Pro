@@ -137,6 +137,65 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         secondResponses.Should().ContainSingle().Which.Response.Should().Equal(0x62, 0xF1, 0x91, 0x91);
     }
 
+    // Codex and Bugbot on #150: a call queued behind another's window does not go out on a
+    // client disposed in the meantime.
+    [Fact]
+    public async Task A_Call_Queued_Behind_Another_Does_Not_Send_After_Dispose()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        int requestsSeen = 0;
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) Interlocked.Increment(ref requestsSeen);
+        };
+
+        var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(300), cts.Token);
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(300), cts.Token);
+        await Task.Delay(50); // the first is in its window, the second queued behind it
+
+        functional.Dispose();
+
+        Func<Task> act = () => second;
+        await act.Should().ThrowAsync<Exception>()
+            .Where(ex => ex is ObjectDisposedException || ex is OperationCanceledException,
+                "the queued call must not proceed on a disposed client");
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<Exception>(); // its window was cut short by the disposal
+        requestsSeen.Should().Be(1, "only the first request reached the wire");
+    }
+
+    // Codex on #150: a service with a sub-function echoes it; a late answer for another
+    // sub-function is not this request's.
+    [Fact]
+    public async Task A_Positive_Response_For_Another_SubFunction_Is_Not_Attributed()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        // Asked for Default (0x01), the ECU's late answer says Extended (0x03).
+        var stale = SingleFrameFrom(Ecu1, new byte[] { 0x50, 0x03, 0x00, 0x32, 0x01, 0xF4 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) busEcus.Transmit(stale);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Default, Window, cts.Token);
+
+        responses.Should().BeEmpty("an answer for another sub-function is an earlier request's");
+    }
+
     [Fact]
     public async Task An_Unsuppressed_TesterPresent_Needs_A_Window()
     {
