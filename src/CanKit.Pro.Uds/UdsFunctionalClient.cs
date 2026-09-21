@@ -188,9 +188,27 @@ public sealed class UdsFunctionalClient : IDisposable
             {
                 var remaining = SuppressedResponseWindows.Remaining(until);
                 if (remaining <= TimeSpan.Zero) break;
-                var heard = await _client.CollectResponsesAsync(remaining, cancellationToken).ConfigureAwait(false);
-                foreach (var pending in heard.Where(r => IsResponsePending(r.Data, sid)))
-                    until = Math.Max(until, pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
+                IReadOnlyList<IsoTpFunctionalResponse> heard;
+                try
+                {
+                    heard = await _client.CollectResponsesAsync(remaining, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // What this slice heard is lost with it -- a 0x78 among it would have moved
+                    // the window out by P2*; the window takes that reading (Bugbot on #150).
+                    until = Math.Max(until, Stopwatch.GetTimestamp() + Ticks(_responsePendingWindow));
+                    throw;
+                }
+                foreach (var pending in heard.Where(r => IsResponsePending(r.Data)))
+                {
+                    // A 0x78 for another service with a window open moves that one out too
+                    // (Codex on #150).
+                    var extendedUntil = pending.HostArrivalTimestamp + Ticks(_responsePendingWindow);
+                    byte pendingSid = pending.Data[1];
+                    if (pendingSid == sid) until = Math.Max(until, extendedUntil);
+                    else if (_openWindows.TryGetDeadline(pendingSid, out _)) _openWindows.Extend(pendingSid, extendedUntil);
+                }
             }
             waitedOut = true;
         }
@@ -277,7 +295,10 @@ public sealed class UdsFunctionalClient : IDisposable
     private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);
 
     private static bool IsResponsePending(byte[] data, byte sid)
-        => data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending;
+        => IsResponsePending(data) && data[1] == sid;
+
+    private static bool IsResponsePending(byte[] data)
+        => data.Length >= 3 && data[0] == NegativeResponseSid && data[2] == NrcResponsePending;
 
     // Mirrors UdsClientImpl.HasSubFunction (ISO 14229-1 table 2). Not 0x2A: its
     // transmissionMode is a plain parameter, and its response echoes nothing (Codex on #150).

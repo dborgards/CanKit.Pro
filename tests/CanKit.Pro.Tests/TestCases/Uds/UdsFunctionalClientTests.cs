@@ -459,6 +459,46 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the final negative answer at 250 ms belongs to the cancelled request, whose 0x78 the cancellation hid");
     }
 
+    // Bugbot on #150: a wait-out cancelled mid-slice loses what the slice heard; a 0x78 in it
+    // would have moved the window out, so the window takes that reading.
+    [Fact]
+    public async Task A_Cancelled_Wait_Takes_The_Conservative_Reading_For_What_It_Heard()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x78 });
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x12 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x7E, 0x00 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[2] == 0x80)
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(50); busEcus.Transmit(pending);
+                    await Task.Delay(400); busEcus.Transmit(negative);
+                });
+            else busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed; 0x78 at 50 ms, negative at 450 ms
+
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+        Func<Task> cancelled = () => functional.TesterPresentAsync(suppressPositiveResponse: false, Window, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>(); // cancelled while waiting; the 0x78 it heard is lost
+
+        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the negative at 450 ms belongs to the suppressed send; the window must have reached past it");
+    }
+
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.
     [Fact]
     public async Task A_Functional_Read_For_More_Than_One_Did_Is_Refused()

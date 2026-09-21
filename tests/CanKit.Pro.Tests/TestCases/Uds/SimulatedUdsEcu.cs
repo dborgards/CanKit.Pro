@@ -158,15 +158,28 @@ public sealed class SimulatedUdsEcu : IDisposable
                     }
                     catch (EcuResponsePendingThenNegative pendingNegative)
                     {
-                        if (pendingNegative.DelayBefore > TimeSpan.Zero)
-                            await Task.Delay(pendingNegative.DelayBefore, ct).ConfigureAwait(false);
-                        for (int i = 0; i < pendingNegative.PendingCount && !ct.IsCancellationRequested; i++)
-                            await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
-                        if (pendingNegative.DelayAfter > TimeSpan.Zero)
-                            await Task.Delay(pendingNegative.DelayAfter, ct).ConfigureAwait(false);
-                        if (ct.IsCancellationRequested) return;
-                        await SendAndCountAsync(new byte[] { 0x7F, sid, pendingNegative.Nrc }, ct)
-                            .ConfigureAwait(false);
+                        // Off the loop: the ECU keeps serving other requests while this one's
+                        // 0x78 and final negative go out on their own schedule (#150).
+                        var pn = pendingNegative;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                if (pn.DelayBefore > TimeSpan.Zero)
+                                    await Task.Delay(pn.DelayBefore, ct).ConfigureAwait(false);
+                                for (int i = 0; i < pn.PendingCount && !ct.IsCancellationRequested; i++)
+                                    await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
+                                if (pn.DelayAfter > TimeSpan.Zero)
+                                    await Task.Delay(pn.DelayAfter, ct).ConfigureAwait(false);
+                                if (ct.IsCancellationRequested) return;
+                                await SendAndCountAsync(new byte[] { 0x7F, sid, pn.Nrc }, ct)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                // the ECU was disposed mid-sequence
+                            }
+                        }, ct);
                     }
                     catch (EcuResponsePendingThenSilent pendingSilent)
                     {

@@ -642,6 +642,46 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: a 0x78 for service B, heard while waiting out service A's window, moves
+    // B's window out; it is not dropped as A's noise.
+    [Fact]
+    public async Task A_Pending_Answer_For_Another_Service_Heard_During_A_Wait_Extends_That_Services_Window()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e
+                .On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0) throw new EcuSilent();
+                    return new byte[] { 0x00 };
+                })
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(500));
+                    Thread.Sleep(250); // slow enough that the stale negative (at 550 ms) would be first in line
+                    return new byte[] { 0x01 };
+                }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(400),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, silent
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B: 0x78 at 50 ms, negative at 450 ms
+
+            // A's request waits A's window out and hears B's 0x78 meanwhile.
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            // B's request follows at once: B's window must now reach past 450 ms.
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            reset.Should().Equal(0x51, 0x01);
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()

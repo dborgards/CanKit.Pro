@@ -422,6 +422,33 @@ public class UdsExpiredDeadlineTests
             "the second send waited out the window the cancelled send opened");
     }
 
+    /// <summary>
+    /// Bugbot on #150 — the drain that ends a wait-out reads the inbox, and a queued reassembly
+    /// fault throws from that read. It is stale, as it is for the discard that follows, and
+    /// must not fail the request before it is sent.
+    /// </summary>
+    [Fact]
+    public async Task P_A_Stale_Transport_Fault_Queued_Behind_A_Suppressed_Send_Does_Not_Fail_The_Next_Request()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            QueuedFault = true,
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(1),
+            LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(1),
+        };
+        using var client = NewClient(channel);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await client.SendRawAsync(new byte[] { 0x22, 0x80 }, cts.Token); // not a sub-function service: sent and answered
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: opens the window
+
+        // The next TesterPresent waits the window out; the drain at its end meets the fault.
+        Func<Task> act = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await act.Should().NotThrowAsync<IsoTpException>("the queued fault is stale and dropped");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -572,8 +599,18 @@ public class UdsExpiredDeadlineTests
         /// </summary>
         private bool _handedOver;
 
+        /// <summary>A queued reassembly fault, thrown by the first non-blocking take (#150).</summary>
+        public bool QueuedFault { get; init; }
+        private bool _faultThrown;
+
         public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
         {
+            if (QueuedFault && !_faultThrown)
+            {
+                _faultThrown = true;
+                throw new IsoTpTimeoutException(IsoTpTimer.NCr, "a stale reassembly abort, queued");
+            }
+
             // An inbox empties: the one queued response is handed over once (#150 -- a drain
             // that reads until the inbox is empty would otherwise never end here).
             if (!_handedOver && RespondPendingFirst && _pendingSent)

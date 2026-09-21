@@ -483,6 +483,12 @@ internal sealed class UdsClientImpl : IUdsClient
                     if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
+                catch (IsoTpException)
+                {
+                    // A queued transport fault -- an aborted reassembly from before -- is stale
+                    // here, as it is in the discard that follows (Bugbot on #150).
+                    continue;
+                }
                 ExtendOnPending(sid, pdu, ref until);
             }
             waitedOut = true;
@@ -496,21 +502,41 @@ internal sealed class UdsClientImpl : IUdsClient
         }
     }
 
-    // Reads whatever is queued; true when a 0x78 among it moved the window out.
+    // Reads whatever is queued; true when a 0x78 among it moved this service's window out.
     private bool DrainExtends(byte sid, ref long until)
     {
         bool extended = false;
-        while (_channel.TryReceiveWithArrival(out var queued))
+        while (true)
+        {
+            IsoTpReceivedPdu queued;
+            try
+            {
+                if (!_channel.TryReceiveWithArrival(out queued)) break;
+            }
+            catch (IsoTpException)
+            {
+                continue; // a stale transport fault, dropped as the discard would (Bugbot on #150)
+            }
             extended |= ExtendOnPending(sid, queued, ref until);
+        }
         return extended;
     }
 
+    // A 0x78 heard while waiting out one service's window may be for another service whose
+    // window is open too; it moves that service's window out in the table, and this
+    // service's locally (Codex on #150). True when this service's moved.
     private bool ExtendOnPending(byte sid, in IsoTpReceivedPdu pdu, ref long until)
     {
         var data = pdu.Pdu;
-        if (data.Length < 3 || data[0] != NegativeResponseSid || data[1] != sid || data[2] != NrcResponsePending)
+        if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending)
             return false;
         var extendedUntil = pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency);
+        if (data[1] != sid)
+        {
+            if (_suppressedWindows.TryGetDeadline(data[1], out _))
+                _suppressedWindows.Extend(data[1], extendedUntil);
+            return false;
+        }
         if (extendedUntil <= until) return false;
         until = extendedUntil;
         return true;
