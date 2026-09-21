@@ -688,6 +688,37 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         (await UploadUnsignedAsync(master, Slave, 0x1005, 0x00)).Should().Be(0x0000_0080u);
     }
 
+    // FR-CO-018 (#133 review) — a CAN-ID carries one communication object of this node: a frame on
+    // the SYNC CAN-ID is a SYNC and nothing else, so 1005h cannot be moved onto the CAN-ID of a
+    // PDO that exists, and a PDO cannot be created on the SYNC CAN-ID — over SDO and locally,
+    // with 0609 0030h either way. A PDO left "does not exist" on that CAN-ID is no collision.
+    [Fact]
+    public async Task Sync_And_A_Pdo_Cannot_Share_A_CanId()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0);
+        slave.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+
+        await ExpectAbortAsync(() => DownloadAsync(master, Slave, 0x1005, 0x00, U32(CanOpenCobId.RpdoDefault(Slave, 1))), SdoAbortCode.ValueRangeExceeded);
+        (await UploadUnsignedAsync(master, Slave, 0x1005, 0x00)).Should().Be(0x0000_0080u, "1005h stays where it was");
+
+        Action rpdoOnSync = () => slave.ConfigureRpdo(2, new PdoMapping().Add(0x2000, 0x00, 16), cobId: CanOpenCobId.Sync);
+        rpdoOnSync.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06090030");
+        Action tpdoOnSync = () => slave.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), cobId: CanOpenCobId.Sync);
+        tpdoOnSync.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06090030");
+        (od.ReadUnsigned(0x1401, 0x01) & CanOpenCobId.InvalidBit).Should().Be(CanOpenCobId.InvalidBit, "the PDO was left destroyed");
+
+        // Destroyed on the SYNC CAN-ID is fine: nothing listens or transmits there but SYNC.
+        od.WriteUnsigned(0x1401, 0x01, CanOpenCobId.InvalidBit | CanOpenCobId.Sync);
+        od.WriteUnsigned(0x1005, 0x00, 0x0000_0081u);
+        od.ReadUnsigned(0x1005, 0x00).Should().Be(0x0000_0081u, "a destroyed PDO on the old SYNC CAN-ID does not hold 1005h back");
+    }
+
     // FR-CO-018: the same rule on the local path — the dictionary refuses the value with an
     // ArgumentException naming the abort code the SDO write would have produced.
     [Fact]
@@ -966,6 +997,49 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         slave.State.Should().Be(NmtState.PreOperational);
     }
 
+    // FR-CO-022 / FR-CO-009 (#133 review) — with the producer off, a guarding poll already in the
+    // mailbox when a reset ran is answered behind the reset's boot-up, not ahead of it: a consumer
+    // that saw the toggle-0 reply first and the boot-up second would read two toggle-0 frames as
+    // a guarding error. The loop is held while both frames are injected, so their order in the
+    // mailbox is exact; the bus parks each confirmation, so what is on the wire is exact too.
+    [Fact]
+    public async Task A_Guarding_Reply_To_A_Poll_Queued_Behind_A_Reset_Stays_Behind_The_Bootup()
+    {
+        var session = NewSession();
+        using var bus = ControllableBus.DeferredEchoCapable(session);
+        using var slave = new CanOpenNode(new CanBusService(bus), Slave, new CanOpenNodeOptions(), ownsService: true);
+        var wire = new List<byte>();
+        bus.OnTransmitting = frame =>
+        {
+            if (frame.ID == CanOpenCobId.Heartbeat(Slave)) lock (wire) wire.Add(frame.Data.Span[0]);
+        };
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the opening boot-up
+        bus.DeferredEchoes.ReleaseAll();
+        int transmitsBefore = bus.TransmitCount;
+        int enqueuedBefore = bus.DeferredEchoes.Enqueued;
+        lock (wire) wire.Clear();
+
+        using var release = new ManualResetEventSlim(false);
+        var held = slave.PostToActorAsync(() => release.Wait(ShortTimeout));
+        bus.RaiseObserved(CanFrame.Classic(0x000, new byte[] { (byte)NmtCommand.ResetCommunication, Slave }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.Heartbeat(Slave)), ReadOnlyMemory<byte>.Empty,
+            isExtendedFrame: false, isRemoteFrame: true), isEcho: false); // the poll, behind the reset in the mailbox
+        release.Set();
+        await held.WithTimeoutAsync(ShortTimeout);
+
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(enqueuedBefore + 1, ShortTimeout); // the boot-up is on the wire, unconfirmed
+        await slave.PostToActorAsync(() => { }).WithTimeoutAsync(ShortTimeout);
+        await Task.Delay(100);
+        bus.TransmitCount.Should().Be(transmitsBefore + 1, "the guarding reply waits behind the unconfirmed boot-up");
+        lock (wire) wire.Should().Equal(new byte[] { 0x00 });
+
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(enqueuedBefore + 2, ShortTimeout);
+        bus.DeferredEchoes.ReleaseAll();
+        lock (wire) wire.Should().Equal(new byte[] { 0x00, (byte)NmtState.PreOperational },
+            "boot-up first, then the toggle-0 guarding reply");
+    }
+
     // FR-CO-019 / FR-CO-022 (#133 review) — with the producer on, the restore arms its tick before
     // the application's reset hook runs; a hook longer than the interval leaves the tick due when
     // it returns. Two things hold: every heartbeat of the node goes out through one chain, so the
@@ -1029,9 +1103,10 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
     }
 
     // FR-CO-019 (#133 review) — a handler that throws does not stop the reset: the exception is
-    // reported and the boot-up still goes out.
+    // reported, the other subscribers still run — each restores its own objects, so the boot-up
+    // never announces a device only some of them reset — and the boot-up goes out.
     [Fact]
-    public async Task A_Throwing_ApplicationReset_Handler_Is_Reported_And_The_Reset_Completes()
+    public async Task A_Throwing_ApplicationReset_Handler_Is_Reported_And_The_Others_Still_Run()
     {
         var session = NewSession();
         using var busA = Open(session, 0);
@@ -1039,14 +1114,19 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         using var master = CanOpen.OpenNode(busA, nodeId: Master);
         var bootups = new BootupWatch(master, Slave);
         using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0x1234);
         await bootups.First;
         var reported = NewTcs<Exception>();
         slave.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
         slave.ApplicationReset += (_, _) => throw new InvalidOperationException("restore failed");
+        slave.ApplicationReset += (_, _) => od.WriteUnsigned(0x2000, 0x00, 0x1234); // subscribed after the one that throws
 
+        od.WriteUnsigned(0x2000, 0x00, 0x0001);
         await master.SendNmtCommandAsync(NmtCommand.ResetNode, Slave);
         await bootups.Second;
         (await reported.Task.WithTimeoutAsync(ShortTimeout)).Message.Should().Be("restore failed");
+        od.ReadUnsigned(0x2000, 0x00).Should().Be(0x1234u, "the second subscriber ran although the first threw");
         slave.State.Should().Be(NmtState.PreOperational);
     }
 

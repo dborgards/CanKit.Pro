@@ -402,15 +402,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // the actor decided — the order the error register was written in. Actor loop only.
     private Task _emcySendChain = Task.CompletedTask;
 
-    // Every heartbeat of this node — boot-up, state change, producer tick — goes out through one
-    // chain likewise, so a boot-up ordered by a reset is on the bus before the tick that became
-    // due while the application's reset hook ran (Codex on #133). Actor loop only.
+    // Every frame of this node on 0x700 + id — boot-up, state change, producer tick, guarding
+    // reply — goes out through one chain likewise, so a boot-up ordered by a reset is on the bus
+    // before the tick that became due while the application's reset hook ran, and before the
+    // reply to a poll that was already in the mailbox (Codex and Bugbot on #133). Actor loop only.
     private Task _heartbeatSendChain = Task.CompletedTask;
 
-    private Task EmitHeartbeat(byte state)
+    private Task EmitHeartbeat(byte payload)
     {
         uint cobId = CanOpenCobId.Heartbeat(_nodeId);
-        var frame = new[] { state };
+        var frame = new[] { payload };
         var link = _heartbeatSendChain.ContinueWith(
             _ => SendControlFrame(cobId, frame),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
@@ -1848,8 +1849,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         var handler = ApplicationReset;
         if (handler is null) return;
-        try { handler(this, new NmtResetEventArgs(command)); }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+        var args = new NmtResetEventArgs(command);
+        // Each subscriber on its own: one that throws is reported and the others still restore
+        // their objects, so the boot-up never announces a device only some of them reset
+        // (Codex on #133).
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            try { ((EventHandler<NmtResetEventArgs>)subscriber)(this, args); }
+            catch (Exception ex) { RaiseBackgroundException(ex); }
+        }
     }
 
     private void RaiseNmtCommandReceived(NmtCommand cmd, byte target)

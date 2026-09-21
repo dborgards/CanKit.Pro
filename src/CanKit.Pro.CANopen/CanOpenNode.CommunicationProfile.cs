@@ -243,8 +243,27 @@ internal sealed partial class CanOpenNode
         if ((cur & CanOpenCobId.SyncGenerateBit) != 0 && (v & CanOpenCobId.SyncGenerateBit) != 0
             && (cur & lower30) != (v & lower30))
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        // A CAN-ID carries one communication object of this node: a frame on the SYNC CAN-ID is
+        // a SYNC and nothing else, so 1005h cannot move onto the CAN-ID of a PDO that exists
+        // (Codex on #133). The PDO side refuses the mirror image.
+        if (IsCanIdOfAValidPdo(v & CanOpenCobId.CanIdMask)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
         return OdWriteDecision.Accept;
     }
+
+    private bool IsCanIdOfAValidPdo(uint canId)
+    {
+        for (int n = 1; n <= Co.PdoCount; n++)
+        {
+            if (IsValidPdoOn((ushort)(Co.RpdoComm + n - 1), canId) || IsValidPdoOn((ushort)(Co.TpdoComm + n - 1), canId))
+                return true;
+        }
+        return false;
+    }
+
+    private bool IsValidPdoOn(ushort comm, uint canId)
+        => _od.TryReadUnsigned(comm, 0x01, out var word)
+           && (word & CanOpenCobId.InvalidBit) == 0
+           && (word & CanOpenCobId.CanIdMask) == canId;
 
     // §7.5.2.17 Table 59: bit 31 valid, bit 30 reserved (always 0b), bit 29 frame. "The bits 0
     // to 29 shall not be changed, while the object exists and is valid (bit 31 = 0b)."

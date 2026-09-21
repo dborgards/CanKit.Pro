@@ -254,7 +254,10 @@ internal sealed partial class CanOpenNode
         byte state = (byte)_state;
         byte payload = (byte)((_nodeGuardingProducerToggle ? 0x80 : 0x00) | (state & 0x7F));
         _nodeGuardingProducerToggle = !_nodeGuardingProducerToggle;
-        _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { payload });
+        // Through the chain every frame of this node on 0x700 + id goes through: a poll already
+        // in the mailbox when a reset ran is answered behind the reset's boot-up, not ahead of it
+        // — two toggle-0 frames in the wrong order read as a guarding error (Bugbot on #133).
+        _ = EmitHeartbeat(payload);
 
         OnGuardingPollReceived();
     }
