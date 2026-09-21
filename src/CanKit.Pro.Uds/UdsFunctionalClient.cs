@@ -34,6 +34,10 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly SuppressedResponseWindows _openWindows = new();
     // Per service: the standing subscription that hears the window out, and the task reading it.
     private readonly Dictionary<byte, (IsoTpFunctionalListener Ears, Task Run)> _listeners = new();
+    // The services with a send in flight, with the 0x78 arrivals heard for them meanwhile:
+    // their listener does not retire, and whether such a 0x78 was punctual is decided against
+    // the window as anchored once the send returns (Codex on #150). Under the same lock.
+    private readonly Dictionary<byte, List<long>> _inFlight = new();
     // One request on the wire at a time, its collection window included: overlapping calls
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
@@ -125,11 +129,17 @@ public sealed class UdsFunctionalClient : IDisposable
             // a negative answer, a 0x78 -- goes unobserved, and a send cancelled between the
             // driver's acceptance and the confirmation is covered (Codex on #150). Its window
             // is moved out to the confirmation afterwards.
-            StartListening(sid, Stopwatch.GetTimestamp());
-            await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            // Through StartListening again: a confirmation that outlasted the window has let
-            // the listener retire, and the moved-out window needs one (Codex on #150).
-            StartListening(sid, Stopwatch.GetTimestamp());
+            StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
+            try
+            {
+                await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Through StartListening again: the window is moved out to the confirmation,
+                // and the listener, kept through the send, reads it (Codex on #150).
+                StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
+            }
             return Array.Empty<UdsFunctionalResponse>();
         }
 
@@ -153,7 +163,7 @@ public sealed class UdsFunctionalClient : IDisposable
         // is over, the window is moved out to the send's own instant plus P2: the collection
         // ran for `window` from the transmit confirmation, so that instant is at least now
         // less `window`, however long the confirmation took (Codex on #150).
-        StartListening(sid, Stopwatch.GetTimestamp());
+        StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
         IReadOnlyList<IsoTpFunctionalResponse> raw;
         try
         {
@@ -163,10 +173,10 @@ public sealed class UdsFunctionalClient : IDisposable
         catch
         {
             // A collection that ends in a cancellation or a transport fault may still have put
-            // the request on the bus, and a confirmation that outlasted the window has let the
-            // pre-send listener retire; the ECUs' P2 from the transmission is at most P2 from
-            // now, so that window is noted before the exception leaves (Codex on #150).
-            StartListening(sid, Stopwatch.GetTimestamp());
+            // the request on the bus; the ECUs' P2 from the transmission is at most P2 from
+            // now, so that window is noted before the exception leaves, and the listener,
+            // kept through the send, has heard any 0x78 the collection lost (Codex on #150).
+            StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
             throw;
         }
         var req = request.Span;
@@ -183,7 +193,7 @@ public sealed class UdsFunctionalClient : IDisposable
         // provisional window has forgotten it, and a 0x78 inside the ECU's P2 must still move
         // it out (Codex on #150).
         long transmitted = Stopwatch.GetTimestamp() - Ticks(window);
-        lock (_listeners) _openWindows.Note(sid, transmitted, _responseWindow);
+        lock (_listeners) NoteAnchored(sid, transmitted);
         var responses = new List<UdsFunctionalResponse>(raw.Count);
         foreach (var r in raw)
         {
@@ -202,7 +212,7 @@ public sealed class UdsFunctionalClient : IDisposable
         // Through StartListening again, after the 0x78s above moved the window: a confirmation
         // that outlasted the window has let the listener retire, and the moved-out window
         // needs one (Codex on #150).
-        StartListening(sid, transmitted);
+        StartListening(sid, transmitted, inFlight: false);
         return responses;
     }
 
@@ -222,13 +232,34 @@ public sealed class UdsFunctionalClient : IDisposable
     // so a note that moves the window out either finds the listener still reading -- and it
     // re-reads the deadline before retiring -- or finds none and starts one; a listener cannot
     // retire, forgetting the window, between the note and the check (Codex on #150).
-    private void StartListening(byte sid, long from)
+    private void StartListening(byte sid, long from, bool inFlight)
     {
         lock (_listeners)
         {
-            _openWindows.Note(sid, from, _responseWindow);
+            if (inFlight)
+            {
+                _inFlight[sid] = new List<long>();
+                _openWindows.Note(sid, from, _responseWindow);
+            }
+            else
+            {
+                NoteAnchored(sid, from);
+            }
             EnsureListener(sid);
         }
+    }
+
+    // Under the listeners lock. Ends the send in flight for the service: notes its window
+    // from the anchor the send gave, then applies the 0x78s heard meanwhile in arrival order,
+    // each only if the window was open when it arrived -- one at the transmission moves it
+    // out, one from after P2 does not (Codex on #150).
+    private void NoteAnchored(byte sid, long from)
+    {
+        _openWindows.Note(sid, from, _responseWindow);
+        if (!_inFlight.TryGetValue(sid, out var heard)) return;
+        _inFlight.Remove(sid);
+        foreach (var arrival in heard)
+            _openWindows.ExtendIfOpenAt(sid, arrival, arrival + Ticks(_responsePendingWindow));
     }
 
     // Under the listeners lock. Starts a listener for the service's window if the window is
@@ -253,6 +284,9 @@ public sealed class UdsFunctionalClient : IDisposable
         lock (_listeners) _openWindows.ExtendIfOpenAt(sid, arrival, until);
     }
 
+    // How long a listener kept alive by a send in flight collects before it looks again.
+    private static readonly TimeSpan InFlightSlice = TimeSpan.FromMilliseconds(20);
+
     private async Task ListenAsync(byte sid, IsoTpFunctionalListener ears)
     {
         try
@@ -271,16 +305,27 @@ public sealed class UdsFunctionalClient : IDisposable
                     if (!_openWindows.TryGetDeadline(sid, out var until)
                         || (remaining = SuppressedResponseWindows.Remaining(until)) <= TimeSpan.Zero)
                     {
-                        if (drained)
+                        if (_inFlight.ContainsKey(sid))
+                        {
+                            // A send still in flight -- its confirmation outlasting the
+                            // provisional window -- keeps the listener: the window is moved
+                            // out once the send returns, and nothing answered at the
+                            // transmission goes unheard meanwhile (Codex on #150).
+                            remaining = InFlightSlice;
+                        }
+                        else if (drained)
                         {
                             Retire(sid, ears);
                             return;
                         }
-                        // Not before what the subscription buffered is read: it was made
-                        // before the send, and holds what arrived while this worker was
-                        // still being scheduled -- a punctual 0x78 among it moves the window
-                        // out, and the decision is taken again (Codex on #150).
-                        remaining = TimeSpan.Zero;
+                        else
+                        {
+                            // Not before what the subscription buffered is read: it was made
+                            // before the send, and holds what arrived while this worker was
+                            // still being scheduled -- a punctual 0x78 among it moves the
+                            // window out, and the decision is taken again (Codex on #150).
+                            remaining = TimeSpan.Zero;
+                        }
                     }
                 }
                 var heard = await ears.CollectAsync(remaining, _lifetimeCts.Token).ConfigureAwait(false);
@@ -293,7 +338,8 @@ public sealed class UdsFunctionalClient : IDisposable
                     // yet, is not revived for a full P2* by a late frame (Codex on #150).
                     lock (_listeners)
                     {
-                        _openWindows.ExtendIfOpenAt(pendingSid, pending.HostArrivalTimestamp,
+                        if (_inFlight.TryGetValue(pendingSid, out var inFlight)) inFlight.Add(pending.HostArrivalTimestamp);
+                        else _openWindows.ExtendIfOpenAt(pendingSid, pending.HostArrivalTimestamp,
                             pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
                     }
                 }

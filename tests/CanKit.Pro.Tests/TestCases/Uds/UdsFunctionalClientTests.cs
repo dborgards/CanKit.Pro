@@ -808,6 +808,49 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the cancelled request's late negative answer fell in the window anchored when its collection was cancelled");
     }
 
+    // Codex on #150: a suppressed send whose confirmation outlasts the window must not be
+    // left without a listener between the transmission and the send's return -- a 0x78
+    // answered at the transmission would be lost, and with it the P2* that covers the
+    // request's final answer.
+    [Fact]
+    public async Task A_Listener_Is_Kept_Through_A_Send_Whose_Confirmation_Outlasts_The_Window()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(2) };
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400), responsePendingWindow: TimeSpan.FromMilliseconds(1000));
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x10, 0x78 });
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x10, 0x12 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x50, 0x03, 0x00, 0x32, 0x01, 0xF4 });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        // The confirmation is held for 600 ms, past the 400 ms provisional window; the frame is
+        // on the bus meanwhile, and the ECU's 0x78 arrives at 500 ms, 100 ms before the
+        // confirmation is released -- heard by the listener while the send is still in
+        // flight. The negative answer follows 600 ms after the confirmation: past the P2
+        // window anchored there (1000 ms), inside P2* = 1000 ms from the 0x78 (1500 ms).
+        var suppressed = functional.SendRawAsync(new byte[] { 0x10, 0x83 }, Window, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await Task.Delay(500);
+        bus.RaiseObserved(pending, isEcho: false);
+        await Task.Delay(100);
+        bus.DeferredEchoes.ReleaseNext();
+        await suppressed;
+        _ = Task.Run(async () => { await Task.Delay(600); bus.RaiseObserved(negative, isEcho: false); });
+
+        var second = functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext();
+        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
+        var responses = await second;
+
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the listener kept through the send heard the 0x78 and held the window past the negative answer");
+    }
+
     // Bugbot on #150: a collection that outlasts P2 anchors a window already over; that must
     // not leave a completed listener behind that blocks the next window's real one.
     [Fact]
