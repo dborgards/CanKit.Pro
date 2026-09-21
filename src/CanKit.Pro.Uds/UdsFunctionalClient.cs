@@ -127,14 +127,16 @@ public sealed class UdsFunctionalClient : IDisposable
                 "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
                 nameof(request));
 
-        // Noted before the send, so a collection that is cancelled or fails still leaves the
-        // window in place (Bugbot on #150); what the ECUs may still send after the window ends
-        // is the remainder of their P2 from the request. A reading taken before the send is a
-        // lower bound on it; the window is moved out to the send's own instant afterwards.
+        // Noted before the send, so a collection that is cancelled or fails still leaves a
+        // window in place (Bugbot on #150) -- a lower bound, since the send is later. Once the
+        // collection is over, the window is moved out to the send's own instant plus P2: the
+        // collection ran for `window` from the transmit confirmation, so that instant is at
+        // least now less `window`, however long the confirmation took (Codex on #150).
         byte sid = request.Span[0];
         _openWindows.Note(sid, Stopwatch.GetTimestamp(), _responseWindow);
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
+        _openWindows.Note(sid, Stopwatch.GetTimestamp() - Ticks(window), _responseWindow);
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
@@ -254,6 +256,8 @@ public sealed class UdsFunctionalClient : IDisposable
         }
         return true;
     }
+
+    private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);
 
     private static bool IsResponsePending(byte[] data, byte sid)
         => data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending;

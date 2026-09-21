@@ -7,6 +7,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.IsoTp;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using CanKit.Pro.Uds;
 using FluentAssertions;
@@ -343,6 +344,43 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var responses = await functional.SendRawAsync(new byte[] { 0x2A, 0x01, 0xF1 }, Window, cts.Token);
 
         responses.Should().ContainSingle().Which.Response.Should().Equal(0x6A, 0xF1, 0x11, 0x22);
+    }
+
+    // Codex on #150: the window is the ECU's P2 from the *transmission*. With the transmit
+    // confirmation delayed, a window anchored before the send ends too early; after the
+    // collection it is moved out to the send's instant, which the collection's length gives.
+    [Fact]
+    public async Task A_Window_Is_Anchored_At_The_Transmission_However_Late_It_Was_Confirmed()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
+
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        // First request: its echo -- the transmit confirmation -- is held for 200 ms; the ECU
+        // answers negatively 450 ms after the frame went out, inside its P2 of 300 ms from the
+        // confirmation's point of view as the client sees it... and before that from the wire's.
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        _ = Task.Run(async () => { await Task.Delay(450); bus.RaiseObserved(negative, isEcho: false); });
+        await Task.Delay(200);
+        bus.DeferredEchoes.ReleaseNext();
+        await first;
+
+        // The second request, at once: its own echo is released promptly, and the ECU answers it.
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the count never decreases
+        bus.DeferredEchoes.ReleaseNext();
+        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
+        var responses = await second;
+
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the negative answer came 450 ms after the first request's transmission, inside its window");
     }
 
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.
