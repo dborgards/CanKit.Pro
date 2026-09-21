@@ -127,6 +127,16 @@ public interface IIsoTpChannel : IDisposable
     IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress();
 
     /// <summary>
+    /// Completes once every frame the bus had delivered before the call has been taken through
+    /// the channel: a PDU it completed is in the inbox, a reception it began is in
+    /// <see cref="GetReceptionsInProgress"/>. For a decision taken at a deadline — is a
+    /// response there, was there a 0x78 — what the inbox does not hold after this did not
+    /// arrive before the call; without it, a frame stamped in time can still be on its way
+    /// through the channel's actor when the deadline fires (Codex on #150).
+    /// </summary>
+    Task SettleAsync();
+
+    /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
     /// faults enqueued by <c>AbortRx</c> — and returns how many were dropped. Also silently
     /// aborts any in-flight multi-frame reassembly on the actor so leftover consecutive frames

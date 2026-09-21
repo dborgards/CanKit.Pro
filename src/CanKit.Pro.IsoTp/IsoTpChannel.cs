@@ -344,6 +344,26 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     /// <inheritdoc />
+    /// <inheritdoc />
+    public Task SettleAsync()
+    {
+        if (Volatile.Read(ref _disposed) != 0) return Task.CompletedTask;
+        // What the demux has buffered goes to the actor now rather than after the reader's
+        // next scheduling; then a no-op posted behind it completes once the actor has taken
+        // everything queued so far. Called from the actor itself, the post would wait for the
+        // loop it is on: there is nothing ahead of the caller then.
+        PumpSubscription();
+        if (_actor is ProtocolActor { IsOnCurrentActor: true }) return Task.CompletedTask;
+        try
+        {
+            return _actor.PostAsync(() => { });
+        }
+        catch (ObjectDisposedException)
+        {
+            return Task.CompletedTask; // channel tearing down: nothing left on its way
+        }
+    }
+
     public int DiscardPendingPdus()
     {
         // Everything that arrived up to now is pending. The stamp goes first, so a frame the
