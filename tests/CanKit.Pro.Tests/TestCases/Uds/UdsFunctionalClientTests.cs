@@ -560,15 +560,18 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
         functional.ListenerStartDelay = TimeSpan.FromMilliseconds(150); // past the 100 ms window
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.SendRawAsync(new byte[] { 0x10, 0x83 }, Window, cts.Token); // suppressed: the 0x78 is buffered before the worker runs
 
         var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
+        // P2* = 1500 ms: the negative answer's timer must fire before the second request goes
+        // out, with 1250 ms to spare (macOS CI on #150 exceeded 150). The same P2* in the
+        // three tests below, for the same reason.
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
-            "the late worker read the buffered 0x78 and kept the window to 400 ms, past the negative at 250");
+            "the late worker read the buffered 0x78 and kept the window to 1500 ms, past the negative at 250");
     }
 
     // Codex on #150: a cancelled collection loses what it collected, but the listener that
@@ -596,7 +599,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
 
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
         Func<Task> cancelled = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
@@ -634,7 +637,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(600));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed; 0x78 at 50 ms, negative at 250 ms, window to 650 ms
@@ -675,7 +678,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(600));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed; 0x78 at 100 ms, negative at 500 ms
