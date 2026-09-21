@@ -461,8 +461,10 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex on #150: P2* runs from the 0x78's arrival, not from the end of the collection.
-    // With the 0x78 at the start of a 300 ms window and P2* = 400 ms, the next call may go
-    // out at 400 ms after the request, not at 700.
+    // With the 0x78 at the start of a 1500 ms window and P2* = 1600 ms, the next call may go
+    // out at 1600 ms after the request, not at 3100. The two readings are the collection's
+    // length apart, so the collection is long: an upper bound is what a loaded host breaks,
+    // and macOS CI on #150 was 300 ms late against a 300 ms difference.
     [Fact]
     public async Task A_Pending_Answer_Extends_The_Window_From_Its_Arrival_Not_From_The_Collections_End()
     {
@@ -480,19 +482,19 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1600));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         var sw = Stopwatch.StartNew();
-        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(300), cts.Token);
+        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(1500), cts.Token);
         var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
         sw.Stop();
 
         responses.Should().ContainSingle();
-        // From the 0x78 (at ~0 ms) plus 400 ms the second call goes out and collects for 50 ms:
-        // ~450 ms in all. From the collection's end (300 ms) plus 400 ms it could not finish
-        // before 750 ms. The bound sits between the two.
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(620),
+        // From the 0x78 (at ~0 ms) plus 1600 ms the second call goes out and collects for
+        // 50 ms: ~1650 ms in all. From the collection's end (1500 ms) plus 1600 ms it could not
+        // finish before 3150 ms. The bound sits between the two, 750 ms from either.
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(2400),
             "P2* is counted from the 0x78's arrival");
     }
 

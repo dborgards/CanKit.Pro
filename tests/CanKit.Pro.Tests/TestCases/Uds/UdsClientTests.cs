@@ -661,22 +661,23 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
-        // The ECU's 0x78, stamped 20 ms in, buffered by the demux -- the reader task that would
-        // take it to the actor is starved by construction.
-        await Task.Delay(20);
+        // The ECU's 0x78, stamped at the send -- inside the window by construction, not by a
+        // timer -- buffered by the demux; the reader task that would take it to the actor is
+        // starved by construction.
+        long arrival = Stopwatch.GetTimestamp();
         byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
-        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), Stopwatch.GetTimestamp());
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
         await Task.Delay(150); // the window has run out, as measured
 
         // The next TesterPresent waits the window out: P2* from the 0x78 if the channel was
         // settled before the inbox was read empty, else nothing. It is never answered; what
-        // matters is how long it waited before it sent, a lower bound a loaded host only raises.
-        var sw = Stopwatch.StartNew();
+        // matters is that it did not fail before P2* from the 0x78 had passed -- a lower bound
+        // a loaded host only raises.
         Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
         await next.Should().ThrowAsync<UdsTimeoutException>();
-        sw.Stop();
-        sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(400),
-            "the 0x78 on its way through the channel moved the window out to 620 ms");
+        var sinceArrival = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - arrival) / (double)Stopwatch.Frequency);
+        sinceArrival.Should().BeGreaterThanOrEqualTo(pendingBudget,
+            "the 0x78 on its way through the channel moved the window out to P2* from its arrival");
     }
 
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
