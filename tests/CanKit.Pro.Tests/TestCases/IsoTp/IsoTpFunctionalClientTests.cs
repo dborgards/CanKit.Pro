@@ -586,7 +586,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var busB = OpenClassic(session, 1); // joined so the hub forwards frames, but silent
         using var client = IsoTpFactory.OpenFunctional(busA, 0x7DF, 0x7E8, 0x7EF, FastOptions());
 
-        var listener = client.Listen();
+        using var listener = client.Listen(); // disposed below; the using covers a throw before that (CodeQL)
         var collecting = listener.CollectAsync(ShortTimeout);
         listener.Dispose();
         // Disposal completes the subscription; a collection in progress ends with it.
