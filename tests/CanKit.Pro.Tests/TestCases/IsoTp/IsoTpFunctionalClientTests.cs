@@ -588,6 +588,18 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         await delivered.Task.WaitAsync(ShortTimeout);
         (await listener.CollectAsync(TimeSpan.FromSeconds(-1)).WaitAsync(ShortTimeout))
             .Should().ContainSingle("a window in the past does not carry a buffered response to the next collection");
+
+        // A window beyond a timer's reach is refused, and what is buffered survives the
+        // refusal (Codex on #150). What an expired collection carried over survives it by
+        // construction -- the check precedes the take -- since no test fills the carry-over
+        // deterministically: it is the instant between the timer and the drain.
+        delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.Transmit(frame);
+        await delivered.Task.WaitAsync(ShortTimeout);
+        Func<Task> oversized = () => listener.CollectAsync(TimeSpan.FromDays(50));
+        await oversized.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        (await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout))
+            .Should().ContainSingle("the refused collection took nothing");
     }
 
     // Bugbot on #150: a subscription completed underneath -- the service disposed -- ends the

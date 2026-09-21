@@ -23,6 +23,9 @@ namespace CanKit.Pro.IsoTp;
 /// </remarks>
 public sealed class IsoTpFunctionalListener : IDisposable
 {
+    // CancellationTokenSource.CancelAfter's bound.
+    private static readonly TimeSpan MaxWindow = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
     private readonly ISubscription _subscription;
     // Arrived after a collection's deadline but before its drain read the buffer: kept for the
     // next collection, whose window they are in (Codex on #150).
@@ -51,12 +54,20 @@ public sealed class IsoTpFunctionalListener : IDisposable
     /// disposed -- which a collection in progress reports by returning what was buffered, and
     /// every collection after it by this exception.
     /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="window"/> exceeds what a timer can measure; nothing buffered is lost.
+    /// </exception>
     public async Task<IReadOnlyList<IsoTpFunctionalResponse>> CollectAsync(
         TimeSpan window, CancellationToken cancellationToken = default)
     {
         if (Volatile.Read(ref _disposed) != 0 || _ended)
             throw new ObjectDisposedException(nameof(IsoTpFunctionalListener),
                 _ended ? "The subscription ended: the service was disposed." : null);
+        // Before anything carried over is taken: a window the timer would refuse must not
+        // cost the previous collection's remainder (Codex on #150).
+        if (window > MaxWindow)
+            throw new ArgumentOutOfRangeException(nameof(window), window,
+                "The collection window exceeds what a timer can measure (about 49 days).");
         long now = Stopwatch.GetTimestamp();
         var responses = new List<IsoTpFunctionalResponse>(_carried);
         _carried.Clear();
