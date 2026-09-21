@@ -18,7 +18,7 @@ namespace CanKit.Pro.IsoTp
         System.Threading.Tasks.Task<byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpReceivedPdu> ReceiveWithArrivalAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
-        System.Threading.Tasks.Task<long> SendWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpTransmitStamps> SendWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
         bool TryReceiveWithArrival(out CanKit.Pro.IsoTp.IsoTpReceivedPdu pdu);
     }
     public static class IsoTp
@@ -168,6 +168,17 @@ namespace CanKit.Pro.IsoTp
         NAs = 0,
         NBs = 1,
         NCr = 2,
+    }
+    public readonly struct IsoTpTransmitStamps : System.IEquatable<CanKit.Pro.IsoTp.IsoTpTransmitStamps>
+    {
+        public IsoTpTransmitStamps(long firstFrameHandoffTimestamp, long lastFrameTransmitTimestamp) { }
+        public long FirstFrameHandoffTimestamp { get; }
+        public long LastFrameTransmitTimestamp { get; }
+        public bool Equals(CanKit.Pro.IsoTp.IsoTpTransmitStamps other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public static bool operator !=(CanKit.Pro.IsoTp.IsoTpTransmitStamps left, CanKit.Pro.IsoTp.IsoTpTransmitStamps right) { }
+        public static bool operator ==(CanKit.Pro.IsoTp.IsoTpTransmitStamps left, CanKit.Pro.IsoTp.IsoTpTransmitStamps right) { }
     }
     public sealed class IsoTpWaitFrameLimitExceededException : CanKit.Pro.IsoTp.IsoTpException
     {

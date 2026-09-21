@@ -54,9 +54,11 @@ public interface IIsoTpChannel : IDisposable
     Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// As <see cref="SendAsync"/>, but returns the monotonic
-    /// (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) instant at which the PDU's last
-    /// frame was handed to the bus. Zero when nothing was transmitted.
+    /// As <see cref="SendAsync"/>, but returns the two monotonic
+    /// (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>) instants of the transmission:
+    /// just before the first frame was handed to the driver, and no later than the driver
+    /// accepted the last one (see <see cref="IsoTpTransmitStamps"/>). Zero for an instant not
+    /// reported.
     /// </summary>
     /// <remarks>
     /// The send-side counterpart of <see cref="ReceiveWithArrivalAsync"/>, and needed for the
@@ -67,7 +69,7 @@ public interface IIsoTpChannel : IDisposable
     /// as independent of scheduling as the arrival stamp makes its end -- pinning only one of the
     /// two leaves the deadline movable from the other side.
     /// </remarks>
-    Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+    Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
         CancellationToken cancellationToken = default);
 
     /// <summary>

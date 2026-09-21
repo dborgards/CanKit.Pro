@@ -1914,8 +1914,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         using var transmitting = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
+        long enteredAt = 0;
         bus.OnTransmitting = _ =>
         {
+            enteredAt = Stopwatch.GetTimestamp();
             transmitting.Set();
             release.Wait(ShortTimeout);
         };
@@ -1926,11 +1928,16 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var releasedAt = Stopwatch.GetTimestamp();
         release.Set();
 
-        var transmitStamp = await send.WaitAsync(ShortTimeout);
+        var stamps = await send.WaitAsync(ShortTimeout);
 
-        transmitStamp.Should().BeGreaterThan(releasedAt,
+        stamps.LastFrameTransmitTimestamp.Should().BeGreaterThan(releasedAt,
             "the stamp must be taken after the driver accepted the frame, and this test held the "
             + "driver call open until the instant above");
+        // Codex on #147: the first frame's handoff is stamped before the driver call, so a
+        // caller's stale-response cutoff cannot be later than the frame's wire instant.
+        stamps.FirstFrameHandoffTimestamp.Should().BeGreaterThan(0)
+            .And.BeLessThanOrEqualTo(enteredAt,
+                "the handoff instant precedes the driver call this test observed entering");
     }
 
     // #113 -- who disposes the actor when construction fails. The seam's contract is that a

@@ -799,24 +799,30 @@ internal sealed class UdsClientImpl : IUdsClient
         // A raw monotonic reading rather than a Stopwatch instance, because the budget is
         // compared against the *arrival* stamp the channel takes at enqueue, and both must come
         // from the same source (Stopwatch.GetTimestamp) for the subtraction to mean anything.
-        // Read before the request is handed to the channel: nothing that reached the wire after
-        // this reading can be an earlier request's response. The transmit stamp cannot serve as
-        // that bound -- it is "no later than the driver accepted the frame", taken after a
-        // synchronous delivery or a completion callback, and a fast peer's answer can be
-        // stamped by the demux before it (#146).
+        // Read before the request is handed to the channel, as the fallback for a channel that
+        // reports no first-frame handoff: nothing that reached the wire after this reading can
+        // be an earlier request's response.
         var requestStarted = Stopwatch.GetTimestamp();
-        var transmitStamp = await _channel.SendWithTransmitStampAsync(request, linkedToken)
+        var stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken)
             .ConfigureAwait(false);
+        var transmitStamp = stamps.LastFrameTransmitTimestamp;
 
         // Zero means the channel reported no transmit instant. Falling back to now is the old
         // behaviour, which is worse but not broken; treating zero as a timestamp would read as
         // infinitely long ago and time out every request.
         var budgetStart = transmitStamp > 0 ? transmitStamp : Stopwatch.GetTimestamp();
         // A response whose first frame arrived before this is an earlier request's (Codex on
-        // #143); one that arrived between it and the transmit stamp is not told apart from the
-        // request's own -- a stale transfer beginning while a multi-frame request is still on
-        // the wire is the one shape this leaves, and the budget's clamp to zero covers it.
-        var notBefore = requestStarted;
+        // #143). The bound is the channel's own handoff of the request's first frame, taken
+        // just before the driver call: the transmit stamp cannot serve -- it is "no later than
+        // the driver accepted the frame", taken after a synchronous delivery or a completion
+        // callback, and a fast peer's answer can be stamped by the demux before it (#146) --
+        // and a reading taken here before entering the channel would leave the channel's gate
+        // and scheduling as a window a late response to the previous request passes through
+        // (Codex on #147). What remains is a stale transfer that begins while a multi-frame
+        // request is still on the wire; the budget's clamp to zero covers it.
+        var notBefore = stamps.FirstFrameHandoffTimestamp > 0
+            ? stamps.FirstFrameHandoffTimestamp
+            : requestStarted;
         var timeout = _options.P2ClientMax;
         var timerKind = UdsTimeoutTimer.P2;
         int pendingCount = 0;

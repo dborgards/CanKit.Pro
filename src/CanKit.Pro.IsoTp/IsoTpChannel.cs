@@ -210,7 +210,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         => await SendWithTransmitStampAsync(pdu, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+    public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
         CancellationToken cancellationToken = default)
     {
         if (pdu.Length == 0)
@@ -227,12 +227,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         try
         {
             ThrowIfDisposed();
-            var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<IsoTpTransmitStamps>(TaskCreationOptions.RunContinuationsAsynchronously);
             var pduBytes = pdu.ToArray();
             CancellationTokenRegistration ctr = cancellationToken.CanBeCanceled
                 ? cancellationToken.Register(static state =>
                 {
-                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<long>, CancellationToken))state!;
+                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<IsoTpTransmitStamps>, CancellationToken))state!;
                     self.CancelInFlightSend(t, ct);
                 }, (this, tcs, cancellationToken))
                 : default;
@@ -247,7 +247,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 tcs.TrySetException(ex);
             }
 
-            long transmitStamp;
+            IsoTpTransmitStamps transmitStamp;
             try
             {
                 transmitStamp = await tcs.Task.ConfigureAwait(false);
@@ -624,7 +624,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // TX side (all methods run on the actor loop unless noted)
     // -----------------------------------------------------------------------------------------
 
-    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<long> tcs, CancellationToken ct)
+    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
         // Fix (Bugbot 3594960794): the send may have been canceled between when the caller
         // posted us and when the actor got around to running us -- CancelInFlightSend may have
@@ -679,7 +679,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private static bool IsSendAlreadyCanceled(TaskCompletionSource<long> tcs, CancellationToken ct)
+    private static bool IsSendAlreadyCanceled(TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
         if (!tcs.Task.IsCompleted && !ct.IsCancellationRequested)
             return false;
@@ -773,6 +773,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             Exception? failure = null;
             try
             {
+                // The PDU's first frame: stamped just before it is handed to the driver. A
+                // caller's cutoff for "could still be a response to this PDU" must not be
+                // later than the frame's wire instant, and the acceptance stamp below can be
+                // (#146, Codex on #147).
+                if (expected is not null && expectTx is TxExpect.SingleFrameConfirm or TxExpect.FirstFrameConfirm)
+                    expected.FirstFrameHandoffTimestamp = Stopwatch.GetTimestamp();
                 var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
                 confirmation = c;
             }
@@ -992,7 +998,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.NBsDeadline?.Complete();
         tx.StMinTimer?.Dispose();
         _tx = null;
-        tx.Tcs.TrySetResult(tx.LastFrameTransmitTimestamp);
+        tx.Tcs.TrySetResult(new IsoTpTransmitStamps(tx.FirstFrameHandoffTimestamp, tx.LastFrameTransmitTimestamp));
     }
 
     private void FailTx(Exception ex)
@@ -1004,7 +1010,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.Fail(ex);
     }
 
-    private void CancelInFlightSend(TaskCompletionSource<long> tcs, CancellationToken ct)
+    private void CancelInFlightSend(TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
         // Complete the caller's await immediately (any thread). BeginSendOnLoop may still be
         // sitting in the actor mailbox ahead of our cleanup work item; completing `tcs` here
@@ -1515,7 +1521,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private sealed class TxState
     {
-        public TxState(byte[] pdu, TaskCompletionSource<long> tcs)
+        public TxState(byte[] pdu, TaskCompletionSource<IsoTpTransmitStamps> tcs)
         {
             Pdu = pdu;
             Tcs = tcs;
@@ -1523,7 +1529,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         public byte[] Pdu { get; }
-        public TaskCompletionSource<long> Tcs { get; }
+        public TaskCompletionSource<IsoTpTransmitStamps> Tcs { get; }
 
         /// <summary>
         /// <see cref="Stopwatch.GetTimestamp"/> reading reported by the bus for the most recent
@@ -1532,6 +1538,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         /// instant P2 starts.
         /// </summary>
         public long LastFrameTransmitTimestamp { get; set; }
+        /// <summary>Just before the first frame was handed to the driver (#146).</summary>
+        public long FirstFrameHandoffTimestamp { get; set; }
 
         public TxStage State { get; set; }
         public int Offset { get; set; }

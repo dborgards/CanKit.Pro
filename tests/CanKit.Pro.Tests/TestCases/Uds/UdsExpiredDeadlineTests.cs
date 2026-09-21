@@ -301,6 +301,36 @@ public class UdsExpiredDeadlineTests
         data.Should().Equal(0xAA);
     }
 
+    /// <summary>
+    /// Codex on #147 — the cutoff for "an earlier request's response" is the channel's handoff
+    /// of the request's first frame, not a reading the client takes before entering the channel:
+    /// the channel's gate and scheduling sit between the two, and a late response to the previous
+    /// request that arrives in that window is not this request's. Here the request took 20 ms
+    /// to send, the first frame was handed over 5 ms before the transmit stamp, and the stale
+    /// response arrived 10 ms before it — after the client entered the channel, before the
+    /// handoff.
+    /// </summary>
+    [Fact]
+    public async Task L_A_Response_From_Before_The_First_Frame_Handoff_Is_A_Stray()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(20),
+            FirstFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(5),
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(-10),
+            HonorCancellation = true,
+            FirstFrameOffsetFromTransmit = TimeSpan.FromMilliseconds(-10),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "a response that arrived before the request's first frame was handed over is an earlier request's");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -367,7 +397,13 @@ public class UdsExpiredDeadlineTests
 
         public IsoTpChannelOptions Options { get; } = new();
 
-        public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+        /// <summary>
+        /// How long before the transmit stamp the first frame was handed to the driver. Defaults
+        /// to the start of the transmission (<see cref="TransmissionTime"/> before the stamp).
+        /// </summary>
+        public TimeSpan? FirstFrameHandoffBeforeTransmit { get; init; }
+
+        public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
             if (TransmissionTime > TimeSpan.Zero)
@@ -381,7 +417,9 @@ public class UdsExpiredDeadlineTests
             if (SendObservationDelay > TimeSpan.Zero)
                 await Task.Delay(SendObservationDelay, CancellationToken.None).ConfigureAwait(false);
 
-            return ReportNoTransmitStamp ? 0 : _arrivalStamp;
+            if (ReportNoTransmitStamp) return default;
+            var handoff = _arrivalStamp - Ticks(FirstFrameHandoffBeforeTransmit ?? TransmissionTime);
+            return new IsoTpTransmitStamps(handoff, _arrivalStamp);
         }
 
         public async Task SendAsync(ReadOnlyMemory<byte> pdu,
