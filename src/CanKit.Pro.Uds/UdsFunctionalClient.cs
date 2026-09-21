@@ -87,8 +87,16 @@ public sealed class UdsFunctionalClient : IDisposable
     /// answer to <em>it</em> that arrives within <paramref name="window"/>: a positive response
     /// to the request's service, or a negative response naming it. Other traffic on the
     /// response identifiers -- another tester's answers, a late answer to an earlier request --
-    /// is not attributed to this call. A request with suppressPosRspMsgIndication set is sent
-    /// and not collected for: an empty list comes back as soon as the frame is confirmed.
+    /// is not attributed to this call where the response lets it be told apart: a positive
+    /// response is matched on the request bytes it echoes (the sub-function, a DID, a routine
+    /// identifier, a block counter, a mode of operation, a memory address and size), a
+    /// periodic read on the identifier it carries data for. For a service whose positive
+    /// response echoes nothing of the request -- ClearDiagnosticInformation (0x14),
+    /// ReadMemoryByAddress (0x23), RequestDownload and RequestUpload (0x34, 0x35),
+    /// RequestTransferExit (0x37), SecuredDataTransmission (0x84) -- the service identifier
+    /// is the whole correlation, and another tester's answer to the same service inside the
+    /// window is attributed to this call. A request with suppressPosRspMsgIndication set is
+    /// sent and not collected for: an empty list comes back as soon as the frame is confirmed.
     /// </summary>
     public async Task<IReadOnlyList<UdsFunctionalResponse>> SendRawAsync(ReadOnlyMemory<byte> request,
         TimeSpan window, CancellationToken cancellationToken = default)
@@ -435,7 +443,10 @@ public sealed class UdsFunctionalClient : IDisposable
     // the block sequence counter (0x36), the modeOfOperation of RequestFileTransfer (0x38 --
     // Codex on #150), and for WriteMemoryByAddress (0x3D) the addressAndLengthFormatIdentifier
     // with the address and size it sizes -- its low nibble the address's bytes, its high
-    // nibble the size's (Codex on #150).
+    // nibble the size's (Codex on #150). The rest echo nothing -- 0x14, 0x23, 0x34, 0x35,
+    // 0x37, 0x84 -- and are correlated on the positive SID alone, which SendRawAsync's
+    // documentation says; refusing them would refuse ClearDiagnosticInformation to everyone,
+    // the functional request there is (Codex on #150).
     private static int EchoedRequestBytes(ReadOnlySpan<byte> request)
     {
         byte sid = request[0];
