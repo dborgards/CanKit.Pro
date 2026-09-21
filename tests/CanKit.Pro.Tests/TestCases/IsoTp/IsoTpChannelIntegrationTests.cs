@@ -417,6 +417,35 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.GetReceptionsInProgress().Should().BeEmpty();
     }
 
+    // Bugbot on #147: ignored means no effect at all -- a reassembly in flight survives a
+    // stray First Frame that fits a Single Frame, and a short one (#27).
+    [Theory]
+    [InlineData(new byte[] { 0x10, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 })] // fits a Single Frame
+    [InlineData(new byte[] { 0x10, 0x14, 0x11, 0x22, 0x33 })]                   // short
+    public async Task An_Ignored_First_Frame_Leaves_A_Reassembly_In_Flight_Alone(byte[] stray)
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        var faults = new List<Exception>();
+        channel.BackgroundExceptionOccurred += (_, ex) => { lock (faults) faults.Add(ex); };
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x40, 12).Select(i => (byte)i).ToArray();
+        var peer = IsoTpEndpoint.Normal(0x7E8, 0x7E0);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, IsoTpFrameCodec.BuildFirstFrame(peer, pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false), FrameFlags.None));
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, stray, FrameFlags.None));
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, IsoTpFrameCodec.BuildConsecutiveFrame(peer, sequenceNumber: 1, pdu.AsSpan(ffData), isCanFd: false, padding: true, paddingByte: 0xCC), FrameFlags.None));
+        channel.GetReceptionsInProgress();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.TryReceiveWithArrival(out var received).Should().BeTrue("the transfer completed past the stray frame");
+        received.Pdu.Should().Equal(pdu);
+        lock (faults) faults.Should().BeEmpty();
+    }
+
     // The boundary from the other side: one byte more than a Single Frame carries is a First
     // Frame, answered with Flow Control and reassembled.
     [Fact]
@@ -1784,11 +1813,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
 
         var discardedFromHandler = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // A discard that threw would leave the source unset and the wait below would time out:
+        // still a failure, only less specific.
         channel.BackgroundExceptionOccurred += (_, _) =>
-        {
-            try { discardedFromHandler.TrySetResult(channel.DiscardPendingPdus()); }
-            catch (Exception ex) { discardedFromHandler.TrySetException(ex); }
-        };
+            discardedFromHandler.TrySetResult(channel.DiscardPendingPdus());
 
         // A reassembly, then a Consecutive Frame out of sequence: AbortRx raises the event on
         // the actor.

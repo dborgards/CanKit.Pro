@@ -1108,6 +1108,17 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private bool TryBeginRx(byte[] payload, Pci pci, long frameArrival,
         IsoTpReceptionInProgress announce)
     {
+        // Two frames are not First Frames and are ignored -- with no effect on a reassembly in
+        // flight, which only a First Frame proper aborts (Bugbot on #147). A First Frame must
+        // be a full frame: classic CAN_DL 8, CAN FD at least 8 -- its CAN_DL is the RX_DL every
+        // Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8, #27); a shorter one
+        // is ignored. And one announcing what a Single Frame of the same CAN_DL could have
+        // carried is ignored too (§9.6.3.1, #56): no Flow Control, no reassembly. The Single
+        // Frame capacity at that CAN_DL is 7 less the address extension in the short PCI form
+        // (CAN_DL 8) and CAN_DL - 2 less the extension in the escape form beyond it.
+        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return false;
+        if (FitsASingleFrame(pci, payload.Length)) return false;
+
         // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
         // FC(OVFLW) and no replacement session is started (Bugbot 3596527680).
@@ -1116,18 +1127,6 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             AbortRx(new IsoTpException(
                 "ISO-TP First Frame aborted in-flight multi-frame reception."));
         }
-
-        // A First Frame must be a full frame: classic CAN_DL 8, CAN FD at least 8 — its CAN_DL
-        // is the RX_DL every Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8,
-        // #27). A shorter one is not a First Frame; it is ignored.
-        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return false;
-
-        // A First Frame announcing what a Single Frame of the same CAN_DL could have carried is
-        // not a First Frame: ISO 15765-2 §9.6.3.1 has the receiver ignore it -- no Flow Control,
-        // no reassembly (#56). The Single Frame capacity at that CAN_DL is 7 less the address
-        // extension in the short PCI form (CAN_DL 8) and CAN_DL - 2 less the extension in the
-        // escape form beyond it.
-        if (FitsASingleFrame(pci, payload.Length)) return false;
 
         // Cap reassembly allocation to the codec limit for this frame kind (Bugbot 3596212802)
         // and to MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to int.MaxValue;
