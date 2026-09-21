@@ -25,7 +25,7 @@ namespace CanKit.Pro.Uds;
 /// </para>
 /// <para>
 /// Before each send (and on abort paths) the client calls
-/// <see cref="IIsoTpChannel.DiscardPendingPdus"/> so a late ECU reply from a cancelled or
+/// <see cref="IIsoTpChannel.DiscardPendingPdus(long)"/> so a late ECU reply from a cancelled or
 /// timed-out wait cannot be consumed as the answer to a later request. SID correlation during
 /// the wait loop remains as a second line of defense for stray frames that arrive while a
 /// request is still outstanding.
@@ -1122,7 +1122,7 @@ internal sealed class UdsClientImpl : IUdsClient
         {
             // Best-effort: if a PDU is already sitting in the inbox when we abort (e.g. cancel
             // raced with arrival), drop it under the lock so it cannot poison the next caller.
-            DiscardStalePdus();
+            DiscardStalePdus(Stopwatch.GetTimestamp());
             throw;
         }
     }
@@ -1140,8 +1140,9 @@ internal sealed class UdsClientImpl : IUdsClient
     // among it is routed to its service's window rather than dropped unseen (Codex on #150).
     private async Task DiscardStalePdusAsync()
     {
+        long arrivedBefore = Stopwatch.GetTimestamp();
         await SettleAsync().ConfigureAwait(false);
-        DiscardStalePdus();
+        DiscardStalePdus(arrivedBefore);
     }
 
     private async Task SettleAsync()
@@ -1156,7 +1157,11 @@ internal sealed class UdsClientImpl : IUdsClient
         }
     }
 
-    private void DiscardStalePdus()
+    // Drops what arrived before the stamp, after reading it: the stamp is taken before the
+    // read, so everything the discard drops was read, and a 0x78 arriving between the read
+    // and the discard is kept for the request's own receive loop, which routes a stray
+    // (Codex on #150).
+    private void DiscardStalePdus(long arrivedBefore)
     {
         try
         {
@@ -1176,7 +1181,7 @@ internal sealed class UdsClientImpl : IUdsClient
                 }
                 RouteStrayPending(queued);
             }
-            _channel.DiscardPendingPdus();
+            _channel.DiscardPendingPdus(arrivedBefore);
         }
         catch (ObjectDisposedException)
         {
