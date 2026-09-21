@@ -1895,6 +1895,43 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             "the one queued PDU has been taken");
     }
 
+    // Codex on #147 -- the handoff instant is taken inside the service's send lock, immediately
+    // before the driver call. A reading the channel takes before calling the service precedes
+    // another sender's lock wait: with channel A parked inside its driver call, channel B's
+    // frame waits on the lock, and B's handoff instant must be after A's release, not before.
+    [Fact]
+    public async Task Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var a = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+        using var b = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(txCanId: 0x7E1, rxCanId: 0x7E9));
+
+        using var aTransmitting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        bus.OnTransmitting = frame =>
+        {
+            if (frame.ID != 0x7E0) return;
+            aTransmitting.Set();
+            release.Wait(ShortTimeout);
+        };
+
+        var sendA = a.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
+        aTransmitting.Wait(ShortTimeout).Should().BeTrue("A's frame must reach the driver call");
+
+        // B enters the service and waits on the lock A holds across its driver call.
+        var sendB = b.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
+        await Task.Delay(50); // B has had time to reach the lock; a shorter wait only weakens the check
+        var releasedAt = Stopwatch.GetTimestamp();
+        release.Set();
+
+        await sendA.WaitAsync(ShortTimeout);
+        var stampsB = await sendB.WaitAsync(ShortTimeout);
+
+        stampsB.LastFrameHandoffTimestamp.Should().BeGreaterThan(releasedAt,
+            "B's handoff instant is taken inside the lock, which A held until the instant above");
+    }
+
     // #112 -- the transmit stamp must come from the bus's own hand-off to the driver, not from
     // anywhere upstream of it. The UDS-level tests for this run on a channel stub, which by
     // construction cannot say where in the real path the reading is taken (Codex on #112); this

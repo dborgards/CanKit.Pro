@@ -773,11 +773,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             Exception? failure = null;
             try
             {
-                // Stamped just before the frame is handed to the driver; frames go out one at a
-                // time, so the last write is the last frame's. A caller's cutoff for "could
-                // still be a response to this PDU" must not be later than that frame's wire
-                // instant, and the acceptance stamp taken after the call can be (#146, Codex on
-                // #147).
+                // The fallback handoff instant, for a service that reports none: taken here,
+                // before the call, it is no later than the frame's wire instant, but the
+                // service's own lock wait can sit between the two; the service's reading,
+                // taken inside that lock, replaces it in OnSendConfirmed (Codex on #147).
                 if (expected is not null)
                     expected.LastFrameHandoffTimestamp = Stopwatch.GetTimestamp();
                 var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
@@ -881,6 +880,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // CompleteTx hands back, which is the instant the request finished transmitting.
         if (conf.HostTransmitTimestamp > 0)
             expected.LastFrameTransmitTimestamp = conf.HostTransmitTimestamp;
+        // Frames go out one at a time, so this is the last frame's by the time the send
+        // completes. A caller's cutoff for "could still be a response to this PDU" must not be
+        // later than that frame's wire instant; the acceptance stamp above can be (#146), and
+        // so can a reading taken outside the service's lock (Codex on #147).
+        if (conf.HostHandoffTimestamp > 0)
+            expected.LastFrameHandoffTimestamp = conf.HostHandoffTimestamp;
 
         if (!conf.Confirmed)
         {

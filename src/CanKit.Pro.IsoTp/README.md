@@ -43,10 +43,10 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   SRS FR-TP-018).
 - `SendAsync(ReadOnlyMemory<byte>, CancellationToken)` — sends one PDU; task completes on TX-confirm
   of the last frame. `SendWithTransmitStampAsync` returns `IsoTpTransmitStamps`, bracketing the
-  driver call for the last frame: just before it was handed over (a caller's cutoff for what can
-  still be a response to this PDU — a peer answers only a complete request) and no later than
-  the driver accepted it (where a response deadline starts); the two are not interchangeable
-  (#146). Faults with `IsoTpTimeoutException`, `IsoTpOverflowException`,
+  driver call for the last frame as the bus service reports it from inside its send lock: just
+  before the handoff (a caller's cutoff for what can still be a response to this PDU — a peer
+  answers only a complete request) and no later than the driver accepted it (where a response
+  deadline starts); the two are not interchangeable (#146). Faults with `IsoTpTimeoutException`, `IsoTpOverflowException`,
   `IsoTpWaitFrameLimitExceededException`, or `IsoTpSendRejectedException` on the corresponding
   ISO 15765-2 error cases.
 - `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived` — three surfaces onto the same bounded,
