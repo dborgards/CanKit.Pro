@@ -63,21 +63,26 @@ internal sealed class UdsClientImpl : IUdsClient
         _options = options;
         _ownsChannel = ownsChannel;
 
-        if (options.P2ClientMax <= TimeSpan.Zero)
-            throw new ArgumentException("P2ClientMax must be positive.", nameof(options));
-        if (options.P2StarClientMax <= TimeSpan.Zero)
-            throw new ArgumentException("P2StarClientMax must be positive.", nameof(options));
+        // Every duration here runs a timer, and a timer measures about 49 days at most: one
+        // beyond that would throw when it is armed, after the request went out (Codex on #150).
+        if (options.P2ClientMax <= TimeSpan.Zero || options.P2ClientMax > MaxTimerSpan)
+            throw new ArgumentException("P2ClientMax must be positive and within a timer's reach (about 49 days).", nameof(options));
+        if (options.P2StarClientMax <= TimeSpan.Zero || options.P2StarClientMax > MaxTimerSpan)
+            throw new ArgumentException("P2StarClientMax must be positive and within a timer's reach (about 49 days).", nameof(options));
         if (options.MaxBusyRepeatRequests < 0)
             throw new ArgumentOutOfRangeException(nameof(options),
                 "MaxBusyRepeatRequests must be >= 0 (0 disables the repeat).");
-        if (options.BusyRepeatRequestDelay < TimeSpan.Zero)
+        if (options.BusyRepeatRequestDelay < TimeSpan.Zero || options.BusyRepeatRequestDelay > MaxTimerSpan)
             throw new ArgumentOutOfRangeException(nameof(options),
-                "BusyRepeatRequestDelay must not be negative.");
+                "BusyRepeatRequestDelay must not be negative, and must be within a timer's reach (about 49 days).");
         if (options.MaxResponsePendingCount < 0)
             throw new ArgumentException("MaxResponsePendingCount must be non-negative.", nameof(options));
-        if (options.TesterPresentPeriod <= TimeSpan.Zero)
-            throw new ArgumentException("TesterPresentPeriod must be positive.", nameof(options));
+        if (options.TesterPresentPeriod <= TimeSpan.Zero || options.TesterPresentPeriod > MaxTimerSpan)
+            throw new ArgumentException("TesterPresentPeriod must be positive and within a timer's reach (about 49 days).", nameof(options));
     }
+
+    // The longest span Task.Delay and CancellationTokenSource.CancelAfter accept.
+    private static readonly TimeSpan MaxTimerSpan = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     public IIsoTpChannel Channel => _channel;
     public UdsClientOptions Options => _options;

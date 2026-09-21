@@ -905,6 +905,30 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
+    // Codex on #150: every duration in the options runs a timer, which measures about 49 days
+    // at most; one beyond that would throw when armed, after the request went out.
+    [Theory]
+    [InlineData("P2ClientMax")]
+    [InlineData("P2StarClientMax")]
+    [InlineData("BusyRepeatRequestDelay")]
+    [InlineData("TesterPresentPeriod")]
+    public void A_Duration_Beyond_A_Timers_Reach_Is_Rejected_At_Construction(string option)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp());
+        var fiftyDays = TimeSpan.FromDays(50);
+        var options = option switch
+        {
+            "P2ClientMax" => new UdsClientOptions { P2ClientMax = fiftyDays },
+            "P2StarClientMax" => new UdsClientOptions { P2StarClientMax = fiftyDays },
+            "BusyRepeatRequestDelay" => new UdsClientOptions { BusyRepeatRequestDelay = fiftyDays },
+            _ => new UdsClientOptions { TesterPresentPeriod = fiftyDays },
+        };
+        Action act = () => UdsClient.Create(channel, options);
+        act.Should().Throw<ArgumentException>();
+    }
+
     // Codex on #150: the With(...) clone carries the busy-repeat settings.
     [Fact]
     public void Options_With_Carries_The_Busy_Repeat_Settings()
