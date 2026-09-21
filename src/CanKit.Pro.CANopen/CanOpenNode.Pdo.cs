@@ -268,6 +268,12 @@ internal sealed partial class CanOpenNode
         if (entrySub == 0 && PdoMappingEntry.DummyBitLength(entryIndex) is var dummyBits && dummyBits != 0)
             return dummyBits == bitLength ? null : SdoAbortCode.ObjectCannotBeMapped;
 
+        // The communication profile area is not a PDO source or sink in this node: it declares
+        // its objects non-mappable, and the placeholders 1000h/1018h the application replaces or
+        // extends with Add* — whose mappability default serves application objects — must not
+        // become PDO targets that way either (Codex on #133). Whatever the entry's flag says.
+        if (entryIndex is >= 0x1000 and <= 0x1FFF) return SdoAbortCode.ObjectCannotBeMapped;
+
         if (!_od.TryGet(entryIndex, entrySub, out var target)) return SdoAbortCode.ObjectDoesNotExist;
         if (!target.PdoMappable) return SdoAbortCode.ObjectCannotBeMapped;
         var needed = isTpdo ? OdAccess.ReadOnly : OdAccess.WriteOnly;

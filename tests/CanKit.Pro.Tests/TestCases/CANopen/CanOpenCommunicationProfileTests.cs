@@ -445,6 +445,29 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x2000, 0x00).Should().Be(1u);
     }
 
+    // FR-CO-020 (#133 review) — replacing the 1000h placeholder or extending 1018h goes through
+    // Add*, whose mappability default serves application objects; that must not make a
+    // communication-profile object a PDO target. The area is refused as a mapping target
+    // whatever the entry's flag says — through the API and through a mapping-record write.
+    [Fact]
+    public void A_Replaced_Placeholder_Cannot_Become_A_Pdo_Target()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+        var od = node.ObjectDictionary;
+        od.AddU32(0x1000, 0x00, 0x0002_0191, OdAccess.ReadOnly);
+        od.AddU32(0x1018, 0x02, 0x0000_1234, OdAccess.ReadOnly);
+        od.TryGet(0x1000, 0x00, out var deviceType).Should().BeTrue();
+        deviceType.PdoMappable.Should().BeTrue("Add*'s default, meant for application objects");
+
+        Action configure = () => node.ConfigureTpdo(1, new PdoMapping().Add(0x1000, 0x00, 32));
+        configure.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06040041");
+        Action mapIdentity = () => od.WriteUnsigned(0x1A00, 0x01, 0x1018_0220);
+        mapIdentity.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06040041");
+        od.ReadUnsigned(0x1A00, 0x00).Should().Be(0u, "nothing of the communication profile area was mapped");
+    }
+
     // FR-CO-014 (#133 review) — a typed write resolves the entry's type under the write gate, so
     // a re-declaration is either fully before or fully after it: the value is encoded and
     // range-checked against the declaration it lands on. The test holds the gate in another

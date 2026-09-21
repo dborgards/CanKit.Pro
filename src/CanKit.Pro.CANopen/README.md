@@ -99,8 +99,10 @@ vendor-id 0 = "no vendor-ID assigned"), `1005h`/`1006h` (SYNC on `080h`, not gen
 `080h` + node-id, valid), `1016h`/`1017h` (heartbeat off), `1200h` (the default SDO server,
 constant) and four RPDO plus four TPDO records (`1400h`–`1403h`, `1600h`–`1603h`,
 `1800h`–`1803h`, `1A00h`–`1A03h`) at their pre-defined connection set CAN-IDs, "not valid" until
-configured. `1000h` and `1018h` are placeholders the application replaces with `AddU32`; the
-other objects are managed by the node and take values, not re-declarations — an `Add*` on one
+configured. `1000h` and `1018h` are placeholders the application replaces with `AddU32` — they
+stay outside the PDOs: the communication profile area is never a mapping target, whatever an
+entry's mappability flag says. The other objects are managed by the node and take values, not
+re-declarations — an `Add*` on one
 of them throws `InvalidOperationException`, whether it would replace a sub-index or add one the
 node does not implement (`1016h` grows through `AddHeartbeatConsumer`, not by hand).
 
