@@ -572,11 +572,14 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busB.Transmit(frame);
         await delivered.Task.WaitAsync(ShortTimeout);
 
-        var responses = await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        // A zero window reads the buffer without waiting (and without a timer, which a starved
+        // thread pool serves late -- #150).
+        var responses = await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout);
         responses.Should().ContainSingle().Which.Data.Should().Equal(pdu);
 
         // Not returned twice: the next collection starts from an empty buffer.
         (await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout)).Should().BeEmpty();
+        (await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout)).Should().BeEmpty();
     }
 
     // Bugbot on #150: a subscription completed underneath -- the service disposed -- ends the

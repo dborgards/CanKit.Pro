@@ -41,7 +41,9 @@ public sealed class IsoTpFunctionalListener : IDisposable
     /// A response that arrives after the window ends but before this call returns is kept for
     /// the next collection, not returned by this one.
     /// </summary>
-    /// <param name="window">Duration to collect responses.</param>
+    /// <param name="window">
+    /// Duration to collect responses. Zero or less returns what is buffered without waiting.
+    /// </param>
     /// <param name="cancellationToken">Cancels the collection; what was collected is lost.</param>
     /// <returns>The responses, in arrival order; empty if none arrived.</returns>
     /// <exception cref="ObjectDisposedException">
@@ -58,6 +60,13 @@ public sealed class IsoTpFunctionalListener : IDisposable
         long deadline = Stopwatch.GetTimestamp() + (long)(window.TotalSeconds * Stopwatch.Frequency);
         var responses = new List<IsoTpFunctionalResponse>(_carried);
         _carried.Clear();
+        if (window <= TimeSpan.Zero)
+        {
+            // No timer for a read of the buffer: its callback would need a thread-pool thread,
+            // which a starved pool grants about once a second (macOS CI on #150).
+            TakeBuffered(responses, deadline);
+            return responses.AsReadOnly();
+        }
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         windowCts.CancelAfter(window);
         try
