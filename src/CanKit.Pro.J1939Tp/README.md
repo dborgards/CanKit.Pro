@@ -11,13 +11,15 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 - **TP.BAM** (Broadcast Announce Message) — one sender pushes an up-to-1785-byte PDU to every node on the bus, no acknowledgement (FR-TP-030).
 - **TP.CM** (Connection Mode: RTS / CTS / EndOfMsgAck / Connection Abort) — point-to-point, with block-size negotiation and end-of-message acknowledgement (FR-TP-031).
 
-TP.DT (Data Transfer) frames carry the segmented payload for both flavors, sequence-numbered from 1 (FR-TP-032). Every session runs on its own actor-owned state and its own set of `IDeadline`s (T1, T2, T3, T4, Tr, Th — FR-TP-033), so multiple sessions can execute in parallel over the same physical bus (FR-TP-034/035) without interfering with each other.
+TP.DT (Data Transfer) frames carry the segmented payload for both flavors, sequence-numbered from 1 (FR-TP-033). Every session runs on its own actor-owned state and its own set of `IDeadline`s (T1, T2, T3, T4 — FR-TP-032), so multiple sessions can execute in parallel over the same physical bus (FR-TP-034/035) without interfering with each other.
+
+The timers carry J1939-21 §5.10.2.4's meanings: T1 (750 ms) between TP.DTs at the receiver, T2 (1250 ms) from the receiver's CTS to the first TP.DT of the block, T3 (1250 ms) at the originator for the response it is owed — CTS after RTS, the next CTS after a block, EndOfMsgAck after the last packet — and T4 (1050 ms) after a CTS(0) hold. Tr (200 ms) is the time a node has to *send* a response, not a timer a peer is held to, so there is no option for it (#31); the `Th` option is the BAM inter-packet spacing, not the standard's holding time (#144). Connection Abort carries table 7's reason codes and nothing outside the table (`J1939TpAbortReason`), so a peer stack reads the abort as what happened (#33).
 
 The channel ships on nuget.org alongside the other `CanKit.Pro.*` L2/L3 building blocks. It re-uses:
 
 - `CanKit.Pro.RawCan` — one `ICanBusService` per channel to demultiplex the TP.CM / TP.DT frames back out of the shared bus stream and to confirm outbound frames.
 - `CanKit.Pro.Actor` — one `IProtocolActor` mailbox for single-writer session state.
-- `CanKit.Pro.Reliability` — `IDeadlineScheduler` for T1/T2/T3/T4/Tr/Th, cancelled/re-armed on the actor's loop.
+- `CanKit.Pro.Reliability` — `IDeadlineScheduler` for T1/T2/T3/T4/Th, cancelled/re-armed on the actor's loop.
 - `CanKit.Pro.Addressing` — `J1939Id` / `J1939Pgn` for composing the TP.CM (PGN 0xEC00) and TP.DT (PGN 0xEB00) 29-bit IDs.
 
 ## Basic usage
@@ -50,8 +52,8 @@ var received = await receiver.ReceiveAsync();
 | --- | --- |
 | FR-TP-030 (TP.BAM send/receive) | Yes |
 | FR-TP-031 (TP.CM RTS/CTS/EndOfMsgAck) | Yes |
-| FR-TP-032 (TP.DT reassembly, SN 1..N) | Yes |
-| FR-TP-033 (T1/T2/T3/T4/Tr/Th via DeadlineScheduler, Connection Abort) | Yes |
+| FR-TP-032 (T1/T2/T3/T4 via DeadlineScheduler, Connection Abort) | Yes |
+| FR-TP-033 (BAM and CM told apart by PGN, TP.DT reassembly, SN 1..N) | Yes |
 | FR-TP-034 (parallel sessions on shared bus) | Yes |
 | FR-TP-035 (multiple concurrent TP.CM peers) | Yes |
 

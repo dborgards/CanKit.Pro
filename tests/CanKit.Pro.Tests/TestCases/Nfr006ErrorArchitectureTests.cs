@@ -54,7 +54,7 @@ public class Nfr006ErrorArchitectureTests
 
         (new J1939TpAbortException(J1939TpAbortReason.Timeout, 0xEE00, "x"))
             .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolTimeout);
-        (new J1939TpAbortException(J1939TpAbortReason.UnexpectedCtsNumPackets, 0xEE00, "x"))
+        (new J1939TpAbortException(J1939TpAbortReason.MessageSizeExceeded, 0xEE00, "x"))
             .ErrorCode.Should().Be(ProtocolErrorCodes.ProtocolPeerAbort);
         (new J1939TpSendRejectedException("x"))
             .ErrorCode.Should().Be(CanKitErrorCode.TransportOperationFailed);
