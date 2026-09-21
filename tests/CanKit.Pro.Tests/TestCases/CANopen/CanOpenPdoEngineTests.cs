@@ -361,6 +361,43 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         wire.Count(Tpdo1).Should().Be(2, "an RTR-only PDO is never transmitted unrequested");
     }
 
+    // FR-CO-015 (#133 review) — an RTR on a synchronous TPDO (00h–F0h) transmits nothing: §7.2.2.3
+    // "Remotely requested — the transmission of an event-driven PDO is initiated on receipt of a
+    // RTR", and Table 72 "synchronous means that the PDO is transmitted after the SYNC". Only the
+    // SYNC transmits it. The RTR-only event-driven TPDO2 answers its RTR immediately on the same
+    // channel and loop, so its answer is the witness that TPDO1's RTR was processed.
+    [Theory]
+    [InlineData((byte)0x00)]
+    [InlineData((byte)0x01)]
+    [InlineData((byte)0x03)]
+    public async Task Tpdo_Synchronous_Does_Not_Answer_An_Rtr(byte transmissionType)
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = CanOpen.OpenNode(busB, Device);
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0x1111);
+        od.AddU8(0x2001, 0x00, 0);
+
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16), TpdoTransmission.Synchronous);
+        od.WriteUnsigned(0x1800, 0x02, transmissionType);
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0x00, 8), TpdoTransmission.RtrOnlyEventDriven);
+        (od.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.NoRtrBit).Should().Be(0u, "RTR is allowed on TPDO1");
+        await StartAsync(wire, device);
+
+        wire.SendRtr(Tpdo1);
+        wire.SendRtr(Tpdo2);
+        await wire.WaitForCountAsync(Tpdo2, 1);
+        wire.Count(Tpdo1).Should().Be(0, "a synchronous TPDO is transmitted after the SYNC, not on an RTR");
+
+        // 00h transmits on the SYNC after an event, 01h on every SYNC, 03h on every third.
+        if (transmissionType == CanOpenTransmissionType.SynchronousAcyclic) await device.TriggerTpdoAsync(1);
+        for (int i = 0; i < Math.Max(1, (int)transmissionType); i++) wire.SendSync();
+        await wire.WaitForCountAsync(Tpdo1, 1);
+        wire.Payloads(Tpdo1)[0].Should().Equal(0x11, 0x11);
+    }
+
     // FR-CO-015 (d) — type FDh, RTR-only event-driven: Table 72 "the CANopen device will start
     // sampling with the reception of the RTR and will transmit the PDO immediately"; the SYNC
     // plays no part.
@@ -709,6 +746,43 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x2100, 0x00).Should().Be(0x1234u,
             "the received bytes land in the mapped object (background: {0})", string.Join(" | ", background.Select(x => x.ToString())));
         background.Should().BeEmpty();
+    }
+
+    // FR-CO-005 (#133 review) — two valid RPDOs may carry the same COB-ID: the dictionary holds
+    // both records and CiA 301 does not forbid it. A frame on that COB-ID actuates each of them,
+    // not whichever record was rebuilt last.
+    [Fact]
+    public async Task Rpdos_Sharing_A_CobId_Are_Each_Actuated()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = CanOpen.OpenNode(busB, Device);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2100, 0x00, 0);
+        od.AddU8(0x2101, 0x00, 0);
+
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, 8), cobId: Rpdo1);
+        device.ConfigureRpdo(2, new PdoMapping().Add(0x2101, 0x00, 8), cobId: Rpdo1);
+        od.ReadUnsigned(0x1400, 0x01).Should().Be(Rpdo1);
+        od.ReadUnsigned(0x1401, 0x01).Should().Be(Rpdo1);
+
+        var received = new List<int>();
+        var both = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.RpdoReceived += (_, e) =>
+        {
+            lock (received)
+            {
+                received.Add(e.PdoIndex);
+                if (received.Count == 2) both.TrySetResult(true);
+            }
+        };
+        await StartAsync(wire, device);
+        wire.Transmit(Rpdo1, new byte[] { 0x09 });
+        await both.Task.WithTimeoutAsync(ShortTimeout);
+        lock (received) received.Should().BeEquivalentTo(new[] { 1, 2 });
+        od.ReadUnsigned(0x2100, 0x00).Should().Be(9u);
+        od.ReadUnsigned(0x2101, 0x00).Should().Be(9u, "the second RPDO on the same COB-ID is actuated too");
     }
 
     // =========================================================================================

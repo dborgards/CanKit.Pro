@@ -311,7 +311,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // stored count and zeroes the entries the array had grown by since, but keeps
                 // them, so growing again reuses such an entry rather than re-declaring it.
                 if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
-                    _od.AddU32(Co.ConsumerHeartbeat, (byte)slot, 0, OdAccess.ReadWrite, pdoMappable: false);
+                    _od.Declare(Co.ConsumerHeartbeat, (byte)slot, OdDataType.Unsigned32, OdAccess.ReadWrite, new byte[4], pdoMappable: false);
                 _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
             }
             _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
@@ -690,12 +690,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             // A valid RPDO's COB-ID is whatever the application or a master configured, possibly
             // on purpose our own TPDO (#93); an explicitly configured consumer outranks the
-            // range-based guesses below.
-            if (_rpdosByCobId.TryGetValue(cobId, out var rpdo))
+            // range-based guesses below. Two valid RPDOs may share a COB-ID — the dictionary holds
+            // both records and CiA 301 does not forbid it — and then each is actuated (Codex on #133).
+            bool consumed = false;
+            for (int n = 1; n <= Co.PdoCount; n++)
             {
-                HandleRpdo(rpdo, data);
-                return;
+                if (_rpdos[n] is { Valid: true } rpdo && rpdo.CobId == cobId)
+                {
+                    HandleRpdo(rpdo, data);
+                    consumed = true;
+                }
             }
+            if (consumed) return;
             // EMCY 0x081..0x0FF.
             if (cobId is >= 0x081 and <= 0x0FF)
             {

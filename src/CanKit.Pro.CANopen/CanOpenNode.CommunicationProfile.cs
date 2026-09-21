@@ -172,7 +172,7 @@ internal sealed partial class CanOpenNode
             }
         }
 
-        _od.ReplaceGuard = (index, _) => !IsManagedCommunicationObject(index);
+        _od.DeclareGuard = (index, _) => !IsManagedCommunicationObject(index);
         _od.WriteValidator = ValidateCommunicationWrite;
         _od.EntryWritten += OnOdEntryWrittenForCommunicationProfile;
 

@@ -101,7 +101,8 @@ constant) and four RPDO plus four TPDO records (`1400h`–`1403h`, `1600h`–`16
 `1800h`–`1803h`, `1A00h`–`1A03h`) at their pre-defined connection set CAN-IDs, "not valid" until
 configured. `1000h` and `1018h` are placeholders the application replaces with `AddU32`; the
 other objects are managed by the node and take values, not re-declarations — an `Add*` on one
-of them throws `InvalidOperationException`.
+of them throws `InvalidOperationException`, whether it would replace a sub-index or add one the
+node does not implement (`1016h` grows through `AddHeartbeatConsumer`, not by hand).
 
 **API calls are OD writes.** `StartHeartbeatProducer` writes `1017h`; `AddHeartbeatConsumer`
 writes a sub-index of `1016h`, growing the array when every slot is taken; `StartSyncProducer`
@@ -179,8 +180,14 @@ invalid (bit 31 set). Both are measured on the actor's `ITimeSource`, so a test 
 with a virtual clock.
 
 **RTR.** A remote frame on a valid TPDO's COB-ID is a PDO read (§7.2.2.5.2) and is answered
-unless bit 30 of `1800h:01` ("no RTR allowed") is set. The record's power-on default carries
-that bit; `ConfigureTpdo` without an explicit `cobId` clears it.
+unless bit 30 of `1800h:01` ("no RTR allowed") is set — by the event-driven types and the
+RTR-only types (see the table). A synchronous TPDO (`00h`–`F0h`) is transmitted after the SYNC
+and by nothing else, so its RTR is not answered: §7.2.2.3 defines the remote request for
+event-driven PDOs. The record's power-on default carries bit 30; `ConfigureTpdo` without an
+explicit `cobId` clears it.
+
+**RPDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID; a frame on it
+actuates each of them.
 
 **Synchronous RPDOs.** `ConfigureRpdo(…, transmission: RpdoTransmission.Synchronous)` writes
 `00h` to `1400h:02`: received data is held and written to the object dictionary — and reported

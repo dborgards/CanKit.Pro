@@ -412,6 +412,38 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x1018, 0x02).Should().Be(0x0000_1234u);
     }
 
+    // FR-CO-014 (d, #133 review) — the guard covers additions too: a sub-index the node does not
+    // declare under a managed object cannot be added by the application, or the generic SDO
+    // server would serve it — 1800h:04 is reserved and answers 0609 0011h, 1200h has no sub-index
+    // 03h, and 1016h grows only through AddHeartbeatConsumer. The placeholders stay open.
+    [Fact]
+    public async Task Managed_Communication_Objects_Do_Not_Take_Added_Subindices_Either()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var tool = CanOpen.OpenNode(busA, nodeId: Tool);
+        using var node = CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = node.ObjectDictionary;
+
+        Action addReservedPdoSubindex = () => od.AddU32(0x1800, 0x04, 0);
+        Action addSdoServerSubindex = () => od.AddU8(0x1200, 0x03, 0x11);
+        Action growConsumerHeartbeatByHand = () => od.AddU32(0x1016, 0x02, 0);
+        addReservedPdoSubindex.Should().Throw<InvalidOperationException>();
+        addSdoServerSubindex.Should().Throw<InvalidOperationException>();
+        growConsumerHeartbeatByHand.Should().Throw<InvalidOperationException>();
+        od.TryGet(0x1800, 0x04, out _).Should().BeFalse();
+        od.TryGet(0x1200, 0x03, out _).Should().BeFalse();
+        od.TryGet(0x1016, 0x02, out _).Should().BeFalse();
+        await ExpectAbortAsync(() => UploadAsync(tool, Slave, 0x1800, 0x04), SdoAbortCode.SubIndexDoesNotExist);
+
+        node.AddHeartbeatConsumer(0x12, TimeSpan.FromSeconds(1));
+        node.AddHeartbeatConsumer(0x13, TimeSpan.FromSeconds(1));
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "the node itself grows the array");
+        od.AddU32(0x1018, 0x03, 0x0001_0000, OdAccess.ReadOnly);
+        od.ReadUnsigned(0x1018, 0x03).Should().Be(0x0001_0000u, "the identity placeholder is the application's to extend");
+    }
+
     // FR-CO-014 (e): 1001h "is a part of an emergency object" (CiA 301 §7.5.2.2) — the error
     // register a master reads over SDO is the one the EMCY carried.
     [Fact]

@@ -40,7 +40,6 @@ internal sealed partial class CanOpenNode
     private readonly TpdoRuntime?[] _tpdos = new TpdoRuntime?[Co.PdoCount + 1];
     private readonly Dictionary<uint, TpdoRuntime> _tpdosByCobId = new();
     private readonly RpdoRuntime?[] _rpdos = new RpdoRuntime?[Co.PdoCount + 1];
-    private readonly Dictionary<uint, RpdoRuntime> _rpdosByCobId = new();
 
     // Change-of-state TPDO support (FR-CO-006): volatile pre-filter snapshot of OD entries
     // mapped in at least one event-driven or synchronous-acyclic TPDO (rebuilt on the actor by
@@ -329,9 +328,6 @@ internal sealed partial class CanOpenNode
         var comm = (ushort)(Co.RpdoComm + n - 1);
         var map = (ushort)(Co.RpdoMap + n - 1);
         var rp = _rpdos[n] ??= new RpdoRuntime(n);
-
-        if (_rpdosByCobId.TryGetValue(rp.CobId, out var registered) && ReferenceEquals(registered, rp))
-            _rpdosByCobId.Remove(rp.CobId);
         rp.SyncPending = null;
 
         uint word = _od.TryReadUnsigned(comm, 0x01, out var w) ? w : CanOpenCobId.InvalidBit;
@@ -340,8 +336,6 @@ internal sealed partial class CanOpenNode
         rp.TransmissionType = _od.TryReadUnsigned(comm, 0x02, out var t) ? (byte)t : CanOpenTransmissionType.EventDrivenManufacturer;
         rp.Mapping = ReadMappingRecord(map);
         rp.TotalBytes = TotalBytes(rp.Mapping);
-
-        if (rp.Valid) _rpdosByCobId[rp.CobId] = rp;
     }
 
     private PdoMappingEntry[] ReadMappingRecord(ushort map)
@@ -475,10 +469,19 @@ internal sealed partial class CanOpenNode
             }
             return;
         }
+        // §7.2.2.3: "the transmission of an event-driven PDO is initiated on receipt of a RTR";
         // §7.5.2.37: the inhibit time bounds every transmission of an event-driven TPDO, and a
-        // PDO read is one of them; the RTR-only and synchronous types are outside its scope.
-        if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)) RequestEventDrivenTransmission(rt);
-        else EmitTpdo(rt);
+        // PDO read is one of them. The RTR-only event-driven type (FDh) "will start sampling with
+        // the reception of the RTR and will transmit the PDO immediately" (Table 72), outside the
+        // inhibit time's scope.
+        if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType))
+        {
+            RequestEventDrivenTransmission(rt);
+            return;
+        }
+        if (rt.TransmissionType == CanOpenTransmissionType.RtrOnlyEventDriven) EmitTpdo(rt);
+        // A synchronous TPDO (00h–F0h) "is transmitted after the SYNC" (Table 72) and nothing
+        // else: its RTR is not answered here, the next SYNC transmits it (Codex on #133).
     }
 
     private void TriggerTpdoOnActor(int pdoIndex)
@@ -647,7 +650,6 @@ internal sealed partial class CanOpenNode
             }
         }
         _tpdosByCobId.Clear();
-        _rpdosByCobId.Clear();
     }
 
     // =========================================================================================
