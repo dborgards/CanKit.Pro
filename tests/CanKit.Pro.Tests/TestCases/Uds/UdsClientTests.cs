@@ -708,6 +708,35 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Bugbot on #150: a refused request puts the window back to what it was -- an earlier
+    // suppressed send's window still open stays open, and the next request still waits it out.
+    [Fact]
+    public async Task A_Suppressed_Send_The_Channel_Refuses_Leaves_An_Earlier_Window_As_It_Was()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req => new byte[] { 0x00 }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromSeconds(2), P2StarClientMax = TimeSpan.FromSeconds(2) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var sw = Stopwatch.StartNew();
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: a 2 s window, not waited out by the next suppressed send
+            var oversized = new byte[4200];
+            oversized[0] = 0x3E;
+            oversized[1] = 0x80;
+            Func<Task> refused = () => client.SendRawAsync(oversized, cts.Token);
+            await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
+
+            // The unsuppressed TesterPresent waits the first send's window out: at least 2 s
+            // after it, a lower bound a loaded host only raises.
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+            sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(1900),
+                "the refused send left the earlier suppressed send's window as it was");
+        }
+    }
+
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()

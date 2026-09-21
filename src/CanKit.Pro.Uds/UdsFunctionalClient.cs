@@ -296,11 +296,13 @@ public sealed class UdsFunctionalClient : IDisposable
         lock (_listeners)
         {
             _inFlight.Remove(sid);
-            _openWindows.Restore(sid, had, until);
             // The listener started for the send is collecting for the window it was given;
             // retired here, its subscription ends and the collection with it, so the next call
-            // does not wait on it. A window put back still open gets a listener from that call.
+            // does not wait on it. Retired before the window is put back: retiring forgets the
+            // window (Bugbot on #150). A window put back still open gets a listener from the
+            // next call.
             if (_listeners.TryGetValue(sid, out var entry)) Retire(sid, entry.Ears);
+            _openWindows.Restore(sid, had, until);
         }
     }
 
