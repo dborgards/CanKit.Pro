@@ -65,7 +65,18 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   bytes; classic CAN is bounded at 4095 by the codec anyway) is answered with `FC(OVFLW)` and
   nothing is allocated for it, so a CAN-FD escape First Frame cannot make the process reserve
   the ~2 GB it may announce. A Consecutive Frame whose CAN_DL is not the First Frame's, unless
-  it is the last one, is ignored as ISO 15765-2 §9.8 requires — it is not copied short.
+  it is the last one, is ignored as ISO 15765-2 §9.8 requires — it is not copied short. A First
+  Frame announcing no more than a Single Frame of the same CAN_DL could carry is ignored too
+  (§9.6.3.1): no Flow Control, no reassembly (#56).
+- Flow parameters: the sender takes BS and STmin from the first FC.CTS of a transfer and ignores
+  the values a later FC.CTS carries, as ISO 15765-2 requires (#56).
+- Echoes: a channel receives on `RxCanId` and transmits on `TxCanId`, so on an echo-capable bus
+  its own frames never match its filter and host echoes are kept — two reciprocal channels in
+  one process are peers. The one exception is an endpoint with `TxCanId == RxCanId`, where the
+  host echo flag is the only thing telling the channel's frame from the peer's; there host
+  echoes are withheld (#56).
+- `DiscardPendingPdus` may be called from a `BackgroundExceptionOccurred` handler, which runs on
+  the channel's actor: the clear then runs inline instead of waiting on the loop it is on (#56).
 
 ## Timing accuracy — STmin pacing (NFR-003)
 
