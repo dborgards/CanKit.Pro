@@ -270,6 +270,10 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         (await heartbeatTap.NextAsync())[0].Should().Be((byte)NmtState.Operational,
             "with 1017h back at 0 the RTR is answered, and with toggle 0: the ignored RTR did not consume a toggle");
 
+        // The reply on the wire implies the life time is armed (#141) -- and the settle makes the
+        // clock move only once the callback that answered has returned, so the test does not
+        // rest on that order either way.
+        await witness.SettleAsync();
         await witness.AdvanceAsync(TimeSpan.FromMilliseconds(150));
         (await events.NextAsync(ShortTimeout, "life guarding event")).State.Should().Be(LifeGuardingState.Occurred,
             "the answered RTR started guarding");

@@ -670,13 +670,15 @@ internal sealed partial class CanOpenNode
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
         // producer's cycle restarts from it: the restore armed the tick before the application's
         // hook ran, so a tick that became due meanwhile would otherwise fire right behind this.
-        _ = EmitHeartbeat(0x00);
+        // Re-armed before the frames are ordered, for the same reason the guarding reply arms
+        // its life time first (#141): a frame on the wire implies the timer behind it is set.
         if (_heartbeatProducerInterval > TimeSpan.Zero)
         {
-            _ = EmitHeartbeat((byte)NmtState.PreOperational);
             _heartbeatProducerHandle?.Dispose();
             ScheduleHeartbeatProducerTick();
         }
+        _ = EmitHeartbeat(0x00);
+        if (_heartbeatProducerInterval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
     }
 
     private void AbortServerSessions(SdoAbortCode code)
