@@ -463,6 +463,124 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------------
+    // FR-CO-004 (#134): the blksize a sub-block confirm carries is for "the following block"
+    // (CiA 301 §7.2.4.3.15). A partial confirm that also shrinks it below ackseq + 1 must not
+    // shrink the retransmission — the client resends the rest of the current sub-block with its
+    // original bound and numbering, and only the following sub-block is the smaller one.
+    // Before the fix the retransmission loop found nothing to send and the transfer waited for
+    // a confirm that could not come.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Sdo_BlockDownload_Client_Applies_A_Smaller_BlkSize_Only_After_The_Retransmission()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 2);
+
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var payload = Enumerable.Range(0, 40).Select(i => (byte)(0x30 + i)).ToArray(); // 6 segments
+        var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var sendTask = client.SdoDownloadAsync(serverNodeId: 0x02, index: 0x2100, subindex: 0x00,
+            payload, mode: SdoTransferMode.Block, new System.Threading.CancellationTokenSource(ShortTimeout).Token);
+
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE0).Should().Be(SdoBlockFrames.CcsBlockDownloadInitBase);
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x02)),
+            SdoBlockFrames.BuildBlockDownloadInitResponse(0x2100, 0x00, serverCrcSupported: false, blockSize: 4)));
+
+        var first = new List<byte[]>();
+        for (var i = 0; i < 4; i++) first.Add(tap.Next(ShortTimeout));
+        first.Select(s => s[0] & 0x7F).Should().Equal(1, 2, 3, 4);
+
+        // Two confirmed, and "use 2 segments per block from now on" — below the 3 the resend starts at.
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x02)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 2, nextBlockSize: 2)));
+
+        var resent3 = tap.Next(ShortTimeout);
+        var resent4 = tap.Next(ShortTimeout);
+        (resent3[0] & 0x7F).Should().Be(3, "the current sub-block keeps its bound and numbering through the retransmission");
+        (resent4[0] & 0x7F).Should().Be(4);
+        (resent4[0] & 0x80).Should().Be(0, "segment 4 is not the payload's last");
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x02)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 4, nextBlockSize: 2)));
+
+        // The following sub-block is the smaller one: two segments, the second the payload's last.
+        var next1 = tap.Next(ShortTimeout);
+        var next2 = tap.Next(ShortTimeout);
+        (next1[0] & 0x7F).Should().Be(1);
+        (next2[0] & 0x7F).Should().Be(2);
+        (next2[0] & 0x80).Should().Be(0x80, "40 bytes are 6 segments: 4 in the first sub-block, 2 in the second");
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x02)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 2, nextBlockSize: 2)));
+        var end = tap.Next(ShortTimeout);
+        (end[0] & 0xC3).Should().Be(SdoBlockFrames.CcsBlockDownloadEndBase);
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x02)),
+            SdoBlockFrames.BuildEndResponse(SdoBlockFrames.ScsBlockDownloadEndResponse)));
+        await sendTask.WithTimeoutAsync(ShortTimeout);
+
+        var accepted = first.Take(2).Concat(new[] { resent3, resent4, next1, next2 })
+            .Select(s => s.Skip(1)).SelectMany(b => b).Take(payload.Length).ToArray();
+        accepted.Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#134): the upload server mirrors it — a partial confirm from the client that
+    // shrinks blksize below ackseq + 1 still gets the rest of the current sub-block resent.
+    [Fact]
+    public async Task Sdo_BlockUpload_Server_Applies_A_Smaller_BlkSize_Only_After_The_Retransmission()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        var payload = Enumerable.Range(0, 40).Select(i => (byte)(0x60 + i)).ToArray(); // 6 segments
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, payload, OdAccess.ReadOnly);
+        var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildBlockUploadInit(0x2100, 0x00, clientCrcSupported: false, blockSize: 4, pst: 0)));
+        var initResp = tap.Next(ShortTimeout);
+        (initResp[0] & 0xE0).Should().Be(SdoBlockFrames.ScsBlockUploadInitResponseBase);
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart)));
+
+        var first = new List<byte[]>();
+        for (var i = 0; i < 4; i++) first.Add(tap.Next(ShortTimeout));
+        first.Select(s => s[0] & 0x7F).Should().Equal(1, 2, 3, 4);
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck, lastAckedSeq: 2, nextBlockSize: 2)));
+
+        var resent3 = tap.Next(ShortTimeout);
+        var resent4 = tap.Next(ShortTimeout);
+        (resent3[0] & 0x7F).Should().Be(3, "the current sub-block keeps its bound and numbering through the retransmission");
+        (resent4[0] & 0x7F).Should().Be(4);
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck, lastAckedSeq: 4, nextBlockSize: 2)));
+
+        var next1 = tap.Next(ShortTimeout);
+        var next2 = tap.Next(ShortTimeout);
+        (next1[0] & 0x7F).Should().Be(1);
+        (next2[0] & 0x7F).Should().Be(2);
+        (next2[0] & 0x80).Should().Be(0x80, "the following sub-block is the smaller one and ends the upload");
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck, lastAckedSeq: 2, nextBlockSize: 2)));
+        var end = tap.Next(ShortTimeout);
+        (end[0] & 0xC3).Should().Be(SdoBlockFrames.ScsBlockUploadEndBase);
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadEndResponse)));
+
+        var accepted = first.Take(2).Concat(new[] { resent3, resent4, next1, next2 })
+            .Select(s => s.Skip(1)).SelectMany(b => b).Take(payload.Length).ToArray();
+        accepted.Should().Equal(payload);
+    }
+
+    // -----------------------------------------------------------------------------------------
     // FR-CO-004: retransmissions are bounded — a peer that never confirms progress aborts the
     // transfer after CanOpenNodeOptions.SdoBlockMaxRetransmissions instead of retrying forever.
     // -----------------------------------------------------------------------------------------
