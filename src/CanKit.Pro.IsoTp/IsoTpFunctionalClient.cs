@@ -271,6 +271,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
         var responses = new List<IsoTpFunctionalResponse>();
 
         // Combine the caller's token with a deadline token so the window bounds the collection.
+        // The window's end is also held as an arrival stamp: the timer's callback and this
+        // method's continuations are scheduling, and a frame that arrived after the deadline
+        // but before they ran is not the window's (Codex on #150).
+        long deadline = Stopwatch.GetTimestamp() + (long)(window.TotalSeconds * Stopwatch.Frequency);
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         windowCts.CancelAfter(window);
         var windowToken = windowCts.Token;
@@ -279,8 +283,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
         {
             await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response))
-                    responses.Add(response!);
+                if (TryParseFunctionalResponse(frameEvent, out var response) && response!.HostArrivalTimestamp <= deadline)
+                    responses.Add(response);
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -299,8 +303,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
             sub.Dispose();
             while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response))
-                    responses.Add(response!);
+                if (TryParseFunctionalResponse(frameEvent, out var response) && response!.HostArrivalTimestamp <= deadline)
+                    responses.Add(response);
             }
         }
 

@@ -741,18 +741,19 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(2) };
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(1000));
 
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // The first request's confirmation is held for 500 ms -- longer than the 400 ms window
-        // the pre-send listener was given; the ECU answers negatively 150 ms after the frame
-        // is confirmed, inside the window as anchored at the transmission.
+        // The first request's confirmation is held for 1100 ms -- longer than the 1000 ms
+        // window the pre-send listener was given; the ECU answers negatively 150 ms after the
+        // frame is confirmed, inside the window as anchored at the transmission, with 850 ms
+        // to spare for the host to delay that timer.
         var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
-        await Task.Delay(500);
+        await Task.Delay(1100);
         bus.DeferredEchoes.ReleaseNext();
         _ = Task.Run(async () => { await Task.Delay(150); bus.RaiseObserved(negative, isEcho: false); });
         await first;
@@ -778,18 +779,21 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(2) };
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(1000));
 
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
 
-        // The confirmation is held for 500 ms, past the 400 ms window of the pre-send listener;
-        // the collection is then cancelled 50 ms in, and the ECU answers negatively after that,
-        // 150 ms after the confirmation -- inside its P2 from the transmission.
+        // The confirmation is held for 1100 ms, past the 1000 ms window of the pre-send
+        // listener; the collection is then cancelled 50 ms in, and the ECU answers negatively
+        // after that, 150 ms after the confirmation -- inside its P2 from the transmission.
+        // The quantity the host perturbs is the negative answer's timer, which must fire
+        // before the second request goes out at 1000 ms after the cancellation: a margin of
+        // 900 ms (Windows CI on #150 exceeded 300).
         using var early = new CancellationTokenSource();
         var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
-        await Task.Delay(500);
+        await Task.Delay(1100);
         bus.DeferredEchoes.ReleaseNext();
         await Task.Delay(50);
         early.Cancel();
@@ -820,7 +824,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(2) };
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400), responsePendingWindow: TimeSpan.FromMilliseconds(1000));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400), responsePendingWindow: TimeSpan.FromMilliseconds(2000));
 
         var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x10, 0x78 });
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x10, 0x12 });
@@ -831,7 +835,8 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         // on the bus meanwhile, and the ECU's 0x78 arrives at 500 ms, 100 ms before the
         // confirmation is released -- heard by the listener while the send is still in
         // flight. The negative answer follows 600 ms after the confirmation: past the P2
-        // window anchored there (1000 ms), inside P2* = 1000 ms from the 0x78 (1500 ms).
+        // window anchored there (1000 ms), inside P2* = 2000 ms from the 0x78 (2500 ms), with
+        // 1300 ms to spare for the host to delay its timer.
         var suppressed = functional.SendRawAsync(new byte[] { 0x10, 0x83 }, Window, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         await Task.Delay(500);
