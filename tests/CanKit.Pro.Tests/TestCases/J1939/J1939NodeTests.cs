@@ -338,7 +338,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // Unclaimed: Cannot-Claim.
         var seen = WaitForMessageAsync(node, m => J1939Pgn.IsRequest(m.Pgn), ShortTimeout);
         Request();
-        (await NextClaimAsync()).Should().Be(((byte)J1939Pgn.NullAddress, nodeName.Value), "a node without an address answers Cannot-Claim");
+        (await NextClaimAsync()).Should().Be((J1939Pgn.NullAddress, nodeName.Value), "a node without an address answers Cannot-Claim");
         (await seen).SourceAddress.Should().Be((byte)0x20, "the request still reaches the application");
 
         // Claimed: the claim itself.
