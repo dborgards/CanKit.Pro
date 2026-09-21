@@ -98,6 +98,10 @@ internal sealed partial class CanOpenNode
             }
         }
 
+        // What the description declared has a power-on value from now on: the objects it
+        // created and the managed ones it gave values to, as far as they still exist.
+        foreach (var index in objects.Keys.Where(index => _od.ContainsIndex(index))) _describedObjects.Add(index);
+
         _factoryDefaults = SnapshotRestorableValues();
         _powerOnValues = _factoryDefaults;
         _deviceDescription = new DeviceDescriptionReport(description, _nodeId, loaded,
@@ -336,12 +340,19 @@ internal sealed partial class CanOpenNode
         }
 
         // Values, with the PDO still destroyed: transmission type, inhibit time, event timer.
-        foreach (var sub in implemented.Where(s => s != 1 && described.ContainsKey(s)))
+        foreach (var sub in implemented.Where(s => s != 1 && described.ContainsKey(s) && _od.TryGet(index, s, out _)))
         {
-            if (_od.TryGet(index, sub, out var current)) ApplyManagedValue(index, sub, current.DataType, described[sub], findings);
+            _od.TryGet(index, sub, out var current);
+            ApplyManagedValue(index, sub, current!.DataType, described[sub], findings);
         }
         // The COB-ID word last, and only after every mapping record is in (step 5).
-        if (described.TryGetValue(1, out var cobId) && ParseUnsigned(cobId, out var raw) is { } word)
+        bool hasCobId = described.TryGetValue(1, out var cobId);
+        if (hasCobId && !string.IsNullOrEmpty(cobId.Value) && ParseUnsigned(cobId, out var unreadable) is null)
+        {
+            findings.Add(new DeviceDescriptionFinding(index, 0x01, DeviceDescriptionOutcome.PdoDisabled,
+                "the COB-ID word could not be read as UNSIGNED32; the PDO stays destroyed on its default COB-ID", unreadable));
+        }
+        else if (hasCobId && ParseUnsigned(cobId, out var raw) is { } word)
         {
             if ((word & CanOpenCobId.InvalidBit) != 0)
             {
@@ -369,6 +380,19 @@ internal sealed partial class CanOpenNode
                 $"the node implements {Co.PdoCount} PDOs of each kind; this record is not created"));
             return 0;
         }
+        // A PDO exists only with both records (objects overview, footnote *): a mapping record
+        // whose communication record — or its COB-ID sub-index — the description does not
+        // declare cannot form one, and the validation of a mapping write reads that COB-ID.
+        // The record is not created; the finding says why (Bugbot on #135).
+        var commIndex = (ushort)(index - 0x200);
+        if (!_od.TryGet(commIndex, 0x01, out _))
+        {
+            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
+                $"the description declares no COB-ID (0x{commIndex:X4}:01) for this PDO; a PDO exists only with both records, so the mapping record is not created"));
+            RemoveObject(index);
+            failedMappings.Add(index);
+            return 0;
+        }
         int loaded = 0;
         var byIndex = entries.ToDictionary(e => e.Subindex);
         foreach (var entry in entries)
@@ -384,15 +408,33 @@ internal sealed partial class CanOpenNode
             loaded++;
         }
 
-        // The mapping itself, in the order of §7.5.2.38 steps 2 to 4 (the PDO is destroyed).
-        uint count = byIndex.TryGetValue(0, out var sub0) ? ParseUnsigned(sub0, out _) ?? 0 : 0;
-        _od.WriteUnsigned(index, 0x00, 0);
+        // The mapping itself, in the order of §7.5.2.38 steps 2 to 4 (the PDO is destroyed). A
+        // value that cannot be read is a finding like a value that is rejected (Bugbot on #135):
+        // an empty value is a 0, a garbled one leaves the slot empty and the mapping disabled.
         bool failed = false;
+        uint count = 0;
+        if (byIndex.TryGetValue(0, out var sub0) && !string.IsNullOrEmpty(sub0.Value))
+        {
+            if (ParseUnsigned(sub0, out _) is { } parsedCount) count = parsedCount;
+            else
+            {
+                findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
+                    "the mapping count could not be read as UNSIGNED8; the mapping stays disabled", sub0.Value));
+                failed = true;
+            }
+        }
+        _od.WriteUnsigned(index, 0x00, 0);
         for (byte s = 1; s <= Math.Min(count, (uint)Pdo.PdoMapping.MaxEntries); s++)
         {
-            if (!byIndex.TryGetValue(s, out var entry)) continue;
+            if (!byIndex.TryGetValue(s, out var entry) || string.IsNullOrEmpty(entry.Value)) continue;
             var value = ParseUnsigned(entry, out var raw);
-            if (value is null) continue;
+            if (value is null)
+            {
+                findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected,
+                    "the mapping entry could not be read as UNSIGNED32; the slot stays empty and the mapping stays disabled", raw));
+                failed = true;
+                continue;
+            }
             if (!_od.TryWriteRaw(index, s, ObjectDictionary.EncodeU32(value.Value), out var abort))
             {
                 findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected,

@@ -55,7 +55,7 @@ DefaultValue=0
 PDOMapping=0
 
 [OptionalObjects]
-SupportedObjects=21
+SupportedObjects=24
 1=0x1005
 2=0x1006
 3=0x1008
@@ -77,6 +77,9 @@ SupportedObjects=21
 19=0x1804
 20=0x1A04
 21=0x1A01
+22=0x1401
+23=0x1601
+24=0x1603
 
 [1010]
 ParameterName=Store parameters
@@ -524,4 +527,75 @@ ObjectType=0x7
 DataType=0x0010
 AccessType=rw
 DefaultValue=0x123456
+PDOMapping=0
+
+[1401]
+ParameterName=RPDO2 communication parameter (unreadable COB-ID)
+SubNumber=3
+ObjectType=0x9
+
+[1401sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1401sub1]
+ParameterName=COB-ID used by RPDO
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=notanumber
+PDOMapping=0
+
+[1401sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=255
+PDOMapping=0
+
+[1601]
+ParameterName=RPDO2 mapping parameter (unreadable entry)
+SubNumber=2
+ObjectType=0x9
+
+[1601sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1601sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=garbled
+PDOMapping=0
+
+[1603]
+ParameterName=RPDO4 mapping parameter (no communication record)
+SubNumber=2
+ObjectType=0x9
+
+[1603sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1603sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20000010
 PDOMapping=0

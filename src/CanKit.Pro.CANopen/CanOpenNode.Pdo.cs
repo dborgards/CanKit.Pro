@@ -208,7 +208,7 @@ internal sealed partial class CanOpenNode
         // only while the PDO does not exist. ConfigureTpdo / ConfigureRpdo follow the
         // procedure; a master must too.
         var commIndex = (ushort)(index - (isTpdo ? Co.TpdoMap : Co.RpdoMap) + (isTpdo ? Co.TpdoComm : Co.RpdoComm));
-        if ((_od.ReadUnsigned(commIndex, 0x01) & CanOpenCobId.InvalidBit) == 0)
+        if (_od.TryReadUnsigned(commIndex, 0x01, out var cobIdWord) && (cobIdWord & CanOpenCobId.InvalidBit) == 0)
             return OdWriteDecision.Reject(SdoAbortCode.UnsupportedAccess);
 
         if (subindex == 0x00)

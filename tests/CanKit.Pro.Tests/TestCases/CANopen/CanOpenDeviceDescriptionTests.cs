@@ -33,10 +33,8 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
 
     private static ICanBus Open(string session, int channel) => VirtualAdapterFixture.Open(session, channel);
 
-    private static readonly string FixturesDirectory =
-        Path.Combine(AppContext.BaseDirectory, Path.Combine("TestCases", "CANopen", "Fixtures"));
-
-    private static string Fixture(string name) => Path.Combine(FixturesDirectory, name);
+    private static string Fixture(string name)
+        => Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", name);
 
     private static CanOpenDeviceDescription DeviceEds() => CanOpenDeviceDescription.Load(Fixture("device.eds"));
 
@@ -309,6 +307,58 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         // 1010h beyond sub-index 01h: not implemented, not created.
         Finding(0x1010, 0x02).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
         od.TryGet(0x1010, 0x02, out _).Should().BeFalse();
+
+        // A COB-ID and a mapping entry the parser cannot read are findings like values it
+        // rejects, not silence (#135 review): the PDO stays destroyed on its default COB-ID, the
+        // slot stays empty and the mapping disabled.
+        var unreadableCobId = Finding(0x1401, 0x01);
+        unreadableCobId.Outcome.Should().Be(DeviceDescriptionOutcome.PdoDisabled);
+        unreadableCobId.DescribedValue.Should().Be("notanumber");
+        od.ReadUnsigned(0x1401, 0x01).Should().Be(CanOpenCobId.InvalidBit | CanOpenCobId.RpdoDefault(Device, 2));
+        var unreadableEntry = Finding(0x1601, 0x01);
+        unreadableEntry.Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        unreadableEntry.DescribedValue.Should().Be("garbled");
+        od.ReadUnsigned(0x1601, 0x00).Should().Be(0u);
+        od.ReadUnsigned(0x1601, 0x01).Should().Be(0u);
+
+        // A mapping record whose communication record the file does not declare cannot form a
+        // PDO: it is not created and the node still opens (#135 review).
+        Finding(0x1603, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
+        od.ContainsIndex(0x1603).Should().BeFalse();
+        od.ContainsIndex(0x1403).Should().BeFalse();
+    }
+
+    // FR-CO-019 / FR-CO-028 (#135 review) — without a description the node has no power-on source
+    // for the placeholders 1000h/1018h and the application objects: what the application put
+    // there stays across a reset — of either kind, and after a "save" too — while the
+    // communication objects restore. The description is what makes them restorable.
+    [Theory]
+    [InlineData(NmtCommand.ResetCommunication)]
+    [InlineData(NmtCommand.ResetNode)]
+    public async Task Without_A_Description_A_Reset_Leaves_Placeholders_And_Application_Objects_Alone(NmtCommand reset)
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        var bootups = new BootupWatch(master, Device);
+        using var device = CanOpen.OpenNode(busB, Device);
+        var od = device.ObjectDictionary;
+        od.AddU32(0x1000, 0x00, 0x0002_0191, OdAccess.ReadOnly);
+        od.AddU32(0x1018, 0x02, 0x0000_1234, OdAccess.ReadOnly);
+        od.AddU16(0x2000, 0x00, 0x0001);
+        od.WriteUnsigned(0x1017, 0x00, 100);
+        device.StoreParameters();
+        od.WriteUnsigned(0x2000, 0x00, 0x0002);
+        od.WriteUnsigned(0x1017, 0x00, 300);
+        await bootups.First;
+
+        await master.SendNmtCommandAsync(reset, Device);
+        await bootups.Second;
+        (await UploadUnsignedAsync(master, 0x1017, 0x00)).Should().Be(100u, "the communication object restores to the stored value");
+        (await UploadUnsignedAsync(master, 0x1000, 0x00)).Should().Be(0x0002_0191u, "the replaced placeholder is not reset to zero");
+        (await UploadUnsignedAsync(master, 0x1018, 0x02)).Should().Be(0x0000_1234u);
+        (await UploadUnsignedAsync(master, 0x2000, 0x00)).Should().Be(0x0002u, "the live process value is not reverted to the stored one");
     }
 
     // =========================================================================================

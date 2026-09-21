@@ -196,15 +196,22 @@ internal sealed partial class CanOpenNode
     };
 
     /// <summary>
-    /// The objects an NMT reset restores: every parameter in the dictionary — the managed
-    /// communication objects and the application objects alike — except status (1001h) and the
-    /// constant records (1010h/1011h capabilities, 1200h). Reset Communication restores the
-    /// communication profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301
-    /// §7.3.2.2.1). An application object has a power-on value once it was stored, or once a
-    /// device description supplied it.
+    /// The objects an NMT reset restores: the managed communication objects — except status
+    /// (1001h) and the constant records (1010h/1011h capabilities, 1200h) — and every object a
+    /// device description declared, the placeholders 1000h/1018h and the application objects
+    /// among them. Without a description the node has no power-on source for those: what the
+    /// application put into 1000h, 1018h or its own objects stays across a reset, as FR-CO-019
+    /// and the README say (Bugbot on #135). Reset Communication restores the communication
+    /// profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
     /// </summary>
-    private static bool IsRestorableObject(ushort index)
-        => index is not (Co.ErrorRegister or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
+    private bool IsRestorableObject(ushort index)
+        => (IsManagedCommunicationObject(index) || _describedObjects.Contains(index))
+           && index is not (Co.ErrorRegister or Co.StoreParameters or Co.RestoreDefaults or Co.SdoServer);
+
+    // The objects a device description declared and the loader created or took over; empty
+    // without a description. Written once, on the constructing thread, before the node's actor
+    // runs anything that reads it.
+    private readonly HashSet<ushort> _describedObjects = new();
 
     private static bool IsCommunicationProfileArea(ushort index) => index is >= 0x1000 and <= 0x1FFF;
 
