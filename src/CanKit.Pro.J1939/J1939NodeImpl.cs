@@ -571,7 +571,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             if (peerName.HasHigherClaimPriorityThan(_name))
             {
-                // We are unseated. Broadcast Cannot-Claim and transition.
+                // We are unseated. An arbitrary-address-capable node moves to another address
+                // (SAE J1939-81 §4.5, #35): the same scan a contested first claim runs, from the
+                // address just lost; only when it finds nothing is Cannot-Claim broadcast.
+                byte lost = (byte)_addressStore;
+                byte? scanStart = null;
+                if (ArbitraryClaimingEnabled && TryGetNextArbitraryCandidate(lost, ref scanStart, out var nextCandidate))
+                {
+                    // Nobody awaits this round: it was not asked for. Its outcome is announced
+                    // through AddressClaimChanged like any claim's, and a failure — the field
+                    // exhausted, a TX fault — is reported as a background exception.
+                    var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _ = tcs.Task.ContinueWith(t => RaiseBackgroundException(t.Exception!.GetBaseException()),
+                        CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+                    BeginClaimRound(nextCandidate, tcs, default, scanStart);
+                    return;
+                }
+                // Broadcast Cannot-Claim and transition.
                 WriteAddress(null);
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
@@ -583,6 +599,24 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // Peer loses: re-announce our own claim so it moves off our address.
                 SendAddressClaimFrame(sourceAddress: (byte)_addressStore);
             }
+        }
+    }
+
+    private void AnswerRequestForAddressClaimed()
+    {
+        switch ((J1939ClaimState)Volatile.Read(ref _claimStateStore))
+        {
+            case J1939ClaimState.Claimed when _addressStore >= 0:
+                SendAddressClaimFrame(sourceAddress: (byte)_addressStore);
+                break;
+            case J1939ClaimState.Claiming when _pendingClaim is { } pending:
+                // Arbitrating: the claim for the preferred address is the answer, and a peer
+                // that hears it contests it now rather than after the window (§4.4.3).
+                SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
+                break;
+            default:
+                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+                break;
         }
     }
 
@@ -1101,6 +1135,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))
                 return;
+
+            // A Request for Address Claimed (SAE J1939-81 §4.2.2, #34) is answered by the node
+            // itself: with its claim while it holds or is arbitrating an address, with
+            // Cannot-Claim (SA 0xFE) while it holds none — without this a network-management
+            // tool scanning the bus never sees the node. The request still reaches the
+            // application below.
+            if (J1939Pgn.IsRequest(pgn) && payload.Length >= 3
+                && (payload[0] | (payload[1] << 8) | (payload[2] << 16)) == J1939Pgn.AddressClaimed)
+            {
+                AnswerRequestForAddressClaimed();
+            }
 
             var message = new J1939Message(pgn, payload, priority, sa,
                 isPdu1 ? da : J1939Pgn.GlobalAddress);

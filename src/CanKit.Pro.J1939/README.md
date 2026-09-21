@@ -17,11 +17,18 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
 - **Address claiming** (PGN 0xEE00) with SAE J1939-81 §4.4.3 NAME arbitration
   and the 250 ms announcement window (**FR-J1939-003**).
 - **Address-Claim fallback** (**FR-J1939-004**): after losing the preferred
-  address to a higher-priority NAME the node scans the arbitrary address
-  field (0x80..0xF7, wrapping once) and only broadcasts **Cannot Claim**
-  (PGN 0xEE00 from SA = 0xFE) when the field is exhausted. Governed by
+  address to a higher-priority NAME — during the arbitration or after the
+  claim had succeeded — the node scans the arbitrary address field
+  (0x80..0xF7, wrapping once) and only broadcasts **Cannot Claim** (PGN
+  0xEE00 from SA = 0xFE) when the field is exhausted. Governed by
   `J1939NodeOptions.EnableArbitraryAddressClaiming` (default: derived from
-  the NAME's Arbitrary Address Capable bit).
+  the NAME's Arbitrary Address Capable bit). A move after a successful claim
+  is announced through `AddressClaimChanged`; nobody awaits it.
+- **Request for Address Claimed** (SAE J1939-81 §4.2.2): a Request for PGN
+  0xEE00 is answered by the node itself — with its Address Claimed while it
+  holds or arbitrates an address, with Cannot Claim while it holds none — so
+  a network-management tool scanning the bus sees it. The request still
+  reaches `MessageReceived`.
 - **Request-PGN** (PGN 0xEA00) send and receive (**FR-J1939-005**).
 - **Auto-routing** to J1939-TP for payloads > 8 bytes; direct 29-bit frames
   for payloads ≤ 8 bytes (**FR-J1939-006**).

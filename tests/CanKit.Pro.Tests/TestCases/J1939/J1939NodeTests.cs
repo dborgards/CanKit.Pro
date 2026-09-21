@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -303,6 +304,93 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         decomposed.SourceAddress.Should().Be(J1939Pgn.NullAddress);
         decomposed.PduSpecific.Should().Be(J1939Pgn.GlobalAddress);
         J1939Pgn.IsAddressClaim(decomposed.Pgn).Should().BeTrue();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #34 (SAE J1939-81 §4.2.2): a Request for PGN 0xEE00 is answered by the node itself —
+    // with its Address Claimed while it holds an address, with Cannot-Claim (SA 0xFE) while it
+    // holds none — so a network-management tool scanning the bus sees it. The request still
+    // reaches the application through MessageReceived.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task RequestForAddressClaimed_IsAnsweredWithTheClaim_OrCannotClaimWhenUnclaimed()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // the scanning tool
+        var nodeName = Name(0x0000CC);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(nodeName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        var claims = Channel.CreateUnbounded<(byte Sa, ulong Name)>();
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && e.CanFrame.Data.Length >= 8)
+                claims.Writer.TryWrite((fields.SourceAddress, BitConverter.ToUInt64(e.CanFrame.Data.ToArray(), 0)));
+        };
+        async Task<(byte Sa, ulong Name)> NextClaimAsync()
+            => await claims.Reader.ReadAsync(new CancellationTokenSource(ShortTimeout).Token);
+        void Request() => busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        // Unclaimed: Cannot-Claim.
+        var seen = WaitForMessageAsync(node, m => J1939Pgn.IsRequest(m.Pgn), ShortTimeout);
+        Request();
+        (await NextClaimAsync()).Should().Be((J1939Pgn.NullAddress, nodeName.Value), "a node without an address answers Cannot-Claim");
+        (await seen).SourceAddress.Should().Be((byte)0x20, "the request still reaches the application");
+
+        // Claimed: the claim itself.
+        await node.ClaimAddressAsync(0x80).WithTimeout(ShortTimeout);
+        while (claims.Reader.TryRead(out _)) { } // the claim announcement of the arbitration
+        Request();
+        (await NextClaimAsync()).Should().Be(((byte)0x80, nodeName.Value), "a node with an address answers with its Address Claimed");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #35 (SAE J1939-81 §4.5): a node that loses its address after a successful claim moves to
+    // another address when it is arbitrary-address capable — the same scan a contested first
+    // claim runs — instead of going Cannot-Claim and silent. The peer contests 0x80 only.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task LosingAClaimedAddress_ArbitraryCapableNodeClaimsAnotherOne()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        var nodeName = Name(0x0000BB);
+        var peerName = Name(0x000001); // numerically lower: wins
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(nodeName)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+        var claimed81 = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claimed && e.Address == 0x81) claimed81.TrySetResult(e);
+        };
+        var cannotClaims = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
+        };
+
+        await node.ClaimAddressAsync(0x80).WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)0x80);
+
+        // A higher-priority NAME takes 0x80 after the fact.
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.AddressClaimed, 0x80, J1939Pgn.GlobalAddress),
+            BitConverter.GetBytes(peerName.Value), isExtendedFrame: true));
+
+        await claimed81.Task.AsTaskWithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be((byte)0x81, "the node moved to the next free address of the arbitrary field");
+        Volatile.Read(ref cannotClaims).Should().Be(0, "it never went Cannot-Claim");
     }
 
     // ---------------------------------------------------------------------------------------
