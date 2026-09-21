@@ -12,22 +12,31 @@ namespace CanKit.Pro.J1939Tp;
 /// override any subset via <see cref="With"/>. Every timer defaults to its standard value:
 /// <list type="bullet">
 ///   <item><description><see cref="T1"/> = 750 ms — TP.DT gap timeout at the receiver.</description></item>
-///   <item><description><see cref="T2"/> = 1250 ms — TP.CM CTS gap timeout at the sender after a data block.</description></item>
-///   <item><description><see cref="T3"/> = 1250 ms — TP.CM RTS→CTS / EOM-ack gap timeout at the sender.</description></item>
+///   <item><description><see cref="T2"/> = 1250 ms — CTS→first TP.DT timeout at the receiver.</description></item>
+///   <item><description><see cref="T3"/> = 1250 ms — RTS→CTS, block→next CTS and last DT→EndOfMsgAck timeout at the originator.</description></item>
 ///   <item><description><see cref="T4"/> = 1050 ms — TP.CM hold timeout at the originator after CTS(0) (§5.10.2.4).</description></item>
-///   <item><description><see cref="Tr"/> = 200 ms — receiver-side response deadline after emitting a CTS.</description></item>
 ///   <item><description><see cref="Th"/> = 50 ms — hold-off between two consecutive BAM DTs (50..200 ms).</description></item>
 /// </list>
+/// The standard's Tr (200 ms) is the time a node has to <em>send</em> a response it owes, not
+/// a timer a peer is held to; this stack answers at once and has no option for it (#31).
 /// </remarks>
 public sealed class J1939TpOptions
 {
     /// <summary>T1 — TP.DT gap timeout at the receiver (J1939-21 §5.10.2.4). Default 750 ms.</summary>
     public TimeSpan T1 { get; init; } = TimeSpan.FromMilliseconds(750);
 
-    /// <summary>T2 — CTS gap timeout at the sender after a data block (§5.10.2.4). Default 1250 ms.</summary>
+    /// <summary>
+    /// T2 — the receiver's timeout from its CTS to the first TP.DT of the granted block
+    /// (§5.10.2.4). Default 1250 ms. Before #31 this window was held to Tr (200 ms), which
+    /// rejected a conforming but slow originator.
+    /// </summary>
     public TimeSpan T2 { get; init; } = TimeSpan.FromMilliseconds(1250);
 
-    /// <summary>T3 — RTS→CTS / EndOfMsgAck gap timeout at the sender (§5.10.2.4). Default 1250 ms.</summary>
+    /// <summary>
+    /// T3 — the originator's timeout for the response it is owed: CTS after RTS, the next CTS
+    /// after the last TP.DT of a block, EndOfMsgAck after the last TP.DT (§5.10.2.4). Default
+    /// 1250 ms.
+    /// </summary>
     public TimeSpan T3 { get; init; } = TimeSpan.FromMilliseconds(1250);
 
     /// <summary>
@@ -35,9 +44,6 @@ public sealed class J1939TpOptions
     /// Per J1939-21 §5.10.2.4, lack of a follow-up CTS within T4 closes the connection. Default 1050 ms.
     /// </summary>
     public TimeSpan T4 { get; init; } = TimeSpan.FromMilliseconds(1050);
-
-    /// <summary>Tr — receiver response deadline after emitting a CTS (§5.10.2.4). Default 200 ms.</summary>
-    public TimeSpan Tr { get; init; } = TimeSpan.FromMilliseconds(200);
 
     /// <summary>
     /// Th — minimum hold-off between two consecutive BAM TP.DT frames on the wire (§5.10.3
@@ -79,7 +85,6 @@ public sealed class J1939TpOptions
         TimeSpan? t2 = null,
         TimeSpan? t3 = null,
         TimeSpan? t4 = null,
-        TimeSpan? tr = null,
         TimeSpan? th = null,
         byte? priority = null,
         byte? maxPacketsPerCts = null,
@@ -95,7 +100,6 @@ public sealed class J1939TpOptions
             T2 = t2 ?? T2,
             T3 = t3 ?? T3,
             T4 = t4 ?? T4,
-            Tr = tr ?? Tr,
             Th = th ?? Th,
             Priority = priority ?? Priority,
             MaxPacketsPerCts = maxPacketsPerCts ?? MaxPacketsPerCts,

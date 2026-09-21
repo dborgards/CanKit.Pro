@@ -18,7 +18,7 @@ namespace CanKit.Pro.J1939Tp;
 /// Actor-driven <see cref="IJ1939TpChannel"/> that composes on top of the CanKit.Pro L2
 /// services: <see cref="ICanBusService"/> for RX demux and TX confirmation,
 /// <see cref="IProtocolActor"/> for single-writer per-session state, and
-/// <see cref="DeadlineScheduler"/> for the J1939-21 §5.10.2.4 timers T1..T4/Tr/Th (SRS
+/// <see cref="DeadlineScheduler"/> for the J1939-21 §5.10.2.4 timers T1..T4/Th (SRS
 /// FR-TP-032/034).
 ///
 /// <para>
@@ -57,7 +57,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     // Bounded receive inbox for consumers. Drop-oldest so a stalled reader never stalls the RX
     // state machine (mirrors the L2 subscription policy). Items are either a fully reassembled
-    // datagram or a reassembly-abort fault (bad DT SN / T1·Tr timeout / peer Abort) so a blocked
+    // datagram or a reassembly-abort fault (bad DT SN / T1·T2 timeout / peer Abort) so a blocked
     // ReceiveAsync completes instead of hanging — the FailTx analogue on the RX side (mirrors
     // IsoTpChannel.AbortRx / Bugbot 3596396508).
     private readonly Channel<RxInboxItem> _pduInbox;
@@ -195,7 +195,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (!ct.CanBeCanceled) return;
         // Hop cancellation onto the actor so we clean up the session state under the single-writer
         // discipline (rather than racing the actor from whatever thread cancels the token).
-        ct.Register(static state =>
+        var registration = ct.Register(static state =>
         {
             var (self, k, t, token) = ((J1939TpChannel, TxSessionKey, TaskCompletionSource<object?>, CancellationToken))state!;
             try
@@ -207,6 +207,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 t.TrySetCanceled(token);
             }
         }, (this, key, tcs, ct));
+        // Released when the send completes, whichever way: with an application-wide shutdown
+        // token the registration would otherwise outlive every send it was made for, and the
+        // token's list would grow by one per multi-frame send for the life of the process
+        // (#36). ClaimAddressAsync in CanKit.Pro.J1939 already does this.
+        _ = tcs.Task.ContinueWith(static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+            registration, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     /// <summary>
@@ -467,7 +474,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     byte maxCts = payload[4];
                     if (!IsValidTotals(totalBytes, totalPackets))
                     {
-                        SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.Unknown, dataPgn),
+                        // Table 7 has a code for one of the ways totals go wrong (#33).
+                        var reason = totalBytes > J1939TpFrames.MaxTpPayloadLength
+                            ? J1939TpAbortReason.MessageSizeExceeded
+                            : J1939TpAbortReason.Unassigned;
+                        SendTpCm(J1939TpFrames.BuildAbort(reason, dataPgn),
                             destinationAddress: sa);
                         return;
                     }
@@ -482,13 +493,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     byte block = (byte)Math.Min(cap, totalPackets);
                     var cts = J1939TpFrames.BuildCts(block, 1, dataPgn);
                     var session = RxSession.NewCm(sa, dataPgn, totalBytes, totalPackets, cap,
-                        _deadlines, _options, OnRxT1Expired, OnRxTrExpired);
+                        _deadlines, _options, OnRxT1Expired, OnRxT2Expired);
                     session.NextExpectedSn = 1;
                     session.BlockRemaining = block;
                     _rxSessions[cmKey] = session;
                     SendTpCm(cts, destinationAddress: sa);
-                    // Tr covers the gap from CTS → first DT of the block (FR-TP-032 / §5.10.2.4).
-                    session.ArmTr();
+                    // T2 covers the gap from CTS → first DT of the block (§5.10.2.4, #31). Not
+                    // Tr: that is the 200 ms a node has to *send* its response, not the 1250 ms
+                    // the receiver waits for one.
+                    session.ArmT2();
                     break;
                 }
 
@@ -542,21 +555,25 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (sn != match.NextExpectedSn)
         {
             // Unexpected SN means the transfer cannot complete. Tear the session down immediately
-            // (Cancel() disposes T1/Tr) and AbortRx so a blocked ReceiveAsync / ReceiveAllAsync
+            // (Cancel() disposes T1/T2) and AbortRx so a blocked ReceiveAsync / ReceiveAllAsync
             // completes with the same exception observers see on BackgroundExceptionOccurred.
-            // CM: abort on the wire with code 5 (closest standard reason for sequence mismatch).
-            // BAM: no ack channel, so local notify only.
+            // CM: abort on the wire with table 7's code for it -- 7, bad sequence number, or 8
+            // when the packet is the one just received again (#33). BAM: no ack channel, so
+            // local notify only.
             byte expected = match.NextExpectedSn;
             uint pgn = match.Pgn;
+            var snReason = sn == expected - 1
+                ? J1939TpAbortReason.DuplicateSequenceNumber
+                : J1939TpAbortReason.BadSequenceNumber;
             if (match.Kind == J1939TpKind.Cm)
             {
-                SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.UnexpectedCtsSequenceNumber, pgn),
+                SendTpCm(J1939TpFrames.BuildAbort(snReason, pgn),
                     destinationAddress: sa);
             }
             match.Cancel();
             _rxSessions.Remove(matchKey);
             AbortRx(new J1939TpAbortException(
-                J1939TpAbortReason.UnexpectedCtsSequenceNumber, pgn,
+                snReason, pgn,
                 $"J1939-TP {match.Kind} RX session aborted: unexpected TP.DT sequence number {sn} " +
                 $"(expected {expected}) from 0x{sa:X2}."));
             return;
@@ -568,7 +585,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         Buffer.BlockCopy(payload, 1, match.Buffer, offset, copy);
         match.NextExpectedSn = (byte)(sn + 1);
         match.PacketsReceived++;
-        // First DT of a CTS block clears Tr and switches to T1; subsequent DTs rearm T1.
+        // First DT of a CTS block clears T2 and switches to T1; subsequent DTs rearm T1.
         match.OnDtReceived();
 
         if (match.PacketsReceived >= match.TotalPackets)
@@ -601,8 +618,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 match.BlockRemaining = block;
                 SendTpCm(J1939TpFrames.BuildCts(block, match.NextExpectedSn, match.Pgn),
                     destinationAddress: sa);
-                // Fresh Tr for the next block's first DT (T1 only runs inside a block).
-                match.ArmTr();
+                // Fresh T2 for the next block's first DT (T1 only runs inside a block).
+                match.ArmT2();
             }
         }
     }
@@ -610,8 +627,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private void OnRxT1Expired(RxSession session)
         => ExpireRxSession(session, "T1", "waiting for next TP.DT");
 
-    private void OnRxTrExpired(RxSession session)
-        => ExpireRxSession(session, "Tr", "waiting for first TP.DT after CTS");
+    private void OnRxT2Expired(RxSession session)
+        => ExpireRxSession(session, "T2", "waiting for first TP.DT after CTS");
 
     private void ExpireRxSession(RxSession session, string timerName, string waitingFor)
     {
@@ -774,7 +791,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 : (session.NextSn == 0 ? 1 : session.NextSn);
             if (nextSn != expectedSn)
             {
-                AbortTx(session, J1939TpAbortReason.UnexpectedCtsSequenceNumber,
+                // A CTS for a packet already sent is a retransmit request, which this stack
+                // does not serve -- its limit is reached at once (table 7, code 5); one for a
+                // packet beyond the next is a sequence number nothing can recover from (code 7).
+                AbortTx(session, nextSn < expectedSn
+                        ? J1939TpAbortReason.MaximumRetransmitRequestsReached
+                        : J1939TpAbortReason.BadSequenceNumber,
                     $"Peer requested SN {nextSn} but we expected SN {expectedSn}.");
                 return;
             }
@@ -785,7 +807,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             int totalRemaining = session.TotalPackets - packetsBeforeNextBlock;
             if (numPackets > totalRemaining)
             {
-                AbortTx(session, J1939TpAbortReason.UnexpectedCtsNumPackets,
+                AbortTx(session, J1939TpAbortReason.Unassigned,
                     $"Peer requested {numPackets} packets but only {totalRemaining} remain.");
                 return;
             }
@@ -818,7 +840,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             bool lastDtOnWire = session.State == TxStage.SendingDt && session.LastDtQueued;
             if (session.State != TxStage.WaitEom && !lastDtOnWire)
             {
-                AbortTx(session, J1939TpAbortReason.Unknown,
+                AbortTx(session, J1939TpAbortReason.Unassigned,
                     $"Peer sent EndOfMsgAck while TX session was in {session.State} (expected WaitEom).");
                 return;
             }
@@ -827,7 +849,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             int totalPackets = payload[3];
             if (totalBytes != session.Pdu.Length || totalPackets != session.TotalPackets)
             {
-                AbortTx(session, J1939TpAbortReason.Unknown,
+                AbortTx(session, J1939TpAbortReason.Unassigned,
                     $"Peer EOM ack size mismatch (expected {session.Pdu.Length}/{session.TotalPackets}, got {totalBytes}/{totalPackets}).");
                 return;
             }
@@ -916,7 +938,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (session.BlockRemaining <= 0)
         {
             // Block done. If the peer already cleared the next block (early CTS race on a fast
-            // Virtual bus), apply the stashed CTS immediately; otherwise wait for T2.
+            // Virtual bus), apply the stashed CTS immediately; otherwise wait for the next CTS
+            // under T3 -- the originator's timer after the last packet of a block (§5.10.2.4);
+            // T2 is the receiver's (#31).
             if (session.HasPendingCts)
             {
                 session.HasPendingCts = false;
@@ -931,7 +955,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
             session.State = TxStage.WaitCts;
             session.Deadline?.Dispose();
-            session.Deadline = _deadlines.Arm(_options.T2, () => OnTxT2Expired(key));
+            session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
             return;
         }
 
@@ -941,21 +965,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         TrySendNextCmDt(key);
     }
 
-    private void OnTxT2Expired(TxSessionKey key)
-    {
-        if (!_txSessions.TryGetValue(key, out var session) || !session.IsCm) return;
-        if (session.State != TxStage.WaitCts) return;
-        AbortTx(session, J1939TpAbortReason.Timeout,
-            "T2 expired waiting for next CTS from peer.");
-    }
-
     private void OnTxT3Expired(TxSessionKey key)
     {
         if (!_txSessions.TryGetValue(key, out var session) || !session.IsCm) return;
         if (session.State != TxStage.WaitCts && session.State != TxStage.WaitEom) return;
         var msg = session.State == TxStage.WaitEom
             ? "T3 expired waiting for EndOfMsgAck from peer."
-            : "T3 expired waiting for initial CTS from peer.";
+            : "T3 expired waiting for CTS from peer.";
         AbortTx(session, J1939TpAbortReason.Timeout, msg);
     }
 
@@ -1223,15 +1239,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private sealed class RxSession
     {
         private readonly Action<RxSession> _onT1;
-        private readonly Action<RxSession>? _onTr;
+        private readonly Action<RxSession>? _onT2;
         private readonly TimeSpan _t1;
-        private readonly TimeSpan _tr;
+        private readonly TimeSpan _t2;
         private readonly DeadlineScheduler _scheduler;
         private bool _awaitingFirstDtOfBlock;
 
         private RxSession(byte peer, uint pgn, byte[] buffer, int totalPackets, byte maxPacketsPerCts,
-            J1939TpKind kind, DeadlineScheduler scheduler, TimeSpan t1, TimeSpan tr,
-            Action<RxSession> onT1, Action<RxSession>? onTr, bool armT1Immediately)
+            J1939TpKind kind, DeadlineScheduler scheduler, TimeSpan t1, TimeSpan t2,
+            Action<RxSession> onT1, Action<RxSession>? onT2, bool armT1Immediately)
         {
             PeerAddress = peer;
             Pgn = pgn;
@@ -1241,9 +1257,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             Kind = kind;
             _scheduler = scheduler;
             _t1 = t1;
-            _tr = tr;
+            _t2 = t2;
             _onT1 = onT1;
-            _onTr = onTr;
+            _onT2 = onT2;
             if (armT1Immediately)
                 Deadline = scheduler.Arm(t1, () => onT1(this));
         }
@@ -1251,17 +1267,17 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public static RxSession NewBam(byte sa, uint pgn, int totalBytes, int totalPackets,
             DeadlineScheduler scheduler, J1939TpOptions options, Action<RxSession> onT1)
             => new(sa, pgn, new byte[totalBytes], totalPackets, options.MaxPacketsPerCts,
-                J1939TpKind.Bam, scheduler, options.T1, options.Tr, onT1, onTr: null,
+                J1939TpKind.Bam, scheduler, options.T1, options.T2, onT1, onT2: null,
                 armT1Immediately: true)
             { NextExpectedSn = 1 };
 
         public static RxSession NewCm(byte sa, uint pgn, int totalBytes, int totalPackets, byte maxPerCts,
             DeadlineScheduler scheduler, J1939TpOptions options,
-            Action<RxSession> onT1, Action<RxSession> onTr)
-            // CM does not arm T1 here: the caller sends CTS then calls ArmTr() so Tr covers the
-            // CTS → first-DT gap (options.Tr / FR-TP-032). T1 takes over inside the block.
+            Action<RxSession> onT1, Action<RxSession> onT2)
+            // CM does not arm T1 here: the caller sends CTS then calls ArmT2() so T2 covers the
+            // CTS → first-DT gap (options.T2 / FR-TP-032). T1 takes over inside the block.
             => new(sa, pgn, new byte[totalBytes], totalPackets, maxPerCts,
-                J1939TpKind.Cm, scheduler, options.T1, options.Tr, onT1, onTr,
+                J1939TpKind.Cm, scheduler, options.T1, options.T2, onT1, onT2,
                 armT1Immediately: false)
             { NextExpectedSn = 1 };
 
@@ -1277,19 +1293,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public IDeadline? Deadline { get; private set; }
 
         /// <summary>
-        /// Arms Tr after emitting a CTS: peer must deliver the first TP.DT of the granted block
-        /// before Tr elapses (J1939TpOptions.Tr / §5.10.2.4).
+        /// Arms T2 after emitting a CTS: peer must deliver the first TP.DT of the granted block
+        /// before T2 elapses (J1939TpOptions.T2 / §5.10.2.4).
         /// </summary>
-        public void ArmTr()
+        public void ArmT2()
         {
-            if (_onTr is null) return;
+            if (_onT2 is null) return;
             Deadline?.Dispose();
             _awaitingFirstDtOfBlock = true;
-            Deadline = _scheduler.Arm(_tr, () => _onTr(this));
+            Deadline = _scheduler.Arm(_t2, () => _onT2(this));
         }
 
         /// <summary>
-        /// Called on every accepted TP.DT. For CM, the first DT of a CTS block clears Tr and
+        /// Called on every accepted TP.DT. For CM, the first DT of a CTS block clears T2 and
         /// switches to T1; subsequent DTs rearm T1. BAM always rearms T1.
         /// </summary>
         public void OnDtReceived()

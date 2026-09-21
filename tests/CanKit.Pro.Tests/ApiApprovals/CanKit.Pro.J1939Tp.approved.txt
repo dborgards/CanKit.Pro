@@ -25,14 +25,16 @@ namespace CanKit.Pro.J1939Tp
     public enum J1939TpAbortReason : byte
     {
         Unknown = 0,
-        ResourceNeededForHigherPriorityProcess = 1,
+        SessionAlreadyOpen = 1,
         NoResourcesAvailable = 2,
         Timeout = 3,
-        UnexpectedCtsNumPackets = 4,
-        UnexpectedCtsSequenceNumber = 5,
-        RetransmitNotSupported = 6,
-        SessionAlreadyOpen = 7,
-        ReceiverAbort = 250,
+        CtsReceivedDuringDataTransfer = 4,
+        MaximumRetransmitRequestsReached = 5,
+        UnexpectedDataTransferPacket = 6,
+        BadSequenceNumber = 7,
+        DuplicateSequenceNumber = 8,
+        MessageSizeExceeded = 9,
+        Unassigned = 255,
     }
     public readonly struct J1939TpDatagram
     {
@@ -65,8 +67,7 @@ namespace CanKit.Pro.J1939Tp
         public System.TimeSpan T3 { get; init; }
         public System.TimeSpan T4 { get; init; }
         public System.TimeSpan Th { get; init; }
-        public System.TimeSpan Tr { get; init; }
-        public CanKit.Pro.J1939Tp.J1939TpOptions With(System.TimeSpan? t1 = default, System.TimeSpan? t2 = default, System.TimeSpan? t3 = default, System.TimeSpan? t4 = default, System.TimeSpan? tr = default, System.TimeSpan? th = default, byte? priority = default, byte? maxPacketsPerCts = default, int? receiveBufferCapacity = default) { }
+        public CanKit.Pro.J1939Tp.J1939TpOptions With(System.TimeSpan? t1 = default, System.TimeSpan? t2 = default, System.TimeSpan? t3 = default, System.TimeSpan? t4 = default, System.TimeSpan? th = default, byte? priority = default, byte? maxPacketsPerCts = default, int? receiveBufferCapacity = default) { }
     }
     public sealed class J1939TpSendRejectedException : CanKit.Pro.J1939Tp.J1939TpException
     {

@@ -350,11 +350,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // 14-byte payload = exactly 2 TP.DT frames -> minimal, deterministic size.
         var payload = RandomPayload(14, seed: 314);
 
-        // Long Tr: after CTS the receiver arms Tr waiting for the first DT. This test intentionally
-        // injects a second RTS and asserts the Abort *before* sending DTs; default Tr (200 ms) can
+        // Long T2: after CTS the receiver arms T2 waiting for the first DT. This test intentionally
+        // injects a second RTS and asserts the Abort *before* sending DTs; a short T2 could
         // expire on a slow Windows/net48 runner and emit Abort(Timeout) for the active PGN, which
         // is correct protocol behavior but unrelated to the intruder-RTS rejection under test.
-        var opts = new J1939TpOptions().With(tr: TimeSpan.FromSeconds(5));
+        var opts = new J1939TpOptions().With(t2: TimeSpan.FromSeconds(5));
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         // Observe every TP.CM frame the receiver emits so we can inspect CTS / EOM / Abort.
@@ -418,7 +418,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             d => d.Length >= 8 && d[0] == J1939TpFrames.ControlAbort
                  && J1939TpFrames.ReadDataPgn(d) == intruderPgn,
             ShortTimeout);
-        abort[1].Should().Be((byte)J1939TpAbortReason.SessionAlreadyOpen);
+        abort[1].Should().Be(1, "J1939-21 table 7: already in a session (#33)");
 
         // Receiver must not have started tearing down / re-CTSing the active session.
         lock (observed)
@@ -644,10 +644,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             .Which.ParamName.Should().Be("maxPacketsPerCts");
     }
 
-    // Bugbot 3596025934 / 3596396508: Tr (CTS → first DT) must abort on the wire, raise
+    // Bugbot 3596025934 / 3596396508: T2 (CTS → first DT) must abort on the wire, raise
     // BackgroundExceptionOccurred, and fault a blocked ReceiveAsync (IsoTp AbortRx pattern).
     [Fact]
-    public async Task Cm_Receiver_TrTimeout_AbortsWhenNoDtAfterCts()
+    public async Task Cm_Receiver_T2Timeout_AbortsWhenNoDtAfterCts()
     {
         var session = NewSession();
         using var receiverBus = Open(session, 0);
@@ -658,7 +658,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xEE82u;
 
         var opts = new J1939TpOptions().With(
-            tr: TimeSpan.FromMilliseconds(80),
+            t2: TimeSpan.FromMilliseconds(80),
             t1: TimeSpan.FromSeconds(5)); // T1 must not fire first
 
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
@@ -685,7 +685,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var rts = J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn);
         var rtsId = J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa);
         peerBus.Transmit(CanFrame.Classic((int)rtsId, rts, isExtendedFrame: true));
-        // Do not send any TP.DT — Tr must expire and abort.
+        // Do not send any TP.DT — T2 must expire and abort.
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abortFrame[1].Should().Be((byte)J1939TpAbortReason.Timeout);
@@ -693,11 +693,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = () => recvTask;
         var recvEx = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
         recvEx.Reason.Should().Be(J1939TpAbortReason.Timeout);
-        recvEx.Message.Should().Contain("Tr");
+        recvEx.Message.Should().Contain("T2");
 
         var ex = await bgAbort.Task.AsTaskWithTimeout(ShortTimeout);
         ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
-        ex.Message.Should().Contain("Tr");
+        ex.Message.Should().Contain("T2");
     }
 
     // Bugbot 3596396508: mismatched TP.DT SN must AbortRx — fault blocked ReceiveAsync and raise
@@ -748,16 +748,16 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         peerBus.Transmit(CanFrame.Classic((int)dtId, badDt, isExtendedFrame: true));
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        abortFrame[1].Should().Be((byte)J1939TpAbortReason.UnexpectedCtsSequenceNumber);
+        abortFrame[1].Should().Be(7, "J1939-21 table 7: bad sequence number (#33)");
 
         Func<Task> act = () => recvTask;
         var recvEx = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        recvEx.Reason.Should().Be(J1939TpAbortReason.UnexpectedCtsSequenceNumber);
+        recvEx.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
         recvEx.Pgn.Should().Be(pgn);
         recvEx.Message.Should().Contain("unexpected TP.DT sequence number");
 
         var bgEx = await bgAbort.Task.AsTaskWithTimeout(ShortTimeout);
-        bgEx.Reason.Should().Be(J1939TpAbortReason.UnexpectedCtsSequenceNumber);
+        bgEx.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
 
         // Channel remains usable for a subsequent BAM after the abort (fault consumed once).
         var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
@@ -787,7 +787,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task Cm_Receiver_RtsWithReservedPgnBits_RepliesCtsAndArmsTr()
+    public async Task Cm_Receiver_RtsWithReservedPgnBits_RepliesCtsAndArmsT2()
     {
         var session = NewSession();
         using var receiverBus = Open(session, 0);
@@ -798,7 +798,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xEE88u;
 
         var opts = new J1939TpOptions().With(
-            tr: TimeSpan.FromMilliseconds(80),
+            t2: TimeSpan.FromMilliseconds(80),
             t1: TimeSpan.FromSeconds(5));
 
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
@@ -824,7 +824,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var cts = await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
         J1939TpFrames.ReadDataPgn(cts).Should().Be(pgn);
 
-        // Tr must be armed: with no DT, the receiver aborts for timeout (not a timerless orphan).
+        // T2 must be armed: with no DT, the receiver aborts for timeout (not a timerless orphan).
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
         abortFrame[1].Should().Be((byte)J1939TpAbortReason.Timeout);
     }
@@ -866,13 +866,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => recvTask;
         var recvEx = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        recvEx.Reason.Should().Be(J1939TpAbortReason.UnexpectedCtsSequenceNumber);
+        recvEx.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
         recvEx.Pgn.Should().Be(pgn);
         recvEx.Message.Should().Contain("Bam");
         recvEx.Message.Should().Contain("unexpected TP.DT sequence number");
 
         var bgEx = await bgAbort.Task.AsTaskWithTimeout(ShortTimeout);
-        bgEx.Reason.Should().Be(J1939TpAbortReason.UnexpectedCtsSequenceNumber);
+        bgEx.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
     }
 
     // Bugbot 3596617262: peer Connection Abort during outbound TP.CM must fail SendCmAsync
@@ -958,11 +958,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => sendTask.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        ex.Reason.Should().Be(J1939TpAbortReason.Unknown);
+        ex.Reason.Should().Be(J1939TpAbortReason.Unassigned);
         ex.Message.Should().Contain("WaitEom");
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        abortFrame[1].Should().Be((byte)J1939TpAbortReason.Unknown);
+        abortFrame[1].Should().Be(255, "no table 7 code covers an EndOfMsgAck out of turn (#33)");
     }
 
     // Bugbot 3596489078: EOM totals that disagree with the session must fail SendCmAsync
@@ -1015,7 +1015,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => sendTask.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        ex.Reason.Should().Be(J1939TpAbortReason.Unknown);
+        ex.Reason.Should().Be(J1939TpAbortReason.Unassigned);
         ex.Message.Should().Contain("EOM ack size mismatch");
     }
 
@@ -1140,7 +1140,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         var opts = new J1939TpOptions().With(
             t1: TimeSpan.FromMilliseconds(120),
-            tr: TimeSpan.FromSeconds(5)); // keep Tr out of the way so T1 is the timer under test
+            t2: TimeSpan.FromSeconds(5)); // keep T2 out of the way so T1 is the timer under test
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         var ctsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1184,7 +1184,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // FR-TP-032 (T2): the peer grants a short block (CTS(2)) and then never sends the
     // follow-up CTS — the sender's post-block CTS gap timer T2 must abort the send.
     [Fact]
-    public async Task Cm_Sender_T2Timeout_WhenFollowUpCtsMissing()
+    public async Task Cm_Sender_T3Timeout_WhenFollowUpCtsMissing()
     {
         var session = NewSession();
         using var senderBus = Open(session, 0);
@@ -1194,9 +1194,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x02;
         const uint pgn = 0xEF01u;
 
+        // T3 is the originator's timer after the last packet of a block as well as after the
+        // RTS (§5.10.2.4, #31); T2 is the receiver's and plays no part on this side.
         var opts = new J1939TpOptions().With(
-            t2: TimeSpan.FromMilliseconds(150),
-            t3: TimeSpan.FromSeconds(5),
+            t2: TimeSpan.FromSeconds(5),
+            t3: TimeSpan.FromMilliseconds(150),
             t4: TimeSpan.FromSeconds(5));
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
 
@@ -1216,7 +1218,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
         // Grant only 2 of the 3 packets, then go silent: after the block drains the sender
-        // waits for the follow-up CTS on T2.
+        // waits for the follow-up CTS on T3.
         peerBus.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, senderSa),
             J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 1, dataPgn: pgn),
@@ -1225,7 +1227,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
         ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
-        ex.Message.Should().Contain("T2");
+        ex.Message.Should().Contain("T3");
     }
 
     // FR-TP-032 (T3 waiting for EndOfMsgAck): the peer grants the whole message but never
@@ -1408,7 +1410,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint directedPgn = 0x9876u;
 
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa,
-            options: new J1939TpOptions().With(tr: TimeSpan.FromSeconds(5)));
+            options: new J1939TpOptions().With(t2: TimeSpan.FromSeconds(5)));
 
         var cmFrames = new List<byte[]>();
         using var frameReady = new SemaphoreSlim(0);
@@ -1633,6 +1635,168 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             "one send per (destination, PGN) is in flight or waiting at a time, as before the queue");
         await Task.WhenAll(first, waiting).WithTimeout(ShortTimeout);
     }
+    // -----------------------------------------------------------------------------------
+    // #33 — the Connection Abort reason byte on the wire is J1939-21 table 7's, not this
+    // stack's. Peer stacks log and react to the code; before this, "session already open"
+    // went out as 7 (bad sequence number) and a bad sequence number as 5 (retransmit limit).
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(J1939TpAbortReason.SessionAlreadyOpen, 1)]
+    [InlineData(J1939TpAbortReason.NoResourcesAvailable, 2)]
+    [InlineData(J1939TpAbortReason.Timeout, 3)]
+    [InlineData(J1939TpAbortReason.CtsReceivedDuringDataTransfer, 4)]
+    [InlineData(J1939TpAbortReason.MaximumRetransmitRequestsReached, 5)]
+    [InlineData(J1939TpAbortReason.UnexpectedDataTransferPacket, 6)]
+    [InlineData(J1939TpAbortReason.BadSequenceNumber, 7)]
+    [InlineData(J1939TpAbortReason.DuplicateSequenceNumber, 8)]
+    [InlineData(J1939TpAbortReason.MessageSizeExceeded, 9)]
+    [InlineData(J1939TpAbortReason.Unassigned, 255)]
+    public void Abort_Reason_Goes_On_The_Wire_As_Table_7_Assigns_It(J1939TpAbortReason reason, byte code)
+    {
+        var frame = J1939TpFrames.BuildAbort(reason, dataPgn: 0xFECAu);
+        frame[0].Should().Be(J1939TpFrames.ControlAbort);
+        frame[1].Should().Be(code);
+    }
+
+    // A CTS asking for a packet already sent is a retransmit request; this stack does not
+    // retransmit, so the limit is reached at once (table 7, code 5). Before #33 it went out
+    // as 5 by coincidence of a different meaning ("unexpected CTS sequence number").
+    [Fact]
+    public async Task Cm_Sender_CtsForAPacketAlreadySent_AbortsWithRetransmitLimit()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte senderSa = 0xA1;
+        const byte peerSa = 0xA2;
+        const uint pgn = 0xFEA1u;
+        var payload = RandomPayload(21, seed: 161); // 3 packets
+
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+
+        var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstDtSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peerBus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != senderSa) return;
+            var data = e.CanFrame.Data.ToArray();
+            if (J1939Pgn.IsTransportCm(fields.Pgn) && data.Length >= 8 && J1939TpFrames.ReadDataPgn(data) == pgn)
+            {
+                if (data[0] == J1939TpFrames.ControlRts) rtsSeen.TrySetResult(null);
+                else if (data[0] == J1939TpFrames.ControlAbort) abortSeen.TrySetResult(data);
+            }
+            else if (J1939Pgn.IsTransportDt(fields.Pgn) && data.Length >= 1 && data[0] == 1)
+                firstDtSeen.TrySetResult(null);
+        };
+
+        var send = sender.SendCmAsync(pgn, destinationAddress: peerSa, payload);
+        await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        var cmId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, senderSa);
+        // Grant one packet, take it, then ask for it again.
+        peerBus.Transmit(CanFrame.Classic(cmId, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn), isExtendedFrame: true));
+        await firstDtSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        peerBus.Transmit(CanFrame.Classic(cmId, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn), isExtendedFrame: true));
+
+        Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.MaximumRetransmitRequestsReached);
+
+        var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        abort[1].Should().Be(5, "J1939-21 table 7: maximum retransmit request limit reached (#33)");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #31 — the window from the receiver's CTS to the first TP.DT is T2 (1250 ms), not Tr
+    // (200 ms): Tr is the time a node has to *send* a response it owes. A conforming but slow
+    // originator that needs 300 ms to get its first DT out must not be rejected.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task Cm_Receiver_Survives_A_First_Dt_That_Arrives_300ms_After_Cts()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte receiverSa = 0xB1;
+        const byte peerSa = 0xB2;
+        const uint pgn = 0xFEB1u;
+        var payload = RandomPayload(14, seed: 177); // 2 packets
+
+        // Defaults: T2 = 1250 ms is the timer under test. The 300 ms below is a lower bound on
+        // the delay, so a loaded host only widens the gap it must survive, up to T2's margin.
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa);
+
+        var ctsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peerBus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != receiverSa || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            var data = e.CanFrame.Data.Span;
+            if (data.Length >= 8 && data[0] == J1939TpFrames.ControlCts && J1939TpFrames.ReadDataPgn(data) == pgn)
+                ctsSeen.TrySetResult(null);
+        };
+
+        var recvTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+
+        var rts = J1939TpFrames.BuildRts(totalBytes: payload.Length, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn);
+        peerBus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa), rts, isExtendedFrame: true));
+        await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        await Task.Delay(300);
+
+        var dtId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa);
+        peerBus.Transmit(CanFrame.Classic(dtId, J1939TpFrames.BuildDt(sn: 1, pdu: payload, offset: 0), isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic(dtId, J1939TpFrames.BuildDt(sn: 2, pdu: payload, offset: 7), isExtendedFrame: true));
+
+        var datagram = await recvTask;
+        datagram.Payload.ToArray().Should().Equal(payload);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #36 — the per-send registration on the caller's token is released when the send
+    // completes. With an application-wide shutdown token, an undisposed registration keeps
+    // the send's completion source -- and so the Task handed to the caller -- reachable from
+    // the token for the life of the process. Observed through a weak reference to that Task.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Completed_Send_Is_Not_Kept_Alive_By_The_Callers_Token()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var receiverBus = Open(session, 1);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0xC1);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0xC2);
+        using var shutdown = new CancellationTokenSource();
+
+        var weak = await SendAndForgetAsync(sender, receiver, shutdown.Token);
+
+        for (int i = 0; i < 5 && weak.IsAlive; i++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        weak.IsAlive.Should().BeFalse("the token's registration for the send was disposed with it");
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static async Task<WeakReference> SendAndForgetAsync(IJ1939TpChannel sender,
+        IJ1939TpChannel receiver, CancellationToken token)
+    {
+        var recv = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        var send = sender.SendCmAsync(0xFEC1u, destinationAddress: 0xC2, RandomPayload(21, seed: 193), token);
+        await send.WithTimeout(ShortTimeout);
+        await recv;
+        return new WeakReference(send);
+    }
+
 }
 
 /// <summary>

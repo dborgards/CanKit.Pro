@@ -13,7 +13,7 @@ namespace CanKit.Pro.J1939Tp;
 /// <remarks>
 /// <para>
 /// Threading model (SRS FR-TP-034 = FR-TP-016/017 applied to J1939-TP): every session's state
-/// (sequence numbers, remaining bytes, block counters, T1..T4/Tr/Th deadlines) lives inside a
+/// (sequence numbers, remaining bytes, block counters, T1..T4/Th deadlines) lives inside a
 /// single <see cref="Actor.IProtocolActor"/> mailbox and is only ever read/written on the
 /// actor's loop thread. Callers may invoke <see cref="SendBamAsync"/> or
 /// <see cref="SendCmAsync"/> concurrently from any thread; the channel serializes them per
@@ -66,7 +66,7 @@ public interface IJ1939TpChannel : IDisposable
     /// <summary>
     /// Awaits the next fully reassembled inbound TP.BAM or TP.CM datagram, or faults with
     /// <see cref="J1939TpAbortException"/> when an in-flight reassembly is aborted (bad TP.DT
-    /// sequence number, T1/Tr timeout, or peer Connection Abort). One waiter consumes the fault;
+    /// sequence number, T1/T2 timeout, or peer Connection Abort). One waiter consumes the fault;
     /// subsequent receives remain available for later successful datagrams.
     /// </summary>
     Task<J1939TpDatagram> ReceiveAsync(CancellationToken cancellationToken = default);
