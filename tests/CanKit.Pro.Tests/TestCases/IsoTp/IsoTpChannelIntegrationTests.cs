@@ -1525,9 +1525,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // --------------------------------------------------------------------------------
     // #25: the STmin timer belongs to its transfer. A send cancelled while waiting out STmin
     // and replaced at once by another SendAsync must not have the old timer send a Consecutive
-    // Frame of the new PDU under the old sequence number: after the new transfer's First Frame
-    // nothing follows until the peer's Flow Control. STmin is 300 ms so the cancel lands inside
-    // the wait; the peer withholds its FC for well past that.
+    // Frame of the new PDU under the old sequence number. The sender runs on a clock the test
+    // owns: STmin is armed but cannot elapse before the cancel has been applied, and the moment
+    // the stale timer would fire is a clock advance the test makes after the new transfer's
+    // First Frame — after which nothing may follow until the peer's Flow Control.
     // --------------------------------------------------------------------------------
     [Fact]
     public async Task A_Stale_StMin_Timer_Does_Not_Send_A_ConsecutiveFrame_Of_The_Next_Transfer()
@@ -1535,10 +1536,14 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
+        using var clock = new VirtualClock();
+        using var serviceA = new CanBusService(busA);
+        var senderActor = clock.NewActor();
+        var stMin = TimeSpan.FromMilliseconds(100); // encodable as STmin raw 0x64; 300 ms would clamp to 127
 
         var epSender = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
         var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
-        using var sender = IsoTpFactory.Open(busA, epSender, FastOptions(nBs: TimeSpan.FromSeconds(3)));
+        using var sender = new IsoTpChannel(serviceA, epSender, FastOptions(nBs: TimeSpan.FromSeconds(3)), ownsService: false, senderActor);
 
         var fromSender = Channel.CreateUnbounded<byte[]>();
         busB.FrameObserved += (_, e) =>
@@ -1554,19 +1559,22 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var firstSend = sender.SendAsync(first, cancel.Token);
         (await NextAsync())[0].Should().Be(0x10, "FF of the first PDU");
         busB.Transmit(CanFrame.Classic(0x7E8, IsoTpFrameCodec.BuildFlowControl(epPeer, FlowStatus.ClearToSend,
-            blockSize: 0, stMinRaw: IsoTpFrameCodec.EncodeStMin(TimeSpan.FromMilliseconds(300)), isCanFd: false, padding: true)));
-        await Task.Delay(50); // the sender has taken the FC and armed STmin
+            blockSize: 0, stMinRaw: IsoTpFrameCodec.EncodeStMin(stMin), isCanFd: false, padding: true)));
+        await clock.WaitUntilTimerArmedAsync(senderActor, stMin, ShortTimeout); // STmin armed, on a clock that has not moved
+
         cancel.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstSend);
+        await clock.SettleAsync(); // the cancel's cleanup has run on the actor
 
         var secondSend = sender.SendAsync(second, new CancellationTokenSource(ShortTimeout).Token);
         var ff2 = await NextAsync();
         ff2[0].Should().Be(0x10, "FF of the second PDU");
         ff2.Skip(2).Take(6).Should().Equal(second.Take(6));
 
-        // The old timer would fire at 300 ms: watch for 700 ms — nothing may follow the FF.
-        fromSender.Reader.TryRead(out _).Should().BeFalse();
-        await Task.Delay(700);
+        // Now the old STmin elapses. Nothing may follow the FF: the peer has not sent Flow Control.
+        await clock.AdvanceAsync(stMin);
+        await clock.SettleAsync();
+        await Task.Delay(100); // a frame the timer released would be on the wire by now
         fromSender.Reader.TryRead(out var stray).Should().BeFalse(
             $"no Consecutive Frame may go out before the peer's Flow Control, but one did: {(stray is null ? "" : BitConverter.ToString(stray))}");
 
