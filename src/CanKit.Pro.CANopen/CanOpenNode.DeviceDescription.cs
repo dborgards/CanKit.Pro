@@ -48,13 +48,10 @@ internal sealed partial class CanOpenNode
         var objects = description.Objects.Objects;
         int loaded = 0;
 
-        foreach (var mandatory in MandatoryObjects)
+        foreach (var mandatory in MandatoryObjects.Where(m => !objects.ContainsKey(m)))
         {
-            if (!objects.ContainsKey(mandatory))
-            {
-                findings.Add(new DeviceDescriptionFinding(mandatory, 0, DeviceDescriptionOutcome.SuppliedDefault,
-                    "CiA 301 §7.5.2 makes this object mandatory and the description does not declare it; the node keeps its placeholder"));
-            }
+            findings.Add(new DeviceDescriptionFinding(mandatory, 0, DeviceDescriptionOutcome.SuppliedDefault,
+                "CiA 301 §7.5.2 makes this object mandatory and the description does not declare it; the node keeps its placeholder"));
         }
 
         // §7.3.3: "A CANopen device shall provide the corresponding CAN-IDs only for the
@@ -118,9 +115,9 @@ internal sealed partial class CanOpenNode
 
     private void RemoveObject(ushort index)
     {
-        foreach (var key in _od.SnapshotKeys())
+        foreach (var key in _od.SnapshotKeys().Where(k => (ushort)(k >> 8) == index))
         {
-            if ((ushort)(key >> 8) == index) _od.Remove(index, (byte)(key & 0xFF));
+            _od.Remove(index, (byte)(key & 0xFF));
         }
     }
 
@@ -330,9 +327,8 @@ internal sealed partial class CanOpenNode
             highest = Math.Max(highest, sub);
         }
         _od.WriteUnsigned(index, 0x00, highest);
-        foreach (var entry in entries)
+        foreach (var entry in entries.Where(e => e.Subindex != 0 && Array.IndexOf(implemented, e.Subindex) < 0))
         {
-            if (entry.Subindex == 0 || Array.IndexOf(implemented, entry.Subindex) >= 0) continue;
             findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
                 entry.Subindex == 4
                     ? "sub-index 04h is reserved and shall not be implemented (CiA 301 §7.5.2.37)"
@@ -340,10 +336,9 @@ internal sealed partial class CanOpenNode
         }
 
         // Values, with the PDO still destroyed: transmission type, inhibit time, event timer.
-        foreach (var sub in implemented)
+        foreach (var sub in implemented.Where(s => s != 1 && described.ContainsKey(s)))
         {
-            if (sub == 1 || !described.TryGetValue(sub, out var entry) || !_od.TryGet(index, sub, out var current)) continue;
-            ApplyManagedValue(index, sub, current.DataType, entry, findings);
+            if (_od.TryGet(index, sub, out var current)) ApplyManagedValue(index, sub, current.DataType, described[sub], findings);
         }
         // The COB-ID word last, and only after every mapping record is in (step 5).
         if (described.TryGetValue(1, out var cobId) && ParseUnsigned(cobId, out var raw) is { } word)
