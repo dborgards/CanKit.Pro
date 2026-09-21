@@ -393,7 +393,7 @@ public class UdsExpiredDeadlineTests
             deliverAfter: TimeSpan.FromSeconds(5),
             stampArrivalAtDelivery: true)
         {
-            TransmissionTime = TimeSpan.FromMilliseconds(200),
+            TransmissionTime = TimeSpan.FromSeconds(5), // held until the cancellation, so nothing races it
             CancellableSend = true,
             HonorCancellation = true,
         };
@@ -434,14 +434,14 @@ public class UdsExpiredDeadlineTests
             deliverAfter: TimeSpan.FromSeconds(5),
             stampArrivalAtDelivery: true)
         {
-            TransmissionTime = TimeSpan.FromMilliseconds(300),
+            TransmissionTime = TimeSpan.FromSeconds(5), // held until the cancellation, so nothing races it
             CancellableSend = true,
             HonorCancellation = true,
         };
         using var client = NewClient(channel);
 
-        // Cancelled at 150 ms: past the 80 ms window noted before the send, inside the 300 ms
-        // the send takes.
+        // Cancelled at 150 ms: past the 80 ms window noted before the send, with the send
+        // still held (macOS CI on #150 fired a 150 ms timer after a 300 ms send had completed).
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
         Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
