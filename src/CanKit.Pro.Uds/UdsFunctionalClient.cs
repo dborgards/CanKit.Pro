@@ -25,6 +25,7 @@ public sealed class UdsFunctionalClient : IDisposable
     private const byte SuppressPositiveResponseBit = 0x80;
     private const byte NegativeResponseSid = 0x7F;
     private const byte NrcResponsePending = 0x78;
+    private const byte ReadDataByPeriodicIdentifierSid = 0x2A;
 
     private readonly IsoTpFunctionalClient _client;
     private readonly bool _ownsClient;
@@ -126,14 +127,15 @@ public sealed class UdsFunctionalClient : IDisposable
                 "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
                 nameof(request));
 
-        // Noted before the collection: what the ECUs may still send after the window ends is
-        // the remainder of their P2 from the request, not from now.
-        var sentAt = Stopwatch.GetTimestamp();
+        // Noted before the send, so a collection that is cancelled or fails still leaves the
+        // window in place (Bugbot on #150); what the ECUs may still send after the window ends
+        // is the remainder of their P2 from the request. A reading taken before the send is a
+        // lower bound on it; the window is moved out to the send's own instant afterwards.
+        byte sid = request.Span[0];
+        _openWindows.Note(sid, Stopwatch.GetTimestamp(), _responseWindow);
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
-        _openWindows.Note(request.Span[0], sentAt, _responseWindow);
         var req = request.Span;
-        byte sid = req[0];
         byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
         // (bit 7 cleared), a DID, a routine identifier, a block counter -- so a late answer to
@@ -144,7 +146,8 @@ public sealed class UdsFunctionalClient : IDisposable
         foreach (var r in raw)
         {
             var data = r.Data;
-            bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed);
+            bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed)
+                && (sid != ReadDataByPeriodicIdentifierSid || NamesARequestedPeriodicIdentifier(req, data));
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
             if (IsResponsePending(data, sid))
                 _openWindows.Extend(sid, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
@@ -159,6 +162,7 @@ public sealed class UdsFunctionalClient : IDisposable
     private async Task WaitOutOpenWindowAsync(byte sid, CancellationToken cancellationToken)
     {
         if (!_openWindows.TryGetDeadline(sid, out var until)) return;
+        bool waitedOut = false;
         try
         {
             while (true)
@@ -169,10 +173,14 @@ public sealed class UdsFunctionalClient : IDisposable
                 if (heard.Any(r => IsResponsePending(r.Data, sid)))
                     until = Math.Max(until, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
             }
+            waitedOut = true;
         }
         finally
         {
-            _openWindows.Forget(sid);
+            // A cancelled wait keeps what remains of the window, extensions included, for the
+            // next call (Bugbot on #150).
+            if (waitedOut) _openWindows.Forget(sid);
+            else _openWindows.Extend(sid, until);
         }
     }
 
@@ -224,6 +232,18 @@ public sealed class UdsFunctionalClient : IDisposable
         _ => HasSubFunction(sid) ? 1 : 0,
     };
 
+    // 0x2A echoes nothing: its positive response starts with the periodic identifier it carries
+    // data for, which must be one the request asked for (bytes after the transmission mode).
+    private static bool NamesARequestedPeriodicIdentifier(ReadOnlySpan<byte> request, byte[] response)
+    {
+        if (response.Length < 2) return false;
+        for (int i = 2; i < request.Length; i++)
+        {
+            if (request[i] == response[1]) return true;
+        }
+        return false;
+    }
+
     private static bool EchoMatches(ReadOnlySpan<byte> request, byte[] response, int echoed)
     {
         for (int i = 0; i < echoed; i++)
@@ -238,10 +258,11 @@ public sealed class UdsFunctionalClient : IDisposable
     private static bool IsResponsePending(byte[] data, byte sid)
         => data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending;
 
-    // Mirrors UdsClientImpl.HasSubFunction (ISO 14229-1 table 2).
+    // Mirrors UdsClientImpl.HasSubFunction (ISO 14229-1 table 2). Not 0x2A: its
+    // transmissionMode is a plain parameter, and its response echoes nothing (Codex on #150).
     private static bool HasSubFunction(byte sid) => sid switch
     {
-        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2A or 0x2C or 0x31 or 0x3E
+        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2C or 0x31 or 0x3E
             or 0x83 or 0x85 or 0x86 or 0x87 => true,
         _ => false,
     };

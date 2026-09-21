@@ -285,6 +285,66 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "F190's late negative answer is the previous request's");
     }
 
+    // Bugbot on #150: a collection that is cancelled still leaves the window in place.
+    [Fact]
+    public async Task A_Cancelled_Collection_Still_Leaves_Its_Window_For_The_Next_Call()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[3] == 0x90)
+                _ = Task.Run(async () => { await Task.Delay(150); busEcus.Transmit(negative); });
+            else
+                busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
+
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+        Func<Task> cancelled = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the cancelled request's late negative answer is not the next call's");
+    }
+
+    // Codex on #150: ReadDataByPeriodicIdentifier echoes nothing; its answer names the
+    // periodic identifier it carries data for, which must be one the request asked for.
+    [Fact]
+    public async Task A_Periodic_Read_Is_Correlated_On_The_Requested_Identifier()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var ours = SingleFrameFrom(Ecu1, new byte[] { 0x6A, 0xF1, 0x11, 0x22 });
+        var other = SingleFrameFrom(Ecu2, new byte[] { 0x6A, 0xF2, 0x33 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            busEcus.Transmit(other);
+            busEcus.Transmit(ours);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x2A, 0x01, 0xF1 }, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.Response.Should().Equal(0x6A, 0xF1, 0x11, 0x22);
+    }
+
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.
     [Fact]
     public async Task A_Functional_Read_For_More_Than_One_Did_Is_Refused()

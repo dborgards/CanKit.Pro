@@ -580,6 +580,68 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Bugbot on #150: a 0x78 already queued when the window is over still moves it out.
+    [Fact]
+    public async Task A_Queued_Pending_Answer_Still_Extends_A_Window_That_Has_Run_Out()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                        delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(500));
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+            await Task.Delay(300); // the 0x78 is queued, the 200 ms window has run out, the negative is at 550 ms
+
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the queued 0x78 moves the window out by P2*");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
+    // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
+    [Fact]
+    public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                {
+                    Thread.Sleep(200);
+                    throw new EcuNegativeResponse(0x12);
+                }
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(400) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+
+            using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+            Func<Task> cancelled = () => client.TesterPresentAsync(suppressPositiveResponse: false, early.Token);
+            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+            // The negative at 200 ms is still coming; the window must still be honoured.
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the remaining window survived the cancelled wait");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()

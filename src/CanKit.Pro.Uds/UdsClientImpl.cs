@@ -454,12 +454,19 @@ internal sealed class UdsClientImpl : IUdsClient
     {
         byte sid = (byte)serviceId;
         if (!_suppressedWindows.TryGetDeadline(sid, out var until)) return;
+        bool waitedOut = false;
         try
         {
             while (true)
             {
                 var remaining = SuppressedResponseWindows.Remaining(until);
-                if (remaining <= TimeSpan.Zero) break;
+                if (remaining <= TimeSpan.Zero)
+                {
+                    // The window is over as measured now -- but a 0x78 may be queued already,
+                    // and it moves the window out (Bugbot on #150). Only an empty inbox ends it.
+                    if (DrainExtends(sid, ref until)) continue;
+                    break;
+                }
                 using var slice = new CancellationTokenSource(remaining);
                 using var combined = CancellationTokenSource.CreateLinkedTokenSource(linkedToken, slice.Token);
                 IsoTpReceivedPdu pdu;
@@ -469,24 +476,48 @@ internal sealed class UdsClientImpl : IUdsClient
                 }
                 catch (OperationCanceledException) when (slice.IsCancellationRequested && !linkedToken.IsCancellationRequested)
                 {
+                    if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
-                var data = pdu.Pdu;
-                if (data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending)
-                    until = pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency);
+                ExtendOnPending(sid, pdu, ref until);
             }
+            waitedOut = true;
         }
         finally
         {
-            _suppressedWindows.Forget(sid);
+            // A cancelled wait keeps what remains of the window, extensions included, for the
+            // next request (Bugbot on #150).
+            if (waitedOut) _suppressedWindows.Forget(sid);
+            else _suppressedWindows.Extend(sid, until);
         }
     }
 
+    // Reads whatever is queued; true when a 0x78 among it moved the window out.
+    private bool DrainExtends(byte sid, ref long until)
+    {
+        bool extended = false;
+        while (_channel.TryReceiveWithArrival(out var queued))
+            extended |= ExtendOnPending(sid, queued, ref until);
+        return extended;
+    }
+
+    private bool ExtendOnPending(byte sid, in IsoTpReceivedPdu pdu, ref long until)
+    {
+        var data = pdu.Pdu;
+        if (data.Length < 3 || data[0] != NegativeResponseSid || data[1] != sid || data[2] != NrcResponsePending)
+            return false;
+        var extendedUntil = pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency);
+        if (extendedUntil <= until) return false;
+        until = extendedUntil;
+        return true;
+    }
+
     // The services whose second byte is a sub-function parameter, and so carry the
-    // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column).
+    // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column). Not 0x2A:
+    // its transmissionMode is a plain parameter (Codex on #150).
     private static bool HasSubFunction(UdsServiceId sid) => (byte)sid switch
     {
-        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2A or 0x2C or 0x31 or 0x3E
+        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2C or 0x31 or 0x3E
             or 0x83 or 0x85 or 0x86 or 0x87 => true,
         _ => false,
     };
