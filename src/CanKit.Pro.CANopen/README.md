@@ -26,8 +26,9 @@ virtual bus in one process.
 This is a **subset of CiA 301**, not a complete implementation of it. What the subset covers is
 every requirement of SRS §4.3.2 — the requirements this repository set itself. FR-CO-013 to
 FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
-(`docs/reviews/2026-09-15-canopen-scope.md`); the SRS's "Quelle" column says for each of them
-whether CiA 301 requires it or the architecture does.
+(`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
+scope (#132); the SRS's "Quelle" column says for each of them whether CiA 301 requires it or the
+architecture does.
 
 | SRS id | Feature |
 | --- | --- |
@@ -55,6 +56,10 @@ whether CiA 301 requires it or the architecture does.
 | FR-CO-022 | NMT state semantics of Table 37: no SDO, SYNC or EMCY in Stopped, PDO only in Operational, state-change heartbeat only with the producer on, guarding toggle reset on reset |
 | FR-CO-023 | Heartbeat consumer and producer from `1016h`/`1017h`; `1016h` grows per consumer; duplicate node-id `0604 0043h` |
 | FR-CO-024 | RPDO length handling: too short → not processed and EMCY `8210h`; too long → the first bytes are used |
+| FR-CO-025 | A node opened from an EDS or DCF (CiA 306, read with `EdsDcfNet`): application objects with type, access, `PDOMapping` and value from the file, the managed communication objects through the validated write path, PDO records in the §7.5.2.38 order, undeclared PDOs absent, `$NODEID` evaluated, a DCF's `ParameterValue` and `NodeID` honoured |
+| FR-CO-026 | Whatever the node cannot take as written is degraded, corrected in the dictionary and reported per entry in `DeviceDescription` (omitted / corrected / PDO disabled / not implemented / default supplied, with the SDO abort code that decided) |
+| FR-CO-027 | The file's access rights govern the bus: `rw` PDO records are writable without `WritableCommunicationParameters`, `ro` stays `ro`; its `PDOMapping` attribute is the object's mappability |
+| FR-CO-028 | The described values are the power-on values: "load" and Reset Communication return `1000h`–`1FFFh` to them (or to the last "save"), Reset Node the application objects too |
 
 ## Not built, and why
 
@@ -77,19 +82,18 @@ Deliberate omissions, each checked against the norm text:
   CanKit derives a frame's DLC from its data and refuses data on a remote frame, so the RTR this
   node sends carries DLC 0 (#59). Producers answer a guarding RTR by CAN-ID; what the consumer
   evaluates is the reply.
-* **Reset Node vs. Reset Communication** — both restore the same set, the communication-profile
-  objects. Without a device description the node has no source for the power-on values of the
-  application objects, so the application restores those itself from `ApplicationReset`, which
-  runs before the boot-up goes out.
+* **Reset Node vs. Reset Communication without a device description** — both restore the same
+  set, the communication-profile objects, because the node then has no source for the power-on
+  values of the application objects; the application restores those itself from
+  `ApplicationReset`, which runs before the boot-up goes out. With a description the two differ
+  as CiA 301 says (see below).
 * **The pst > 0 fallback from block to segmented transfer** — `pst = 0` is forced, which CiA 301
   §7.2.4.3.13 defines as "change of transfer protocol not allowed".
 * **CiA 302** (boot-up manager, flying master) — outside CiA 301 and outside this package.
 
-One item is **deferred**, not omitted: the **EDS/DCF loader** (scope items 1, 2, 13 and the EDS
-half of 26 — the object dictionary and the PDO configuration from a device description, with
-degradation and reporting of whatever the stack cannot implement, the file's access rights on
-the mapping records and its `PDOMapping` attribute). It waits for the next release of
-`EdsDcfNet`, and its requirements are written when it is built.
+What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
+is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
+with such an entry instead of ignoring it.
 
 ## The object dictionary is the configuration
 
@@ -155,6 +159,60 @@ otherwise a Reset Communication from the master undoes it.
 **Units** are the norm's: `1006h` in µs; `1016h`, `1017h` and `100Ch` in ms; `1800h:03` in
 multiples of 100 µs; `1800h:05` in ms. The `TimeSpan` arguments of the API are converted and
 range-checked against the object's UNSIGNED width.
+
+## Device descriptions (EDS/DCF)
+
+A node can be opened from a CiA 306 device description — an **EDS**, or a **DCF** for a
+commissioned device — read with [`EdsDcfNet`](https://github.com/dborgards/eds-dcf-net):
+
+```csharp
+var description = CanOpenDeviceDescription.Load("device.eds");
+using var device = CanOpen.OpenNode(bus, nodeId: 0x11, description);
+
+// A DCF carries its NodeID, so the node-id may be left to the file:
+using var commissioned = CanOpen.OpenNode(bus, CanOpenDeviceDescription.Load("device.dcf"));
+
+foreach (var finding in device.DeviceDescription!.Findings)
+    Console.WriteLine(finding);            // what the node could not take as written
+```
+
+The description shapes the object dictionary, and the dictionary drives the node as it always
+does, so a master sees the described device from its first frame:
+
+* **Application objects** are created with the file's data type, access, `PDOMapping` attribute
+  and value — a DCF's `ParameterValue` over the `DefaultValue` of the EDS it was made from.
+  `$NODEID+…` expressions are evaluated against the node-id the node is opened with.
+* **The managed communication objects** (`1000h`, `1001h`, `1005h`, `1006h`, `100Ch`, `100Dh`,
+  `1014h`, `1016h`, `1017h`, `1018h`) take the file's access and value through the same
+  validated write path an SDO download uses, so a value the norm would reject on the bus is
+  rejected here too. A mandatory object the file omits keeps its placeholder.
+* **PDO records** are applied in the order of §7.5.2.38 — communication parameters with the PDO
+  destroyed, then the mapping, then "create PDO" — and a PDO the file does not declare does not
+  exist (`0602 0000h`). The file's access rights on the records hold on the bus: a record it
+  declares `rw` is writable by a master without `WritableCommunicationParameters`, one it
+  declares `ro` is not.
+* **The described values are the power-on values.** "Load" (`1011h`) and Reset Communication
+  return `1000h`–`1FFFh` to them, or to the last "save"; Reset Node restores the application
+  objects as well, which without a description the node cannot do.
+
+What the node cannot implement as written is **degraded, corrected in the dictionary and
+reported** — never ignored. `ICanOpenNode.DeviceDescription` is a `DeviceDescriptionReport`:
+`IsExact` is true when every entry was taken as written, and each `DeviceDescriptionFinding`
+names the entry, the outcome, the reason, the described value and, where an SDO rule decided,
+its abort code:
+
+| Outcome | Meaning |
+| --- | --- |
+| `Omitted` | Not created: a data type the dictionary does not represent (24/40/48/56-bit integers), a fifth PDO, an unparsable value, a sub-index of a fixed record the node does not implement |
+| `Corrected` | Created with the CiA 301 default instead of the described value, which the rule an SDO download hits rejected (a reserved transmission type, a second `1016h` entry for one producer) |
+| `PdoDisabled` | The PDO stays destroyed (bit 31 set) because its communication record or its mapping could not be applied — a 29-bit COB-ID, a mapping onto an object the file does not declare |
+| `NotImplemented` | Created with the described value as data, with no behaviour behind it: `1012h` (TIME), a `1200h` that differs from the default SDO server |
+| `SuppliedDefault` | A mandatory object (`1000h`, `1001h`, `1018h`) the file does not declare; the node keeps its placeholder |
+
+The parsed model is available as `CanOpenDeviceDescription.Objects` (the `EdsDcfNet` object
+dictionary) and `DeviceInfo`, and `ParseDiagnostics` lists what the parser repaired while reading
+a lenient file. A tool that configures a *foreign* device from its DCF is the master-role round
+(#131), not this loader, which shapes the node it is given to.
 
 ## PDO engine
 

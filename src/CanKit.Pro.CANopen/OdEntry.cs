@@ -3,12 +3,16 @@ using System;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// Data types supported by the Object Dictionary (subset of CiA 301 Table 44). Each type
-/// implies a fixed on-the-wire size (little-endian) used by SDO expedited encoding and PDO
-/// mapping (FR-CO-001 / FR-CO-005).
+/// Data types supported by the Object Dictionary (CiA 301 §7.4.7 Table 44, the data-type
+/// indices <c>0001h</c>–<c>001Bh</c> a device description names). The fixed-width types imply
+/// their on-the-wire size (little-endian) for SDO expedited encoding and PDO mapping
+/// (FR-CO-001 / FR-CO-005); the strings and <see cref="Domain"/> are variable-length.
 /// </summary>
 public enum OdDataType : byte
 {
+    /// <summary>1-byte boolean (CiA 301 <c>BOOLEAN</c>, 0 = false).</summary>
+    Boolean = 0x01,
+
     /// <summary>1-byte unsigned integer (CiA 301 <c>UNSIGNED8</c>).</summary>
     Unsigned8 = 0x05,
 
@@ -27,9 +31,31 @@ public enum OdDataType : byte
     /// <summary>4-byte signed integer, little-endian (CiA 301 <c>INTEGER32</c>).</summary>
     Integer32 = 0x04,
 
+    /// <summary>4-byte IEEE 754 single (CiA 301 <c>REAL32</c>), little-endian.</summary>
+    Real32 = 0x08,
+
+    /// <summary>Variable-length ISO 646 string (CiA 301 <c>VISIBLE_STRING</c>), one byte per
+    /// character, no terminator.</summary>
+    VisibleString = 0x09,
+
+    /// <summary>Variable-length byte string (CiA 301 <c>OCTET_STRING</c>).</summary>
+    OctetString = 0x0A,
+
+    /// <summary>Variable-length UTF-16LE string (CiA 301 <c>UNICODE_STRING</c>).</summary>
+    UnicodeString = 0x0B,
+
     /// <summary>Variable-length byte string (CiA 301 <c>DOMAIN</c>). Always exchanged via SDO
     /// segmented transfer regardless of length.</summary>
     Domain = 0x0F,
+
+    /// <summary>8-byte IEEE 754 double (CiA 301 <c>REAL64</c>), little-endian.</summary>
+    Real64 = 0x11,
+
+    /// <summary>8-byte signed integer, little-endian (CiA 301 <c>INTEGER64</c>).</summary>
+    Integer64 = 0x15,
+
+    /// <summary>8-byte unsigned integer, little-endian (CiA 301 <c>UNSIGNED64</c>).</summary>
+    Unsigned64 = 0x1B,
 }
 
 /// <summary>
@@ -113,9 +139,10 @@ public sealed class OdEntry
     /// </summary>
     internal void SetRawValue(byte[] value)
     {
-        if (DataType != OdDataType.Domain && value.Length != OdEntryLayout.FixedSize(DataType))
+        int fixedSize = OdEntryLayout.FixedSize(DataType);
+        if (fixedSize > 0 && value.Length != fixedSize)
             throw new InvalidOperationException(
-                $"OD entry expects {OdEntryLayout.FixedSize(DataType)} bytes for {DataType} but got {value.Length}.");
+                $"OD entry expects {fixedSize} bytes for {DataType} but got {value.Length}.");
         _value = value;
     }
 
@@ -127,12 +154,20 @@ internal static class OdEntryLayout
 {
     internal static int FixedSize(OdDataType type) => type switch
     {
+        OdDataType.Boolean => 1,
         OdDataType.Unsigned8 => 1,
         OdDataType.Integer8 => 1,
         OdDataType.Unsigned16 => 2,
         OdDataType.Integer16 => 2,
         OdDataType.Unsigned32 => 4,
         OdDataType.Integer32 => 4,
+        OdDataType.Real32 => 4,
+        OdDataType.Real64 => 8,
+        OdDataType.Integer64 => 8,
+        OdDataType.Unsigned64 => 8,
+        OdDataType.VisibleString => -1,
+        OdDataType.OctetString => -1,
+        OdDataType.UnicodeString => -1,
         OdDataType.Domain => -1,
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, "Unknown OD data type."),
     };

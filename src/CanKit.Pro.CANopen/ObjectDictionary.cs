@@ -112,6 +112,21 @@ public sealed class ObjectDictionary
         bool pdoMappable = true)
         => Add(index, subindex, OdDataType.Integer32, access, EncodeU32(unchecked((uint)value)), pdoMappable);
 
+    /// <summary>Adds or replaces an entry of any <see cref="OdDataType"/> from its raw
+    /// little-endian bytes. Fixed-width types must be given exactly their width; the strings and
+    /// <see cref="OdDataType.Domain"/> take any length (may be empty; resized on later writes).</summary>
+    public OdEntry AddRaw(ushort index, byte subindex, OdDataType dataType, byte[] value,
+        OdAccess access = OdAccess.ReadWrite, bool pdoMappable = true)
+    {
+        if (value is null) throw new ArgumentNullException(nameof(value));
+        int fixedSize = OdEntryLayout.FixedSize(dataType);
+        if (fixedSize > 0 && value.Length != fixedSize)
+            throw new ArgumentException($"{dataType} takes exactly {fixedSize} bytes, not {value.Length}.", nameof(value));
+        var copy = new byte[value.Length];
+        Buffer.BlockCopy(value, 0, copy, 0, value.Length);
+        return Add(index, subindex, dataType, access, copy, pdoMappable);
+    }
+
     /// <summary>Adds or replaces an <see cref="OdDataType.Domain"/> entry with the given initial
     /// bytes (may be empty; will be resized on later writes).</summary>
     public OdEntry AddDomain(ushort index, byte subindex, byte[] value, OdAccess access = OdAccess.ReadWrite,
@@ -400,6 +415,19 @@ public sealed class ObjectDictionary
             };
             WriteRaw(index, subindex, raw);
         }
+    }
+
+    /// <summary>Removes an entry (for the node's own use while it shapes the dictionary after a
+    /// device description). Returns <see langword="false"/> when there was none.</summary>
+    internal bool Remove(ushort index, byte subindex)
+    {
+        bool removed;
+        lock (_sync)
+        {
+            removed = _entries.Remove(Key(index, subindex));
+        }
+        if (removed) EntryWritten?.Invoke(index, subindex);
+        return removed;
     }
 
     private OdEntry Add(ushort index, byte subindex, OdDataType type, OdAccess access, byte[] value,

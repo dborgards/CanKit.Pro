@@ -24,6 +24,16 @@ An application that references both CanKit.Pro and CanKit is distributing Apache
 binaries and must satisfy the Apache-2.0 attribution terms for them, independently of CanKit.Pro's
 MIT license.
 
+### EdsDcfNet — MIT
+
+`CanKit.Pro.CANopen` reads CiA 306 device descriptions (EDS, DCF) with
+[EdsDcfNet](https://github.com/dborgards/eds-dcf-net), the maintainer's own library, consumed as
+an ordinary NuGet package. It has no runtime dependencies of its own.
+
+    Copyright (c) 2025 Dietmar Borgards
+    Licensed under the MIT License
+    https://github.com/dborgards/eds-dcf-net/blob/main/LICENSE
+
 ### .NET platform packages — MIT
 
 `Microsoft.Bcl.AsyncInterfaces`, `System.Memory` and `System.Threading.Channels` are referenced by

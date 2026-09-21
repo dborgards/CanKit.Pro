@@ -57,4 +57,54 @@ public static class CanOpen
         return new CanOpenNode(service, nodeId, options ?? new CanOpenNodeOptions(),
             ownsService: !leaveOpen);
     }
+
+    /// <summary>
+    /// Opens a node shaped by a device description: its object dictionary and its PDO, SYNC,
+    /// EMCY, heartbeat and guarding configuration come from <paramref name="description"/>,
+    /// with <c>$NODEID</c> resolved to <paramref name="nodeId"/>. What the node could not take
+    /// as written is in <see cref="ICanOpenNode.DeviceDescription"/>.
+    /// </summary>
+    public static ICanOpenNode OpenNode(ICanBus bus, byte nodeId, CanOpenDeviceDescription description,
+        CanOpenNodeOptions? options = null)
+    {
+        if (bus is null) throw new ArgumentNullException(nameof(bus));
+        if (description is null) throw new ArgumentNullException(nameof(description));
+        var service = new CanBusService(bus);
+        try
+        {
+            return new CanOpenNode(service, nodeId, options ?? new CanOpenNodeOptions(),
+                ownsService: true, timeSource: null, description);
+        }
+        catch
+        {
+            service.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Opens a node shaped by a DCF, as the node-id the file was commissioned for
+    /// (<c>[DeviceComissioning] NodeID</c>).
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="description"/> is an EDS, which
+    /// describes a device type and carries no node-id.</exception>
+    public static ICanOpenNode OpenNode(ICanBus bus, CanOpenDeviceDescription description,
+        CanOpenNodeOptions? options = null)
+    {
+        if (description is null) throw new ArgumentNullException(nameof(description));
+        if (description.NodeId is not { } nodeId)
+            throw new ArgumentException("An EDS carries no node-id; pass the node-id, or open the node from a DCF.", nameof(description));
+        return OpenNode(bus, nodeId, description, options);
+    }
+
+    /// <summary>Opens a node shaped by a device description on an existing service (see
+    /// <see cref="OpenNode(ICanBusService, byte, CanOpenNodeOptions?, bool)"/> for ownership).</summary>
+    public static ICanOpenNode OpenNode(ICanBusService service, byte nodeId, CanOpenDeviceDescription description,
+        CanOpenNodeOptions? options = null, bool leaveOpen = true)
+    {
+        if (service is null) throw new ArgumentNullException(nameof(service));
+        if (description is null) throw new ArgumentNullException(nameof(description));
+        return new CanOpenNode(service, nodeId, options ?? new CanOpenNodeOptions(),
+            ownsService: !leaveOpen, timeSource: null, description);
+    }
 }

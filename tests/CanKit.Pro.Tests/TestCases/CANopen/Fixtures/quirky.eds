@@ -1,0 +1,601 @@
+; A small device, described completely by what this node implements: three mandatory objects,
+; SYNC producer, heartbeat producer and one consumer, EMCY, one RPDO, one TPDO with inhibit time
+; and event timer, and three application objects.
+
+[FileInfo]
+FileName=quirky.eds
+FileVersion=1
+FileRevision=0
+EDSVersion=4.0
+Description=CanKit.Pro test device
+CreationTime=10:00AM
+CreationDate=09-21-2026
+CreatedBy=CanKit.Pro tests
+
+[DeviceInfo]
+VendorName=CanKit.Pro
+VendorNumber=0x00000100
+ProductName=Test device
+ProductNumber=0x00001001
+RevisionNumber=0x00010000
+OrderCode=TD-1
+BaudRate_500=1
+SimpleBootUpMaster=0
+SimpleBootUpSlave=1
+Granularity=8
+DynamicChannelsSupported=0
+GroupMessaging=0
+NrOfRXPDO=1
+NrOfTXPDO=1
+LSS_Supported=0
+
+[DummyUsage]
+Dummy0005=1
+Dummy0006=1
+
+[MandatoryObjects]
+SupportedObjects=2
+1=0x1000
+2=0x1001
+
+[1000]
+ParameterName=Device type
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00030191
+PDOMapping=0
+
+[1001]
+ParameterName=Error register
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[OptionalObjects]
+SupportedObjects=24
+1=0x1005
+2=0x1006
+3=0x1008
+4=0x100C
+5=0x100D
+6=0x1010
+7=0x1012
+8=0x1014
+9=0x1016
+10=0x1017
+11=0x1200
+12=0x1400
+13=0x1600
+14=0x1800
+15=0x1A00
+16=0x1801
+17=0x1802
+18=0x1A02
+19=0x1804
+20=0x1A04
+21=0x1A01
+22=0x1401
+23=0x1601
+24=0x1603
+
+[1010]
+ParameterName=Store parameters
+SubNumber=3
+ObjectType=0x8
+
+[1010sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1010sub1]
+ParameterName=Save all parameters
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1010sub2]
+ParameterName=Save communication parameters
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1012]
+ParameterName=COB-ID TIME
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x100
+PDOMapping=0
+
+[1200]
+ParameterName=SDO server parameter
+SubNumber=3
+ObjectType=0x9
+
+[1200sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1200sub1]
+ParameterName=COB-ID client to server
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x601
+PDOMapping=0
+
+[1200sub2]
+ParameterName=COB-ID server to client
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=$NODEID+0x580
+PDOMapping=0
+
+[1801]
+ParameterName=TPDO2 communication parameter
+SubNumber=3
+ObjectType=0x9
+
+[1801sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1801sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20000281
+PDOMapping=0
+
+[1801sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=254
+PDOMapping=0
+
+[1A01]
+ParameterName=TPDO2 mapping parameter
+SubNumber=1
+ObjectType=0x9
+
+[1A01sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[1802]
+ParameterName=TPDO3 communication parameter
+SubNumber=3
+ObjectType=0x9
+
+[1802sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1802sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x380
+PDOMapping=0
+
+[1802sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=254
+PDOMapping=0
+
+[1A02]
+ParameterName=TPDO3 mapping parameter
+SubNumber=2
+ObjectType=0x9
+
+[1A02sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1A02sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x2FFF0010
+PDOMapping=0
+
+[1804]
+ParameterName=TPDO5 communication parameter
+SubNumber=3
+ObjectType=0x9
+
+[1804sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1804sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x80000181
+PDOMapping=0
+
+[1804sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=254
+PDOMapping=0
+
+[1A04]
+ParameterName=TPDO5 mapping parameter
+SubNumber=1
+ObjectType=0x9
+
+[1A04sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[1005]
+ParameterName=COB-ID SYNC
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x40000080
+PDOMapping=0
+
+[1006]
+ParameterName=Communication cycle period
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=100000
+PDOMapping=0
+
+[1008]
+ParameterName=Manufacturer device name
+ObjectType=0x7
+DataType=0x0009
+AccessType=const
+DefaultValue=Test device
+PDOMapping=0
+
+[100C]
+ParameterName=Guard time
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[100D]
+ParameterName=Life time factor
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[1014]
+ParameterName=COB-ID EMCY
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x80
+PDOMapping=0
+
+[1016]
+ParameterName=Consumer heartbeat time
+SubNumber=129
+ObjectType=0x8
+
+[1016sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1016sub1]
+ParameterName=Consumer heartbeat time 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00120064
+PDOMapping=0
+
+[1016sub2]
+ParameterName=Consumer heartbeat time 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00120064
+PDOMapping=0
+
+[1016sub80]
+ParameterName=Consumer heartbeat time 128
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x00130064
+PDOMapping=0
+
+[1017]
+ParameterName=Producer heartbeat time
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=200
+PDOMapping=0
+
+[1400]
+ParameterName=RPDO1 communication parameter
+SubNumber=3
+ObjectType=0x9
+
+[1400sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1400sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x200
+PDOMapping=0
+
+[1400sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=255
+PDOMapping=0
+
+[1600]
+ParameterName=RPDO1 mapping parameter
+SubNumber=2
+ObjectType=0x9
+
+[1600sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1600sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20010008
+PDOMapping=0
+
+[1800]
+ParameterName=TPDO1 communication parameter
+SubNumber=5
+ObjectType=0x9
+
+[1800sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=5
+PDOMapping=0
+
+[1800sub1]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x180
+PDOMapping=0
+
+[1800sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0xF5
+PDOMapping=0
+
+[1800sub3]
+ParameterName=Inhibit time
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=10
+PDOMapping=0
+
+[1800sub5]
+ParameterName=Event timer
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=100
+PDOMapping=0
+
+[1A00]
+ParameterName=TPDO1 mapping parameter
+SubNumber=2
+ObjectType=0x9
+
+[1A00sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1A00sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20000010
+PDOMapping=0
+
+[ManufacturerObjects]
+SupportedObjects=4
+1=0x2000
+2=0x2001
+3=0x2002
+4=0x2003
+
+[2000]
+ParameterName=Process value
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=0x1234
+PDOMapping=1
+
+[2001]
+ParameterName=Command
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=7
+PDOMapping=1
+
+[2002]
+ParameterName=Label
+ObjectType=0x7
+DataType=0x0009
+AccessType=ro
+DefaultValue=abc
+PDOMapping=0
+
+[2003]
+ParameterName=A 24-bit value
+ObjectType=0x7
+DataType=0x0010
+AccessType=rw
+DefaultValue=0x123456
+PDOMapping=0
+
+[1401]
+ParameterName=RPDO2 communication parameter (unreadable COB-ID)
+SubNumber=3
+ObjectType=0x9
+
+[1401sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[1401sub1]
+ParameterName=COB-ID used by RPDO
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=notanumber
+PDOMapping=0
+
+[1401sub2]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=255
+PDOMapping=0
+
+[1601]
+ParameterName=RPDO2 mapping parameter (unreadable entry)
+SubNumber=2
+ObjectType=0x9
+
+[1601sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1601sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=garbled
+PDOMapping=0
+
+[1603]
+ParameterName=RPDO4 mapping parameter (no communication record)
+SubNumber=2
+ObjectType=0x9
+
+[1603sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+
+[1603sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20000010
+PDOMapping=0
