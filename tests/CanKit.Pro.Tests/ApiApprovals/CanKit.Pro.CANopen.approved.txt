@@ -84,6 +84,7 @@ namespace CanKit.Pro.CANopen
         CanKit.Pro.CANopen.ObjectDictionary ObjectDictionary { get; }
         CanKit.Pro.CANopen.CanOpenNodeOptions Options { get; }
         CanKit.Pro.CANopen.Nmt.NmtState State { get; }
+        event System.EventHandler<CanKit.Pro.CANopen.NmtResetEventArgs>? ApplicationReset;
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         event System.EventHandler<CanKit.Pro.CANopen.EmcyReceivedEventArgs>? EmcyReceived;
         event System.EventHandler<CanKit.Pro.CANopen.HeartbeatReceivedEventArgs>? HeartbeatReceived;
@@ -132,6 +133,12 @@ namespace CanKit.Pro.CANopen
         public NmtCommandReceivedEventArgs(CanKit.Pro.CANopen.Nmt.NmtCommand command, byte targetNodeId) { }
         public CanKit.Pro.CANopen.Nmt.NmtCommand Command { get; }
         public byte TargetNodeId { get; }
+    }
+    public sealed class NmtResetEventArgs : System.EventArgs
+    {
+        public NmtResetEventArgs(CanKit.Pro.CANopen.Nmt.NmtCommand command) { }
+        public CanKit.Pro.CANopen.Nmt.NmtCommand Command { get; }
+        public bool IsResetNode { get; }
     }
     public sealed class NodeGuardingReceivedEventArgs : System.EventArgs
     {

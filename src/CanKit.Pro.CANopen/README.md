@@ -79,7 +79,8 @@ Deliberate omissions, each checked against the norm text:
   evaluates is the reply.
 * **Reset Node vs. Reset Communication** — both restore the same set, the communication-profile
   objects. Without a device description the node has no source for the power-on values of the
-  application objects, so the application restores those itself from `NmtCommandReceived`.
+  application objects, so the application restores those itself from `ApplicationReset`, which
+  runs before the boot-up goes out.
 * **The pst > 0 fallback from block to segmented transfer** — `pst = 0` is forced, which CiA 301
   §7.2.4.3.13 defines as "change of transfer protocol not allowed".
 * **CiA 302** (boot-up manager, flying master) — outside CiA 301 and outside this package.
@@ -252,8 +253,15 @@ Table 37 of CiA 301, as the node applies it:
 
 **Reset Node and Reset Communication** abort SDO server sessions, discard a held EMCY, reset the
 guarding toggle to 0 (§7.2.8.3.2.1), restore the power-on values of the communication profile
-(see above), send the boot-up and settle in Pre-operational. With the heartbeat producer on, a
-heartbeat with the new state follows the boot-up.
+(see above), raise `ApplicationReset`, send the boot-up and settle in Pre-operational. With the
+heartbeat producer on, a heartbeat with the new state follows the boot-up.
+
+`ApplicationReset` is the application's turn in the reset: it is raised synchronously on the
+actor loop, still in Initialisation, and the boot-up goes out only when the handler has
+returned — so a master that reacts to the boot-up never reads an application object the reset
+had not reached. `NmtCommandReceived` is the notification of the command, delivered on the event
+queue, and can arrive after the boot-up. A handler of `ApplicationReset` writes the dictionary
+and returns; it must not wait for the node.
 
 ### SDO block transfer
 

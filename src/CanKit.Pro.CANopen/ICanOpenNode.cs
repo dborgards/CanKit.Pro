@@ -84,9 +84,23 @@ public interface ICanOpenNode : IDisposable
     /// the OD — immediately for an event-driven RPDO, with the next SYNC for a synchronous one.</summary>
     event EventHandler<RpdoReceivedEventArgs>? RpdoReceived;
 
-    /// <summary>Raised on the actor loop for every NMT master command whose target matches this
-    /// node (or the broadcast target 0).</summary>
+    /// <summary>Raised for every NMT master command whose target matches this node (or the
+    /// broadcast target 0). Delivered on the node's event queue, after the node has acted on the
+    /// command — for a reset, possibly after the boot-up is on the bus; to restore application
+    /// objects before that, use <see cref="ApplicationReset"/>.</summary>
     event EventHandler<NmtCommandReceivedEventArgs>? NmtCommandReceived;
+
+    /// <summary>
+    /// Raised synchronously on the actor loop during an NMT Reset Node or Reset Communication,
+    /// after the communication-profile objects have been restored and before the boot-up is
+    /// transmitted: the application restores its own object dictionary objects in the handler,
+    /// and the node announces itself only when the handler has returned — a master reacting to
+    /// the boot-up never reads a value the reset had not reached. The handler runs on the loop
+    /// the node's own work runs on, so it must not wait for the node (an SDO transfer,
+    /// <see cref="StoreParameters"/>, a configuration method); its exception is reported through
+    /// <see cref="BackgroundExceptionOccurred"/> and does not stop the reset.
+    /// </summary>
+    event EventHandler<NmtResetEventArgs>? ApplicationReset;
 
     /// <summary>Raised whenever a node-guarding response (data frame on <c>0x700 + producer</c>
     /// with the toggle bit in bit 7 and the NMT state in bits 0..6) is received for a
@@ -172,10 +186,12 @@ public interface ICanOpenNode : IDisposable
     /// <summary>
     /// Transmits an EMCY frame from this node on the COB-ID configured in <c>1014h</c>, after
     /// writing <paramref name="errorRegister"/> to <c>1001h</c> so the error register a master
-    /// reads over SDO is the one the EMCY carried. In NMT state Stopped the EMCY is held and the
-    /// most recent one is transmitted when the node leaves Stopped (CiA 301 §7.3.2.2.4). The
-    /// returned task faults with <see cref="InvalidOperationException"/> when EMCY is disabled
-    /// (bit 31 of <c>1014h</c> set).
+    /// reads over SDO is the one the last EMCY carried: the write and the transmission are one
+    /// ordered step on the node's actor loop, and every EMCY of this node goes out through one
+    /// ordered path, so overlapping calls reach the bus in the order the register was written.
+    /// In NMT state Stopped the EMCY is held and the most recent one is transmitted when the
+    /// node leaves Stopped (CiA 301 §7.3.2.2.4). The returned task faults with
+    /// <see cref="InvalidOperationException"/> when EMCY is disabled (bit 31 of <c>1014h</c> set).
     /// </summary>
     Task SendEmcyAsync(ushort errorCode, byte errorRegister,
         ReadOnlyMemory<byte> manufacturerSpecific = default,

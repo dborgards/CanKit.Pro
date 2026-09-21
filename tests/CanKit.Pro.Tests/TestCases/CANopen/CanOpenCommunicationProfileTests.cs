@@ -10,6 +10,7 @@ using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -841,6 +842,49 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         (await received.Task.WithTimeoutAsync(ShortTimeout)).ErrorCode.Should().Be((ushort)0x1000);
     }
 
+    // FR-CO-014 (e, #133 review) — the error register and the transmission are one ordered step
+    // on the actor loop, and every EMCY goes out through one chain: with the loop held, two calls
+    // move 1001h only when the loop runs them (not ahead of it, on the caller's thread), the
+    // second frame reaches the bus only once the first is confirmed, and the register a master
+    // reads is the one of the last frame on the wire. The bus parks each transmission's
+    // confirmation until the test releases it, which is what makes the chain observable.
+    [Fact]
+    public async Task Overlapping_Emcys_Reach_The_Bus_In_The_Order_The_Register_Was_Written()
+    {
+        var session = NewSession();
+        using var bus = ControllableBus.DeferredEchoCapable(session);
+        using var slave = new CanOpenNode(new CanBusService(bus), Slave, new CanOpenNodeOptions(), ownsService: true);
+        var registers = new List<byte>();
+        bus.OnTransmitting = frame =>
+        {
+            if (frame.ID == CanOpenCobId.Emcy(Slave)) lock (registers) registers.Add(frame.Data.Span[2]);
+        };
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+        int transmitsBefore = bus.TransmitCount;
+
+        using var release = new ManualResetEventSlim(false);
+        var held = slave.PostToActorAsync(() => release.Wait(ShortTimeout));
+        var first = slave.SendEmcyAsync(errorCode: 0x1000, errorRegister: 0x01);
+        var second = slave.SendEmcyAsync(errorCode: 0x2000, errorRegister: 0x02);
+        slave.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(0u, "the register moves with the transmission, on the loop, not ahead of it");
+
+        release.Set();
+        await held.WithTimeoutAsync(ShortTimeout);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the first EMCY is on the wire, unconfirmed
+        await Task.Delay(200);
+        bus.TransmitCount.Should().Be(transmitsBefore + 1, "the second EMCY waits for the first one's confirmation");
+        slave.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(2u, "both registers were written on the loop, in order");
+
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await first.WithTimeoutAsync(ShortTimeout);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await second.WithTimeoutAsync(ShortTimeout);
+        lock (registers) registers.Should().Equal(new byte[] { 0x01, 0x02 }, "the wire order is the order the register was written");
+        slave.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(2u, "the last frame on the wire carried the register a master reads");
+    }
+
     // FR-CO-018: an EMCY COB-ID a master moved over SDO is where the EMCY goes out. Since bits
     // 0..29 may only change while the object is not valid (§7.5.2.17), the move is two writes:
     // invalidate-and-move, then validate.
@@ -877,6 +921,72 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
     // FR-CO-019 — power-on values (CiA 301 §7.3.2.2.1): "the last stored parameters", else the
     // defaults; store and restore through 1010h / 1011h (§7.5.2.13 / §7.5.2.14).
     // =========================================================================================
+
+    // FR-CO-019 (#133 review) — the application's objects are restored before the node announces
+    // itself: ApplicationReset runs synchronously on the actor loop, after the communication
+    // profile is restored and before the boot-up, so a master reacting to the boot-up never reads
+    // a value the reset had not reached. The handler is slow on purpose; when the master has the
+    // boot-up, the restore must already be in the dictionary. NmtCommandReceived, on the event
+    // queue, carries no such guarantee.
+    [Theory]
+    [InlineData(NmtCommand.ResetNode)]
+    [InlineData(NmtCommand.ResetCommunication)]
+    public async Task ApplicationReset_Runs_On_The_Loop_Before_The_Bootup(NmtCommand reset)
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = (CanOpenNode)CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0x1234);
+        await bootups.First;
+        int loopThread = -1;
+        await slave.PostToActorAsync(() => loopThread = Environment.CurrentManagedThreadId);
+
+        NmtResetEventArgs? seen = null;
+        int handlerThread = -1;
+        slave.ApplicationReset += (_, e) =>
+        {
+            seen = e;
+            handlerThread = Environment.CurrentManagedThreadId;
+            Thread.Sleep(300); // a slow restore: the boot-up must still wait for it
+            od.WriteUnsigned(0x2000, 0x00, 0x1234);
+        };
+
+        od.WriteUnsigned(0x2000, 0x00, 0x0001);
+        await master.SendNmtCommandAsync(reset, Slave);
+        await bootups.Second;
+        od.ReadUnsigned(0x2000, 0x00).Should().Be(0x1234u, "the boot-up went out after the handler had restored the object");
+        seen.Should().NotBeNull();
+        seen!.Command.Should().Be(reset);
+        seen.IsResetNode.Should().Be(reset == NmtCommand.ResetNode);
+        handlerThread.Should().Be(loopThread, "the handler runs on the actor loop, before the boot-up");
+        slave.State.Should().Be(NmtState.PreOperational);
+    }
+
+    // FR-CO-019 (#133 review) — a handler that throws does not stop the reset: the exception is
+    // reported and the boot-up still goes out.
+    [Fact]
+    public async Task A_Throwing_ApplicationReset_Handler_Is_Reported_And_The_Reset_Completes()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+        await bootups.First;
+        var reported = NewTcs<Exception>();
+        slave.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+        slave.ApplicationReset += (_, _) => throw new InvalidOperationException("restore failed");
+
+        await master.SendNmtCommandAsync(NmtCommand.ResetNode, Slave);
+        await bootups.Second;
+        (await reported.Task.WithTimeoutAsync(ShortTimeout)).Message.Should().Be("restore failed");
+        slave.State.Should().Be(NmtState.PreOperational);
+    }
 
     // FR-CO-019: a TPDO configured by the application and stored survives an NMT reset — of either
     // kind, since without a device description both restore the same set — and the node comes

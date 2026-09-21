@@ -35,7 +35,8 @@ namespace CanKit.Pro.CANopen;
 /// was created with if nothing was stored or <c>1011h:01</c> / <see cref="RestoreDefaultParameters"/>
 /// preceded the reset. Reset Node and Reset Communication restore the same set here: without a
 /// device description there is no source for the application objects' power-on values, so
-/// the application restores those itself from <see cref="ICanOpenNode.NmtCommandReceived"/>.
+/// the application restores those itself from <see cref="ICanOpenNode.ApplicationReset"/>,
+/// which runs before the boot-up goes out.
 /// </para>
 /// </remarks>
 internal sealed partial class CanOpenNode
@@ -559,7 +560,7 @@ internal sealed partial class CanOpenNode
             // §7.3.2.2.4: "The most recent active EMCY reason may be transmitted after the
             // CANopen device transits into another NMT state."
             _pendingEmcy = null;
-            if (_emcyValid) _ = SendControlFrame(_emcyCobId, pending.Encode());
+            if (_emcyValid) _ = EmitEmcy(pending);
         }
 
         // A state-change heartbeat is an early heartbeat, so it belongs to the heartbeat protocol
@@ -594,6 +595,10 @@ internal sealed partial class CanOpenNode
             _restoreDefaultsOnReset = false;
         }
         RestoreValues(_powerOnValues);
+        // The application's turn, still in Initialisation: its objects are restored before the
+        // node announces itself, so a master reacting to the boot-up never reads a value the
+        // reset had not reached.
+        RaiseApplicationReset(communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode);
 
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is

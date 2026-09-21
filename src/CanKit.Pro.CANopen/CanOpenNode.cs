@@ -149,6 +149,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     public event EventHandler<RpdoReceivedEventArgs>? RpdoReceived;
     /// <inheritdoc />
     public event EventHandler<NmtCommandReceivedEventArgs>? NmtCommandReceived;
+
+    /// <inheritdoc />
+    public event EventHandler<NmtResetEventArgs>? ApplicationReset;
     /// <inheritdoc />
     public event EventHandler<NodeGuardingReceivedEventArgs>? NodeGuardingReceived;
     /// <inheritdoc />
@@ -375,11 +378,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         ThrowIfDisposed();
         var msg = new EmcyMessage(_nodeId, errorCode, errorRegister, manufacturerSpecific.Span);
-        // 1001h is "a part of an emergency object" (CiA 301 §7.5.2.2): the register a master
-        // reads is the one the EMCY carried.
-        _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
         return _actor.PostAsync(() =>
         {
+            // 1001h is "a part of an emergency object" (CiA 301 §7.5.2.2): the register a master
+            // reads is the one the last EMCY carried. Written here, on the loop, in the same
+            // step that orders the transmission, so two overlapping calls cannot leave the
+            // register of one on the bus and the other in the dictionary (Codex on #133).
+            _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
             if (!_emcyValid)
                 throw new InvalidOperationException("EMCY is disabled: bit 31 of 1014h (COB-ID EMCY) is set.");
             if (_state == NmtState.Stopped)
@@ -389,8 +394,23 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 _pendingEmcy = msg;
                 return Task.CompletedTask;
             }
-            return SendControlFrame(_emcyCobId, msg.Encode(), cancellationToken);
+            return EmitEmcy(msg, cancellationToken);
         }).Unwrap();
+    }
+
+    // Every EMCY this node transmits goes out through one chain, so the wire order is the order
+    // the actor decided — the order the error register was written in. Actor loop only.
+    private Task _emcySendChain = Task.CompletedTask;
+
+    private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default)
+    {
+        uint cobId = _emcyCobId;
+        var frame = msg.Encode();
+        var link = _emcySendChain.ContinueWith(
+            _ => SendControlFrame(cobId, frame, cancellationToken),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+        _emcySendChain = link;
+        return link;
     }
 
     /// <inheritdoc />
@@ -1803,6 +1823,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             try { RpdoReceived?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
+    }
+
+    /// <summary>Synchronous, on the actor loop, before the boot-up: the application restores
+    /// its own objects here (Codex on #133 — the event-queue notification can arrive after the
+    /// boot-up). A handler's exception is reported, not propagated: the reset completes.</summary>
+    private void RaiseApplicationReset(NmtCommand command)
+    {
+        var handler = ApplicationReset;
+        if (handler is null) return;
+        try { handler(this, new NmtResetEventArgs(command)); }
+        catch (Exception ex) { RaiseBackgroundException(ex); }
     }
 
     private void RaiseNmtCommandReceived(NmtCommand cmd, byte target)

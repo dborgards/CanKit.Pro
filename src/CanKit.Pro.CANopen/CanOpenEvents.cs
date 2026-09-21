@@ -167,6 +167,26 @@ public sealed class NodeGuardingTimeoutEventArgs : EventArgs
 /// <summary>
 /// Argument type for the <c>NmtCommandReceived</c> event: a decoded incoming NMT master command.
 /// </summary>
+/// <summary>Arguments of <see cref="ICanOpenNode.ApplicationReset"/>: which NMT reset the
+/// node is performing.</summary>
+public sealed class NmtResetEventArgs : EventArgs
+{
+    /// <summary>The reset command: <see cref="NmtCommand.ResetNode"/> or
+    /// <see cref="NmtCommand.ResetCommunication"/>.</summary>
+    public NmtCommand Command { get; }
+
+    /// <summary>Whether the reset is a Reset Node — the one on which CiA 301 §7.3.2.2.1 has the
+    /// application objects return to their power-on values as well.</summary>
+    public bool IsResetNode => Command == NmtCommand.ResetNode;
+
+    /// <summary>Constructs a new event.</summary>
+    public NmtResetEventArgs(NmtCommand command)
+    {
+        Command = command;
+    }
+}
+
+/// <summary>Arguments of <see cref="ICanOpenNode.NmtCommandReceived"/>.</summary>
 public sealed class NmtCommandReceivedEventArgs : EventArgs
 {
     /// <summary>Command specifier (byte 0 of the NMT frame).</summary>

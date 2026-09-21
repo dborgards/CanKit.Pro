@@ -559,7 +559,7 @@ internal sealed partial class CanOpenNode
             if (_emcyValid)
             {
                 var errorRegister = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
-                _ = SendControlFrame(_emcyCobId, new EmcyMessage(_nodeId, 0x8210, errorRegister).Encode());
+                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8210, errorRegister));
             }
             return;
         }
