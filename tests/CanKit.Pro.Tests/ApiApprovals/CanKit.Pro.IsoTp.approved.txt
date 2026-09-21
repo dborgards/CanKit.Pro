@@ -117,8 +117,14 @@ namespace CanKit.Pro.IsoTp
         public CanKit.Pro.IsoTp.IsoTpFunctionalOptions Options { get; }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> CollectResponsesAsync(System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
         public void Dispose() { }
+        public CanKit.Pro.IsoTp.IsoTpFunctionalListener Listen() { }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> SendAndCollectAsync(System.ReadOnlyMemory<byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
         public System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class IsoTpFunctionalListener : System.IDisposable
+    {
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> CollectAsync(System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public void Dispose() { }
     }
     public sealed class IsoTpFunctionalOptions
     {

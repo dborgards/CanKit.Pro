@@ -194,6 +194,19 @@ public sealed class IsoTpFunctionalClient : IDisposable
         return await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Subscribes to the response range now and returns a listener that keeps the subscription
+    /// across collections. Obtained before a <see cref="SendAsync"/>, it closes the gap between
+    /// send and subscribe that <see cref="CollectResponsesAsync"/> leaves, and a response that
+    /// arrives between two of its collections is buffered for the next one.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The client was disposed.</exception>
+    public IsoTpFunctionalListener Listen()
+    {
+        ThrowIfDisposed();
+        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true));
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -304,7 +317,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         while (sub.TryRead(out _)) { }
     }
 
-    private static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
+    internal static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
         out IsoTpFunctionalResponse? response)
     {
         var frame = frameEvent.Frame;

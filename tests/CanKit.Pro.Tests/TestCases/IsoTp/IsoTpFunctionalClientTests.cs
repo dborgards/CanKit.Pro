@@ -542,4 +542,57 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         await peer.SendAsync(new byte[] { 0x11, 0x22 }).WaitAsync(ShortTimeout);
         (await recvTask).Should().Equal(0x11, 0x22);
     }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Listen(): one subscription across collections (#150). A response that arrives between
+    // two collections -- here, before the first one begins -- is buffered for the next, where
+    // CollectResponsesAsync, subscribing per call, would not have seen it.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    [Fact]
+    public async Task Functional_Listener_Keeps_What_Arrives_Between_Collections()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0); // tester bus
+        using var busB = OpenClassic(session, 1); // ECU bus
+
+        const uint FunctionalTxId = 0x7DF;
+        const uint EcuResponseId = 0x7E8;
+
+        byte[] pdu = { 0x62, 0xF1, 0x90, 0x01 };
+        var frame = CanFrame.Classic(
+            unchecked((int)EcuResponseId),
+            IsoTpFrameCodec.BuildSingleFrame(IsoTpEndpoint.Normal(EcuResponseId, 0), pdu, isCanFd: false, padding: true));
+        using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, 0x7E8, 0x7EF, FastOptions());
+
+        // Delivered to the subscription, and confirmed as delivered, before any collection.
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)EcuResponseId)) delivered.TrySetResult(true); };
+        using var listener = client.Listen();
+        busB.Transmit(frame);
+        await delivered.Task.WaitAsync(ShortTimeout);
+
+        var responses = await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        responses.Should().ContainSingle().Which.Data.Should().Equal(pdu);
+
+        // Not returned twice: the next collection starts from an empty buffer.
+        (await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Functional_Listener_Disposal_Ends_A_Collection_In_Progress()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1); // joined so the hub forwards frames, but silent
+        using var client = IsoTpFactory.OpenFunctional(busA, 0x7DF, 0x7E8, 0x7EF, FastOptions());
+
+        var listener = client.Listen();
+        var collecting = listener.CollectAsync(ShortTimeout);
+        listener.Dispose();
+        // Disposal completes the subscription; a collection in progress ends with it.
+        (await collecting.WaitAsync(ShortTimeout)).Should().BeEmpty();
+
+        Func<Task> act = () => listener.CollectAsync(TimeSpan.FromMilliseconds(10));
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
 }

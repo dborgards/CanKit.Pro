@@ -128,6 +128,12 @@ foreach (var r in responses)
   collected in arrival order.
 - `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `UsePadding`, `PaddingByte`,
   and `NAs` (TX-confirm timeout).
+- **Listening across collections**: `CollectResponsesAsync` subscribes per call, so a response
+  that arrives between two calls — or between a `SendAsync` and the first call — is missed.
+  `client.Listen()` subscribes once and returns an `IsoTpFunctionalListener` whose
+  `CollectAsync(window)` collects from that standing subscription: obtained before the send,
+  it hears the fastest reply, and what arrives between two collections is buffered for the
+  next. Dispose it to end the subscription.
 
 ## Non-scope (yet)
 
