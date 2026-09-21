@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.IsoTp;
@@ -145,7 +146,7 @@ public sealed class UdsFunctionalClient : IDisposable
             var data = r.Data;
             bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed);
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
-            if (negative && data[2] == NrcResponsePending)
+            if (IsResponsePending(data, sid))
                 _openWindows.Extend(sid, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
@@ -165,12 +166,8 @@ public sealed class UdsFunctionalClient : IDisposable
                 var remaining = SuppressedResponseWindows.Remaining(until);
                 if (remaining <= TimeSpan.Zero) break;
                 var heard = await _client.CollectResponsesAsync(remaining, cancellationToken).ConfigureAwait(false);
-                foreach (var r in heard)
-                {
-                    var data = r.Data;
-                    if (data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending)
-                        until = Math.Max(until, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
-                }
+                if (heard.Any(r => IsResponsePending(r.Data, sid)))
+                    until = Math.Max(until, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
             }
         }
         finally
@@ -237,6 +234,9 @@ public sealed class UdsFunctionalClient : IDisposable
         }
         return true;
     }
+
+    private static bool IsResponsePending(byte[] data, byte sid)
+        => data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending;
 
     // Mirrors UdsClientImpl.HasSubFunction (ISO 14229-1 table 2).
     private static bool HasSubFunction(byte sid) => sid switch
