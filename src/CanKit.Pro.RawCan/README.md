@@ -112,6 +112,13 @@ Concurrent, byte-identical sends are matched to their own confirmation in FIFO o
 cross-matched (FR-RAW-031). The per-call timeout is configurable (FR-RAW-034); disposing the
 service cancels any outstanding `SendConfirmed` calls rather than leaving them to time out.
 
+A confirmation carries two host-monotonic readings that bracket the driver call, taken inside
+the service's send lock: `HostHandoffTimestamp` immediately before it and `HostTransmitTimestamp`
+immediately after. A response deadline starts at the second; whether a received frame can be a
+response to this transmission at all is decided against the first — the call itself can include
+a peer's answer on an in-process bus, or a completion callback on an asynchronous adapter, so a
+fast reply can be stamped before the second reading (#146, #147).
+
 ## Migrating from 1.2.x
 
 Subscriptions used to yield a bare `CanFrameView`. They now yield a `CanFrameEvent` carrying the

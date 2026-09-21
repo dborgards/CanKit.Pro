@@ -183,8 +183,17 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             //
             // The endpoint is the instance-level identity, and this filter already applies it: a
             // channel transmits on TxCanId and accepts only RxCanId, so its own frames cannot
-            // match its own filter. No further self-check is needed here.
-            _subscription = _service.Subscribe(idFilter, includeEcho: true);
+            // match its own filter -- unless the two are the same identifier and nothing in the
+            // payload tells the directions apart either: Extended addressing writes the target
+            // byte outbound and accepts only the source byte inbound, which the reader's
+            // address-extension filter already applies (Codex on #147). Only when the
+            // identifier *and* the extension byte coincide is a host echo of this channel's own
+            // frame indistinguishable from the peer's, and there it is withheld (#56); a
+            // reciprocal in-process pair of that shape is unreachable by construction.
+            bool selfAddressed = _endpoint.TxCanId == _endpoint.RxCanId
+                && (!_endpoint.UsesAddressExtension
+                    || _endpoint.AddressExtension == _endpoint.RxAddressExtension);
+            _subscription = _service.Subscribe(idFilter, includeEcho: !selfAddressed);
         }
         catch
         {
@@ -201,7 +210,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         => await SendWithTransmitStampAsync(pdu, cancellationToken).ConfigureAwait(false);
 
     /// <inheritdoc />
-    public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+    public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
         CancellationToken cancellationToken = default)
     {
         if (pdu.Length == 0)
@@ -218,12 +227,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         try
         {
             ThrowIfDisposed();
-            var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var tcs = new TaskCompletionSource<IsoTpTransmitStamps>(TaskCreationOptions.RunContinuationsAsynchronously);
             var pduBytes = pdu.ToArray();
             CancellationTokenRegistration ctr = cancellationToken.CanBeCanceled
                 ? cancellationToken.Register(static state =>
                 {
-                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<long>, CancellationToken))state!;
+                    var (self, t, ct) = ((IsoTpChannel, TaskCompletionSource<IsoTpTransmitStamps>, CancellationToken))state!;
                     self.CancelInFlightSend(t, ct);
                 }, (this, tcs, cancellationToken))
                 : default;
@@ -238,7 +247,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 tcs.TrySetException(ex);
             }
 
-            long transmitStamp;
+            IsoTpTransmitStamps transmitStamp;
             try
             {
                 transmitStamp = await tcs.Task.ConfigureAwait(false);
@@ -360,54 +369,57 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // drained. Post+wait so anything already queued on the mailbox is settled first. A
         // reception that began after the stamp is kept: it is not what the caller asked to
         // drop, and its PDU may be the one the caller waits for next.
-        var cleared = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Called from the actor itself -- a BackgroundExceptionOccurred handler runs there --
+        // the post-and-wait below would wait for the very loop it is on (#56). The clear runs
+        // inline instead: it is on the single writer already.
+        if (_actor is ProtocolActor { IsOnCurrentActor: true })
+            return ClearReceptionsBefore(stamp);
+
+        Task<int> cleared;
         try
         {
-            _actor.Post(() =>
-            {
-                int discarded = 0;
-                try
-                {
-                    var rx = _rx;
-                    if (rx is not null && rx.Announce.FirstFrameArrivalTimestamp < stamp)
-                    {
-                        rx.CancelDeadline();
-                        _rx = null;
-                    }
-                    foreach (var reception in Volatile.Read(ref _receptionsInProgress)
-                                 .Where(r => r.FirstFrameArrivalTimestamp < stamp))
-                        WithdrawReception(reception);
-                    // Drain both PDU and AbortRx-fault items from before the stamp. Leaving a
-                    // fault behind would poison the next ReceiveAsync after a higher-layer
-                    // timeout/cancel -- the opposite of the reset intent. Items from after it
-                    // go back in their order; this runs on the inbox's single writer.
-                    var kept = new List<RxInboxItem>();
-                    while (_pduInbox.Reader.TryRead(out var item))
-                    {
-                        // An error item carries the first-frame stamp of the reception it
-                        // aborted, so an abort of a reception that began after the stamp is
-                        // kept as that reception's outcome (Codex on #143).
-                        if (item.FirstFrameArrivalTimestamp >= stamp)
-                            kept.Add(item);
-                        else
-                            discarded++;
-                    }
-                    foreach (var item in kept)
-                        _pduInbox.Writer.TryWrite(item);
-                }
-                finally
-                {
-                    cleared.TrySetResult(discarded);
-                }
-            });
+            cleared = _actor.PostAsync(() => ClearReceptionsBefore(stamp));
         }
         catch (ObjectDisposedException)
         {
-            cleared.TrySetResult(0);
+            return 0; // channel tearing down: nothing left to clear
         }
 
-        // The job completes the source with a result on every path, so nothing to catch.
-        return cleared.Task.GetAwaiter().GetResult();
+        return cleared.GetAwaiter().GetResult();
+    }
+
+    // On the actor. Clears the reassembly, the records and the inbox items that belong to
+    // receptions from before the stamp; returns how many inbox items went.
+    private int ClearReceptionsBefore(long stamp)
+    {
+        int discarded = 0;
+        var rx = _rx;
+        if (rx is not null && rx.Announce.FirstFrameArrivalTimestamp < stamp)
+        {
+            rx.CancelDeadline();
+            _rx = null;
+        }
+        foreach (var reception in Volatile.Read(ref _receptionsInProgress)
+                     .Where(r => r.FirstFrameArrivalTimestamp < stamp))
+            WithdrawReception(reception);
+        // Drain both PDU and AbortRx-fault items from before the stamp. Leaving a fault behind
+        // would poison the next ReceiveAsync after a higher-layer timeout/cancel -- the
+        // opposite of the reset intent. Items from after it go back in their order; this runs
+        // on the inbox's single writer.
+        var kept = new List<RxInboxItem>();
+        while (_pduInbox.Reader.TryRead(out var item))
+        {
+            // An error item carries the first-frame stamp of the reception it aborted, so an
+            // abort of a reception that began after the stamp is kept as that reception's
+            // outcome (Codex on #143).
+            if (item.FirstFrameArrivalTimestamp >= stamp)
+                kept.Add(item);
+            else
+                discarded++;
+        }
+        foreach (var item in kept)
+            _pduInbox.Writer.TryWrite(item);
+        return discarded;
     }
 
     /// <inheritdoc />
@@ -577,6 +589,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         IsoTpReceptionInProgress? announce = null;
         if (IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci)
             && pci.Type == PciType.FirstFrame
+            && !FitsASingleFrame(pci, payload.Length)
             && frameArrival >= Volatile.Read(ref _discardStamp))
         {
             announce = new IsoTpReceptionInProgress(frameArrival, pci.Length,
@@ -611,7 +624,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // TX side (all methods run on the actor loop unless noted)
     // -----------------------------------------------------------------------------------------
 
-    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<long> tcs, CancellationToken ct)
+    private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
         // Fix (Bugbot 3594960794): the send may have been canceled between when the caller
         // posted us and when the actor got around to running us -- CancelInFlightSend may have
@@ -666,7 +679,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    private static bool IsSendAlreadyCanceled(TaskCompletionSource<long> tcs, CancellationToken ct)
+    private static bool IsSendAlreadyCanceled(TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
         if (!tcs.Task.IsCompleted && !ct.IsCancellationRequested)
             return false;
@@ -760,6 +773,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             Exception? failure = null;
             try
             {
+                // The fallback handoff instant, for a service that reports none: taken here,
+                // before the call, it is no later than the frame's wire instant, but the
+                // service's own lock wait can sit between the two; the service's reading,
+                // taken inside that lock, replaces it in OnSendConfirmed (Codex on #147).
+                if (expected is not null)
+                    expected.LastFrameHandoffTimestamp = Stopwatch.GetTimestamp();
                 var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
                 confirmation = c;
             }
@@ -861,6 +880,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // CompleteTx hands back, which is the instant the request finished transmitting.
         if (conf.HostTransmitTimestamp > 0)
             expected.LastFrameTransmitTimestamp = conf.HostTransmitTimestamp;
+        // Frames go out one at a time, so this is the last frame's by the time the send
+        // completes. A caller's cutoff for "could still be a response to this PDU" must not be
+        // later than that frame's wire instant; the acceptance stamp above can be (#146), and
+        // so can a reading taken outside the service's lock (Codex on #147).
+        if (conf.HostHandoffTimestamp > 0)
+            expected.LastFrameHandoffTimestamp = conf.HostHandoffTimestamp;
 
         if (!conf.Confirmed)
         {
@@ -979,7 +1004,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.NBsDeadline?.Complete();
         tx.StMinTimer?.Dispose();
         _tx = null;
-        tx.Tcs.TrySetResult(tx.LastFrameTransmitTimestamp);
+        tx.Tcs.TrySetResult(new IsoTpTransmitStamps(tx.LastFrameHandoffTimestamp, tx.LastFrameTransmitTimestamp));
     }
 
     private void FailTx(Exception ex)
@@ -991,7 +1016,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.Fail(ex);
     }
 
-    private void CancelInFlightSend(TaskCompletionSource<long> tcs, CancellationToken ct)
+    private void CancelInFlightSend(TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
         // Complete the caller's await immediately (any thread). BeginSendOnLoop may still be
         // sitting in the actor mailbox ahead of our cleanup work item; completing `tcs` here
@@ -1083,11 +1108,34 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         EmitPdu(pdu, frameArrival);
     }
 
+    // A First Frame announcing no more than a Single Frame of the same CAN_DL could carry is
+    // ignored (ISO 15765-2 §9.6.3.1, #56): the capacity is 7 less the address extension in the
+    // short PCI form (CAN_DL 8), CAN_DL - 2 less the extension in the escape form beyond it.
+    private bool FitsASingleFrame(in Pci pci, int canDl)
+    {
+        int addrExtBytes = _endpoint.UsesAddressExtension ? 1 : 0;
+        int capacity = canDl <= IsoTpFrameCodec.ClassicCanMaxData
+            ? IsoTpFrameCodec.ClassicCanMaxData - 1 - addrExtBytes
+            : canDl - 2 - addrExtBytes;
+        return pci.Length <= capacity;
+    }
+
     // True when a reassembly is now in progress for this First Frame; false when the frame was
-    // refused or already carried the whole PDU.
+    // ignored or refused.
     private bool TryBeginRx(byte[] payload, Pci pci, long frameArrival,
         IsoTpReceptionInProgress announce)
     {
+        // Two frames are not First Frames and are ignored -- with no effect on a reassembly in
+        // flight, which only a First Frame proper aborts (Bugbot on #147). A First Frame must
+        // be a full frame: classic CAN_DL 8, CAN FD at least 8 -- its CAN_DL is the RX_DL every
+        // Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8, #27); a shorter one
+        // is ignored. And one announcing what a Single Frame of the same CAN_DL could have
+        // carried is ignored too (§9.6.3.1, #56): no Flow Control, no reassembly. The Single
+        // Frame capacity at that CAN_DL is 7 less the address extension in the short PCI form
+        // (CAN_DL 8) and CAN_DL - 2 less the extension in the escape form beyond it.
+        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return false;
+        if (FitsASingleFrame(pci, payload.Length)) return false;
+
         // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
         // FC(OVFLW) and no replacement session is started (Bugbot 3596527680).
@@ -1097,15 +1145,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 "ISO-TP First Frame aborted in-flight multi-frame reception."));
         }
 
-        // A First Frame must be a full frame: classic CAN_DL 8, CAN FD at least 8 — its CAN_DL
-        // is the RX_DL every Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8,
-        // #27). A shorter one is not a First Frame; it is ignored.
-        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return false;
-
         // Cap reassembly allocation to the codec limit for this frame kind (Bugbot 3596212802)
         // and to MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to int.MaxValue;
         // refuse with FC(OVFLW) and do not allocate.
-        if (pci.Length < 1 || pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
+        if (pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
         {
             SendOverflowFlowControl();
             return false;
@@ -1129,21 +1172,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         Array.Copy(payload, pci.DataOffset, buffer, 0, firstChunk);
 
-        // Reply with FC(CTS, BS, STmin) advertising our own block size / separation time.
-        // ISO 15765-2 still expects an FC after FF even when the FF already carried the full
-        // announced length (defensive path for peers that finish in one FF).
+        // Reply with FC(CTS, BS, STmin) advertising our own block size / separation time. The
+        // announced length exceeds what one frame carries (checked above), so at least one
+        // Consecutive Frame follows.
         var fc = IsoTpFrameCodec.BuildFlowControl(_endpoint, FlowStatus.ClearToSend,
             _options.LocalBlockSize, _localStMinRaw,
             _options.UseCanFd, _options.UsePadding, _options.PaddingByte);
         SendUnsequencedFrame(fc);
-
-        // If the FF already contains the full PDU, complete immediately — do not arm N_Cr
-        // waiting for a CF that will never arrive.
-        if (firstChunk >= pci.Length)
-        {
-            EmitPdu(buffer, frameArrival);
-            return false;
-        }
 
         _rx = new RxState(buffer, received: firstChunk,
             expectedSn: IsoTpFrameCodec.FirstConsecutiveSequenceNumber,
@@ -1263,8 +1298,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         switch (pci.FlowStatus)
         {
             case FlowStatus.ClearToSend:
-                tx.BlockSize = pci.BlockSize;
-                tx.StMin = pci.StMin;
+                // BS and STmin are the first FC.CTS's for the whole transfer; ISO 15765-2 has
+                // the sender ignore the values a later FC.CTS carries (#56).
+                if (!tx.FlowParametersTaken)
+                {
+                    tx.BlockSize = pci.BlockSize;
+                    tx.StMin = pci.StMin;
+                    tx.FlowParametersTaken = true;
+                }
                 tx.CfsInCurrentBlock = 0;
                 tx.WaitFramesReceived = 0;
                 tx.State = TxStage.SendingCf;
@@ -1359,13 +1400,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             _rx = null;
         }
 
-        RaiseBackgroundException(ex);
         _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex,
             rx?.Announce.FirstFrameArrivalTimestamp ?? Stopwatch.GetTimestamp()));
         // After the error item, for the same reason the completion path withdraws it after the
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
         if (rx is not null)
             WithdrawReception(rx.Announce);
+        // Raised last: a handler that discards inline (#56) then finds the fault in the inbox
+        // and drains it, instead of the fault landing after the drain and poisoning the next
+        // receive.
+        RaiseBackgroundException(ex);
     }
 
     private void SendOverflowFlowControl()
@@ -1483,7 +1527,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private sealed class TxState
     {
-        public TxState(byte[] pdu, TaskCompletionSource<long> tcs)
+        public TxState(byte[] pdu, TaskCompletionSource<IsoTpTransmitStamps> tcs)
         {
             Pdu = pdu;
             Tcs = tcs;
@@ -1491,7 +1535,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         public byte[] Pdu { get; }
-        public TaskCompletionSource<long> Tcs { get; }
+        public TaskCompletionSource<IsoTpTransmitStamps> Tcs { get; }
 
         /// <summary>
         /// <see cref="Stopwatch.GetTimestamp"/> reading reported by the bus for the most recent
@@ -1500,6 +1544,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         /// instant P2 starts.
         /// </summary>
         public long LastFrameTransmitTimestamp { get; set; }
+        /// <summary>Just before the latest frame was handed to the driver (#146).</summary>
+        public long LastFrameHandoffTimestamp { get; set; }
 
         public TxStage State { get; set; }
         public int Offset { get; set; }
@@ -1509,6 +1555,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // Peer-provided from the last CTS-FC.
         public byte BlockSize { get; set; }
         public TimeSpan StMin { get; set; }
+        /// <summary>Whether the first FC.CTS of this transfer has set BS and STmin.</summary>
+        public bool FlowParametersTaken { get; set; }
 
         // Wait frame tracking (FR-TP-011).
         public int WaitFramesReceived { get; set; }
