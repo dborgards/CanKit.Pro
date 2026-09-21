@@ -171,8 +171,7 @@ internal sealed partial class CanOpenNode
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     // A frame on the SYNC CAN-ID (1005h) is a SYNC and nothing else, so a PDO
                     // cannot be created there (Codex on #133); 1005h refuses the mirror image.
-                    if ((v & CanOpenCobId.InvalidBit) == 0
-                        && (v & CanOpenCobId.CanIdMask) == (_od.ReadUnsigned(Co.SyncCobId, 0x00) & CanOpenCobId.CanIdMask))
+                    if ((v & CanOpenCobId.InvalidBit) == 0 && IsTheSyncCanId(v & CanOpenCobId.CanIdMask))
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     return OdWriteDecision.Accept;
                 }

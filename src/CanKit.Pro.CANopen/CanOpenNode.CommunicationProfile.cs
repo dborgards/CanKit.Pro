@@ -244,11 +244,20 @@ internal sealed partial class CanOpenNode
             && (cur & lower30) != (v & lower30))
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
         // A CAN-ID carries one communication object of this node: a frame on the SYNC CAN-ID is
-        // a SYNC and nothing else, so 1005h cannot move onto the CAN-ID of a PDO that exists
-        // (Codex on #133). The PDO side refuses the mirror image.
-        if (IsCanIdOfAValidPdo(v & CanOpenCobId.CanIdMask)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        // a SYNC and nothing else, so 1005h cannot move onto the CAN-ID of a PDO that exists or
+        // of a valid EMCY (Codex on #133). The PDO and EMCY sides refuse the mirror image.
+        uint canId = v & CanOpenCobId.CanIdMask;
+        if (IsCanIdOfAValidPdo(canId) || IsCanIdOfTheValidEmcy(canId)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
         return OdWriteDecision.Accept;
     }
+
+    private bool IsCanIdOfTheValidEmcy(uint canId)
+    {
+        uint word = _od.ReadUnsigned(Co.EmcyCobId, 0x00);
+        return (word & CanOpenCobId.InvalidBit) == 0 && (word & CanOpenCobId.CanIdMask) == canId;
+    }
+
+    private bool IsTheSyncCanId(uint canId) => (_od.ReadUnsigned(Co.SyncCobId, 0x00) & CanOpenCobId.CanIdMask) == canId;
 
     private bool IsCanIdOfAValidPdo(uint canId)
     {
@@ -276,6 +285,10 @@ internal sealed partial class CanOpenNode
         const uint lower30 = 0x3FFF_FFFF;
         if ((cur & CanOpenCobId.InvalidBit) == 0 && (v & CanOpenCobId.InvalidBit) == 0
             && (cur & lower30) != (v & lower30))
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        // A valid EMCY cannot sit on the SYNC CAN-ID: every data frame there is a SYNC, and on
+        // a bus that echoes the node's own EMCY would come back as one (Codex on #133).
+        if ((v & CanOpenCobId.InvalidBit) == 0 && IsTheSyncCanId(v & CanOpenCobId.CanIdMask))
             return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
         return OdWriteDecision.Accept;
     }

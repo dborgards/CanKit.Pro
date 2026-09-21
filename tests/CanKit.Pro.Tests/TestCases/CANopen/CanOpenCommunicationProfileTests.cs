@@ -719,6 +719,31 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x1005, 0x00).Should().Be(0x0000_0081u, "a destroyed PDO on the old SYNC CAN-ID does not hold 1005h back");
     }
 
+    // FR-CO-018 (#133 review) — the same for EMCY: a valid 1014h cannot sit on the SYNC CAN-ID
+    // (on a bus that echoes, the node's own EMCY would come back as a SYNC), and 1005h cannot be
+    // moved onto the CAN-ID of a valid EMCY. Moving the EMCY there is two writes, invalid first
+    // (§7.5.2.17); the invalid one on the SYNC CAN-ID is no collision, the valid one is.
+    [Fact]
+    public async Task Sync_And_Emcy_Cannot_Share_A_CanId()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+
+        await DownloadAsync(master, Slave, 0x1014, 0x00, U32(CanOpenCobId.InvalidBit | CanOpenCobId.Sync));
+        await ExpectAbortAsync(() => DownloadAsync(master, Slave, 0x1014, 0x00, U32(CanOpenCobId.Sync)), SdoAbortCode.ValueRangeExceeded);
+        (await UploadUnsignedAsync(master, Slave, 0x1014, 0x00)).Should().Be(CanOpenCobId.InvalidBit | CanOpenCobId.Sync, "1014h stays invalid");
+
+        od.WriteUnsigned(0x1014, 0x00, CanOpenCobId.InvalidBit | CanOpenCobId.Emcy(Slave));
+        od.WriteUnsigned(0x1014, 0x00, CanOpenCobId.Emcy(Slave));
+        Action syncOntoEmcy = () => od.WriteUnsigned(0x1005, 0x00, CanOpenCobId.Emcy(Slave));
+        syncOntoEmcy.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06090030");
+        od.ReadUnsigned(0x1005, 0x00).Should().Be(0x0000_0080u, "1005h stays where it was");
+    }
+
     // FR-CO-018: the same rule on the local path — the dictionary refuses the value with an
     // ArgumentException naming the abort code the SDO write would have produced.
     [Fact]
@@ -862,6 +887,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         await DownloadAsync(master, Slave, 0x1014, 0x00, U32(CanOpenCobId.InvalidBit | CanOpenCobId.Emcy(Slave)));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => slave.SendEmcyAsync(errorCode: 0x1000, errorRegister: 0x01));
+        slave.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(0u, "an EMCY that never reaches the bus leaves 1001h alone");
 
         var received = NewTcs<EmcyMessage>();
         master.EmcyReceived += (_, e) =>
@@ -873,11 +899,11 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         (await received.Task.WithTimeoutAsync(ShortTimeout)).ErrorCode.Should().Be((ushort)0x1000);
     }
 
-    // FR-CO-014 (e, #133 review) — the error register and the transmission are one ordered step
-    // on the actor loop, and every EMCY goes out through one chain: with the loop held, two calls
-    // move 1001h only when the loop runs them (not ahead of it, on the caller's thread), the
-    // second frame reaches the bus only once the first is confirmed, and the register a master
-    // reads is the one of the last frame on the wire. The bus parks each transmission's
+    // FR-CO-014 (e, #133 review) — every EMCY goes out through one chain, and 1001h is written
+    // inside it, right before its frame: with the loop held, two calls leave 1001h untouched;
+    // once the loop runs them, the register on the bus and the one in the dictionary are the
+    // same at every step — the first EMCY's while it is the last on the wire, the second's only
+    // once the first is confirmed and the second transmitted. The bus parks each transmission's
     // confirmation until the test releases it, which is what makes the chain observable.
     [Fact]
     public async Task Overlapping_Emcys_Reach_The_Bus_In_The_Order_The_Register_Was_Written()
@@ -905,7 +931,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the first EMCY is on the wire, unconfirmed
         await Task.Delay(200);
         bus.TransmitCount.Should().Be(transmitsBefore + 1, "the second EMCY waits for the first one's confirmation");
-        slave.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(2u, "both registers were written on the loop, in order");
+        slave.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(1u, "the register is the first EMCY's while that is the last one on the wire");
 
         bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
         await first.WithTimeoutAsync(ShortTimeout);
@@ -1420,9 +1446,13 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         grow.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06040043");
         od.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "the count that would show two consumers for 0x13 is refused");
 
-        od.WriteUnsigned(0x1016, 0x01, HeartbeatEntry(0x12, 1000));
-        od.WriteUnsigned(0x1016, 0x00, 2);
-        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "with one consumer per producer the array grows back");
+        // AddHeartbeatConsumer replaces what the hidden slot held, so it grows over it whatever
+        // that was: the entry is written while the slot is still outside the count, then the
+        // count — which is then validated against the entry it will show.
+        node.AddHeartbeatConsumer(0x14, TimeSpan.FromSeconds(3));
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "the hidden slot was reused for the new producer");
+        od.ReadUnsigned(0x1016, 0x02).Should().Be(HeartbeatEntry(0x14, 3000));
+        od.ReadUnsigned(0x1016, 0x01).Should().Be(HeartbeatEntry(0x13, 1000));
     }
 
     // FR-CO-023: RemoveHeartbeatConsumer clears the producer's slot and the consumer stops

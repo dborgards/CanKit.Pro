@@ -315,7 +315,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // them, so growing again reuses such an entry rather than re-declaring it.
                 if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
                     _od.Declare(Co.ConsumerHeartbeat, (byte)slot, OdDataType.Unsigned32, OdAccess.ReadWrite, new byte[4], pdoMappable: false);
+                // The entry first, while the slot is still outside the count — what a hidden slot
+                // held is being replaced, not brought back — then the count, which is validated
+                // against the entry it will show (Codex on #133).
+                _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
                 _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
+                return;
             }
             _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
         });
@@ -380,11 +385,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var msg = new EmcyMessage(_nodeId, errorCode, errorRegister, manufacturerSpecific.Span);
         return _actor.PostAsync(() =>
         {
-            // 1001h is "a part of an emergency object" (CiA 301 §7.5.2.2): the register a master
-            // reads is the one the last EMCY carried. Written here, on the loop, in the same
-            // step that orders the transmission, so two overlapping calls cannot leave the
-            // register of one on the bus and the other in the dictionary (Codex on #133).
-            _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
             if (!_emcyValid)
                 throw new InvalidOperationException("EMCY is disabled: bit 31 of 1014h (COB-ID EMCY) is set.");
             if (_state == NmtState.Stopped)
@@ -399,7 +399,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     }
 
     // Every EMCY this node transmits goes out through one chain, so the wire order is the order
-    // the actor decided — the order the error register was written in. Actor loop only.
+    // the actor decided. 1001h is "a part of an emergency object" (CiA 301 §7.5.2.2): the
+    // register a master reads is the one the last EMCY on the bus carried, so it is written
+    // inside the chain, right before its frame is transmitted — not when the call was posted,
+    // nor for an EMCY that is disabled, held or cancelled and never reaches the bus (Codex on
+    // #133). Actor loop only.
     private Task _emcySendChain = Task.CompletedTask;
 
     // Every frame of this node on 0x700 + id — boot-up, state change, producer tick, guarding
@@ -423,8 +427,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     {
         uint cobId = _emcyCobId;
         var frame = msg.Encode();
+        byte errorRegister = msg.ErrorRegister;
         var link = _emcySendChain.ContinueWith(
-            _ => SendControlFrame(cobId, frame, cancellationToken),
+            _ =>
+            {
+                if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+                _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
+                return SendControlFrame(cobId, frame, cancellationToken);
+            },
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _emcySendChain = link;
         return link;

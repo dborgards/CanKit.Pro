@@ -192,8 +192,8 @@ explicit `cobId` clears it.
 **PDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID, and a frame on it
 actuates each of them; two valid TPDO records may as well, and an RTR on it reads each of them.
 SYNC is the exception: a frame on the CAN-ID in `1005h` is a SYNC and nothing else, so `1005h`
-cannot be moved onto the CAN-ID of a PDO that exists and a PDO cannot be created on the SYNC
-CAN-ID (`0609 0030h` either way).
+cannot be moved onto the CAN-ID of a PDO that exists or of a valid EMCY, and neither a PDO nor
+a valid EMCY can be put on the SYNC CAN-ID (`0609 0030h` either way).
 
 **Synchronous RPDOs.** `ConfigureRpdo(…, transmission: RpdoTransmission.Synchronous)` writes
 `00h` to `1400h:02`: received data is held and written to the object dictionary — and reported
