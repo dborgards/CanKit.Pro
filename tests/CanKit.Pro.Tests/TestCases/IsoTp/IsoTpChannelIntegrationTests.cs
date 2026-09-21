@@ -2149,7 +2149,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Let the actor run: A completes into the inbox and is withdrawn; B stays in progress.
         gate.Release();
         await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
-        var delivered = await receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        using var receiveCts = new CancellationTokenSource(ShortTimeout);
+        var delivered = await receiver.ReceiveAsync(receiveCts.Token);
         delivered.Should().Equal(a);
         seen = receiver.GetReceptionsInProgress();
         seen.Should().HaveCount(1);
