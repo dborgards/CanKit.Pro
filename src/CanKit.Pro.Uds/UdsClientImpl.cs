@@ -1030,11 +1030,19 @@ internal sealed class UdsClientImpl : IUdsClient
     // of a transfer that is then discarded as stray (Codex on #143). A negative response is a
     // Single Frame and never gets here.
     private bool ResponseBeganInTime(UdsServiceId serviceId, TimeSpan budget, long budgetStart)
-        => _channel.TryGetReceptionInProgress(out var reception)
-           && reception is not null
-           && ElapsedSince(budgetStart, reception.FirstFrameArrivalTimestamp) <= budget
-           && reception.FirstFrameData.Length > 0
-           && reception.FirstFrameData.Span[0] == (byte)((byte)serviceId + PositiveResponseOffset);
+    {
+        byte positiveSid = (byte)((byte)serviceId + PositiveResponseOffset);
+        // Several can be pending when the channel's actor is behind the bus; any one that is
+        // this request's response and began in time keeps the wait going.
+        foreach (var reception in _channel.GetReceptionsInProgress())
+        {
+            if (ElapsedSince(budgetStart, reception.FirstFrameArrivalTimestamp) <= budget
+                && reception.FirstFrameData.Length > 0
+                && reception.FirstFrameData.Span[0] == positiveSid)
+                return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// Elapsed time between two <see cref="Stopwatch.GetTimestamp"/> readings, defaulting the

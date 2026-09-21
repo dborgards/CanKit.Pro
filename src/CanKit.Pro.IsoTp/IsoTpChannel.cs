@@ -89,7 +89,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     // The arrival stamp of the First Frame of the reception in progress, or 0 when there is none.
     // Written on the actor loop with _rx; read from any thread by TryGetReceptionInProgress.
-    private IsoTpReceptionInProgress? _rxInProgress;
+    // Copy-on-write: the reader appends, the actor withdraws, callers read a snapshot.
+    private IsoTpReceptionInProgress[] _receptionsInProgress = Array.Empty<IsoTpReceptionInProgress>();
 
     private int _disposed;
 
@@ -269,10 +270,36 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     /// <inheritdoc />
-    public bool TryGetReceptionInProgress(out IsoTpReceptionInProgress? reception)
+    public IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress()
+        => Array.AsReadOnly(Volatile.Read(ref _receptionsInProgress));
+
+    private void PublishReception(IsoTpReceptionInProgress reception)
     {
-        reception = Volatile.Read(ref _rxInProgress);
-        return reception is not null;
+        while (true)
+        {
+            var current = Volatile.Read(ref _receptionsInProgress);
+            if (Array.IndexOf(current, reception) >= 0) return;
+            var next = new IsoTpReceptionInProgress[current.Length + 1];
+            Array.Copy(current, next, current.Length);
+            next[current.Length] = reception;
+            if (Interlocked.CompareExchange(ref _receptionsInProgress, next, current) == current)
+                return;
+        }
+    }
+
+    private void WithdrawReception(IsoTpReceptionInProgress reception)
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _receptionsInProgress);
+            int at = Array.IndexOf(current, reception);
+            if (at < 0) return;
+            var next = new IsoTpReceptionInProgress[current.Length - 1];
+            Array.Copy(current, 0, next, 0, at);
+            Array.Copy(current, at + 1, next, at, current.Length - at - 1);
+            if (Interlocked.CompareExchange(ref _receptionsInProgress, next, current) == current)
+                return;
+        }
     }
 
     /// <inheritdoc />
@@ -305,7 +332,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 {
                     _rx?.CancelDeadline();
                     _rx = null;
-                    Volatile.Write(ref _rxInProgress, null);
+                    Volatile.Write(ref _receptionsInProgress, Array.Empty<IsoTpReceptionInProgress>());
                 }
                 finally
                 {
@@ -454,8 +481,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
                 // A First Frame is published here, on the reader, before the actor sees it: a
                 // caller whose deadline fires while the actor is behind must find the frame at
-                // its arrival, not at its processing (Codex on #143). The actor confirms the
-                // record when it accepts the frame and withdraws it when it does not.
+                // its arrival, not at its processing (Codex on #143). Appended, not written
+                // over: a PDU whose frames are all still in the mailbox is a reception in
+                // progress too, and the next First Frame must not hide it (Codex, again). The
+                // actor withdraws each record on its outcome.
                 IsoTpReceptionInProgress? announce = null;
                 if (IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci)
                     && pci.Type == PciType.FirstFrame)
@@ -463,7 +492,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                     announce = new IsoTpReceptionInProgress(frameArrival, pci.Length,
                         new ReadOnlyMemory<byte>(payload, pci.DataOffset,
                             Math.Max(0, payload.Length - pci.DataOffset)));
-                    Volatile.Write(ref _rxInProgress, announce);
+                    PublishReception(announce);
                 }
                 _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival, announce));
             }
@@ -928,9 +957,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             case PciType.FirstFrame:
                 if (!TryBeginRx(payload, pci, frameArrival, announce!))
                 {
-                    // Refused, or complete in the one frame: the reader's record is withdrawn --
-                    // unless a later First Frame has already replaced it.
-                    Interlocked.CompareExchange(ref _rxInProgress, null, announce);
+                    // Refused, or complete in the one frame (and then already in the inbox):
+                    // the reader's record is withdrawn.
+                    WithdrawReception(announce!);
                 }
                 break;
             case PciType.ConsecutiveFrame:
@@ -1026,10 +1055,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             blockCounter: _options.LocalBlockSize,
             rxDl: payload.Length,
             announce);
-        // Confirm the reader's record. It may already have been overwritten by a later First
-        // Frame the reader saw; that frame is behind this one in the mailbox and will abort
-        // this reassembly, so leaving the newer record in place is the truthful state.
-        Interlocked.CompareExchange(ref _rxInProgress, announce, null);
+        // The reader published the record; re-published here only if a DiscardPendingPdus
+        // posted between the two removed it, so the list states what is in progress.
+        PublishReception(announce);
         ArmNCr();
         return true;
     }
@@ -1078,9 +1106,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // for a caller whose deadline ended there (#28).
             EmitPdu(pdu, frameArrival, rx.Announce.FirstFrameArrivalTimestamp);
             // Withdrawn only once the PDU is in the inbox: a caller whose deadline expires in
-            // between must find either the reception in progress or the PDU, never neither. And
-            // only this reception's record: a newer First Frame's stays.
-            Interlocked.CompareExchange(ref _rxInProgress, null, rx.Announce);
+            // between must find either the reception in progress or the PDU, never neither.
+            WithdrawReception(rx.Announce);
             return;
         }
 
@@ -1242,7 +1269,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // After the error item, for the same reason the completion path withdraws it after the
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
         if (rx is not null)
-            Interlocked.CompareExchange(ref _rxInProgress, null, rx.Announce);
+            WithdrawReception(rx.Announce);
     }
 
     private void SendOverflowFlowControl()

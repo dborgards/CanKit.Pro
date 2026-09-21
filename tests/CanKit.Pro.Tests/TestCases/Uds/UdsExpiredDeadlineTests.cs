@@ -348,11 +348,8 @@ public class UdsExpiredDeadlineTests
             return false;
         }
 
-        public bool TryGetReceptionInProgress(out IsoTpReceptionInProgress? reception)
-        {
-            reception = null;
-            return false;
-        }
+        public IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress()
+            => Array.Empty<IsoTpReceptionInProgress>();
 
         private long FinalArrivalStamp() => _arrivalStamp + Ticks(PendingToFinalArrivalGap);
 

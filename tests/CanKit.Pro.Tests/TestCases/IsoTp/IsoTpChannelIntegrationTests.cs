@@ -2083,29 +2083,89 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var ffTooLong = IsoTpFrameCodec.BuildFirstFrame(epPeer, tooLong.Length, tooLong.AsSpan(0, ffData), isCanFd: false);
         busPeer.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ffTooLong));
 
-        IsoTpReceptionInProgress? seen = null;
-        var deadline = Stopwatch.StartNew();
-        while (!receiver.TryGetReceptionInProgress(out seen) && deadline.Elapsed < ShortTimeout)
-            await Task.Delay(5);
-        seen.Should().NotBeNull("the reader publishes a First Frame before the actor processes it");
-        seen!.AnnouncedLength.Should().Be(20);
-        seen.FirstFrameData.ToArray().Should().Equal(tooLong.Take(ffData));
+        var seen = await WaitForReceptionsAsync(receiver, count: 1);
+        seen.Should().HaveCount(1, "the reader publishes a First Frame before the actor processes it");
+        seen[0].AnnouncedLength.Should().Be(20);
+        seen[0].FirstFrameData.ToArray().Should().Equal(tooLong.Take(ffData));
 
         // ... and withdrawn once the actor refuses it with FC(OVFLW).
         gate.Release();
         await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
-        receiver.TryGetReceptionInProgress(out _).Should().BeFalse("the actor refused the frame");
+        receiver.GetReceptionsInProgress().Should().BeEmpty("the actor refused the frame");
 
         // A First Frame the channel accepts stays in progress after the actor has run.
         byte[] fits = Enumerable.Range(0x40, 12).Select(i => (byte)i).ToArray();
         var ffFits = IsoTpFrameCodec.BuildFirstFrame(epPeer, fits.Length, fits.AsSpan(0, ffData), isCanFd: false);
         busPeer.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ffFits));
-        deadline.Restart();
-        while (!receiver.TryGetReceptionInProgress(out seen) && deadline.Elapsed < ShortTimeout)
-            await Task.Delay(5);
-        seen.Should().NotBeNull();
+        (await WaitForReceptionsAsync(receiver, count: 1)).Should().HaveCount(1);
         await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
-        receiver.TryGetReceptionInProgress(out seen).Should().BeTrue("the actor accepted the frame");
-        seen!.AnnouncedLength.Should().Be(12);
+        seen = receiver.GetReceptionsInProgress();
+        seen.Should().HaveCount(1, "the actor accepted the frame");
+        seen[0].AnnouncedLength.Should().Be(12);
+    }
+
+    // Codex on #143, second round: with the actor behind, a complete multi-frame PDU can sit
+    // in the mailbox when the next First Frame is read. Both are receptions in progress, and
+    // the newer must not hide the older -- its PDU has yet to be delivered.
+    [Fact]
+    public async Task Two_First_Frames_Read_Ahead_Of_The_Actor_Are_Both_In_Progress_Until_Their_Outcomes()
+    {
+        var session = NewSession();
+        using var busPeer = OpenClassic(session, 0);
+        using var busRecv = OpenClassic(session, 1);
+
+        var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+        var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+
+        using var serviceRecv = new CanBusService(busRecv);
+        using var actor = new ProtocolActor();
+        using var receiver = new IsoTpChannel(serviceRecv, epRecv, FastOptions(), ownsService: false, actor);
+
+        using var gate = new SemaphoreSlim(0);
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            held.TrySetResult(true);
+            gate.Wait();
+        });
+        await held.Task.WaitAsync(ShortTimeout);
+
+        // PDU A complete on the wire (FF + one CF), then PDU B's First Frame -- all in the
+        // mailbox behind the held actor. (No Flow Control is answered while it is held; the
+        // peer here does not wait for one.)
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] a = Enumerable.Range(0x62, 12).Select(i => (byte)i).ToArray();
+        byte[] b = Enumerable.Range(0x59, 12).Select(i => (byte)i).ToArray();
+        int canId = unchecked((int)epPeer.TxCanId);
+        busPeer.Transmit(CanFrame.Classic(canId, IsoTpFrameCodec.BuildFirstFrame(epPeer, a.Length, a.AsSpan(0, ffData), isCanFd: false)));
+        busPeer.Transmit(CanFrame.Classic(canId, IsoTpFrameCodec.BuildConsecutiveFrame(epPeer, sequenceNumber: 1, a.AsSpan(ffData), isCanFd: false, padding: true, paddingByte: 0xCC)));
+        busPeer.Transmit(CanFrame.Classic(canId, IsoTpFrameCodec.BuildFirstFrame(epPeer, b.Length, b.AsSpan(0, ffData), isCanFd: false)));
+
+        var seen = await WaitForReceptionsAsync(receiver, count: 2);
+        seen.Should().HaveCount(2, "the second First Frame must not replace the first's record");
+        seen[0].FirstFrameData.Span[0].Should().Be(0x62);
+        seen[1].FirstFrameData.Span[0].Should().Be(0x59);
+
+        // Let the actor run: A completes into the inbox and is withdrawn; B stays in progress.
+        gate.Release();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        var delivered = await receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        delivered.Should().Equal(a);
+        seen = receiver.GetReceptionsInProgress();
+        seen.Should().HaveCount(1);
+        seen[0].FirstFrameData.Span[0].Should().Be(0x59);
+    }
+
+    private static async Task<IReadOnlyList<IsoTpReceptionInProgress>> WaitForReceptionsAsync(
+        IIsoTpChannel channel, int count)
+    {
+        var deadline = Stopwatch.StartNew();
+        var seen = channel.GetReceptionsInProgress();
+        while (seen.Count < count && deadline.Elapsed < ShortTimeout)
+        {
+            await Task.Delay(5);
+            seen = channel.GetReceptionsInProgress();
+        }
+        return seen;
     }
 }

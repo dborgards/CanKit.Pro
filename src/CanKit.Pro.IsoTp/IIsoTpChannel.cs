@@ -111,16 +111,18 @@ public interface IIsoTpChannel : IDisposable
     bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu);
 
     /// <summary>
-    /// Whether a multi-frame reception is in progress — a First Frame has been read off the bus
-    /// and the PDU has not been delivered — and if so, its First Frame: arrival, announced
-    /// length and leading data bytes. For a caller whose own deadline ends with the first frame
-    /// of a response and not with its last (ISO 14229-2 P2, #28): a response that began in time
-    /// is then waited for beyond that deadline, bounded by the transport's N_Cr instead — after
-    /// checking from the leading bytes that it is the response being waited for. Answered from
-    /// the channel's current state; a reception can begin, complete or be refused the moment
-    /// after, so a caller waiting on it re-checks rather than waiting unboundedly.
+    /// The multi-frame receptions in progress — First Frames read off the bus whose PDUs have
+    /// not been delivered — oldest first, each as its First Frame: arrival, announced length
+    /// and leading data bytes. For a caller whose own deadline ends with the first frame of a
+    /// response and not with its last (ISO 14229-2 P2, #28): a response that began in time is
+    /// then waited for beyond that deadline, bounded by the transport's N_Cr instead — after
+    /// checking from the leading bytes that it is the response being waited for. More than one
+    /// is possible when the channel's actor is behind the bus; a record is withdrawn only once
+    /// its outcome — the PDU, or the error of an aborted reassembly — is in the inbox, or the
+    /// frame was refused. A snapshot: a reception can begin, complete or be refused the moment
+    /// after, so a caller waiting on one re-checks rather than waiting unboundedly.
     /// </summary>
-    bool TryGetReceptionInProgress(out IsoTpReceptionInProgress? reception);
+    IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress();
 
     /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
