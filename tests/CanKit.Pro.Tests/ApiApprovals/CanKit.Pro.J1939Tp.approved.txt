@@ -34,7 +34,6 @@ namespace CanKit.Pro.J1939Tp
         BadSequenceNumber = 7,
         DuplicateSequenceNumber = 8,
         MessageSizeExceeded = 9,
-        Unassigned = 255,
     }
     public readonly struct J1939TpDatagram
     {

@@ -958,11 +958,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => sendTask.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        ex.Reason.Should().Be(J1939TpAbortReason.Unassigned);
+        ex.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
         ex.Message.Should().Contain("WaitEom");
 
         var abortFrame = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        abortFrame[1].Should().Be(255, "no table 7 code covers an EndOfMsgAck out of turn (#33)");
+        abortFrame[1].Should().Be(7, "an EndOfMsgAck out of turn is a sequence the software cannot recover from (#33)");
     }
 
     // Bugbot 3596489078: EOM totals that disagree with the session must fail SendCmAsync
@@ -1015,7 +1015,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => sendTask.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
-        ex.Reason.Should().Be(J1939TpAbortReason.Unassigned);
+        ex.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
         ex.Message.Should().Contain("EOM ack size mismatch");
     }
 
@@ -1650,7 +1650,6 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(J1939TpAbortReason.BadSequenceNumber, 7)]
     [InlineData(J1939TpAbortReason.DuplicateSequenceNumber, 8)]
     [InlineData(J1939TpAbortReason.MessageSizeExceeded, 9)]
-    [InlineData(J1939TpAbortReason.Unassigned, 255)]
     public void Abort_Reason_Goes_On_The_Wire_As_Table_7_Assigns_It(J1939TpAbortReason reason, byte code)
     {
         var frame = J1939TpFrames.BuildAbort(reason, dataPgn: 0xFECAu);

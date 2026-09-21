@@ -5,7 +5,8 @@ namespace CanKit.Pro.J1939Tp;
 /// SAE J1939-21 table 7 assigns them (#33). The values are the standard's own, so they
 /// round-trip on the wire without translation; a peer's abort carrying a value outside the
 /// table is surfaced as that value, and 0 -- which the table does not assign -- as
-/// <see cref="Unknown"/>.
+/// <see cref="Unknown"/>. Nothing outside the table is ever sent: 10..250 are reserved to SAE
+/// and 251..255 belong to J1939-71's definitions (Codex on #145).
 /// </summary>
 public enum J1939TpAbortReason : byte
 {
@@ -42,7 +43,12 @@ public enum J1939TpAbortReason : byte
     /// <summary>Unexpected data transfer packet (table 7, code 6).</summary>
     UnexpectedDataTransferPacket = 6,
 
-    /// <summary>Bad sequence number, the software cannot recover (table 7, code 7).</summary>
+    /// <summary>
+    /// Bad sequence number, the software cannot recover (table 7, code 7). Also what this stack
+    /// sends for a control message at a point in the sequence it cannot recover from and the
+    /// table has no code of its own for: an EndOfMsgAck out of turn or carrying the wrong
+    /// totals, a CTS granting packets beyond the message.
+    /// </summary>
     BadSequenceNumber = 7,
 
     /// <summary>Duplicate sequence number, the software cannot recover (table 7, code 8).</summary>
@@ -50,11 +56,4 @@ public enum J1939TpAbortReason : byte
 
     /// <summary>"Total Message Size" is greater than 1785 bytes (table 7, code 9).</summary>
     MessageSizeExceeded = 9,
-
-    /// <summary>
-    /// The top of the range table 7 leaves to J1939-71 definitions (251..255), used for a
-    /// situation the table has no code for -- an EndOfMsgAck out of turn, an RTS whose totals
-    /// do not agree, a CTS granting more packets than remain.
-    /// </summary>
-    Unassigned = 255,
 }

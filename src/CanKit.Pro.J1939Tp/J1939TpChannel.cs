@@ -474,12 +474,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     byte maxCts = payload[4];
                     if (!IsValidTotals(totalBytes, totalPackets))
                     {
-                        // Table 7 has a code for one of the ways totals go wrong (#33).
-                        var reason = totalBytes > J1939TpFrames.MaxTpPayloadLength
-                            ? J1939TpAbortReason.MessageSizeExceeded
-                            : J1939TpAbortReason.Unassigned;
-                        SendTpCm(J1939TpFrames.BuildAbort(reason, dataPgn),
-                            destinationAddress: sa);
+                        // Table 7 has a code for one of the ways totals go wrong (#33). For
+                        // the others -- a byte count under the minimum, a packet count that
+                        // does not match it -- it has none, and no session is opened: the RTS
+                        // is ignored, and the originator's T3 closes its side.
+                        if (totalBytes > J1939TpFrames.MaxTpPayloadLength)
+                        {
+                            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.MessageSizeExceeded, dataPgn),
+                                destinationAddress: sa);
+                        }
                         return;
                     }
 
@@ -807,7 +810,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             int totalRemaining = session.TotalPackets - packetsBeforeNextBlock;
             if (numPackets > totalRemaining)
             {
-                AbortTx(session, J1939TpAbortReason.Unassigned,
+                AbortTx(session, J1939TpAbortReason.BadSequenceNumber,
                     $"Peer requested {numPackets} packets but only {totalRemaining} remain.");
                 return;
             }
@@ -840,7 +843,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             bool lastDtOnWire = session.State == TxStage.SendingDt && session.LastDtQueued;
             if (session.State != TxStage.WaitEom && !lastDtOnWire)
             {
-                AbortTx(session, J1939TpAbortReason.Unassigned,
+                AbortTx(session, J1939TpAbortReason.BadSequenceNumber,
                     $"Peer sent EndOfMsgAck while TX session was in {session.State} (expected WaitEom).");
                 return;
             }
@@ -849,7 +852,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             int totalPackets = payload[3];
             if (totalBytes != session.Pdu.Length || totalPackets != session.TotalPackets)
             {
-                AbortTx(session, J1939TpAbortReason.Unassigned,
+                AbortTx(session, J1939TpAbortReason.BadSequenceNumber,
                     $"Peer EOM ack size mismatch (expected {session.Pdu.Length}/{session.TotalPackets}, got {totalBytes}/{totalPackets}).");
                 return;
             }

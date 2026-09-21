@@ -13,7 +13,7 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 
 TP.DT (Data Transfer) frames carry the segmented payload for both flavors, sequence-numbered from 1 (FR-TP-032). Every session runs on its own actor-owned state and its own set of `IDeadline`s (T1, T2, T3, T4, Th — FR-TP-033), so multiple sessions can execute in parallel over the same physical bus (FR-TP-034/035) without interfering with each other.
 
-The timers carry J1939-21 §5.10.2.4's meanings: T1 (750 ms) between TP.DTs at the receiver, T2 (1250 ms) from the receiver's CTS to the first TP.DT of the block, T3 (1250 ms) at the originator for the response it is owed — CTS after RTS, the next CTS after a block, EndOfMsgAck after the last packet — and T4 (1050 ms) after a CTS(0) hold. Tr (200 ms) is the time a node has to *send* a response, not a timer a peer is held to, so there is no option for it (#31). Connection Abort carries table 7's reason codes (`J1939TpAbortReason`), so a peer stack reads the abort as what happened (#33).
+The timers carry J1939-21 §5.10.2.4's meanings: T1 (750 ms) between TP.DTs at the receiver, T2 (1250 ms) from the receiver's CTS to the first TP.DT of the block, T3 (1250 ms) at the originator for the response it is owed — CTS after RTS, the next CTS after a block, EndOfMsgAck after the last packet — and T4 (1050 ms) after a CTS(0) hold. Tr (200 ms) is the time a node has to *send* a response, not a timer a peer is held to, so there is no option for it (#31). Connection Abort carries table 7's reason codes and nothing outside the table (`J1939TpAbortReason`), so a peer stack reads the abort as what happened (#33).
 
 The channel ships on nuget.org alongside the other `CanKit.Pro.*` L2/L3 building blocks. It re-uses:
 
