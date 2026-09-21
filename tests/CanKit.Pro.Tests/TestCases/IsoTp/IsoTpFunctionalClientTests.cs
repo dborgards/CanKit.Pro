@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -576,6 +577,29 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         // Not returned twice: the next collection starts from an empty buffer.
         (await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout)).Should().BeEmpty();
+    }
+
+    // Bugbot on #150: a subscription completed underneath -- the service disposed -- ends the
+    // collection in progress with what it has, and the next collection throws rather than
+    // return empty at once, which a loop collecting until a deadline would spin on.
+    [Fact]
+    public async Task Functional_Listener_Reports_A_Service_Disposed_Underneath_On_The_Next_Collection()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        var service = new CanBusService(busA);
+        using var client = IsoTpFactory.OpenFunctional(service, 0x7DF, 0x7E8, 0x7EF, FastOptions(), leaveOpen: true);
+
+        using var listener = client.Listen();
+        var collecting = listener.CollectAsync(ShortTimeout);
+        service.Dispose();
+        (await collecting.WaitAsync(ShortTimeout)).Should().BeEmpty("the subscription ended with nothing buffered");
+
+        var sw = Stopwatch.StartNew();
+        Func<Task> next = () => listener.CollectAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
+        sw.Elapsed.Should().BeLessThan(ShortTimeout, "it throws instead of waiting the window");
     }
 
     [Fact]
