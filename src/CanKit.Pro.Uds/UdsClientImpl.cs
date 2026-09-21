@@ -806,6 +806,10 @@ internal sealed class UdsClientImpl : IUdsClient
         // behaviour, which is worse but not broken; treating zero as a timestamp would read as
         // infinitely long ago and time out every request.
         var budgetStart = transmitStamp > 0 ? transmitStamp : Stopwatch.GetTimestamp();
+        // Only a wire instant can say a response *predates* the request: a budget started on
+        // this client's clock after the send completed is later than the request itself, and a
+        // fast response can legitimately be stamped before it (Codex on #143, test H).
+        var startedOnWire = transmitStamp > 0;
         var timeout = _options.P2ClientMax;
         var timerKind = UdsTimeoutTimer.P2;
         int pendingCount = 0;
@@ -815,7 +819,7 @@ internal sealed class UdsClientImpl : IUdsClient
             while (true)
             {
                 var received = await ReceiveWithTimeoutAsync(
-                    serviceId, timerKind, timeout, budgetStart, linkedToken)
+                    serviceId, timerKind, timeout, budgetStart, startedOnWire, linkedToken)
                     .ConfigureAwait(false);
 
                 // The budget is enforced here, not by the cancellation that raced it.
@@ -838,6 +842,12 @@ internal sealed class UdsClientImpl : IUdsClient
                 // the transport's timers (#28). Measured against the last frame, every response
                 // that spends longer on the wire than P2 -- a 4 KB record at STmin 5 ms takes
                 // seconds -- would time out although the server answered in time.
+                // And a response whose first frame predates the budget's start is not this
+                // request's at all -- it began before the request was on the wire, so it answers
+                // an earlier one (Codex on #143). ElapsedSince clamps a negative interval to
+                // zero, which would read as "punctual"; it is a stray, and the wait goes on.
+                if (startedOnWire && received.FirstFrameArrivalTimestamp < budgetStart)
+                    continue;
                 var arrival = ElapsedSince(budgetStart, received.FirstFrameArrivalTimestamp);
                 if (arrival > timeout)
                     throw new UdsTimeoutException(serviceId, timerKind, timeout);
@@ -879,6 +889,7 @@ internal sealed class UdsClientImpl : IUdsClient
                         // be accepted. Same scheduling independence as the check above, and for
                         // the same reason.
                         budgetStart = received.FirstFrameArrivalTimestamp;
+                        startedOnWire = true;
                         timeout = _options.P2StarClientMax;
                         timerKind = UdsTimeoutTimer.P2Star;
                         continue;
@@ -935,7 +946,7 @@ internal sealed class UdsClientImpl : IUdsClient
     /// with that frame (ISO 14229-2), and the transport's N_Cr bounds the rest (#28).
     /// </summary>
     private async Task<IsoTpReceivedPdu> ReceiveWithTimeoutAsync(UdsServiceId serviceId,
-        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart,
+        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, bool startedOnWire,
         CancellationToken linkedToken)
     {
         // How long to wait and whether what turns up was in time are two questions, and only the
@@ -953,7 +964,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // caller judge its stamp; only an empty inbox means nothing arrived in time
             // (Bugbot on #112).
             return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
-                elapsedInBudget, linkedToken).ConfigureAwait(false);
+                startedOnWire, elapsedInBudget, linkedToken).ConfigureAwait(false);
         }
 
         using var timeoutCts = new CancellationTokenSource(remaining);
@@ -971,7 +982,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
             // before declaring a timeout.
             return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
-                budget, linkedToken).ConfigureAwait(false);
+                startedOnWire, budget, linkedToken).ConfigureAwait(false);
         }
     }
 
@@ -989,8 +1000,8 @@ internal sealed class UdsClientImpl : IUdsClient
     /// Anything else is a timeout.
     /// </summary>
     private async Task<IsoTpReceivedPdu> TakeQueuedOrInProgressAsync(UdsServiceId serviceId,
-        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, TimeSpan elapsedReported,
-        CancellationToken linkedToken)
+        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, bool startedOnWire,
+        TimeSpan elapsedReported, CancellationToken linkedToken)
     {
         while (true)
         {
@@ -998,7 +1009,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // completed PDU (or the abort's error item) is in the inbox, so a reception seen in
             // progress here is found by the wait below, and one not seen is either absent or
             // already queued for the peek.
-            if (!ResponseBeganInTime(serviceId, budget, budgetStart))
+            if (!ResponseBeganInTime(serviceId, budget, budgetStart, startedOnWire))
             {
                 if (_channel.TryReceiveWithArrival(out var queued))
                     return queued;
@@ -1029,14 +1040,18 @@ internal sealed class UdsClientImpl : IUdsClient
     // cannot start in time anyway, and waiting it out would only delay the timeout by the length
     // of a transfer that is then discarded as stray (Codex on #143). A negative response is a
     // Single Frame and never gets here.
-    private bool ResponseBeganInTime(UdsServiceId serviceId, TimeSpan budget, long budgetStart)
+    private bool ResponseBeganInTime(UdsServiceId serviceId, TimeSpan budget, long budgetStart,
+        bool startedOnWire)
     {
         byte positiveSid = (byte)((byte)serviceId + PositiveResponseOffset);
         // Several can be pending when the channel's actor is behind the bus; any one that is
         // this request's response and began in time keeps the wait going.
         foreach (var reception in _channel.GetReceptionsInProgress())
         {
-            if (ElapsedSince(budgetStart, reception.FirstFrameArrivalTimestamp) <= budget
+            // Inside the budget on both ends: one that began before the request went out
+            // answers an earlier request, however long it takes to finish (Codex on #143).
+            if ((!startedOnWire || reception.FirstFrameArrivalTimestamp >= budgetStart)
+                && ElapsedSince(budgetStart, reception.FirstFrameArrivalTimestamp) <= budget
                 && reception.FirstFrameData.Length > 0
                 && reception.FirstFrameData.Span[0] == positiveSid)
                 return true;

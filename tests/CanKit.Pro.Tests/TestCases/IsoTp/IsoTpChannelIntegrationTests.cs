@@ -2208,6 +2208,30 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             "the frame was buffered before the discard and belongs to what it dropped");
     }
 
+    // Bugbot on #143: a First Frame buffered at discard time must be dropped *unanswered*. A
+    // Flow Control for it would invite the rest of a transfer nobody waits for, whose
+    // Consecutive Frames then collide with the next reception.
+    [Fact]
+    public async Task A_First_Frame_Buffered_At_Discard_Time_Gets_No_Flow_Control()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x62, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+
+        channel.DiscardPendingPdus();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.GetReceptionsInProgress().Should().BeEmpty("the frame arrived before the discard");
+        lock (service.Sent)
+            service.Sent.Should().BeEmpty("a dropped First Frame is not answered with Flow Control");
+    }
+
     /// <summary>
     /// A bus service whose subscription's <c>WaitToReadAsync</c> stays pending until
     /// <see cref="WakeReader"/>, so the channel's reader task is starved by construction and
@@ -2249,9 +2273,15 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             bool includeEcho = false)
             => new Sub(this);
 
+        /// <summary>Every frame the channel put on the wire, in order.</summary>
+        public List<byte[]> Sent { get; } = new();
+
         public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
+        {
+            lock (Sent) Sent.Add(frame.Data.ToArray());
+            return Task.FromResult(new TxConfirmation { Confirmed = true });
+        }
 
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => Array.Empty<FilterOverlap>();

@@ -222,6 +222,61 @@ public class UdsExpiredDeadlineTests
     /// Answers one positive RDBI response, ignoring the cancellation token so the delivery — not
     /// the deadline — completes the caller's wait.
     /// </summary>
+    /// <summary>
+    /// A multi-frame response whose First Frame arrived <em>before</em> the request reached the
+    /// wire answers an earlier request, however punctual its completion looks: a negative
+    /// interval clamps to zero, which would read as "in time" both while the reception is in
+    /// progress and once the PDU is delivered (Codex on #143). Here the First Frame predates
+    /// the transmit stamp by 20 ms and the transfer completes after the budget; the client must
+    /// neither wait for it nor accept it.
+    /// </summary>
+    [Fact]
+    public async Task I_A_Reception_That_Began_Before_The_Request_Went_Out_Is_Not_Waited_For()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(400),
+            stampArrivalAtDelivery: true)
+        {
+            HonorCancellation = true,
+            FirstFrameOffsetFromTransmit = TimeSpan.FromMilliseconds(-20),
+        };
+        using var client = NewClient(channel);
+
+        var sw = Stopwatch.StartNew();
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "a response that began before the request was sent is an earlier request's");
+        sw.Stop();
+
+        // Timed out at the budget, not once the stale transfer completed: the 400 ms delivery
+        // is a lower bound on what waiting for it would cost, against an 80 ms budget.
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(400),
+            "the stale reception must not extend the budget");
+    }
+
+    /// <summary>
+    /// The same stale response, completing <em>inside</em> the budget: it is delivered, and the
+    /// delivered PDU's first-frame stamp says it began before the request. A stray, not the
+    /// answer.
+    /// </summary>
+    [Fact]
+    public async Task J_A_Delivered_Response_That_Began_Before_The_Request_Went_Out_Is_A_Stray()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(30),
+            stampArrivalAtDelivery: true)
+        {
+            HonorCancellation = true,
+            FirstFrameOffsetFromTransmit = TimeSpan.FromMilliseconds(-20),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "a response that began before the request was sent answers an earlier request");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -268,6 +323,16 @@ public class UdsExpiredDeadlineTests
         /// </summary>
         public bool ReportNoTransmitStamp { get; init; }
 
+        /// <summary>
+        /// When set, the response is multi-frame: its First Frame arrived this long after the
+        /// request reached the wire (negative: before it), it is reported as a reception in
+        /// progress until delivered, and the delivered PDU carries that first-frame stamp.
+        /// </summary>
+        public TimeSpan? FirstFrameOffsetFromTransmit { get; init; }
+
+        private bool _delivered;
+        private long? _deliverAt;
+
         public StubChannel(TimeSpan deliverAfter, bool stampArrivalAtDelivery)
         {
             _deliverAfter = deliverAfter;
@@ -311,9 +376,15 @@ public class UdsExpiredDeadlineTests
                 return new IsoTpReceivedPdu(Pending, _arrivalStamp);
             }
 
-            await Task.Delay(_deliverAfter,
-                HonorCancellation ? cancellationToken : CancellationToken.None)
-                .ConfigureAwait(false);
+            // Delivery is an instant, not a duration per call: a caller that waits in slices
+            // and comes back is still waiting for the same delivery.
+            _deliverAt ??= Stopwatch.GetTimestamp() + Ticks(_deliverAfter);
+            var remaining = TimeSpan.FromSeconds(
+                (_deliverAt.Value - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
+            if (remaining > TimeSpan.Zero)
+                await Task.Delay(remaining,
+                    HonorCancellation ? cancellationToken : CancellationToken.None)
+                    .ConfigureAwait(false);
 
             if (RespondPendingFirst)
                 return new IsoTpReceivedPdu(Response, FinalArrivalStamp());
@@ -321,8 +392,12 @@ public class UdsExpiredDeadlineTests
             var stamp = _stampArrivalAtDelivery
                 ? Stopwatch.GetTimestamp()
                 : _arrivalStamp + Ticks(ResponseArrivalOffsetFromTransmit);
-            return new IsoTpReceivedPdu(Response, stamp);
+            _delivered = true;
+            return new IsoTpReceivedPdu(Response, stamp, FirstFrameStamp() ?? stamp);
         }
+
+        private long? FirstFrameStamp()
+            => FirstFrameOffsetFromTransmit is { } offset ? _arrivalStamp + Ticks(offset) : null;
 
         /// <summary>
         /// Models the final response already sitting in the inbox once the 0x78 has been read:
@@ -337,7 +412,7 @@ public class UdsExpiredDeadlineTests
                 return true;
             }
 
-            if (HonorCancellation)
+            if (HonorCancellation && FirstFrameOffsetFromTransmit is null)
             {
                 // Stamped at the request: punctual, and waiting in the inbox all along.
                 pdu = new IsoTpReceivedPdu(Response, _arrivalStamp);
@@ -349,7 +424,9 @@ public class UdsExpiredDeadlineTests
         }
 
         public IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress()
-            => Array.Empty<IsoTpReceptionInProgress>();
+            => FirstFrameStamp() is { } first && !_delivered
+                ? new[] { new IsoTpReceptionInProgress(first, Response.Length, Response.AsMemory(0, 3)) }
+                : Array.Empty<IsoTpReceptionInProgress>();
 
         private long FinalArrivalStamp() => _arrivalStamp + Ticks(PendingToFinalArrivalGap);
 
