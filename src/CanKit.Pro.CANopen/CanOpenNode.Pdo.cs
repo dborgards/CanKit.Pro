@@ -38,7 +38,6 @@ namespace CanKit.Pro.CANopen;
 internal sealed partial class CanOpenNode
 {
     private readonly TpdoRuntime?[] _tpdos = new TpdoRuntime?[Co.PdoCount + 1];
-    private readonly Dictionary<uint, TpdoRuntime> _tpdosByCobId = new();
     private readonly RpdoRuntime?[] _rpdos = new RpdoRuntime?[Co.PdoCount + 1];
 
     // Change-of-state TPDO support (FR-CO-006): volatile pre-filter snapshot of OD entries
@@ -288,8 +287,6 @@ internal sealed partial class CanOpenNode
         var map = (ushort)(Co.TpdoMap + n - 1);
         var rt = _tpdos[n] ??= new TpdoRuntime(n);
 
-        if (_tpdosByCobId.TryGetValue(rt.CobId, out var registered) && ReferenceEquals(registered, rt))
-            _tpdosByCobId.Remove(rt.CobId);
         // A transmission waiting out the inhibit time is an event the application already
         // raised; a record write that leaves the PDO valid (an event-timer change, say) must not
         // lose it, so it is re-requested against the rebuilt configuration below.
@@ -315,7 +312,6 @@ internal sealed partial class CanOpenNode
 
         if (rt.Valid)
         {
-            _tpdosByCobId[rt.CobId] = rt;
             if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType) && rt.EventTimer > TimeSpan.Zero)
                 ScheduleTpdoEventTimer(rt);
             if (inhibitedEventPending && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType))
@@ -650,7 +646,6 @@ internal sealed partial class CanOpenNode
                 rt.InhibitHandle?.Dispose();
             }
         }
-        _tpdosByCobId.Clear();
     }
 
     // =========================================================================================

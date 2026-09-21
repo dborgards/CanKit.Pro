@@ -785,6 +785,34 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x2101, 0x00).Should().Be(9u, "the second RPDO on the same COB-ID is actuated too");
     }
 
+    // FR-CO-015 (#133 review) — two valid TPDOs may carry the same COB-ID as well: an RTR on it is a
+    // PDO read of each of them, not of whichever record was rebuilt last, and destroying one
+    // leaves the other answering.
+    [Fact]
+    public async Task Tpdos_Sharing_A_CobId_Each_Answer_An_Rtr()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = CanOpen.OpenNode(busB, Device);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2000, 0x00, 0x11);
+        od.AddU8(0x2001, 0x00, 0x22);
+
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 8), TpdoTransmission.RtrOnlyEventDriven, cobId: Tpdo1);
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2001, 0x00, 8), TpdoTransmission.RtrOnlyEventDriven, cobId: Tpdo1);
+        await StartAsync(wire, device);
+
+        wire.SendRtr(Tpdo1);
+        await wire.WaitForCountAsync(Tpdo1, 2);
+        wire.Payloads(Tpdo1).Should().BeEquivalentTo(new[] { new byte[] { 0x11 }, new byte[] { 0x22 } });
+
+        od.WriteUnsigned(0x1801, 0x01, CanOpenCobId.InvalidBit | Tpdo1); // TPDO2 destroyed; TPDO1 still answers
+        wire.SendRtr(Tpdo1);
+        await wire.WaitForCountAsync(Tpdo1, 3);
+        wire.Payloads(Tpdo1)[2].Should().Equal(0x11);
+    }
+
     // FR-CO-006 (#133 review) — a TPDO configured by direct dictionary writes reacts to the very
     // next write of its mapped object, even when the actor loop has not yet rebuilt the runtime:
     // the change-of-state pre-filter is refreshed from the records on the writing thread, under

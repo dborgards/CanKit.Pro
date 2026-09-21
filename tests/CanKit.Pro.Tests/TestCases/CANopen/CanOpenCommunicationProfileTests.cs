@@ -412,6 +412,39 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x1018, 0x02).Should().Be(0x0000_1234u);
     }
 
+    // FR-CO-014 (#133 review) — re-declaring an entry takes the write gate like a write does, so
+    // a write validated against the old declaration is stored on it before the new one replaces
+    // it and never lands on the new one. The test parks a U32 write in its validator while
+    // another thread re-declares the entry as U8: the write completes, then the re-declaration.
+    [Fact]
+    public async Task A_Redeclaration_Waits_For_The_Write_In_Flight_On_The_Entry()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+        var od = node.ObjectDictionary;
+        od.AddU32(0x2000, 0x00, 0);
+
+        var inner = od.WriteValidator!;
+        Task? redeclare = null;
+        od.WriteValidator = (index, subindex, value) =>
+        {
+            if (index == 0x2000 && redeclare is null)
+            {
+                redeclare = Task.Run(() => od.AddU8(0x2000, 0x00, 0x01));
+                Thread.Sleep(200); // a re-declaration that did not wait for the gate would land here
+            }
+            return inner(index, subindex, value);
+        };
+
+        var write = () => od.WriteUnsigned(0x2000, 0x00, 0x1122_3344);
+        write.Should().NotThrow("the write is stored on the entry it was validated against");
+        await redeclare!.WithTimeoutAsync(ShortTimeout);
+        od.TryGet(0x2000, 0x00, out var entry).Should().BeTrue();
+        entry.DataType.Should().Be(OdDataType.Unsigned8, "the re-declaration came after the write");
+        od.ReadUnsigned(0x2000, 0x00).Should().Be(1u);
+    }
+
     // FR-CO-014 (d, #133 review) — the guard covers additions too: a sub-index the node does not
     // declare under a managed object cannot be added by the application, or the generic SDO
     // server would serve it — 1800h:04 is reserved and answers 0609 0011h, 1200h has no sub-index
@@ -1284,6 +1317,48 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, Slave);
         await bootups.Second;
         (await UploadUnsignedAsync(master, Slave, 0x1017, 0x00)).Should().Be(100u, "the save stored 100; the 300 came after it");
+    }
+
+    // FR-CO-019 (#133 review) — a "save" cannot tear an NMT reset's restore: the restore writes
+    // every restorable object as one transaction under the write gate, and the save's snapshot
+    // is taken under the same gate, so it stores all restored values or all live ones, never a
+    // mix. The test starts the save from inside the restore — the dictionary's write event, on
+    // the actor loop, at the first restored object — and reads what the following reset restores.
+    [Fact]
+    public async Task A_Save_During_An_Nmt_Reset_Stores_All_Restored_Values_Not_A_Mix()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x1006, 0x00, 5000); // restored before 1017h: the restore walks the dictionary in index order
+        od.WriteUnsigned(0x1017, 0x00, 300);
+        await bootups.First;
+
+        Task? save = null;
+        od.EntryWritten += (index, _) =>
+        {
+            if (index != 0x1006 || save is not null) return;
+            // The restore has written 1006h and has 1017h still to write. A save now, on another
+            // thread, must wait for the whole restore — or it stores 1006h restored, 1017h live.
+            save = Task.Run(() => od.WriteRaw(0x1010, 0x01, new byte[] { 0x73, 0x61, 0x76, 0x65 }));
+            Thread.Sleep(300); // long enough for a save that is not held back to complete
+        };
+        await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, Slave);
+        await bootups.Second;
+        save.Should().NotBeNull("the restore wrote 1006h");
+        await save!.WithTimeoutAsync(ShortTimeout);
+        (await UploadUnsignedAsync(master, Slave, 0x1017, 0x00)).Should().Be(0u, "the first reset restored the default");
+
+        var second = new BootupWatch(master, Slave);
+        await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, Slave);
+        await second.First;
+        (await UploadUnsignedAsync(master, Slave, 0x1006, 0x00)).Should().Be(0u);
+        (await UploadUnsignedAsync(master, Slave, 0x1017, 0x00)).Should().Be(0u,
+            "the save stored the restored values, not the live 300 of an object the restore had not reached");
     }
 
     // FR-CO-014 (#133 review) — SendSyncAsync transmits on the CAN-ID the dictionary holds when

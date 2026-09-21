@@ -675,16 +675,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 HandleSync();
                 return;
             }
-            // A remote frame is either a PDO read request for one of our valid TPDOs
-            // (CiA 301 §7.2.2.5.2) or a node-guarding poll addressed to us; nothing else answers
-            // an RTR.
+            // A remote frame is either a PDO read request for our valid TPDOs on that COB-ID
+            // (CiA 301 §7.2.2.5.2) — two valid records may share one, and then each is read
+            // (Codex on #133) — or a node-guarding poll addressed to us; nothing else answers an RTR.
             if (isRtr)
             {
-                if (_tpdosByCobId.TryGetValue(cobId, out var requested))
+                bool requested = false;
+                for (int n = 1; n <= Co.PdoCount; n++)
                 {
-                    HandleTpdoRtr(requested);
-                    return;
+                    if (_tpdos[n] is { Valid: true } tpdo && tpdo.CobId == cobId)
+                    {
+                        HandleTpdoRtr(tpdo);
+                        requested = true;
+                    }
                 }
+                if (requested) return;
                 if (cobId == CanOpenCobId.Heartbeat(_nodeId)) HandleNodeGuardingRtrForSelf();
                 return;
             }

@@ -639,23 +639,28 @@ internal sealed partial class CanOpenNode
 
     /// <summary>Restores every restorable object to <paramref name="values"/>; a sub-index that
     /// was added since (a grown <c>1016h</c>) goes to zero. Each write applies to the runtime
-    /// through the ordinary hook, inline because this runs on the actor loop.</summary>
+    /// through the ordinary hook, inline because this runs on the actor loop. One transaction
+    /// under the dictionary's write gate, so the snapshot a "save" takes on another thread sees
+    /// all restored values or all live ones, never a mix (Bugbot on #133).</summary>
     private void RestoreValues(Dictionary<uint, byte[]> values)
     {
-        foreach (var key in _od.SnapshotKeys())
+        _od.Transaction(() =>
         {
-            var index = (ushort)(key >> 8);
-            var subindex = (byte)(key & 0xFF);
-            if (!IsRestorableCommunicationObject(index)) continue;
-            if (values.TryGetValue(key, out var stored))
+            foreach (var key in _od.SnapshotKeys())
             {
-                _od.WriteRawUnchecked(index, subindex, stored);
+                var index = (ushort)(key >> 8);
+                var subindex = (byte)(key & 0xFF);
+                if (!IsRestorableCommunicationObject(index)) continue;
+                if (values.TryGetValue(key, out var stored))
+                {
+                    _od.WriteRawUnchecked(index, subindex, stored);
+                }
+                else if (_od.TryGet(index, subindex, out var entry))
+                {
+                    _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
+                }
             }
-            else if (_od.TryGet(index, subindex, out var entry))
-            {
-                _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
-            }
-        }
+        });
     }
 
     /// <inheritdoc />

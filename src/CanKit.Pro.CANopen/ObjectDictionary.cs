@@ -300,13 +300,18 @@ public sealed class ObjectDictionary
     {
         var copy = new byte[value.Length];
         Buffer.BlockCopy(value, 0, copy, 0, value.Length);
-        lock (_sync)
+        // Under the write gate like every other write, so a snapshot taken there (a "save") and
+        // a validated write on another thread are ordered against it (Bugbot on #133).
+        lock (_writeGate)
         {
-            if (!_entries.TryGetValue(Key(index, subindex), out var entry))
-                throw new KeyNotFoundException($"OD entry 0x{index:X4}:{subindex:X2} not found.");
-            entry.SetRawValue(copy);
+            lock (_sync)
+            {
+                if (!_entries.TryGetValue(Key(index, subindex), out var entry))
+                    throw new KeyNotFoundException($"OD entry 0x{index:X4}:{subindex:X2} not found.");
+                entry.SetRawValue(copy);
+            }
+            EntryWritten?.Invoke(index, subindex);
         }
-        EntryWritten?.Invoke(index, subindex);
     }
 
     /// <summary>Reads a fixed-width unsigned entry as <see cref="uint"/> (upcasts U8/U16/U32).
@@ -396,21 +401,26 @@ public sealed class ObjectDictionary
     {
         var entry = new OdEntry(type, access, value, pdoMappable);
         bool replaced;
-        lock (_sync)
+        // Under the write gate: a write validated against the entry being replaced is stored on
+        // it before the replacement lands, never on the new declaration (Codex on #133).
+        lock (_writeGate)
         {
-            var key = Key(index, subindex);
-            replaced = _entries.ContainsKey(key);
-            if (DeclareGuard is { } guard && !guard(index, subindex))
+            lock (_sync)
             {
-                throw new InvalidOperationException(replaced
-                    ? $"OD entry 0x{index:X4}:{subindex:X2} is a communication object managed by the node and "
-                      + "cannot be re-declared; write its value instead (WriteUnsigned / WriteRaw)."
-                    : $"OD object 0x{index:X4} is a communication object managed by the node: its sub-indices are "
-                      + "declared by the node, not by the application (1016h grows through AddHeartbeatConsumer).");
+                var key = Key(index, subindex);
+                replaced = _entries.ContainsKey(key);
+                if (DeclareGuard is { } guard && !guard(index, subindex))
+                {
+                    throw new InvalidOperationException(replaced
+                        ? $"OD entry 0x{index:X4}:{subindex:X2} is a communication object managed by the node and "
+                          + "cannot be re-declared; write its value instead (WriteUnsigned / WriteRaw)."
+                        : $"OD object 0x{index:X4} is a communication object managed by the node: its sub-indices are "
+                          + "declared by the node, not by the application (1016h grows through AddHeartbeatConsumer).");
+                }
+                _entries[key] = entry;
             }
-            _entries[key] = entry;
+            if (replaced) EntryWritten?.Invoke(index, subindex);
         }
-        if (replaced) EntryWritten?.Invoke(index, subindex);
         return entry;
     }
 
@@ -425,13 +435,16 @@ public sealed class ObjectDictionary
     {
         var entry = new OdEntry(type, access, value, pdoMappable);
         bool replaced;
-        lock (_sync)
+        lock (_writeGate)
         {
-            var key = Key(index, subindex);
-            replaced = _entries.ContainsKey(key);
-            _entries[key] = entry;
+            lock (_sync)
+            {
+                var key = Key(index, subindex);
+                replaced = _entries.ContainsKey(key);
+                _entries[key] = entry;
+            }
+            if (replaced) EntryWritten?.Invoke(index, subindex);
         }
-        if (replaced) EntryWritten?.Invoke(index, subindex);
         return entry;
     }
 

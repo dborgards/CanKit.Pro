@@ -186,8 +186,8 @@ and by nothing else, so its RTR is not answered: §7.2.2.3 defines the remote re
 event-driven PDOs. The record's power-on default carries bit 30; `ConfigureTpdo` without an
 explicit `cobId` clears it.
 
-**RPDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID; a frame on it
-actuates each of them.
+**PDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID, and a frame on it
+actuates each of them; two valid TPDO records may as well, and an RTR on it reads each of them.
 
 **Synchronous RPDOs.** `ConfigureRpdo(…, transmission: RpdoTransmission.Synchronous)` writes
 `00h` to `1400h:02`: received data is held and written to the object dictionary — and reported
