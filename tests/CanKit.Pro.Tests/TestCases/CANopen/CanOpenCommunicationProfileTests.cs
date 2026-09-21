@@ -1225,22 +1225,37 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
     }
 
     // FR-CO-023 (#133 review) — 1016h:00 is read-only on the bus, but a local write reaches it, and
-    // a count above 127 would drive the loops over the array on the actor round the clock (a byte
-    // 255 + 1 is 0). The write is refused with the value-range abort, as the SDO layer would.
+    // it may only name sub-indices that exist: a count above 127 would drive the loops over the
+    // array on the actor round the clock (a byte 255 + 1 is 0), and a count above the declared
+    // sub-indices would announce entries a master cannot read and make every further
+    // AddHeartbeatConsumer see the array as full. The write is refused with the value-range
+    // abort; a count the declared sub-indices back — grown by AddHeartbeatConsumer, shrunk by
+    // hand — is taken.
     [Theory]
-    [InlineData(0x80u)]
-    [InlineData(0xFFu)]
-    public void A_Local_Write_Of_1016h_Sub0_Above_127_Is_Rejected(uint count)
+    [InlineData(0x02u)] // one more than declared on a fresh node
+    [InlineData(0x7Fu)] // the maximum, without the slots behind it
+    [InlineData(0x80u)] // above the maximum
+    [InlineData(0xFFu)] // the wrap-around
+    public void A_Local_Write_Of_1016h_Sub0_Beyond_The_Declared_Slots_Is_Rejected(uint count)
     {
         var session = NewSession();
         using var bus = Open(session, 0);
         using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+        var od = node.ObjectDictionary;
 
-        var write = () => node.ObjectDictionary.WriteUnsigned(0x1016, 0x00, count);
+        var write = () => od.WriteUnsigned(0x1016, 0x00, count);
         write.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06090030");
-        node.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "the count is what the node was created with");
-        node.ObjectDictionary.WriteUnsigned(0x1016, 0x00, 0x7F);
-        node.ObjectDictionary.ReadUnsigned(0x1016, 0x00).Should().Be(0x7Fu, "127 is the largest count the object can hold");
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "the count is what the node was created with");
+
+        node.AddHeartbeatConsumer(0x12, TimeSpan.FromSeconds(1)); // fills the one declared slot
+        node.AddHeartbeatConsumer(0x13, TimeSpan.FromSeconds(1)); // grows: declares sub-index 02h, then raises the count
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "the node declares a slot before it raises the count");
+        od.WriteUnsigned(0x1016, 0x00, 1);
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "a count the declared slots back is taken");
+        od.WriteUnsigned(0x1016, 0x00, 2);
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "and so is one that names every declared slot");
+        node.AddHeartbeatConsumer(0x14, TimeSpan.FromSeconds(1));
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(3u, "the array still grows");
     }
 
     // FR-CO-023: RemoveHeartbeatConsumer clears the producer's slot and the consumer stops

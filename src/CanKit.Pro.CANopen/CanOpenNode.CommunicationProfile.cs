@@ -214,11 +214,7 @@ internal sealed partial class CanOpenNode
             case Co.EmcyCobId:
                 return ValidateEmcyCobIdWrite(value);
             case Co.ConsumerHeartbeat:
-                // §7.5.2.19: sub-index 00h holds at most 127 entries. It is ro on the bus, but a
-                // local write reaches it, and a larger count would send the loops over the array
-                // round the clock on the actor — a byte 255 + 1 is 0 (Codex on #133).
-                if (subindex == 0)
-                    return value[0] <= CanOpenCobId.MaxNodeId ? OdWriteDecision.Accept : OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+                if (subindex == 0) return ValidateConsumerHeartbeatCountWrite(value[0]);
                 return ValidateConsumerHeartbeatWrite(subindex, value);
             case Co.StoreParameters:
                 return subindex == 1 ? HandleStoreCommand(value) : OdWriteDecision.Accept;
@@ -268,6 +264,22 @@ internal sealed partial class CanOpenNode
     // §7.5.2.19 Figure 62: bits 31..24 reserved (00h), 23..16 node-id, 15..0 heartbeat time in
     // ms. "An attempt to configure several heartbeat times unequal 0 for the same node-ID … shall
     // be responded with the SDO abort transfer service (abort code: 0604 0043h)."
+    // §7.5.2.19: sub-index 00h holds at most 127 entries. It is ro on the bus, but a local write
+    // reaches it: a count above 127 would send the loops over the array round the clock on the
+    // actor (a byte 255 + 1 is 0), and a count above the declared sub-indices would announce
+    // entries that cannot be read and make every further AddHeartbeatConsumer see the array as
+    // full. The count may only name sub-indices that exist; the node declares one before it
+    // raises the count (Codex on #133).
+    private OdWriteDecision ValidateConsumerHeartbeatCountWrite(byte count)
+    {
+        if (count > CanOpenCobId.MaxNodeId) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        for (int s = 1; s <= count; s++)
+        {
+            if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)s, out _)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        }
+        return OdWriteDecision.Accept;
+    }
+
     private OdWriteDecision ValidateConsumerHeartbeatWrite(byte subindex, byte[] value)
     {
         uint v = ObjectDictionary.DecodeU32(value);
