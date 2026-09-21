@@ -18,7 +18,7 @@ namespace CanKit.Pro.IsoTp
         System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpReceivedPdu> ReceiveWithArrivalAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<long> SendWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
-        bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp);
+        bool TryGetReceptionInProgress(out CanKit.Pro.IsoTp.IsoTpReceptionInProgress? reception);
         bool TryReceiveWithArrival(out CanKit.Pro.IsoTp.IsoTpReceivedPdu pdu);
     }
     public static class IsoTp
@@ -146,6 +146,13 @@ namespace CanKit.Pro.IsoTp
         public long ArrivalTimestamp { get; }
         public long FirstFrameArrivalTimestamp { get; }
         public byte[] Pdu { get; }
+    }
+    public sealed class IsoTpReceptionInProgress
+    {
+        public IsoTpReceptionInProgress(long firstFrameArrivalTimestamp, int announcedLength, System.ReadOnlyMemory<byte> firstFrameData) { }
+        public int AnnouncedLength { get; }
+        public long FirstFrameArrivalTimestamp { get; }
+        public System.ReadOnlyMemory<byte> FirstFrameData { get; }
     }
     public sealed class IsoTpSendRejectedException : CanKit.Pro.IsoTp.IsoTpException
     {

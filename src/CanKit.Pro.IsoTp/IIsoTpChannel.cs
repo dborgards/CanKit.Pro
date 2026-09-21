@@ -111,15 +111,16 @@ public interface IIsoTpChannel : IDisposable
     bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu);
 
     /// <summary>
-    /// Whether a multi-frame reception is in progress — a First Frame was accepted and its last
-    /// Consecutive Frame has not arrived — and if so, when that First Frame arrived, as a
-    /// <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading. For a caller whose own
-    /// deadline ends with the first frame of a response and not with its last (ISO 14229-2 P2,
-    /// #28): a response that began in time is then waited for without that deadline, bounded by
-    /// the transport's N_Cr instead. Answered from the channel's current state; a reception can
-    /// begin or complete the moment after.
+    /// Whether a multi-frame reception is in progress — a First Frame has been read off the bus
+    /// and the PDU has not been delivered — and if so, its First Frame: arrival, announced
+    /// length and leading data bytes. For a caller whose own deadline ends with the first frame
+    /// of a response and not with its last (ISO 14229-2 P2, #28): a response that began in time
+    /// is then waited for beyond that deadline, bounded by the transport's N_Cr instead — after
+    /// checking from the leading bytes that it is the response being waited for. Answered from
+    /// the channel's current state; a reception can begin, complete or be refused the moment
+    /// after, so a caller waiting on it re-checks rather than waiting unboundedly.
     /// </summary>
-    bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp);
+    bool TryGetReceptionInProgress(out IsoTpReceptionInProgress? reception);
 
     /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort

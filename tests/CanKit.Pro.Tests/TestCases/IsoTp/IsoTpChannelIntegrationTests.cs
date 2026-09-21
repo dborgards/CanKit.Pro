@@ -2040,4 +2040,72 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         public void Dispose() { /* leaveOpen: inner disposed by test */ }
     }
+
+    // -----------------------------------------------------------------------------------
+    // #28, Codex on #143 — a reception in progress is reported from the First Frame's arrival,
+    // not from its processing: the reader publishes it before the actor sees the frame. The
+    // actor then withdraws a record for a frame it refuses and confirms one it accepts.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_First_Frame_Is_In_Progress_While_The_Actor_Is_Behind_And_Withdrawn_When_Refused()
+    {
+        var session = NewSession();
+        using var busPeer = OpenClassic(session, 0);
+        using var busRecv = OpenClassic(session, 1);
+
+        var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+        var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+
+        using var serviceRecv = new CanBusService(busRecv);
+        using var actor = new ProtocolActor();
+        var options = new IsoTpChannelOptions
+        {
+            UseCanFd = false,
+            UsePadding = true,
+            MaxReceivePduLength = 16,
+            NCr = TimeSpan.FromSeconds(5),
+        };
+        using var receiver = new IsoTpChannel(serviceRecv, epRecv, options, ownsService: false, actor);
+
+        // Hold the actor: everything the reader posts from here on waits in the mailbox.
+        using var gate = new SemaphoreSlim(0);
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            held.TrySetResult(true);
+            gate.Wait();
+        });
+        await held.Task.WaitAsync(ShortTimeout);
+
+        // A First Frame announcing more than the channel accepts: published on arrival ...
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] tooLong = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ffTooLong = IsoTpFrameCodec.BuildFirstFrame(epPeer, tooLong.Length, tooLong.AsSpan(0, ffData), isCanFd: false);
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ffTooLong));
+
+        IsoTpReceptionInProgress? seen = null;
+        var deadline = Stopwatch.StartNew();
+        while (!receiver.TryGetReceptionInProgress(out seen) && deadline.Elapsed < ShortTimeout)
+            await Task.Delay(5);
+        seen.Should().NotBeNull("the reader publishes a First Frame before the actor processes it");
+        seen!.AnnouncedLength.Should().Be(20);
+        seen.FirstFrameData.ToArray().Should().Equal(tooLong.Take(ffData));
+
+        // ... and withdrawn once the actor refuses it with FC(OVFLW).
+        gate.Release();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        receiver.TryGetReceptionInProgress(out _).Should().BeFalse("the actor refused the frame");
+
+        // A First Frame the channel accepts stays in progress after the actor has run.
+        byte[] fits = Enumerable.Range(0x40, 12).Select(i => (byte)i).ToArray();
+        var ffFits = IsoTpFrameCodec.BuildFirstFrame(epPeer, fits.Length, fits.AsSpan(0, ffData), isCanFd: false);
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), ffFits));
+        deadline.Restart();
+        while (!receiver.TryGetReceptionInProgress(out seen) && deadline.Elapsed < ShortTimeout)
+            await Task.Delay(5);
+        seen.Should().NotBeNull();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        receiver.TryGetReceptionInProgress(out seen).Should().BeTrue("the actor accepted the frame");
+        seen!.AnnouncedLength.Should().Be(12);
+    }
 }

@@ -952,15 +952,8 @@ internal sealed class UdsClientImpl : IUdsClient
             // already-cancelled token wins against a queued item. Take what is there and let the
             // caller judge its stamp; only an empty inbox means nothing arrived in time
             // (Bugbot on #112).
-            // The in-progress check goes first: the channel clears it only after the completed
-            // PDU is in the inbox, so a reception seen in progress here is found by the wait
-            // below, and one not seen is either absent or already queued for the peek.
-            if (ResponseBeganInTime(budget, budgetStart))
-                return await _channel.ReceiveWithArrivalAsync(linkedToken).ConfigureAwait(false);
-            if (_channel.TryReceiveWithArrival(out var queued))
-                return queued;
-
-            throw new UdsTimeoutException(serviceId, timerKind, elapsedInBudget);
+            return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
+                elapsedInBudget, linkedToken).ConfigureAwait(false);
         }
 
         using var timeoutCts = new CancellationTokenSource(remaining);
@@ -977,21 +970,71 @@ internal sealed class UdsClientImpl : IUdsClient
             // The deadline callback won the race -- which says nothing about whether a punctual
             // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
             // before declaring a timeout.
-            if (ResponseBeganInTime(budget, budgetStart))
-                return await _channel.ReceiveWithArrivalAsync(linkedToken).ConfigureAwait(false);
-            if (_channel.TryReceiveWithArrival(out var raced))
-                return raced;
-
-            throw new UdsTimeoutException(serviceId, timerKind, budget);
+            return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
+                budget, linkedToken).ConfigureAwait(false);
         }
     }
 
-    // A multi-frame response is being reassembled and its First Frame arrived inside the budget:
-    // P2 ended there, and what remains is the transport's transfer, bounded by N_Cr -- which
-    // faults the receive if the server stalls, so the wait without a budget is still bounded.
-    private bool ResponseBeganInTime(TimeSpan budget, long budgetStart)
-        => _channel.TryGetReceptionInProgress(out var firstFrame)
-           && ElapsedSince(budgetStart, firstFrame) <= budget;
+    // How long a wait for a reception in progress runs before it re-checks that the reception
+    // is still there. The channel publishes a First Frame when it is read off the bus and
+    // withdraws it if the actor then refuses the frame -- with nothing put in the inbox -- so
+    // a wait on it must not be unbounded. The re-check costs nothing when the PDU arrives:
+    // completion or abort puts an item in the inbox and the wait returns at once.
+    private static readonly TimeSpan InProgressRecheck = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// The budget is spent. What can still be returned is a PDU already in the inbox, or the
+    /// response being waited for if its First Frame arrived inside the budget: P2 ended there
+    /// (ISO 14229-2), and the remainder of the transfer is the transport's, bounded by N_Cr.
+    /// Anything else is a timeout.
+    /// </summary>
+    private async Task<IsoTpReceivedPdu> TakeQueuedOrInProgressAsync(UdsServiceId serviceId,
+        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, TimeSpan elapsedReported,
+        CancellationToken linkedToken)
+    {
+        while (true)
+        {
+            // The in-progress check goes first: the channel withdraws the record only after the
+            // completed PDU (or the abort's error item) is in the inbox, so a reception seen in
+            // progress here is found by the wait below, and one not seen is either absent or
+            // already queued for the peek.
+            if (!ResponseBeganInTime(serviceId, budget, budgetStart))
+            {
+                if (_channel.TryReceiveWithArrival(out var queued))
+                    return queued;
+
+                throw new UdsTimeoutException(serviceId, timerKind, elapsedReported);
+            }
+
+            using var recheck = new CancellationTokenSource(InProgressRecheck);
+            using var combined = CancellationTokenSource.CreateLinkedTokenSource(
+                linkedToken, recheck.Token);
+            try
+            {
+                return await _channel.ReceiveWithArrivalAsync(combined.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (recheck.IsCancellationRequested
+                                                     && !linkedToken.IsCancellationRequested)
+            {
+                // Still nothing in the inbox: loop, and let the check above decide whether the
+                // reception is still in progress.
+            }
+        }
+    }
+
+    // A multi-frame response is being reassembled, its First Frame arrived inside the budget,
+    // and it is *this* request's response -- its first byte is the positive response SID. Any
+    // other transfer (a late answer to an earlier request, an unsolicited response for another
+    // service) does not extend the budget: the peer is busy with it, so this request's answer
+    // cannot start in time anyway, and waiting it out would only delay the timeout by the length
+    // of a transfer that is then discarded as stray (Codex on #143). A negative response is a
+    // Single Frame and never gets here.
+    private bool ResponseBeganInTime(UdsServiceId serviceId, TimeSpan budget, long budgetStart)
+        => _channel.TryGetReceptionInProgress(out var reception)
+           && reception is not null
+           && ElapsedSince(budgetStart, reception.FirstFrameArrivalTimestamp) <= budget
+           && reception.FirstFrameData.Length > 0
+           && reception.FirstFrameData.Span[0] == (byte)((byte)serviceId + PositiveResponseOffset);
 
     /// <summary>
     /// Elapsed time between two <see cref="Stopwatch.GetTimestamp"/> readings, defaulting the

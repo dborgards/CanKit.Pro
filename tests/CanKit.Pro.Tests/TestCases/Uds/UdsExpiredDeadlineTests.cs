@@ -348,9 +348,9 @@ public class UdsExpiredDeadlineTests
             return false;
         }
 
-        public bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp)
+        public bool TryGetReceptionInProgress(out IsoTpReceptionInProgress? reception)
         {
-            firstFrameArrivalTimestamp = 0;
+            reception = null;
             return false;
         }
 

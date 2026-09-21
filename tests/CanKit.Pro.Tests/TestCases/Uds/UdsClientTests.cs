@@ -399,6 +399,52 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #28, Codex on #143 — the wait beyond P2 is for *this* request's response. A multi-frame
+    // transfer for another service that began inside the budget does not extend it: the peer
+    // is busy with that transfer, so the real answer cannot start in time anyway.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task P2_Is_Not_Extended_By_A_MultiFrame_Transfer_For_Another_Service()
+    {
+        // The ECU answers the RDBI request with silence, but first starts a 146-byte
+        // ReadDTCInformation response (SID 0x59): FF + 20 CFs at the client's STmin of 127 ms,
+        // i.e. 2.5 s on the wire. The client must time out at P2 (500 ms), not after the
+        // transfer; the bound below leaves 1 s for the host between the two.
+        var unrelated = new byte[146];
+        unrelated[0] = 0x59;
+        var p2 = TimeSpan.FromMilliseconds(500);
+
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, req =>
+            {
+                _ = e.Channel.SendAsync(unrelated);
+                throw new EcuSilent();
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 },
+            clientIsoTp: new IsoTpChannelOptions
+            {
+                UseCanFd = false,
+                UsePadding = true,
+                NAs = TimeSpan.FromMilliseconds(500),
+                NBs = TimeSpan.FromMilliseconds(500),
+                NCr = TimeSpan.FromMilliseconds(500),
+                LocalStMin = TimeSpan.FromMilliseconds(127),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var sw = Stopwatch.StartNew();
+            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            await act.Should().ThrowAsync<UdsTimeoutException>();
+            sw.Stop();
+
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(1500),
+                "an unrelated transfer must not hold the request past its budget");
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
     // SecurityAccess must hold the request lock across seed + sendKey so TesterPresent
     // keep-alive cannot interleave and provoke NRC requestSequenceError on real ECUs.
     // -----------------------------------------------------------------------------------

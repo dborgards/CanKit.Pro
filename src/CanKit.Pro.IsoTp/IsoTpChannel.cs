@@ -89,7 +89,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     // The arrival stamp of the First Frame of the reception in progress, or 0 when there is none.
     // Written on the actor loop with _rx; read from any thread by TryGetReceptionInProgress.
-    private long _rxFirstFrameArrival;
+    private IsoTpReceptionInProgress? _rxInProgress;
 
     private int _disposed;
 
@@ -269,10 +269,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     /// <inheritdoc />
-    public bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp)
+    public bool TryGetReceptionInProgress(out IsoTpReceptionInProgress? reception)
     {
-        firstFrameArrivalTimestamp = Interlocked.Read(ref _rxFirstFrameArrival);
-        return firstFrameArrivalTimestamp != 0;
+        reception = Volatile.Read(ref _rxInProgress);
+        return reception is not null;
     }
 
     /// <inheritdoc />
@@ -305,7 +305,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 {
                     _rx?.CancelDeadline();
                     _rx = null;
-                    Interlocked.Exchange(ref _rxFirstFrameArrival, 0);
+                    Volatile.Write(ref _rxInProgress, null);
                 }
                 finally
                 {
@@ -452,7 +452,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // Pass the on-wire frame kind into TryParsePci so CAN-FD escape SF/FF headers are
                 // accepted only for real FD frames (develop codec API: isCanFd required).
                 bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
-                _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival));
+                // A First Frame is published here, on the reader, before the actor sees it: a
+                // caller whose deadline fires while the actor is behind must find the frame at
+                // its arrival, not at its processing (Codex on #143). The actor confirms the
+                // record when it accepts the frame and withdraws it when it does not.
+                IsoTpReceptionInProgress? announce = null;
+                if (IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci)
+                    && pci.Type == PciType.FirstFrame)
+                {
+                    announce = new IsoTpReceptionInProgress(frameArrival, pci.Length,
+                        new ReadOnlyMemory<byte>(payload, pci.DataOffset,
+                            Math.Max(0, payload.Length - pci.DataOffset)));
+                    Volatile.Write(ref _rxInProgress, announce);
+                }
+                _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival, announce));
             }
         }
         catch (OperationCanceledException)
@@ -901,7 +914,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // RX side (all methods run on the actor loop)
     // -----------------------------------------------------------------------------------------
 
-    private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival)
+    private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival,
+        IsoTpReceptionInProgress? announce)
     {
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
@@ -912,7 +926,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 HandleRxSingleFrame(payload, pci, frameArrival);
                 break;
             case PciType.FirstFrame:
-                HandleRxFirstFrame(payload, pci, frameArrival);
+                if (!TryBeginRx(payload, pci, frameArrival, announce!))
+                {
+                    // Refused, or complete in the one frame: the reader's record is withdrawn --
+                    // unless a later First Frame has already replaced it.
+                    Interlocked.CompareExchange(ref _rxInProgress, null, announce);
+                }
                 break;
             case PciType.ConsecutiveFrame:
                 HandleRxConsecutiveFrame(payload, pci, frameArrival);
@@ -940,7 +959,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         EmitPdu(pdu, frameArrival);
     }
 
-    private void HandleRxFirstFrame(byte[] payload, Pci pci, long frameArrival)
+    // True when a reassembly is now in progress for this First Frame; false when the frame was
+    // refused or already carried the whole PDU.
+    private bool TryBeginRx(byte[] payload, Pci pci, long frameArrival,
+        IsoTpReceptionInProgress announce)
     {
         // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
@@ -954,7 +976,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // A First Frame must be a full frame: classic CAN_DL 8, CAN FD at least 8 — its CAN_DL
         // is the RX_DL every Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8,
         // #27). A shorter one is not a First Frame; it is ignored.
-        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return;
+        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return false;
 
         // Cap reassembly allocation to the codec limit for this frame kind (Bugbot 3596212802)
         // and to MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to int.MaxValue;
@@ -962,7 +984,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (pci.Length < 1 || pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
         {
             SendOverflowFlowControl();
-            return;
+            return false;
         }
 
         int firstChunk = payload.Length - pci.DataOffset;
@@ -979,7 +1001,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // CAN-FD escape FF can announce up to int.MaxValue; if the process cannot honor the
             // codec max, refuse with OVFLW rather than faulting the actor loop.
             SendOverflowFlowControl();
-            return;
+            return false;
         }
         Array.Copy(payload, pci.DataOffset, buffer, 0, firstChunk);
 
@@ -996,16 +1018,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (firstChunk >= pci.Length)
         {
             EmitPdu(buffer, frameArrival);
-            return;
+            return false;
         }
 
         _rx = new RxState(buffer, received: firstChunk,
             expectedSn: IsoTpFrameCodec.FirstConsecutiveSequenceNumber,
             blockCounter: _options.LocalBlockSize,
             rxDl: payload.Length,
-            firstFrameArrival: frameArrival);
-        Interlocked.Exchange(ref _rxFirstFrameArrival, frameArrival);
+            announce);
+        // Confirm the reader's record. It may already have been overwritten by a later First
+        // Frame the reader saw; that frame is behind this one in the mailbox and will abort
+        // this reassembly, so leaving the newer record in place is the truthful state.
+        Interlocked.CompareExchange(ref _rxInProgress, announce, null);
         ArmNCr();
+        return true;
     }
 
     private void HandleRxConsecutiveFrame(byte[] payload, Pci pci, long frameArrival)
@@ -1050,10 +1076,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // The last consecutive frame's arrival: a PDU is complete when its final frame
             // lands, not when its first one did -- and the first frame's arrival goes with it,
             // for a caller whose deadline ended there (#28).
-            EmitPdu(pdu, frameArrival, rx.FirstFrameArrival);
-            // Cleared only once the PDU is in the inbox: a caller whose deadline expires in
-            // between must find either the reception in progress or the PDU, never neither.
-            Interlocked.Exchange(ref _rxFirstFrameArrival, 0);
+            EmitPdu(pdu, frameArrival, rx.Announce.FirstFrameArrivalTimestamp);
+            // Withdrawn only once the PDU is in the inbox: a caller whose deadline expires in
+            // between must find either the reception in progress or the PDU, never neither. And
+            // only this reception's record: a newer First Frame's stays.
+            Interlocked.CompareExchange(ref _rxInProgress, null, rx.Announce);
             return;
         }
 
@@ -1212,9 +1239,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         RaiseBackgroundException(ex);
         _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex));
-        // After the error item, for the same reason the completion path clears it after the
+        // After the error item, for the same reason the completion path withdraws it after the
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
-        Interlocked.Exchange(ref _rxFirstFrameArrival, 0);
+        if (rx is not null)
+            Interlocked.CompareExchange(ref _rxInProgress, null, rx.Announce);
     }
 
     private void SendOverflowFlowControl()
@@ -1389,18 +1417,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private sealed class RxState
     {
-        public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter, int rxDl, long firstFrameArrival)
+        public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter, int rxDl,
+            IsoTpReceptionInProgress announce)
         {
             Buffer = buffer;
             Received = received;
             ExpectedSn = expectedSn;
             BlockCounter = blockCounter;
             RxDl = rxDl;
-            FirstFrameArrival = firstFrameArrival;
+            Announce = announce;
         }
 
-        /// <summary>The First Frame's arrival stamp, delivered with the PDU (#28).</summary>
-        public long FirstFrameArrival { get; }
+        /// <summary>The record published for this reception's First Frame; its arrival stamp is
+        /// delivered with the PDU (#28).</summary>
+        public IsoTpReceptionInProgress Announce { get; }
 
         public byte[] Buffer { get; }
 
