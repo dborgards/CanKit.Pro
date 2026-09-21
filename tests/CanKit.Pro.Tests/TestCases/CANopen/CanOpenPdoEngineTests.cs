@@ -785,6 +785,38 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x2101, 0x00).Should().Be(9u, "the second RPDO on the same COB-ID is actuated too");
     }
 
+    // FR-CO-006 (#133 review) — a TPDO configured by direct dictionary writes reacts to the very
+    // next write of its mapped object, even when the actor loop has not yet rebuilt the runtime:
+    // the change-of-state pre-filter is refreshed from the records on the writing thread, under
+    // the write gate, so the write that follows the "create" is seen. The test holds the loop
+    // through the configuration and the write; the release must produce that transmission.
+    [Fact]
+    public async Task Tpdo_Configured_By_Direct_Writes_Reacts_To_The_Write_That_Follows_At_Once()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = (CanOpenNode)CanOpen.OpenNode(busB, Device);
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0x1111);
+        await StartAsync(wire, device);
+
+        using var release = new ManualResetEventSlim(false);
+        var held = device.PostToActorAsync(() => release.Wait(ShortTimeout));
+        od.WriteUnsigned(0x1800, 0x01, CanOpenCobId.InvalidBit | Tpdo1);
+        od.WriteUnsigned(0x1A00, 0x00, 0);
+        od.WriteUnsigned(0x1A00, 0x01, 0x2000_0010);
+        od.WriteUnsigned(0x1A00, 0x00, 1);
+        od.WriteUnsigned(0x1800, 0x02, CanOpenTransmissionType.EventDrivenManufacturer);
+        od.WriteUnsigned(0x1800, 0x01, Tpdo1);
+        od.WriteUnsigned(0x2000, 0x00, 0x2222); // right after "create", before the loop rebuilt anything
+        release.Set();
+        await held.WithTimeoutAsync(ShortTimeout);
+
+        await wire.WaitForCountAsync(Tpdo1, 1);
+        wire.Payloads(Tpdo1)[0].Should().Equal(0x22, 0x22);
+    }
+
     // =========================================================================================
     // FR-CO-018 — PDO COB-ID (CiA 301 §7.5.2.35 Table 66 / §7.5.2.37 Table 70, §7.3.5).
     // =========================================================================================

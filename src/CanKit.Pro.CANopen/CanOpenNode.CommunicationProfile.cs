@@ -291,9 +291,13 @@ internal sealed partial class CanOpenNode
     {
         if (!SignatureMatches(value, SaveSignature))
             return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferred);
+        // The values are taken here, on the writing thread under the dictionary's write gate: what
+        // is stored is what the dictionary held at the "save", not what a writer changed while the
+        // actor was still getting to it (Codex on #133). Only the actor-owned state moves to the loop.
+        var stored = SnapshotRestorableValues();
         RunOnActor(() =>
         {
-            _powerOnValues = SnapshotRestorableValues();
+            _powerOnValues = stored;
             // A store after "load" is the newer instruction: the next reset restores what was
             // just stored, not the defaults the earlier "load" asked for.
             _restoreDefaultsOnReset = false;
@@ -341,6 +345,12 @@ internal sealed partial class CanOpenNode
     {
         if (!IsManagedCommunicationObject(index)) return;
         if (Volatile.Read(ref _disposed) != 0) return;
+        // A TPDO record changed: the change-of-state pre-filter is refreshed here, on the writing
+        // thread and still inside the write gate, so that the writer's next write — the first
+        // value of an object it has just mapped — is already seen, before the actor has rebuilt
+        // the runtime (Codex on #133).
+        if (index is (>= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount) or (>= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount))
+            RebuildCosRelevantEntries();
         RunOnActor(() => ApplyCommunicationObject(index, subindex));
     }
 
@@ -375,6 +385,11 @@ internal sealed partial class CanOpenNode
         }
         _actor.PostAsync(work).GetAwaiter().GetResult();
     }
+
+    /// <summary>Test seam: posts <paramref name="work"/> to the actor loop and returns its task.
+    /// A test holds the loop with it to prove what must not wait for the loop — the values a
+    /// "save" stores, a change-of-state write right after a direct configuration.</summary>
+    internal System.Threading.Tasks.Task PostToActorAsync(Action work) => _actor.PostAsync(work);
 
     /// <summary>Blocks until every apply posted so far has run, so a configuration method
     /// returns with its effect in place. Skipped when already on the actor loop, where posted

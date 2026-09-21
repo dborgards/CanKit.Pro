@@ -1257,6 +1257,35 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         (await UploadUnsignedAsync(master, Slave, 0x1A00, 0x00)).Should().Be(1u);
     }
 
+    // FR-CO-019 (#133 review) — "save" written directly to 1010h:01 stores the values as they are
+    // at that write, under the dictionary's write gate: a parameter changed right after the save
+    // is not what the next reset restores, however busy the actor loop is. The test holds the
+    // loop while it saves and then changes 1017h; the reset after the release restores the saved value.
+    [Fact]
+    public async Task A_Save_Written_Directly_Stores_The_Values_At_That_Write_Not_Later_Ones()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: Master);
+        var bootups = new BootupWatch(master, Slave);
+        using var slave = (CanOpenNode)CanOpen.OpenNode(busB, nodeId: Slave);
+        var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x1017, 0x00, 100);
+        await bootups.First;
+
+        using var release = new ManualResetEventSlim(false);
+        var held = slave.PostToActorAsync(() => release.Wait(ShortTimeout));
+        od.WriteRaw(0x1010, 0x01, new byte[] { 0x73, 0x61, 0x76, 0x65 }); // "save"
+        od.WriteUnsigned(0x1017, 0x00, 300);                                // after the save, before the loop ran anything
+        release.Set();
+        await held.WithTimeoutAsync(ShortTimeout);
+
+        await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, Slave);
+        await bootups.Second;
+        (await UploadUnsignedAsync(master, Slave, 0x1017, 0x00)).Should().Be(100u, "the save stored 100; the 300 came after it");
+    }
+
     // FR-CO-014 (#133 review) — SendSyncAsync transmits on the CAN-ID the dictionary holds when
     // it is called. The apply that updates the runtime's copy of 1005h is posted to the actor, so
     // a caller that has just written 1005h could otherwise race it; reading the dictionary

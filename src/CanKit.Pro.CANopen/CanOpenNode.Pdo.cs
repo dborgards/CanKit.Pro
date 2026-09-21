@@ -42,9 +42,10 @@ internal sealed partial class CanOpenNode
     private readonly RpdoRuntime?[] _rpdos = new RpdoRuntime?[Co.PdoCount + 1];
 
     // Change-of-state TPDO support (FR-CO-006): volatile pre-filter snapshot of OD entries
-    // mapped in at least one event-driven or synchronous-acyclic TPDO (rebuilt on the actor by
-    // RebuildCosRelevantEntries), plus the dirty-set coalescing state that bounds CoS posts to
-    // at most one queued evaluation (see OnOdEntryWrittenForCoS).
+    // mapped in at least one event-driven or synchronous-acyclic TPDO (rebuilt from the records
+    // by RebuildCosRelevantEntries — on the writing thread as soon as a TPDO record is written,
+    // and on the actor after each rebuild), plus the dirty-set coalescing state that bounds CoS
+    // posts to at most one queued evaluation (see OnOdEntryWrittenForCoS).
     private volatile HashSet<uint> _cosRelevantEntries = new();
     private readonly object _cosGate = new();
     private HashSet<uint>? _cosDirty;
@@ -752,8 +753,10 @@ internal sealed partial class CanOpenNode
            || CanOpenTransmissionType.IsEventDriven(transmissionType);
 
     // Rebuilds the volatile pre-filter snapshot of OD entries mapped in at least one TPDO whose
-    // transmission type reacts to a change of state. Called on the actor whenever a TPDO record
-    // changes.
+    // transmission type reacts to a change of state. Reads the records, not the runtime, because
+    // it runs on the writing thread as soon as a TPDO record is written — inside the write gate,
+    // so the writer's next write already meets the new filter — and again on the actor after each
+    // rebuild (Codex on #133).
     private void RebuildCosRelevantEntries()
     {
         var set = new HashSet<uint>();
@@ -761,9 +764,11 @@ internal sealed partial class CanOpenNode
         {
             for (int n = 1; n <= Co.PdoCount; n++)
             {
-                var rt = _tpdos[n];
-                if (rt is null || !rt.Valid || !IsChangeOfStateTriggered(rt.TransmissionType)) continue;
-                foreach (var e in rt.Mapping) set.Add(CosKey(e.Index, e.Subindex));
+                var comm = (ushort)(Co.TpdoComm + n - 1);
+                if (!_od.TryReadUnsigned(comm, 0x01, out var word) || (word & CanOpenCobId.InvalidBit) != 0) continue;
+                byte type = _od.TryReadUnsigned(comm, 0x02, out var t) ? (byte)t : CanOpenTransmissionType.EventDrivenManufacturer;
+                if (!IsChangeOfStateTriggered(type)) continue;
+                foreach (var e in ReadMappingRecord((ushort)(Co.TpdoMap + n - 1))) set.Add(CosKey(e.Index, e.Subindex));
             }
         }
         _cosRelevantEntries = set;
