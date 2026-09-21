@@ -40,7 +40,7 @@ namespace CanKit.Pro.Uds
         public System.TimeSpan P2ClientMax { get; init; }
         public System.TimeSpan P2StarClientMax { get; init; }
         public System.TimeSpan TesterPresentPeriod { get; init; }
-        public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default) { }
+        public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default, int? maxBusyRepeatRequests = default, System.TimeSpan? busyRepeatRequestDelay = default) { }
     }
     public readonly struct UdsDownloadResponse
     {

@@ -21,6 +21,7 @@ namespace CanKit.Pro.Uds;
 public sealed class UdsFunctionalClient : IDisposable
 {
     private const byte SuppressPositiveResponseBit = 0x80;
+    private const byte NegativeResponseSid = 0x7F;
 
     private readonly IsoTpFunctionalClient _client;
     private readonly bool _ownsClient;
@@ -44,9 +45,11 @@ public sealed class UdsFunctionalClient : IDisposable
 
     /// <summary>
     /// Sends <paramref name="request"/> on the functional identifier and collects every ECU's
-    /// answer that arrives within <paramref name="window"/>. A request with
-    /// suppressPosRspMsgIndication set is sent and not collected for: an empty list comes back
-    /// as soon as the frame is confirmed.
+    /// answer to <em>it</em> that arrives within <paramref name="window"/>: a positive response
+    /// to the request's service, or a negative response naming it. Other traffic on the
+    /// response identifiers -- another tester's answers, a late answer to an earlier request --
+    /// is not attributed to this call. A request with suppressPosRspMsgIndication set is sent
+    /// and not collected for: an empty list comes back as soon as the frame is confirmed.
     /// </summary>
     public async Task<IReadOnlyList<UdsFunctionalResponse>> SendRawAsync(ReadOnlyMemory<byte> request,
         TimeSpan window, CancellationToken cancellationToken = default)
@@ -64,20 +67,37 @@ public sealed class UdsFunctionalClient : IDisposable
 
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
-        var responses = new UdsFunctionalResponse[raw.Count];
-        for (int i = 0; i < raw.Count; i++)
-            responses[i] = new UdsFunctionalResponse(raw[i].SourceCanId, raw[i].Data);
+        byte sid = request.Span[0];
+        byte positiveSid = (byte)(sid + 0x40);
+        var responses = new List<UdsFunctionalResponse>(raw.Count);
+        foreach (var r in raw)
+        {
+            // Correlated to this request the way the physical client correlates: the positive
+            // response SID, or a negative response echoing the request's SID (Codex on #150).
+            var data = r.Data;
+            bool ours = data.Length >= 1 && data[0] == positiveSid
+                || data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
+            if (ours) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
+        }
         return responses;
     }
 
     /// <summary>
     /// TesterPresent to everyone (<c>3E 80</c>): the keep-alive that reaches every ECU with one
-    /// frame. With the positive response suppressed, the default, nothing is collected.
+    /// frame. With the positive response suppressed, the default, nothing is collected and
+    /// <paramref name="window"/> is ignored; without it, every ECU answers, and a
+    /// <paramref name="window"/> to collect them in is required (Codex on #150).
     /// </summary>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="suppressPositiveResponse"/> is <c>false</c> and no window was given.
+    /// </exception>
     public async Task<IReadOnlyList<UdsFunctionalResponse>> TesterPresentAsync(
         bool suppressPositiveResponse = true, TimeSpan? window = null,
         CancellationToken cancellationToken = default)
     {
+        if (!suppressPositiveResponse && window is null)
+            throw new ArgumentNullException(nameof(window),
+                "An unsuppressed TesterPresent is answered by every ECU; give a window to collect the answers in.");
         byte sub = suppressPositiveResponse ? SuppressPositiveResponseBit : (byte)0x00;
         return await SendRawAsync(new byte[] { (byte)UdsServiceId.TesterPresent, sub },
             window ?? TimeSpan.Zero, cancellationToken).ConfigureAwait(false);

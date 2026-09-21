@@ -508,6 +508,23 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: the With(...) clone carries the busy-repeat settings.
+    [Fact]
+    public void Options_With_Carries_The_Busy_Repeat_Settings()
+    {
+        var options = new UdsClientOptions
+        {
+            MaxBusyRepeatRequests = 7,
+            BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(15),
+        };
+
+        var clone = options.With(p2ClientMax: TimeSpan.FromMilliseconds(50));
+
+        clone.MaxBusyRepeatRequests.Should().Be(7);
+        clone.BusyRepeatRequestDelay.Should().Be(TimeSpan.FromMilliseconds(15));
+        options.With(maxBusyRepeatRequests: 0).MaxBusyRepeatRequests.Should().Be(0);
+    }
+
     [Fact]
     public async Task BusyRepeatRequest_Is_Surfaced_Once_The_Repeats_Are_Used_Up()
     {

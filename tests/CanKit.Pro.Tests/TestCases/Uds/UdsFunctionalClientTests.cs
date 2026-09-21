@@ -78,6 +78,47 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         fromEcu2.NegativeResponseCode.Should().Be(0x31);
     }
 
+    // Codex on #150: only answers to *this* request are attributed to the call. Another
+    // tester's answer on a response identifier, or a late answer to an earlier request, is not.
+    [Fact]
+    public async Task A_Functional_Request_Does_Not_Attribute_Unrelated_Traffic_To_Itself()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var ours = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x90, 0x01 });
+        var otherService = SingleFrameFrom(Ecu2, new byte[] { 0x50, 0x03, 0x00, 0x32, 0x01, 0xF4 });
+        var otherNegative = SingleFrameFrom(Ecu2, new byte[] { 0x7F, 0x10, 0x12 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            busEcus.Transmit(otherService);
+            busEcus.Transmit(otherNegative);
+            busEcus.Transmit(ours);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.SourceCanId.Should().Be(Ecu1);
+    }
+
+    [Fact]
+    public async Task An_Unsuppressed_TesterPresent_Needs_A_Window()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        Func<Task> act = () => functional.TesterPresentAsync(suppressPositiveResponse: false);
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
     [Fact]
     public async Task TesterPresent_To_Everyone_Is_One_Suppressed_Frame_And_Collects_Nothing()
     {

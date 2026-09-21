@@ -94,7 +94,9 @@ public sealed class UdsClientOptions
         TimeSpan? p2StarClientMax = null,
         int? maxResponsePendingCount = null,
         TimeSpan? testerPresentPeriod = null,
-        bool? keepAliveSuppressPositiveResponse = null)
+        bool? keepAliveSuppressPositiveResponse = null,
+        int? maxBusyRepeatRequests = null,
+        TimeSpan? busyRepeatRequestDelay = null)
         => new()
         {
             P2ClientMax = p2ClientMax ?? P2ClientMax,
@@ -102,5 +104,7 @@ public sealed class UdsClientOptions
             MaxResponsePendingCount = maxResponsePendingCount ?? MaxResponsePendingCount,
             TesterPresentPeriod = testerPresentPeriod ?? TesterPresentPeriod,
             KeepAliveSuppressPositiveResponse = keepAliveSuppressPositiveResponse ?? KeepAliveSuppressPositiveResponse,
+            MaxBusyRepeatRequests = maxBusyRepeatRequests ?? MaxBusyRepeatRequests,
+            BusyRepeatRequestDelay = busyRepeatRequestDelay ?? BusyRepeatRequestDelay,
         };
 }
