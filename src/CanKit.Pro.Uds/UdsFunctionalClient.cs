@@ -95,22 +95,19 @@ public sealed class UdsFunctionalClient : IDisposable
 
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
-        byte sid = request.Span[0];
+        var req = request.Span;
+        byte sid = req[0];
         byte positiveSid = (byte)(sid + 0x40);
-        // A service with a sub-function echoes it in the positive response (bit 7 cleared), so
-        // a late answer to an earlier request for another sub-function -- a session change to
-        // Extended answered during the next one to Default -- is told apart (Codex on #150).
-        int subFunction = HasSubFunction(sid) && request.Length >= 2
-            ? request.Span[1] & ~SuppressPositiveResponseBit
-            : -1;
+        // A positive response echoes the request's leading parameter bytes -- the sub-function
+        // (bit 7 cleared), a DID, a routine identifier, a block counter -- so a late answer to
+        // an earlier request for another parameter, arriving in this window, is told apart
+        // (Codex on #150, twice). How many bytes, per service, is in EchoedRequestBytes.
+        int echoed = Math.Min(EchoedRequestBytes(sid), req.Length - 1);
         var responses = new List<UdsFunctionalResponse>(raw.Count);
         foreach (var r in raw)
         {
-            // Correlated to this request the way the physical client correlates: the positive
-            // response SID (and sub-function), or a negative response echoing the request's SID.
             var data = r.Data;
-            bool positive = data.Length >= 1 && data[0] == positiveSid
-                && (subFunction < 0 || data.Length >= 2 && data[1] == subFunction);
+            bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed);
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
@@ -151,6 +148,29 @@ public sealed class UdsFunctionalClient : IDisposable
             throw new ArgumentOutOfRangeException(nameof(session), session, "Session type must be 0x01..0x7F.");
         return await SendRawAsync(new byte[] { (byte)UdsServiceId.DiagnosticSessionControl, sub },
             window, cancellationToken).ConfigureAwait(false);
+    }
+
+    // How many request bytes after the SID a positive response repeats, for the services
+    // whose response layout starts with them (ISO 14229-1, the response tables of each
+    // service): the sub-function where there is one, then a DID (0x22 the first, 0x2E), the
+    // routine identifier (0x31), the block sequence counter (0x36).
+    private static int EchoedRequestBytes(byte sid) => sid switch
+    {
+        0x22 or 0x2E => 2,
+        0x31 => 3,
+        0x36 => 1,
+        _ => HasSubFunction(sid) ? 1 : 0,
+    };
+
+    private static bool EchoMatches(ReadOnlySpan<byte> request, byte[] response, int echoed)
+    {
+        for (int i = 0; i < echoed; i++)
+        {
+            byte expected = request[1 + i];
+            if (i == 0 && HasSubFunction(request[0])) expected &= unchecked((byte)~SuppressPositiveResponseBit);
+            if (response[1 + i] != expected) return false;
+        }
+        return true;
     }
 
     // Mirrors UdsClientImpl.HasSubFunction (ISO 14229-1 table 2).

@@ -42,6 +42,12 @@ internal sealed class UdsClientImpl : IUdsClient
     /// <summary>How long Dispose waits for a request in flight to release the lock.</summary>
     internal TimeSpan DisposeLockTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    // A suppressed send draws no positive response but may still draw a negative one, up to P2
+    // after it went out. A following request for the same service would take that negative
+    // response as its own; it waits until the window is over instead (Codex on #150).
+    private int _suppressedSid = -1;
+    private long _suppressedUntil;
+
     private readonly IIsoTpChannel _channel;
     private readonly bool _ownsChannel;
     private readonly UdsClientOptions _options;
@@ -430,12 +436,33 @@ internal sealed class UdsClientImpl : IUdsClient
         await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
         try
         {
-            await _channel.SendAsync(request, linkedToken).ConfigureAwait(false);
+            var stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+            var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
+            _suppressedSid = request[0];
+            _suppressedUntil = sent + (long)(_options.P2ClientMax.TotalSeconds * Stopwatch.Frequency);
         }
         finally
         {
             _requestLock.Release();
         }
+    }
+
+    // Under the request lock. A request for the service of the latest suppressed send waits
+    // out that send's P2, draining what arrives, so a late negative response to the suppressed
+    // send cannot be taken for this request's.
+    private async Task WaitOutSuppressedResponseWindowAsync(UdsServiceId serviceId, CancellationToken linkedToken)
+    {
+        if (_suppressedSid != (byte)serviceId) return;
+        var remaining = ElapsedUntil(_suppressedUntil);
+        if (remaining > TimeSpan.Zero)
+            await Task.Delay(remaining, linkedToken).ConfigureAwait(false);
+        _suppressedSid = -1;
+    }
+
+    private static TimeSpan ElapsedUntil(long timestamp)
+    {
+        var ticks = timestamp - Stopwatch.GetTimestamp();
+        return ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 
     // The services whose second byte is a sub-function parameter, and so carry the
@@ -845,6 +872,8 @@ internal sealed class UdsClientImpl : IUdsClient
     private async Task<byte[]> ExchangeOnceAsync(UdsServiceId serviceId, byte[] request,
         CancellationToken linkedToken)
     {
+        await WaitOutSuppressedResponseWindowAsync(serviceId, linkedToken).ConfigureAwait(false);
+
         // Drop any late reply left over from a previous aborted/timed-out wait before we put a
         // new request on the wire. SID correlation alone is insufficient when the next request
         // uses the same service (the stale positive response SID would match).

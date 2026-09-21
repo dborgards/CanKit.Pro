@@ -488,6 +488,36 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: a suppressed send may still draw a negative response, up to P2 after it.
+    // The next request for the same service waits that window out rather than taking the
+    // negative response as its own.
+    [Fact]
+    public async Task A_Late_Negative_Response_To_A_Suppressed_Send_Is_Not_The_Next_Requests()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                {
+                    Thread.Sleep(100);                  // late ...
+                    throw new EcuNegativeResponse(0x12); // ... and negative, to the suppressed one
+                }
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+
+            // Follows at once; the ECU's negative answer to the suppressed send is still coming.
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the negative response belongs to the suppressed send");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()

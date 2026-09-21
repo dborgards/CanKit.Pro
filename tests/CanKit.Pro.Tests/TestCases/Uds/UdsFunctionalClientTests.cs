@@ -152,7 +152,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) Interlocked.Increment(ref requestsSeen);
         };
 
-        var functional = UdsFunctionalClient.Create(
+        using var functional = UdsFunctionalClient.Create( // a second Dispose is idempotent
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
 
         using var cts = new CancellationTokenSource(ShortTimeout);
@@ -194,6 +194,30 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Default, Window, cts.Token);
 
         responses.Should().BeEmpty("an answer for another sub-function is an earlier request's");
+    }
+
+    // Codex on #150: a positive response echoes the request's DID; a late answer for another
+    // DID arriving in this window is an earlier request's.
+    [Fact]
+    public async Task A_Positive_Response_For_Another_Did_Is_Not_Attributed()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var stale = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x90, 0x01 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) busEcus.Transmit(stale);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+
+        responses.Should().BeEmpty("the answer names DID F190, the request asked for F191");
     }
 
     [Fact]
