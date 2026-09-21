@@ -384,7 +384,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                     var kept = new List<RxInboxItem>();
                     while (_pduInbox.Reader.TryRead(out var item))
                     {
-                        if (item.Error is null && item.FirstFrameArrivalTimestamp >= stamp)
+                        // An error item carries the first-frame stamp of the reception it
+                        // aborted, so an abort of a reception that began after the stamp is
+                        // kept as that reception's outcome (Codex on #143).
+                        if (item.FirstFrameArrivalTimestamp >= stamp)
                             kept.Add(item);
                         else
                             discarded++;
@@ -1357,7 +1360,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         RaiseBackgroundException(ex);
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex));
+        _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex,
+            rx?.Announce.FirstFrameArrivalTimestamp ?? Stopwatch.GetTimestamp()));
         // After the error item, for the same reason the completion path withdraws it after the
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
         if (rx is not null)
@@ -1463,11 +1467,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         public static RxInboxItem FromPdu(byte[] pdu, long arrivalTimestamp, long firstFrameArrivalTimestamp)
             => new(pdu, null, arrivalTimestamp, firstFrameArrivalTimestamp);
 
-        public static RxInboxItem FromError(Exception error)
-        {
-            var now = Stopwatch.GetTimestamp();
-            return new(null, error, now, now);
-        }
+        /// <summary>An aborted reassembly's fault, stamped with the First Frame arrival of the
+        /// reception it ends, so a discard tells its reception's age.</summary>
+        public static RxInboxItem FromError(Exception error, long firstFrameArrival)
+            => new(null, error, Stopwatch.GetTimestamp(), firstFrameArrival);
     }
 
     private enum TxStage
