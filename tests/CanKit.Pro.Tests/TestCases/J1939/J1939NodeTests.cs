@@ -1550,18 +1550,85 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the node sent this itself, and an echo bus hands it straight back");
     }
 
-    // #119, found by Codex on the guard above. BeginClaimRound calls WriteAddress(null) before
-    // announcing the new preferred SA, so for the whole arbitration window the node has no
-    // address and the guard's `myAddr >= 0` is false. A frame this node transmitted under the old
-    // SA, whose echo is still queued behind the claim on the actor, then walks straight past it.
+    // #119 found that a frame this node transmitted under the address it is giving up walks past
+    // the guard above during a re-claim -- BeginClaimRound clears the address before announcing
+    // the new one -- and #121 found that the marker #119 added for it was bounded by the
+    // arbitration window, not by the transmission it existed for: an echo delivered after the
+    // claim completed passed both guards. The node now recognises its own frames by content,
+    // against a ledger of what it transmitted, so the echo is recognised whenever it arrives.
     //
-    // Reproduced deterministically rather than by racing the reader: a frame carrying the vacated
-    // SA is injected *while* the claim is pending, which is the state the race produces. The
-    // arbitration window is deliberately long here -- the assertion is that something is dropped
-    // during the window, so a wider window can only make the test surer.
+    // Reproduced without a wall-clock margin: the bus parks every echo, the echo of the frame
+    // sent under the old address is withheld until the claim for the new one has completed, and
+    // only then delivered. A peer's frame after it is the barrier that it was processed.
+    [Fact]
+    public async Task An_Echo_Sent_Under_The_Vacated_Address_Is_Not_Raised_Even_After_The_Claim_Completed()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        var claimA = node.ClaimAddressAsync(0x11);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await claimA.WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        // A broadcast under 0x11 whose echo the bus holds back -- this is the late echo.
+        const uint ownPgn = 0xFEF3u;
+        var ownFrame = CanFrame.Classic((int)J1939Id.ComposePgn(6, ownPgn, sourceAddress: 0x11),
+            new byte[] { 1, 2, 3 }, isExtendedFrame: true);
+        var ownSend = node.SendAsync(new J1939Message(ownPgn, new byte[] { 1, 2, 3 },
+            destinationAddress: J1939Pgn.GlobalAddress));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+
+        // Re-claim to 0x22: its announcement is the third parked echo. Withhold the broadcast's
+        // echo for good on the bus (it is delivered by hand below), release the claim's, and let
+        // the claim complete.
+        var claimB = node.ClaimAddressAsync(0x22);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
+        bus.DeferredEchoes.DiscardNext().Should().BeTrue();  // the broadcast's echo, held back
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();  // the claim's
+        await claimB.WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be(0x22);
+
+        // The late echo, after the claim completed; then a peer's frame as the barrier.
+        bus.RaiseObserved(ownFrame, isEcho: true);
+        const uint peerPgn = 0xFEF4u;
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, peerPgn, sourceAddress: 0x33),
+            new byte[] { 4, 5, 6 }, isExtendedFrame: true), isEcho: false);
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == peerPgn)) break; }
+            await Task.Delay(5);
+        }
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+        snapshot.Should().Contain(m => m.Pgn == peerPgn, "a peer is heard whatever else arrived");
+        snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
+            "the node sent this frame itself; its echo is recognised by content, not by an "
+            + "address the node happens to hold when the echo is finally processed");
+
+        // The broadcast's own confirmation never came (its echo was withheld): the send faults,
+        // which is the bus's doing and not the ledger's.
+        await Assert.ThrowsAnyAsync<Exception>(() => ownSend.WithTimeout(ShortTimeout));
+    }
+
+    // #121, the other direction, and the one the marker got wrong by construction: a frame this
+    // node did *not* send is a peer's, whatever address it carries and whatever the node is
+    // doing with that address. The marker treated every frame under the vacated address as the
+    // node's own echo for the length of the arbitration window; the ledger only ever matches what
+    // the node transmitted, so a peer transmitting under the old address -- with or without a
+    // claim of its own -- is heard even while the re-claim is in flight.
     [Theory]
     [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
-    public async Task A_Vacated_Address_Is_Still_Recognised_As_Ours_While_Reclaiming(EchoWorld world)
+    public async Task A_Frame_This_Node_Did_Not_Send_Is_Heard_Under_The_Vacated_Address_During_A_Reclaim(EchoWorld world)
     {
         using var echo = EchoWorldFixture.Create(world, NewSession());
         using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
@@ -1581,229 +1648,86 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.ClaimState.Should().NotBe(J1939ClaimState.Claimed,
             "the rest of this test is about the window where the node has no address");
 
-        const uint vacatedPgn = 0xFEF3u;
-        const uint thirdPartyPgn = 0xFEF4u;
+        const uint underVacated = 0xFEF3u;
         echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, vacatedPgn, sourceAddress: 0x11),
+            (int)J1939Id.ComposePgn(6, underVacated, sourceAddress: 0x11),
             new byte[] { 1, 2, 3 }, isExtendedFrame: true));
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, thirdPartyPgn, sourceAddress: 0x33),
-            new byte[] { 4, 5, 6 }, isExtendedFrame: true));
 
         var deadline = DateTime.UtcNow + ShortTimeout;
         while (DateTime.UtcNow < deadline)
         {
-            lock (seenLock) { if (seen.Any(m => m.Pgn == thirdPartyPgn)) break; }
+            lock (seenLock) { if (seen.Any(m => m.Pgn == underVacated)) break; }
             await Task.Delay(5);
         }
-
         List<J1939Message> snapshot;
         lock (seenLock) snapshot = new List<J1939Message>(seen);
-
-        snapshot.Should().Contain(m => m.Pgn == thirdPartyPgn,
-            "an unrelated peer must still be heard during a re-claim");
-        snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
-            "0x11 is the address this node is in the middle of giving up, so a frame carrying it "
-            + "is its own echo draining behind the claim");
+        snapshot.Should().Contain(m => m.Pgn == underVacated && m.SourceAddress == 0x11,
+            "this node never transmitted this frame, so it is a peer's -- the address it carries "
+            + "being one this node is giving up does not make it the node's own echo");
 
         await reclaim.WithTimeout(ShortTimeout);
     }
 
-    // #119, found by Codex and Bugbot independently on the memory added for the first finding:
-    // BeginClaimRound calls WriteAddress(null) on *every* round, so a second round while still
-    // Claiming -- an arbitrary-address fallback, or a replacing ClaimAddressAsync -- copied the
-    // already-cleared -1 over the remembered address and forgot it.
-    //
-    // Driven through the public API rather than by reaching into the state: claim, start a
-    // re-claim, then replace that claim while it is still in flight. The second BeginClaimRound
-    // is the one that used to wipe the memory.
-    [Theory]
-    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
-    public async Task A_Vacated_Address_Survives_A_Second_Claim_Round(EchoWorld world)
+    // #121 across claim rounds: a re-claim replaced while in flight, then completed for a third
+    // address, and the echo of the frame sent under the first address still arrives after all of
+    // it. The ledger is not touched by claim rounds at all, so nothing here can forget the frame;
+    // the test pins that the replacement does not either (#119 had a marker that a second round
+    // wiped).
+    [Fact]
+    public async Task An_Echo_Sent_Under_The_Vacated_Address_Is_Not_Raised_After_A_Replaced_Reclaim()
     {
-        using var echo = EchoWorldFixture.Create(world, NewSession());
-        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
         {
-            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
         });
-        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        var claimA = node.ClaimAddressAsync(0x11);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await claimA.WithTimeout(ShortTimeout);
 
         var seen = new List<J1939Message>();
         var seenLock = new object();
         node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
 
-        // First round: vacates 0x11.
-        var superseded = node.ClaimAddressAsync(0x22);
-        var claiming = DateTime.UtcNow + ShortTimeout;
-        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
-            await Task.Delay(5);
-        node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
+        const uint ownPgn = 0xFEF7u;
+        var ownFrame = CanFrame.Classic((int)J1939Id.ComposePgn(6, ownPgn, sourceAddress: 0x11),
+            new byte[] { 1, 2, 3 }, isExtendedFrame: true);
+        var ownSend = node.SendAsync(new J1939Message(ownPgn, new byte[] { 1, 2, 3 },
+            destinationAddress: J1939Pgn.GlobalAddress));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
 
-        // Second round while the first is still in flight. The address store is already -1 here,
-        // which is exactly the case that used to overwrite the memory of 0x11.
+        var superseded = node.ClaimAddressAsync(0x22);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
         var reclaim = node.ClaimAddressAsync(0x23);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
         Func<Task> awaitSuperseded = () => superseded.WithTimeout(ShortTimeout);
         await awaitSuperseded.Should().ThrowAsync<TaskCanceledException>();
 
-        const uint vacatedPgn = 0xFEF7u;
-        const uint thirdPartyPgn = 0xFEF8u;
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, vacatedPgn, sourceAddress: 0x11),
-            new byte[] { 1, 2, 3 }, isExtendedFrame: true));
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, thirdPartyPgn, sourceAddress: 0x33),
-            new byte[] { 4, 5, 6 }, isExtendedFrame: true));
+        bus.DeferredEchoes.DiscardNext().Should().BeTrue();  // the broadcast's echo, held back
+        bus.DeferredEchoes.ReleaseAll();                     // both claims' announcements
+        await reclaim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x23);
+
+        bus.RaiseObserved(ownFrame, isEcho: true);
+        const uint peerPgn = 0xFEF8u;
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, peerPgn, sourceAddress: 0x33),
+            new byte[] { 4, 5, 6 }, isExtendedFrame: true), isEcho: false);
 
         var deadline = DateTime.UtcNow + ShortTimeout;
         while (DateTime.UtcNow < deadline)
         {
-            lock (seenLock) { if (seen.Any(m => m.Pgn == thirdPartyPgn)) break; }
+            lock (seenLock) { if (seen.Any(m => m.Pgn == peerPgn)) break; }
             await Task.Delay(5);
         }
-
         List<J1939Message> snapshot;
         lock (seenLock) snapshot = new List<J1939Message>(seen);
-        snapshot.Should().Contain(m => m.Pgn == thirdPartyPgn,
-            "an unrelated peer must still be heard across claim rounds");
+        snapshot.Should().Contain(m => m.Pgn == peerPgn);
         snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
-            "0x11 is still the address this node is giving up; a further claim round does not "
-            + "make its own draining echo somebody else's traffic");
+            "0x11 is the address this node transmitted the frame under; two claim rounds later "
+            + "its echo is still its own");
 
-        await reclaim.WithTimeout(ShortTimeout);
-    }
-
-    // #119, Codex again on the same condition: while this node is claiming B, the address A it
-    // gave up is free, and a peer may legitimately claim it and start broadcasting before B's
-    // arbitration ends. HandleIncomingAddressClaim ignores that claim -- it only arbitrates
-    // against the pending preferred address -- so the vacated marker kept discarding the new
-    // owner's traffic for the rest of an unrelated claim window.
-    //
-    // The peer's Address Claim is the signal that A is somebody else's now, so it clears the
-    // marker.
-    [Theory]
-    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
-    public async Task A_Vacated_Address_Stops_Being_Ours_Once_A_Peer_Claims_It(EchoWorld world)
-    {
-        using var echo = EchoWorldFixture.Create(world, NewSession());
-        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
-        });
-        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
-
-        var seen = new List<J1939Message>();
-        var seenLock = new object();
-        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
-
-        var reclaim = node.ClaimAddressAsync(0x22);
-        var claiming = DateTime.UtcNow + ShortTimeout;
-        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
-            await Task.Delay(5);
-        node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
-
-        var peerName = Name(0x00ABCD);
-        byte[] Claim(byte sa) => BitConverter.GetBytes(peerName.Value);
-        void Inject(uint pgn, byte sa, byte[] data) => echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: sa), data, isExtendedFrame: true));
-
-        async Task DrainUntilAsync(uint barrierPgn)
-        {
-            var until = DateTime.UtcNow + ShortTimeout;
-            while (DateTime.UtcNow < until)
-            {
-                lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) return; }
-                await Task.Delay(5);
-            }
-        }
-
-        const uint beforePgn = 0xFEF9u;
-        const uint afterPgn = 0xFEFCu;
-        const uint barrier1 = 0xFEFDu;
-        const uint barrier2 = 0xFEFEu;
-
-        // First a claim for an unrelated address. It must leave the marker alone -- otherwise any
-        // arbitration traffic on the bus would reopen the window this node still needs.
-        Inject(J1939Pgn.AddressClaimed, 0x44, Claim(0x44));
-        Inject(beforePgn, 0x11, new byte[] { 7, 7, 7 });
-        Inject(barrier1, 0x33, new byte[] { 1 });
-        await DrainUntilAsync(barrier1);
-
-        lock (seenLock)
-        {
-            seen.Should().Contain(m => m.Pgn == barrier1);
-            seen.Should().NotContain(m => m.Pgn == beforePgn,
-                "a claim for some other address says nothing about the one this node is giving up");
-        }
-
-        // Now the claim for the vacated address itself.
-        Inject(J1939Pgn.AddressClaimed, 0x11, Claim(0x11));
-        Inject(afterPgn, 0x11, new byte[] { 8, 8, 8 });
-        Inject(barrier2, 0x33, new byte[] { 2 });
-        await DrainUntilAsync(barrier2);
-
-        lock (seenLock)
-        {
-            seen.Should().Contain(m => m.Pgn == barrier2);
-            seen.Should().Contain(m => m.Pgn == afterPgn && m.SourceAddress == 0x11,
-                "a peer announced that address as its own, so it is no longer this node's to "
-                + "mistake for a draining echo -- even though this node's claim is still in flight");
-        }
-
-        await reclaim.WithTimeout(ShortTimeout);
-    }
-
-    // The placement of that clear, which is load-bearing and was not covered until this test.
-    // It sits *after* the NAME check, so only a peer's claim ends the marker. Re-claiming the
-    // same address is where that matters: the node announces for 0x11 while 0x11 is exactly what
-    // it vacated, so its own claim echo arrives carrying the marked address. Clearing on it would
-    // reopen the window for this node's own draining application traffic.
-    [Theory]
-    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
-    public async Task Our_Own_Claim_Echo_Does_Not_Clear_The_Vacated_Marker(EchoWorld world)
-    {
-        using var echo = EchoWorldFixture.Create(world, NewSession());
-        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
-        });
-        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
-
-        var seen = new List<J1939Message>();
-        var seenLock = new object();
-        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
-
-        // Re-claim the same address: the announce goes out under 0x11, and on an echo bus it
-        // comes straight back carrying our own NAME and the very address we just vacated.
-        var reclaim = node.ClaimAddressAsync(0x11);
-        var claiming = DateTime.UtcNow + ShortTimeout;
-        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
-            await Task.Delay(5);
-        node.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
-
-        const uint vacatedPgn = 0xFEFAu;
-        const uint thirdPartyPgn = 0xFEFBu;
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, vacatedPgn, sourceAddress: 0x11),
-            new byte[] { 1, 2, 3 }, isExtendedFrame: true));
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, thirdPartyPgn, sourceAddress: 0x33),
-            new byte[] { 4, 5, 6 }, isExtendedFrame: true));
-
-        var deadline = DateTime.UtcNow + ShortTimeout;
-        while (DateTime.UtcNow < deadline)
-        {
-            lock (seenLock) { if (seen.Any(m => m.Pgn == thirdPartyPgn)) break; }
-            await Task.Delay(5);
-        }
-
-        List<J1939Message> snapshot;
-        lock (seenLock) snapshot = new List<J1939Message>(seen);
-        snapshot.Should().Contain(m => m.Pgn == thirdPartyPgn);
-        snapshot.Should().NotContain(m => m.SourceAddress == 0x11,
-            "this node's own Address Claim does not hand its address to somebody else, so the "
-            + "marker must survive it");
-
-        await reclaim.WithTimeout(ShortTimeout);
+        await Assert.ThrowsAnyAsync<Exception>(() => ownSend.WithTimeout(ShortTimeout));
     }
 
     // The other half of the guard above: the memory of a vacated address must expire. Without the
@@ -1861,136 +1785,6 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         snapshot.Should().Contain(m => m.Pgn == pgn && m.SourceAddress == contended,
             "arbitration is over and this address belongs to the peer that won it; the unseated "
             + "node must hear its traffic rather than keep mistaking it for its own echo");
-    }
-
-    // #119, Codex and Bugbot on the same lines: the clear that answers the round above fired on
-    // *any* peer claim for the vacated address, including one this node is contesting and
-    // winning. Re-claiming the same address makes the vacated address and the pending preferred
-    // address one and the same, so a peer that loses that contest took the marker down with it --
-    // and the node stayed Claiming with no address, i.e. with neither guard able to fire.
-    //
-    // A peer that loses has taken nothing, so the marker stays.
-    [Theory]
-    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
-    public async Task Winning_A_Same_Address_Contest_Keeps_The_Vacated_Marker(EchoWorld world)
-    {
-        using var echo = EchoWorldFixture.Create(world, NewSession());
-        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
-        });
-        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
-
-        var seen = new List<J1939Message>();
-        var seenLock = new object();
-        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
-
-        // Re-claiming the *same* address, which is what makes the two addresses coincide.
-        var reclaim = node.ClaimAddressAsync(0x11);
-        var claiming = DateTime.UtcNow + ShortTimeout;
-        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < claiming)
-            await Task.Delay(5);
-        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
-
-        void Inject(uint pgn, byte sa, byte[] data) => echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: sa), data, isExtendedFrame: true));
-
-        // A numerically higher NAME contests 0x11 and loses (SAE J1939-81 4.4.3.2).
-        Inject(J1939Pgn.AddressClaimed, 0x11, BitConverter.GetBytes(Name(0x00ABCD).Value));
-
-        const uint drainingPgn = 0xFEF9u;
-        const uint barrierPgn = 0xFEFDu;
-        Inject(drainingPgn, 0x11, new byte[] { 7, 7, 7 });
-        Inject(barrierPgn, 0x33, new byte[] { 1 });
-
-        var until = DateTime.UtcNow + ShortTimeout;
-        while (DateTime.UtcNow < until)
-        {
-            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
-            await Task.Delay(5);
-        }
-
-        lock (seenLock)
-        {
-            seen.Should().Contain(m => m.Pgn == barrierPgn);
-            seen.Should().NotContain(m => m.Pgn == drainingPgn,
-                "the peer lost the contest, so 0x11 is still the address this node is re-taking "
-                + "and its own traffic under it may still be draining");
-        }
-
-        // The contest was won, not lost -- otherwise the assertion above would hold for the
-        // wrong reason. Observing the claim's own task says so more directly than the state does,
-        // and observing it is what CodeQL asked for (303).
-        await reclaim.WithTimeout(ShortTimeout);
-        node.Address.Should().Be(0x11);
-        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
-    }
-
-    // #119, Codex once more, this time about how long the marker may live at all. The unseated
-    // path calls WriteAddress(null) while the address store still holds the lost address, so the
-    // marker is set for an address that now belongs to the peer that won it. CannotClaim makes
-    // the guard inert, which hides it -- until a later ClaimAddressAsync for some other address
-    // sets Claiming again and brings the stale marker back with it.
-    //
-    // The marker is scoped to one claim sequence, and SetClaimState is where every exit from a
-    // sequence passes.
-    [Theory]
-    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
-    public async Task An_Address_Lost_To_A_Peer_Is_Not_Remembered_By_A_Later_Claim(EchoWorld world)
-    {
-        using var echo = EchoWorldFixture.Create(world, NewSession());
-        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(0x00ABCD))
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromSeconds(2),
-        });
-        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
-
-        var seen = new List<J1939Message>();
-        var seenLock = new object();
-        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
-
-        void Inject(uint pgn, byte sa, byte[] data) => echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, pgn, sourceAddress: sa), data, isExtendedFrame: true));
-
-        // A numerically lower NAME unseats this node at 0x11; from here on that address is the
-        // peer's.
-        Inject(J1939Pgn.AddressClaimed, 0x11, BitConverter.GetBytes(Name(1).Value));
-        var unseated = DateTime.UtcNow + ShortTimeout;
-        while (node.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < unseated)
-            await Task.Delay(5);
-        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
-
-        // A later, unrelated claim. It has nothing to do with 0x11 and must not resurrect it.
-        var reclaim = node.ClaimAddressAsync(0x22);
-        var claiming = DateTime.UtcNow + ShortTimeout;
-        while (node.ClaimState != J1939ClaimState.Claiming && DateTime.UtcNow < claiming)
-            await Task.Delay(5);
-        node.ClaimState.Should().Be(J1939ClaimState.Claiming);
-
-        const uint ownerPgn = 0xFEF9u;
-        const uint barrierPgn = 0xFEFDu;
-        Inject(ownerPgn, 0x11, new byte[] { 8, 8, 8 });
-        Inject(barrierPgn, 0x33, new byte[] { 1 });
-
-        var until = DateTime.UtcNow + ShortTimeout;
-        while (DateTime.UtcNow < until)
-        {
-            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
-            await Task.Delay(5);
-        }
-
-        lock (seenLock)
-        {
-            seen.Should().Contain(m => m.Pgn == barrierPgn);
-            seen.Should().Contain(m => m.Pgn == ownerPgn && m.SourceAddress == 0x11,
-                "0x11 was lost to a peer two claim sequences ago; a fresh arbitration for some "
-                + "other address does not make that peer's traffic this node's own echo");
-        }
-
-        // Nothing contested 0x22, so the claim this test started must complete on it. Observing
-        // it also answers CodeQL (304).
-        await reclaim.WithTimeout(ShortTimeout);
-        node.Address.Should().Be(0x22);
     }
 
     // #119, Codex: the self-source drop is unconditional, and RequestPgnAsync accepts this node's
