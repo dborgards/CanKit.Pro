@@ -98,14 +98,16 @@ await uds.DownloadAsync(
   masking it; `SendRawAsync` sends a request with suppressPosRspMsgIndication set without
   waiting for a response and returns empty. A suppressed send may still draw a negative
   response, up to P2 after it: the next request for the same service waits that window out
-  rather than taking the negative response as its own (#57).
+  rather than taking the negative response as its own, one window per service (#57).
 * Functional addressing: `UdsFunctionalClient` wraps an `IsoTpFunctionalClient` — one request on
   the functional identifier, every ECU's Single-Frame answer collected within a window and read
   as UDS (`UdsFunctionalResponse` with source identifier, bytes, `IsNegative` and the NRC). Only
   answers correlated to the request are attributed: a positive response echoing the request's
   leading bytes (sub-function, DID, routine identifier, block counter), or a negative response
-  naming the service. Calls run one at a time. The keep-alive to everyone is
-  `TesterPresentAsync()` (`3E 80`, not collected for) (#57).
+  naming the service. Calls run one at a time; a call for a service with a suppressed send
+  still open waits that window out first (`Create`'s `suppressedResponseWindow`, default P2),
+  and a read for more than one DID is refused, a Single Frame holding no more. The keep-alive
+  to everyone is `TesterPresentAsync()` (`3E 80`, not collected for) (#57).
 * `Dispose` waits up to five seconds for a request in flight to release the request lock; a
   holder that outlasts the wait keeps an undisposed semaphore, so its eventual release does not
   throw into an operation that was merely slow (#57).

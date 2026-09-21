@@ -45,8 +45,7 @@ internal sealed class UdsClientImpl : IUdsClient
     // A suppressed send draws no positive response but may still draw a negative one, up to P2
     // after it went out. A following request for the same service would take that negative
     // response as its own; it waits until the window is over instead (Codex on #150).
-    private int _suppressedSid = -1;
-    private long _suppressedUntil;
+    private readonly SuppressedResponseWindows _suppressedWindows = new();
 
     private readonly IIsoTpChannel _channel;
     private readonly bool _ownsChannel;
@@ -438,8 +437,7 @@ internal sealed class UdsClientImpl : IUdsClient
         {
             var stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
             var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
-            _suppressedSid = request[0];
-            _suppressedUntil = sent + (long)(_options.P2ClientMax.TotalSeconds * Stopwatch.Frequency);
+            _suppressedWindows.Note(request[0], sent, _options.P2ClientMax);
         }
         finally
         {
@@ -447,23 +445,11 @@ internal sealed class UdsClientImpl : IUdsClient
         }
     }
 
-    // Under the request lock. A request for the service of the latest suppressed send waits
-    // out that send's P2, draining what arrives, so a late negative response to the suppressed
-    // send cannot be taken for this request's.
-    private async Task WaitOutSuppressedResponseWindowAsync(UdsServiceId serviceId, CancellationToken linkedToken)
-    {
-        if (_suppressedSid != (byte)serviceId) return;
-        var remaining = ElapsedUntil(_suppressedUntil);
-        if (remaining > TimeSpan.Zero)
-            await Task.Delay(remaining, linkedToken).ConfigureAwait(false);
-        _suppressedSid = -1;
-    }
-
-    private static TimeSpan ElapsedUntil(long timestamp)
-    {
-        var ticks = timestamp - Stopwatch.GetTimestamp();
-        return ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
-    }
+    // Under the request lock. A request for a service with a suppressed send still open waits
+    // out that send's P2 -- the discard that follows drains what arrived -- so a late negative
+    // response to the suppressed send cannot be taken for this request's.
+    private Task WaitOutSuppressedResponseWindowAsync(UdsServiceId serviceId, CancellationToken linkedToken)
+        => _suppressedWindows.WaitOutAsync((byte)serviceId, linkedToken);
 
     // The services whose second byte is a sub-function parameter, and so carry the
     // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column).

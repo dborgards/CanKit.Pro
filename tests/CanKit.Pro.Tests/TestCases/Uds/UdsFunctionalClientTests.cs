@@ -220,6 +220,51 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         responses.Should().BeEmpty("the answer names DID F190, the request asked for F191");
     }
 
+    // Codex on #150: a suppressed functional send may still be answered negatively; the next
+    // call for the same service waits that window out before it collects.
+    [Fact]
+    public async Task A_Late_Negative_Answer_To_A_Suppressed_Send_Does_Not_Land_In_The_Next_Window()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x3E, 0x12 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x7E, 0x00 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[2] == 0x80)
+                _ = Task.Run(async () => { await Task.Delay(100); busEcus.Transmit(negative); });
+            else
+                busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, suppressedResponseWindow: TimeSpan.FromMilliseconds(300));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.TesterPresentAsync(cancellationToken: cts.Token);
+        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the late negative answer belongs to the suppressed send and is not collected");
+    }
+
+    // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.
+    [Fact]
+    public async Task A_Functional_Read_For_More_Than_One_Did_Is_Refused()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        Func<Task> act = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x91 }, Window);
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
     [Fact]
     public async Task An_Unsuppressed_TesterPresent_Needs_A_Window()
     {

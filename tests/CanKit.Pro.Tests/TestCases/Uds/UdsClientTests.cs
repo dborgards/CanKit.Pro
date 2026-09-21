@@ -518,6 +518,37 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex and Bugbot on #150: the windows are per service. A suppressed send for another
+    // service in between must not shorten the first's.
+    [Fact]
+    public async Task Suppressed_Send_Windows_Are_Kept_Per_Service()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e
+                .On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                    {
+                        Thread.Sleep(100);
+                        throw new EcuNegativeResponse(0x12);
+                    }
+                    return new byte[] { 0x00 };
+                })
+                .On(0x11, req => Array.Empty<byte>()),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window opens
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // another service's
+
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the TesterPresent window is still open, whatever came after");
+            ecu.RequestsHandled.Should().Be(3);
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()

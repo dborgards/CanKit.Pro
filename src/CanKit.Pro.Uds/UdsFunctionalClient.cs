@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.IsoTp;
@@ -25,6 +26,8 @@ public sealed class UdsFunctionalClient : IDisposable
 
     private readonly IsoTpFunctionalClient _client;
     private readonly bool _ownsClient;
+    private readonly TimeSpan _suppressedResponseWindow;
+    private readonly SuppressedResponseWindows _suppressedWindows = new();
     // One request on the wire at a time, its collection window included: overlapping calls
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
@@ -35,18 +38,25 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly CancellationTokenSource _lifetimeCts = new();
     private int _disposed;
 
-    private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient)
+    private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan suppressedResponseWindow)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        if (suppressedResponseWindow <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(suppressedResponseWindow), "The window must be positive.");
         _ownsClient = ownsClient;
+        _suppressedResponseWindow = suppressedResponseWindow;
     }
 
     /// <summary>
     /// Wraps an open <see cref="IsoTpFunctionalClient"/>. With <paramref name="ownsClient"/>,
-    /// disposing this client disposes it.
+    /// disposing this client disposes it. <paramref name="suppressedResponseWindow"/> is how
+    /// long after a suppressed send an ECU may still answer it negatively -- P2 -- and so how
+    /// long the next call for the same service waits before it collects; the default is
+    /// <see cref="UdsClientOptions.DefaultP2"/>.
     /// </summary>
-    public static UdsFunctionalClient Create(IsoTpFunctionalClient client, bool ownsClient = false)
-        => new(client, ownsClient);
+    public static UdsFunctionalClient Create(IsoTpFunctionalClient client, bool ownsClient = false,
+        TimeSpan? suppressedResponseWindow = null)
+        => new(client, ownsClient, suppressedResponseWindow ?? UdsClientOptions.DefaultP2);
 
     /// <summary>The underlying ISO-TP functional client.</summary>
     public IsoTpFunctionalClient Channel => _client;
@@ -75,6 +85,9 @@ public sealed class UdsFunctionalClient : IDisposable
         {
             // Disposed while queued behind another call: the lock is released, not used.
             ThrowIfDisposed();
+            // A suppressed send for this service may still be answered negatively; that answer
+            // must not land in this call's window (Codex on #150).
+            await _suppressedWindows.WaitOutAsync(request.Span[0], linkedToken).ConfigureAwait(false);
             return await SendRawLockedAsync(request, window, linkedToken).ConfigureAwait(false);
         }
         finally
@@ -90,8 +103,17 @@ public sealed class UdsFunctionalClient : IDisposable
             && (request.Span[1] & SuppressPositiveResponseBit) != 0)
         {
             await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            _suppressedWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _suppressedResponseWindow);
             return Array.Empty<UdsFunctionalResponse>();
         }
+
+        // A read for more than one DID is answered with all of them in one PDU, which a Single
+        // Frame cannot hold with their data; and only the first DID would be correlated here,
+        // so two such reads sharing it could take each other's late answers (Codex on #150).
+        if (request.Span[0] == (byte)UdsServiceId.ReadDataByIdentifier && request.Length > 3)
+            throw new ArgumentException(
+                "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
+                nameof(request));
 
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
