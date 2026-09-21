@@ -303,13 +303,17 @@ internal sealed class UdsClientImpl : IUdsClient
             var seedResponse = await ExecuteCoreAsync(UdsServiceId.SecurityAccess, seedRequest,
                 linkedToken).ConfigureAwait(false);
 
-            // Positive response: [0]=0x67 [1]=requestSeedLevel [2..]=seed. A zero-length seed means
-            // "already unlocked" per ISO 14229-1 §9.4.5.3 — the client MUST NOT send the key.
+            // Positive response: [0]=0x67 [1]=requestSeedLevel [2..]=seed. A seed of all zeroes
+            // means "already unlocked" per ISO 14229-1 §9.4.5.3 -- the length is the server's
+            // usual seed length, the bytes are 0x00 -- and the client MUST NOT send the key
+            // (#29): a key computed for that seed gets NRC 0x24 back. A zero-length seed is kept
+            // as the defensive reading of the same answer.
             if (seedResponse.Length < 2 || seedResponse[1] != requestSeedLevel)
                 throw new UdsProtocolException(
                     $"SecurityAccess seed response sub-function mismatch (expected 0x{requestSeedLevel:X2}).");
             int seedLen = seedResponse.Length - 2;
             if (seedLen == 0) return;
+            if (IsAllZero(seedResponse, 2, seedLen)) return;
 
             var seed = new byte[seedLen];
             Buffer.BlockCopy(seedResponse, 2, seed, 0, seedLen);
@@ -811,7 +815,7 @@ internal sealed class UdsClientImpl : IUdsClient
             while (true)
             {
                 var received = await ReceiveWithTimeoutAsync(
-                    serviceId, timerKind, timeout, ElapsedSince(budgetStart), linkedToken)
+                    serviceId, timerKind, timeout, budgetStart, linkedToken)
                     .ConfigureAwait(false);
 
                 // The budget is enforced here, not by the cancellation that raced it.
@@ -829,7 +833,12 @@ internal sealed class UdsClientImpl : IUdsClient
                 // punctual response observed late would be rejected -- swapping a rare wrong
                 // accept for a frequent wrong reject under precisely the load that causes the
                 // bug.
-                var arrival = ElapsedSince(budgetStart, received.ArrivalTimestamp);
+                // Against the response's *first* frame: ISO 14229-2 ends P2 (and P2*) with the
+                // first frame of the response, and leaves the rest of a multi-frame transfer to
+                // the transport's timers (#28). Measured against the last frame, every response
+                // that spends longer on the wire than P2 -- a 4 KB record at STmin 5 ms takes
+                // seconds -- would time out although the server answered in time.
+                var arrival = ElapsedSince(budgetStart, received.FirstFrameArrivalTimestamp);
                 if (arrival > timeout)
                     throw new UdsTimeoutException(serviceId, timerKind, timeout);
 
@@ -869,7 +878,7 @@ internal sealed class UdsClientImpl : IUdsClient
                         // -- 100 ms after the 0x78, against an 80 ms P2* -- measure as zero and
                         // be accepted. Same scheduling independence as the check above, and for
                         // the same reason.
-                        budgetStart = received.ArrivalTimestamp;
+                        budgetStart = received.FirstFrameArrivalTimestamp;
                         timeout = _options.P2StarClientMax;
                         timerKind = UdsTimeoutTimer.P2Star;
                         continue;
@@ -897,6 +906,15 @@ internal sealed class UdsClientImpl : IUdsClient
         }
     }
 
+    private static bool IsAllZero(byte[] data, int offset, int count)
+    {
+        for (int i = offset; i < offset + count; i++)
+        {
+            if (data[i] != 0) return false;
+        }
+        return true;
+    }
+
     private void DiscardStalePdus()
     {
         try
@@ -912,16 +930,19 @@ internal sealed class UdsClientImpl : IUdsClient
     /// <summary>
     /// Waits on <see cref="IIsoTpChannel.ReceiveAsync"/> with the currently applicable
     /// (P2 or P2*) timeout, taking already-elapsed time into account so a single wait budget
-    /// isn't re-set to full when the loop iterates for a stray frame.
+    /// isn't re-set to full when the loop iterates for a stray frame. A multi-frame response
+    /// whose First Frame arrived inside the budget is waited for beyond it: the budget ended
+    /// with that frame (ISO 14229-2), and the transport's N_Cr bounds the rest (#28).
     /// </summary>
     private async Task<IsoTpReceivedPdu> ReceiveWithTimeoutAsync(UdsServiceId serviceId,
-        UdsTimeoutTimer timerKind, TimeSpan budget, TimeSpan elapsedInBudget,
+        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart,
         CancellationToken linkedToken)
     {
         // How long to wait and whether what turns up was in time are two questions, and only the
         // first one is answered here. The second belongs to the caller's arrival check, because
         // the answer must not depend on when this client got scheduled -- so neither exit below
         // may discard a PDU unread on the strength of a clock reading taken now.
+        var elapsedInBudget = ElapsedSince(budgetStart);
         var remaining = budget - elapsedInBudget;
         if (remaining <= TimeSpan.Zero)
         {
@@ -931,6 +952,11 @@ internal sealed class UdsClientImpl : IUdsClient
             // already-cancelled token wins against a queued item. Take what is there and let the
             // caller judge its stamp; only an empty inbox means nothing arrived in time
             // (Bugbot on #112).
+            // The in-progress check goes first: the channel clears it only after the completed
+            // PDU is in the inbox, so a reception seen in progress here is found by the wait
+            // below, and one not seen is either absent or already queued for the peek.
+            if (ResponseBeganInTime(budget, budgetStart))
+                return await _channel.ReceiveWithArrivalAsync(linkedToken).ConfigureAwait(false);
             if (_channel.TryReceiveWithArrival(out var queued))
                 return queued;
 
@@ -951,12 +977,21 @@ internal sealed class UdsClientImpl : IUdsClient
             // The deadline callback won the race -- which says nothing about whether a punctual
             // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
             // before declaring a timeout.
+            if (ResponseBeganInTime(budget, budgetStart))
+                return await _channel.ReceiveWithArrivalAsync(linkedToken).ConfigureAwait(false);
             if (_channel.TryReceiveWithArrival(out var raced))
                 return raced;
 
             throw new UdsTimeoutException(serviceId, timerKind, budget);
         }
     }
+
+    // A multi-frame response is being reassembled and its First Frame arrived inside the budget:
+    // P2 ended there, and what remains is the transport's transfer, bounded by N_Cr -- which
+    // faults the receive if the server stalls, so the wait without a budget is still bounded.
+    private bool ResponseBeganInTime(TimeSpan budget, long budgetStart)
+        => _channel.TryGetReceptionInProgress(out var firstFrame)
+           && ElapsedSince(budgetStart, firstFrame) <= budget;
 
     /// <summary>
     /// Elapsed time between two <see cref="Stopwatch.GetTimestamp"/> readings, defaulting the
