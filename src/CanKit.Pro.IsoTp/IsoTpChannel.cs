@@ -351,7 +351,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // What the demux has buffered goes to the actor now rather than after the reader's
         // next scheduling; then a no-op posted behind it completes once the actor has taken
         // everything queued so far. Called from the actor itself, the post would wait for the
-        // loop it is on: there is nothing ahead of the caller then.
+        // loop it is on, and the pumped frames cannot be handled inline either: frames the
+        // reader task posted earlier sit ahead of them in the mailbox, and reassembly does not
+        // survive the reordering (Bugbot on #150). They are handled after the current work
+        // item, which the contract says.
         PumpSubscription();
         if (_actor is ProtocolActor { IsOnCurrentActor: true }) return Task.CompletedTask;
         try

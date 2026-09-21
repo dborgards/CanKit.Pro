@@ -132,7 +132,10 @@ public interface IIsoTpChannel : IDisposable
     /// <see cref="GetReceptionsInProgress"/>. For a decision taken at a deadline — is a
     /// response there, was there a 0x78 — what the inbox does not hold after this did not
     /// arrive before the call; without it, a frame stamped in time can still be on its way
-    /// through the channel's actor when the deadline fires (Codex on #150).
+    /// through the channel's actor when the deadline fires (Codex on #150). Called on the
+    /// channel's own actor — from a <c>BackgroundExceptionOccurred</c> handler — it returns at
+    /// once and the frames on their way are handled after the current work item: they queue
+    /// behind frames already in the mailbox, and handling them inline would reorder the two.
     /// </summary>
     Task SettleAsync();
 
