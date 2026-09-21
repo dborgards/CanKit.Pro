@@ -72,6 +72,20 @@ public sealed class UdsClientOptions
     public bool KeepAliveSuppressPositiveResponse { get; init; } = true;
 
     /// <summary>
+    /// How many times a request is repeated after NRC 0x21 (busyRepeatRequest) before the
+    /// negative response is surfaced. The NRC exists to ask for a repeat (ISO 14229-1 §A.1),
+    /// so the default repeats; zero surfaces the first 0x21 as an
+    /// <see cref="UdsNegativeResponseException"/> (#57). Default 3.
+    /// </summary>
+    public int MaxBusyRepeatRequests { get; init; } = 3;
+
+    /// <summary>
+    /// The pause before a request is repeated after NRC 0x21. Default zero: the server said
+    /// "repeat", not "wait", and its P2 budget starts again with the repeated request.
+    /// </summary>
+    public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that only want to tweak one field of a shared default template.
     /// </summary>

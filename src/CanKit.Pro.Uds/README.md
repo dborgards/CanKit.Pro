@@ -88,6 +88,22 @@ await uds.DownloadAsync(
   channel's handoff instant, not the transmit stamp — that one is "no later than the driver
   accepted the frame", and a fast peer can be stamped before it (#146) — and not a reading
   taken before entering the channel, whose transmission would leave a window.
+* NRC 0x21 (busyRepeatRequest) is what it says: the request is repeated, up to
+  `UdsClientOptions.MaxBusyRepeatRequests` times (default 3, after `BusyRepeatRequestDelay`,
+  default zero), each with a fresh P2; the negative response surfaces only once the repeats are
+  used up (#57).
+* `UdsTimeoutException.Elapsed` is the budget of the timer that expired (P2 or P2*) on every
+  path, never a measurement of how late the client noticed (#57).
+* `DiagnosticSessionControlAsync(byte)` rejects 0x00 and any value with bit 7 set rather than
+  masking it; `SendRawAsync` sends a request with suppressPosRspMsgIndication set without
+  waiting for a response and returns empty (#57).
+* Functional addressing: `UdsFunctionalClient` wraps an `IsoTpFunctionalClient` — one request on
+  the functional identifier, every ECU's Single-Frame answer collected within a window and read
+  as UDS (`UdsFunctionalResponse` with source identifier, bytes, `IsNegative` and the NRC). The
+  keep-alive to everyone is `TesterPresentAsync()` (`3E 80`, not collected for) (#57).
+* `Dispose` waits up to five seconds for a request in flight to release the request lock; a
+  holder that outlasts the wait keeps an undisposed semaphore, so its eventual release does not
+  throw into an operation that was merely slow (#57).
 * `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
   *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
   answer a key for that seed with NRC 0x24.

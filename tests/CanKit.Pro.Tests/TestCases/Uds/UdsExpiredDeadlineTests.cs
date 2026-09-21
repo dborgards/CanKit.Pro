@@ -332,6 +332,55 @@ public class UdsExpiredDeadlineTests
             "a response that arrived before the request's last frame was handed over is an earlier request's");
     }
 
+    /// <summary>
+    /// #57 — <see cref="UdsTimeoutException.Elapsed"/> is the budget of the timer that expired
+    /// on every path. Here the send's own await returns after the budget is spent and nothing
+    /// is queued: the zero-remaining exit, which used to report how late the client noticed.
+    /// </summary>
+    [Fact]
+    public async Task M_A_Timeout_Reports_The_Budget_Not_How_Late_The_Client_Noticed()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            SendObservationDelay = TimeSpan.FromMilliseconds(160),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        var ex = (await act.Should().ThrowAsync<UdsTimeoutException>()).Which;
+
+        ex.Elapsed.Should().Be(Budget);
+    }
+
+    /// <summary>
+    /// #57 — Dispose waits for a request in flight to release the lock; when it does not in
+    /// time, the semaphore is left undisposed, so the holder's eventual Release does not throw
+    /// ObjectDisposedException into an operation that was merely slow.
+    /// </summary>
+    [Fact]
+    public async Task N_Dispose_Leaves_The_Lock_To_A_Holder_That_Outlasts_The_Wait()
+    {
+        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.Zero,
+            stampArrivalAtDelivery: true)
+        { Gate = gate };
+        var client = NewClient(channel);
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(100);
+
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        await Task.Delay(50); // let the request take the lock and block in the receive
+
+        client.Dispose(); // returns after its 100 ms wait, the holder still inside
+
+        gate.SetResult(true);
+        Func<Task> act = () => inFlight;
+        await act.Should().NotThrowAsync<ObjectDisposedException>(
+            "the holder's Release must find its semaphore intact");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -405,6 +454,9 @@ public class UdsExpiredDeadlineTests
         /// </summary>
         public TimeSpan LastFrameHandoffBeforeTransmit { get; init; }
 
+        /// <summary>When set, a receive blocks here first, ignoring cancellation (#57).</summary>
+        public TaskCompletionSource<bool>? Gate { get; init; }
+
         public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
@@ -430,6 +482,9 @@ public class UdsExpiredDeadlineTests
         public async Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(
             CancellationToken cancellationToken = default)
         {
+            if (Gate is not null)
+                await Gate.Task.ConfigureAwait(false);
+
             // Deliberately not observing the token: this models the write winning the race.
             if (RespondPendingFirst && !_pendingSent)
             {

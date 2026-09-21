@@ -445,6 +445,87 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #57 — the collected UDS findings.
+    // -----------------------------------------------------------------------------------
+
+    // Bit 7 of the session type is suppressPosRspMsgIndication; masking it silently sent a
+    // session the caller did not ask for. Rejected before anything is on the wire.
+    [Theory]
+    [InlineData(0x83)]
+    [InlineData(0x00)]
+    public async Task DiagnosticSessionControl_Rejects_A_Session_Type_Outside_01_To_7F(byte sessionType)
+    {
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x10, req => new byte[] { req[1], 0x00, 0x32, 0x01, 0xF4 }));
+
+        using (dispose)
+        {
+            Func<Task> act = () => client.DiagnosticSessionControlAsync(sessionType,
+                new CancellationTokenSource(ShortTimeout).Token);
+            await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+            ecu.RequestsHandled.Should().Be(0, "nothing was sent");
+        }
+    }
+
+    // A raw request with the suppress bit set gets no positive response; waiting P2 for one
+    // ended in a timeout every time. It is sent and returns empty.
+    [Fact]
+    public async Task SendRaw_With_The_Suppress_Bit_Does_Not_Wait_For_A_Response()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req => Array.Empty<byte>()),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var response = await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+            response.Should().BeEmpty();
+
+            // The frame reached the ECU: it counts a suppressed TesterPresent as handled.
+            var deadline = Stopwatch.StartNew();
+            while (ecu.RequestsHandled == 0 && deadline.Elapsed < ShortTimeout) await Task.Delay(5);
+            ecu.RequestsHandled.Should().Be(1);
+        }
+    }
+
+    // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
+    [Fact]
+    public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()
+    {
+        int calls = 0;
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x22, req =>
+        {
+            if (Interlocked.Increment(ref calls) <= 2) throw new EcuNegativeResponse(0x21);
+            return new byte[] { 0xF1, 0x90, 0xAB };
+        }));
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var data = await client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            data.Should().Equal(0xAB);
+            ecu.RequestsHandled.Should().Be(3, "two busy answers, then the data");
+        }
+    }
+
+    [Fact]
+    public async Task BusyRepeatRequest_Is_Surfaced_Once_The_Repeats_Are_Used_Up()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x22, req => throw new EcuNegativeResponse(0x21)),
+            options: new UdsClientOptions { MaxBusyRepeatRequests = 1 });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            var ex = (await act.Should().ThrowAsync<UdsNegativeResponseException>()).Which;
+            ex.Code.Should().Be(0x21);
+            ecu.RequestsHandled.Should().Be(2, "the request and one repeat");
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
     // SecurityAccess must hold the request lock across seed + sendKey so TesterPresent
     // keep-alive cannot interleave and provoke NRC requestSequenceError on real ECUs.
     // -----------------------------------------------------------------------------------

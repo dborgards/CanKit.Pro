@@ -37,6 +37,10 @@ internal sealed class UdsClientImpl : IUdsClient
     private const byte PositiveResponseOffset = 0x40;
     private const byte NrcResponsePending = 0x78;
     private const byte SuppressPositiveResponseBit = 0x80;
+    private const byte NrcBusyRepeatRequest = 0x21;
+
+    /// <summary>How long Dispose waits for a request in flight to release the lock.</summary>
+    internal TimeSpan DisposeLockTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     private readonly IIsoTpChannel _channel;
     private readonly bool _ownsChannel;
@@ -79,7 +83,13 @@ internal sealed class UdsClientImpl : IUdsClient
     public async Task<byte[]> DiagnosticSessionControlAsync(byte sessionType,
         CancellationToken cancellationToken = default)
     {
-        byte sub = (byte)(sessionType & 0x7F);
+        // The sub-function byte's bit 7 is suppressPosRspMsgIndication, not part of the session
+        // type; a caller passing 0x83 meant something this method does not do (it waits for
+        // the response), and masking it to 0x03 hid that (#57). 0x00 is ISOSAEReserved.
+        if (sessionType == 0 || (sessionType & SuppressPositiveResponseBit) != 0)
+            throw new ArgumentOutOfRangeException(nameof(sessionType), sessionType,
+                "Session type must be 0x01..0x7F; bit 7 is suppressPosRspMsgIndication and is not accepted here.");
+        byte sub = sessionType;
         var request = new byte[] { (byte)UdsServiceId.DiagnosticSessionControl, sub };
         var response = await ExecuteAsync(UdsServiceId.DiagnosticSessionControl, request,
             cancellationToken).ConfigureAwait(false);
@@ -347,24 +357,7 @@ internal sealed class UdsClientImpl : IUdsClient
 
         if (suppressPositiveResponse)
         {
-            // Fire-and-forget: acquire the request lock so we don't interleave with a real
-            // request, send the frame, then release. No response is expected. Link the
-            // lifetime token so Dispose() cancels a WaitAsync/Send still in progress
-            // (Bugbot 3596586770) — same contract as ExecuteAsync / SecurityAccessAsync.
-            ThrowIfDisposed();
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken, _lifetimeCts.Token);
-            var linkedToken = linked.Token;
-
-            await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
-            try
-            {
-                await _channel.SendAsync(request, linkedToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                _requestLock.Release();
-            }
+            await SendWithoutResponseAsync(request, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -402,8 +395,51 @@ internal sealed class UdsClientImpl : IUdsClient
         var sid = (UdsServiceId)request.Span[0];
         var copy = new byte[request.Length];
         request.Span.CopyTo(copy);
+
+        // A request with suppressPosRspMsgIndication set gets no positive response; waiting P2
+        // for one ended in a timeout every time (#57). Sent the way a suppressed TesterPresent
+        // is, and an empty response returned. A negative response the server may still send is
+        // not waited for either -- the next request's discard drops it.
+        if (copy.Length >= 2 && HasSubFunction(sid) && (copy[1] & SuppressPositiveResponseBit) != 0)
+        {
+            await SendWithoutResponseAsync(copy, cancellationToken).ConfigureAwait(false);
+            return Array.Empty<byte>();
+        }
+
         return await ExecuteAsync(sid, copy, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Fire-and-forget under the request lock: the frame goes out without interleaving a real
+    /// request, and no response is waited for. The lifetime token is linked so Dispose()
+    /// cancels a wait or send still in progress (Bugbot 3596586770), as ExecuteAsync does.
+    /// </summary>
+    private async Task SendWithoutResponseAsync(byte[] request, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, _lifetimeCts.Token);
+        var linkedToken = linked.Token;
+
+        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        try
+        {
+            await _channel.SendAsync(request, linkedToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _requestLock.Release();
+        }
+    }
+
+    // The services whose second byte is a sub-function parameter, and so carry the
+    // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column).
+    private static bool HasSubFunction(UdsServiceId sid) => (byte)sid switch
+    {
+        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2A or 0x2C or 0x31 or 0x3E
+            or 0x83 or 0x85 or 0x86 or 0x87 => true,
+        _ => false,
+    };
 
     // ---------------------------------------------------------------------------------------
     // Upload / Download (SRS FR-UDS-012, ISO 14229-1 §14).
@@ -782,6 +818,27 @@ internal sealed class UdsClientImpl : IUdsClient
     private async Task<byte[]> ExecuteCoreAsync(UdsServiceId serviceId, byte[] request,
         CancellationToken linkedToken)
     {
+        // NRC 0x21 (busyRepeatRequest) asks for exactly that: the request is repeated, up to
+        // MaxBusyRepeatRequests times, each with a fresh P2 (#57). Anything else the exchange
+        // produces -- data, another NRC, a timeout -- passes through.
+        for (int repeats = 0; ; repeats++)
+        {
+            try
+            {
+                return await ExchangeOnceAsync(serviceId, request, linkedToken).ConfigureAwait(false);
+            }
+            catch (UdsNegativeResponseException ex)
+                when (ex.Code == NrcBusyRepeatRequest && repeats < _options.MaxBusyRepeatRequests)
+            {
+                if (_options.BusyRepeatRequestDelay > TimeSpan.Zero)
+                    await Task.Delay(_options.BusyRepeatRequestDelay, linkedToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<byte[]> ExchangeOnceAsync(UdsServiceId serviceId, byte[] request,
+        CancellationToken linkedToken)
+    {
         // Drop any late reply left over from a previous aborted/timed-out wait before we put a
         // new request on the wire. SID correlation alone is insufficient when the next request
         // uses the same service (the stale positive response SID would match).
@@ -977,7 +1034,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // caller judge its stamp; only an empty inbox means nothing arrived in time
             // (Bugbot on #112).
             return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
-                notBefore, elapsedInBudget, linkedToken).ConfigureAwait(false);
+                notBefore, linkedToken).ConfigureAwait(false);
         }
 
         using var timeoutCts = new CancellationTokenSource(remaining);
@@ -995,7 +1052,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
             // before declaring a timeout.
             return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
-                notBefore, budget, linkedToken).ConfigureAwait(false);
+                notBefore, linkedToken).ConfigureAwait(false);
         }
     }
 
@@ -1014,7 +1071,7 @@ internal sealed class UdsClientImpl : IUdsClient
     /// </summary>
     private async Task<IsoTpReceivedPdu> TakeQueuedOrInProgressAsync(UdsServiceId serviceId,
         UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, long notBefore,
-        TimeSpan elapsedReported, CancellationToken linkedToken)
+        CancellationToken linkedToken)
     {
         while (true)
         {
@@ -1027,7 +1084,7 @@ internal sealed class UdsClientImpl : IUdsClient
                 if (_channel.TryReceiveWithArrival(out var queued))
                     return queued;
 
-                throw new UdsTimeoutException(serviceId, timerKind, elapsedReported);
+                throw new UdsTimeoutException(serviceId, timerKind, budget);
             }
 
             using var recheck = new CancellationTokenSource(InProgressRecheck);
@@ -1103,10 +1160,15 @@ internal sealed class UdsClientImpl : IUdsClient
         // the lock races WaitAsync/Release.
         try { _lifetimeCts.Cancel(); } catch { /* already disposed */ }
 
+        // If the holder does not let go in time -- an operation ignoring the cancellation --
+        // the semaphore stays undisposed: its Release on the holder's thread would otherwise
+        // throw ObjectDisposedException into an operation that was merely slow (#57). A
+        // SemaphoreSlim without a wait handle holds nothing that needs disposing.
+        bool lockAcquired = false;
         try
         {
-            if (_requestLock.Wait(TimeSpan.FromSeconds(5)))
-                _requestLock.Release();
+            lockAcquired = _requestLock.Wait(DisposeLockTimeout);
+            if (lockAcquired) _requestLock.Release();
         }
         catch (ObjectDisposedException)
         {
@@ -1114,7 +1176,7 @@ internal sealed class UdsClientImpl : IUdsClient
         }
 
         _lifetimeCts.Dispose();
-        _requestLock.Dispose();
+        if (lockAcquired) _requestLock.Dispose();
 
         if (_ownsChannel)
         {

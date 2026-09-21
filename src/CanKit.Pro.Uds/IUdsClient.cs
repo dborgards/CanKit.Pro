@@ -65,6 +65,11 @@ public interface IUdsClient : IDisposable
     /// Sends DiagnosticSessionControl (0x10) with a raw sub-function byte. Convenience for
     /// vendor-specific session numbers that are not covered by <see cref="UdsSessionType"/>.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="sessionType"/> is 0x00 (ISOSAEReserved) or has bit 7 set: that bit is
+    /// suppressPosRspMsgIndication, not part of the session type, and this method waits for the
+    /// response (#57).
+    /// </exception>
     Task<byte[]> DiagnosticSessionControlAsync(byte sessionType,
         CancellationToken cancellationToken = default);
 
@@ -168,7 +173,11 @@ public interface IUdsClient : IDisposable
     /// <summary>
     /// Sends the raw <paramref name="request"/> bytes verbatim (starting with the SID) and
     /// returns the ECU's raw positive-response bytes (again including the response SID). The
-    /// same P2/P2* timing and NRC handling apply as for the strongly-typed methods.
+    /// same P2/P2* timing and NRC handling apply as for the strongly-typed methods. A request
+    /// whose sub-function byte has suppressPosRspMsgIndication set (bit 7, on a service that
+    /// carries a sub-function) is sent without waiting: an empty array comes back once the
+    /// frame is confirmed, and a negative response the server may still send is not waited for
+    /// (#57).
     /// </summary>
     Task<byte[]> SendRawAsync(ReadOnlyMemory<byte> request,
         CancellationToken cancellationToken = default);
