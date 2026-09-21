@@ -361,6 +361,35 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         responses.Should().ContainSingle().Which.Response.Should().Equal(0x7D, 0x11, 0x34, 0x02);
     }
 
+    // Codex on #150: RequestFileTransfer echoes its modeOfOperation; an answer for another
+    // operation is not this request's. (Its positive SID is 0x78 -- not the NRC, which is
+    // the third byte of a 0x7F frame.)
+    [Fact]
+    public async Task A_File_Transfer_Request_Is_Correlated_On_Its_Mode_Of_Operation()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var ours = SingleFrameFrom(Ecu1, new byte[] { 0x78, 0x01, 0x01, 0x10 });
+        var other = SingleFrameFrom(Ecu2, new byte[] { 0x78, 0x02, 0x01, 0x10 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            busEcus.Transmit(other);
+            busEcus.Transmit(ours);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        // AddFile (0x01), a one-byte path "A".
+        var responses = await functional.SendRawAsync(new byte[] { 0x38, 0x01, 0x00, 0x01, 0x41 }, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.Response.Should().Equal(0x78, 0x01, 0x01, 0x10);
+    }
+
     // Codex on #150: ReadDataByPeriodicIdentifier echoes nothing; its answer names the
     // periodic identifier it carries data for, which must be one the request asked for.
     [Fact]

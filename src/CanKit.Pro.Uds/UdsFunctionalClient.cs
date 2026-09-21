@@ -172,9 +172,9 @@ public sealed class UdsFunctionalClient : IDisposable
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
-        // (bit 7 cleared), a DID, a routine identifier, a block counter, an address and size --
-        // so a late answer to an earlier request for another parameter, arriving in this
-        // window, is told apart
+        // (bit 7 cleared), a DID, a routine identifier, a block counter, a mode of operation,
+        // an address and size -- so a late answer to an earlier request for another
+        // parameter, arriving in this window, is told apart
         // (Codex on #150, twice). How many bytes, per service, is in EchoedRequestBytes.
         int echoed = Math.Min(EchoedRequestBytes(req), req.Length - 1);
         // The window as anchored at the transmission -- the collection ran for `window` from
@@ -386,9 +386,10 @@ public sealed class UdsFunctionalClient : IDisposable
     // whose response layout starts with them (ISO 14229-1, the response tables of each
     // service): the sub-function where there is one, then a DID (0x22 the first, 0x24, 0x2E,
     // 0x2F -- Codex on #150), the sub-function and DID (0x2C), the routine identifier (0x31),
-    // the block sequence counter (0x36), and for WriteMemoryByAddress (0x3D) the
-    // addressAndLengthFormatIdentifier with the address and size it sizes -- its low nibble
-    // the address's bytes, its high nibble the size's (Codex on #150).
+    // the block sequence counter (0x36), the modeOfOperation of RequestFileTransfer (0x38 --
+    // Codex on #150), and for WriteMemoryByAddress (0x3D) the addressAndLengthFormatIdentifier
+    // with the address and size it sizes -- its low nibble the address's bytes, its high
+    // nibble the size's (Codex on #150).
     private static int EchoedRequestBytes(ReadOnlySpan<byte> request)
     {
         byte sid = request[0];
@@ -396,7 +397,7 @@ public sealed class UdsFunctionalClient : IDisposable
         {
             0x22 or 0x24 or 0x2E or 0x2F => 2,
             0x2C or 0x31 => 3,
-            0x36 => 1,
+            0x36 or 0x38 => 1,
             0x3D => request.Length < 2 ? 0 : 1 + (request[1] & 0x0F) + (request[1] >> 4),
             _ => HasSubFunction(sid) ? 1 : 0,
         };
