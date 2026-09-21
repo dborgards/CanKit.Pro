@@ -114,6 +114,10 @@ public sealed class UdsFunctionalClient : IDisposable
         if (request.Length >= 2 && HasSubFunction(request.Span[0])
             && (request.Span[1] & SuppressPositiveResponseBit) != 0)
         {
+            // Noted before the send as well: cancelled between the driver's acceptance and
+            // the confirmation, the frame is on the bus and may still be answered (Codex on
+            // #150). Moved out to the confirmation afterwards.
+            _openWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _responseWindow);
             await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
             _openWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _responseWindow);
             return Array.Empty<UdsFunctionalResponse>();
@@ -134,8 +138,20 @@ public sealed class UdsFunctionalClient : IDisposable
         // least now less `window`, however long the confirmation took (Codex on #150).
         byte sid = request.Span[0];
         _openWindows.Note(sid, Stopwatch.GetTimestamp(), _responseWindow);
-        var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
-            .ConfigureAwait(false);
+        IReadOnlyList<IsoTpFunctionalResponse> raw;
+        try
+        {
+            raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // What arrived before the cancellation is lost with it -- an NRC 0x78 among it
+            // would have moved the window out by P2*. Not knowing, the window takes that
+            // reading (Codex on #150): the next call for this service waits P2* from now.
+            _openWindows.Extend(sid, Stopwatch.GetTimestamp() + Ticks(_responsePendingWindow));
+            throw;
+        }
         _openWindows.Note(sid, Stopwatch.GetTimestamp() - Ticks(window), _responseWindow);
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
@@ -151,8 +167,9 @@ public sealed class UdsFunctionalClient : IDisposable
             bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed)
                 && (sid != ReadDataByPeriodicIdentifierSid || NamesARequestedPeriodicIdentifier(req, data));
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
+            // P2* runs from the 0x78's arrival, which the response carries.
             if (IsResponsePending(data, sid))
-                _openWindows.Extend(sid, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
+                _openWindows.Extend(sid, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
         return responses;
@@ -172,8 +189,8 @@ public sealed class UdsFunctionalClient : IDisposable
                 var remaining = SuppressedResponseWindows.Remaining(until);
                 if (remaining <= TimeSpan.Zero) break;
                 var heard = await _client.CollectResponsesAsync(remaining, cancellationToken).ConfigureAwait(false);
-                if (heard.Any(r => IsResponsePending(r.Data, sid)))
-                    until = Math.Max(until, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
+                foreach (var pending in heard.Where(r => IsResponsePending(r.Data, sid)))
+                    until = Math.Max(until, pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             }
             waitedOut = true;
         }

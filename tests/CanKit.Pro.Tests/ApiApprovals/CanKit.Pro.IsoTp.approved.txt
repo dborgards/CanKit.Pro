@@ -133,6 +133,7 @@ namespace CanKit.Pro.IsoTp
     public sealed class IsoTpFunctionalResponse
     {
         public byte[] Data { get; }
+        public long HostArrivalTimestamp { get; }
         public uint SourceCanId { get; }
     }
     public sealed class IsoTpOverflowException : CanKit.Pro.IsoTp.IsoTpException

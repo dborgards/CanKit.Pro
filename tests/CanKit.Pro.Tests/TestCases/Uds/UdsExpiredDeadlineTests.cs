@@ -381,6 +381,47 @@ public class UdsExpiredDeadlineTests
             "the holder's Release must find its semaphore intact");
     }
 
+    /// <summary>
+    /// Codex on #150 — a suppressed send cancelled between the driver's acceptance and the
+    /// confirmation is on the bus and may still be answered: its window is noted before the
+    /// send, so the next request for the service still waits it out.
+    /// </summary>
+    [Fact]
+    public async Task O_A_Suppressed_Send_Cancelled_Before_Confirmation_Still_Opens_Its_Window()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(200),
+            CancellableSend = true,
+            HonorCancellation = true,
+        };
+        using var client = NewClient(channel);
+
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+        Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        // The next TesterPresent must wait the suppressed send's window (P2 = 80 ms from the
+        // note, taken just before the first send began) before it sends.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        Func<Task> next = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await next.Should().ThrowAsync<Exception>(); // the stub never answers; what matters is when it sent
+
+        long gapTicks;
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCount(2);
+            gapTicks = channel.Sent[1].StartedAt - channel.Sent[0].StartedAt;
+        }
+        // The cancelled send started at ~0 ms and was cancelled at 30 ms; without the window the
+        // second would start right then. 80 ms less a margin for the note preceding the send.
+        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
+            Budget - TimeSpan.FromMilliseconds(5),
+            "the second send waited out the window the cancelled send opened");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -457,11 +498,18 @@ public class UdsExpiredDeadlineTests
         /// <summary>When set, a receive blocks here first, ignoring cancellation (#57).</summary>
         public TaskCompletionSource<bool>? Gate { get; init; }
 
+        /// <summary>Requests sent, in order, with the instant each send began (#150).</summary>
+        public List<(byte[] Request, long StartedAt)> Sent { get; } = new();
+
+        /// <summary>When set, a send observes the token while it waits for its confirmation.</summary>
+        public bool CancellableSend { get; init; }
+
         public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
+            lock (Sent) Sent.Add((pdu.ToArray(), Stopwatch.GetTimestamp()));
             if (TransmissionTime > TimeSpan.Zero)
-                await Task.Delay(TransmissionTime, CancellationToken.None).ConfigureAwait(false);
+                await Task.Delay(TransmissionTime, CancellableSend ? cancellationToken : CancellationToken.None).ConfigureAwait(false);
 
             // The wire instant. Everything the client is entitled to measure is relative to this
             // and to nothing else; arrival is "now" for the punctual case, inside the budget and
@@ -522,17 +570,23 @@ public class UdsExpiredDeadlineTests
         /// a caller past its deadline gets it handed over without waiting, and its stamp — not
         /// the caller's clock — decides whether it counts.
         /// </summary>
+        private bool _handedOver;
+
         public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
         {
-            if (RespondPendingFirst && _pendingSent)
+            // An inbox empties: the one queued response is handed over once (#150 -- a drain
+            // that reads until the inbox is empty would otherwise never end here).
+            if (!_handedOver && RespondPendingFirst && _pendingSent)
             {
+                _handedOver = true;
                 pdu = new IsoTpReceivedPdu(Response, FinalArrivalStamp());
                 return true;
             }
 
-            if (HonorCancellation && FirstFrameOffsetFromTransmit is null)
+            if (!_handedOver && HonorCancellation && FirstFrameOffsetFromTransmit is null)
             {
                 // Stamped at the request: punctual, and waiting in the inbox all along.
+                _handedOver = true;
                 pdu = new IsoTpReceivedPdu(Response, _arrivalStamp);
                 return true;
             }

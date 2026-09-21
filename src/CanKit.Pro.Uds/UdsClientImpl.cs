@@ -435,6 +435,10 @@ internal sealed class UdsClientImpl : IUdsClient
         await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
         try
         {
+            // Noted before the send as well: cancelled between the driver's acceptance and the
+            // confirmation, the frame is on the bus and may still be answered (Codex on #150).
+            // Moved out to the transmit stamp afterwards.
+            _suppressedWindows.Note(request[0], Stopwatch.GetTimestamp(), _options.P2ClientMax);
             var stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
             var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
             _suppressedWindows.Note(request[0], sent, _options.P2ClientMax);

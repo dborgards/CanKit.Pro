@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -305,9 +306,11 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
                 busEcus.Transmit(positive);
         };
 
+        // A cancelled collection takes the conservative reading (P2* from the cancellation);
+        // kept short here so the test measures the window, not the default P2*.
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(300));
 
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
         Func<Task> cancelled = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
@@ -381,6 +384,79 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the negative answer came 450 ms after the first request's transmission, inside its window");
+    }
+
+    // Codex on #150: P2* runs from the 0x78's arrival, not from the end of the collection.
+    // With the 0x78 at the start of a 300 ms window and P2* = 400 ms, the next call may go
+    // out at 400 ms after the request, not at 700.
+    [Fact]
+    public async Task A_Pending_Answer_Extends_The_Window_From_Its_Arrival_Not_From_The_Collections_End()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[3] == 0x90) busEcus.Transmit(pending); else busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var sw = Stopwatch.StartNew();
+        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(300), cts.Token);
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        sw.Stop();
+
+        responses.Should().ContainSingle();
+        // From the 0x78 (at ~0 ms) plus 400 ms the second call goes out and collects for 50 ms:
+        // ~450 ms in all. From the collection's end (300 ms) plus 400 ms it could not finish
+        // before 750 ms. The bound sits between the two.
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(620),
+            "P2* is counted from the 0x78's arrival");
+    }
+
+    // Codex on #150: a cancelled collection cannot show what arrived; the window takes the
+    // conservative reading and the next call waits P2* from the cancellation.
+    [Fact]
+    public async Task A_Cancelled_Collection_Leaves_A_Conservative_Window()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[3] == 0x90)
+            {
+                busEcus.Transmit(pending);
+                _ = Task.Run(async () => { await Task.Delay(250); busEcus.Transmit(negative); });
+            }
+            else busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+        Func<Task> cancelled = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the final negative answer at 250 ms belongs to the cancelled request, whose 0x78 the cancellation hid");
     }
 
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.

@@ -26,9 +26,17 @@ public sealed class IsoTpFunctionalResponse
     /// </summary>
     public byte[] Data { get; }
 
-    internal IsoTpFunctionalResponse(uint sourceCanId, byte[] data)
+    /// <summary>
+    /// When the frame arrived, as the demux stamped it (<see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>),
+    /// so a caller's deadline that runs from a response -- UDS P2* from an NRC 0x78 -- runs
+    /// from its arrival, not from the end of the collection window (#150).
+    /// </summary>
+    public long HostArrivalTimestamp { get; }
+
+    internal IsoTpFunctionalResponse(uint sourceCanId, byte[] data, long hostArrivalTimestamp = 0)
     {
         SourceCanId = sourceCanId;
         Data = data ?? throw new ArgumentNullException(nameof(data));
+        HostArrivalTimestamp = hostArrivalTimestamp;
     }
 }

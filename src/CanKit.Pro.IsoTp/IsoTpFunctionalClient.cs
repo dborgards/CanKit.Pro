@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -265,7 +266,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         {
             await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frameEvent.Frame, out var response))
+                if (TryParseFunctionalResponse(frameEvent, out var response))
                     responses.Add(response!);
             }
         }
@@ -285,7 +286,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
             sub.Dispose();
             while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frameEvent.Frame, out var response))
+                if (TryParseFunctionalResponse(frameEvent, out var response))
                     responses.Add(response!);
             }
         }
@@ -303,9 +304,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
         while (sub.TryRead(out _)) { }
     }
 
-    private static bool TryParseFunctionalResponse(CanFrameView frame,
+    private static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
         out IsoTpFunctionalResponse? response)
     {
+        var frame = frameEvent.Frame;
         var payload = frame.Data.ToArray();
         bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
 
@@ -333,7 +335,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
-        response = new IsoTpFunctionalResponse((uint)frame.ID, pdu);
+        // Stamped by the demux at arrival; "now" only for an event built without a stamp.
+        var arrival = frameEvent.HostArrivalTimestamp > 0 ? frameEvent.HostArrivalTimestamp : Stopwatch.GetTimestamp();
+        response = new IsoTpFunctionalResponse((uint)frame.ID, pdu, arrival);
         return true;
     }
 
