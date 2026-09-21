@@ -173,6 +173,13 @@ public sealed class UdsFunctionalClient : IDisposable
         // window, is told apart
         // (Codex on #150, twice). How many bytes, per service, is in EchoedRequestBytes.
         int echoed = Math.Min(EchoedRequestBytes(req), req.Length - 1);
+        // The window as anchored at the transmission -- the collection ran for `window` from
+        // the transmit confirmation, so the send was at least `window` ago -- noted before the
+        // 0x78s are read: a listener that retired while the confirmation outlasted the
+        // provisional window has forgotten it, and a 0x78 inside the ECU's P2 must still move
+        // it out (Codex on #150).
+        long transmitted = Stopwatch.GetTimestamp() - Ticks(window);
+        lock (_listeners) _openWindows.Note(sid, transmitted, _responseWindow);
         var responses = new List<UdsFunctionalResponse>(raw.Count);
         foreach (var r in raw)
         {
@@ -181,15 +188,17 @@ public sealed class UdsFunctionalClient : IDisposable
                 && (sid != ReadDataByPeriodicIdentifierSid || NamesARequestedPeriodicIdentifier(req, data));
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
             // P2* runs from the 0x78's arrival, which the response carries. The listener sees
-            // the same frame; the earlier of the two to act moves the window, the later is idle.
+            // the same frame; the earlier of the two to act moves the window, the later is
+            // idle. Only a 0x78 that arrived while the window was open: a collection window
+            // longer than P2 may hold one from after it, which revives nothing (Codex on #150).
             if (IsResponsePending(data, sid))
-                Extend(sid, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
+                Extend(sid, r.HostArrivalTimestamp, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
         // Through StartListening again, after the 0x78s above moved the window: a confirmation
         // that outlasted the window has let the listener retire, and the moved-out window
         // needs one (Codex on #150).
-        StartListening(sid, Stopwatch.GetTimestamp() - Ticks(window));
+        StartListening(sid, transmitted);
         return responses;
     }
 
@@ -235,9 +244,9 @@ public sealed class UdsFunctionalClient : IDisposable
         _listeners[sid] = (ears, Task.Run(() => ListenAsync(sid, ears)));
     }
 
-    private void Extend(byte sid, long until)
+    private void Extend(byte sid, long arrival, long until)
     {
-        lock (_listeners) _openWindows.Extend(sid, until);
+        lock (_listeners) _openWindows.ExtendIfOpenAt(sid, arrival, until);
     }
 
     private async Task ListenAsync(byte sid, IsoTpFunctionalListener ears)

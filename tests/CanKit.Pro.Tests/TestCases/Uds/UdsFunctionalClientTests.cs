@@ -467,6 +467,42 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "P2* is counted from the 0x78's arrival");
     }
 
+    // Codex on #150: a collection window longer than P2 may hold a 0x78 from after the
+    // request's P2; it answers nothing the window still covers and does not revive it.
+    [Fact]
+    public async Task A_Pending_Answer_Collected_After_P2_Does_Not_Revive_The_Window()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[3] == 0x90)
+                _ = Task.Run(async () => { await Task.Delay(250); busEcus.Transmit(pending); });
+            else busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(2000));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        // P2 = 100 ms; the 0x78 at 250 ms is inside the 400 ms collection but after P2.
+        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(400), cts.Token);
+
+        // Revived, the window would reach 2250 ms and this call would wait most of two
+        // seconds; a loaded host only makes the call slower, so the bound is wide.
+        var sw = Stopwatch.StartNew();
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        sw.Stop();
+        responses.Should().ContainSingle();
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the 0x78 from after P2 did not revive the window");
+    }
+
     // Codex on #150: a cancelled collection loses what it collected, but the listener that
     // owns the window heard the 0x78 too, and the next call waits P2* from it.
     [Fact]
