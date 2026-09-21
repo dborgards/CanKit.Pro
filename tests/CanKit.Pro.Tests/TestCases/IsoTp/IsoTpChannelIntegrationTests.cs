@@ -1438,6 +1438,157 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
+    // FR-TP-002 (#27, ISO 15765-2 §9.8): a Consecutive Frame whose CAN_DL is not the First
+    // Frame's RX_DL — unless it is the last one — is ignored, not accepted with fewer bytes.
+    // Under the bug the shortened CF's 4 bytes were copied and everything after them shifted;
+    // the conforming CF that follows under the same SN completes the PDU intact.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task MultiFrame_Receive_Ignores_A_Shortened_ConsecutiveFrame_That_Is_Not_The_Last()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epRecv = IsoTpEndpoint.Normal(txCanId: 0x328, rxCanId: 0x320);
+        var epPeer = IsoTpEndpoint.Normal(txCanId: 0x320, rxCanId: 0x328);
+        using var receiver = IsoTpFactory.Open(busB, epRecv, FastOptions());
+
+        var fcSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)epRecv.TxCanId)) return;
+            var data = e.CanFrame.Data.ToArray();
+            if (data.Length > 0 && (data[0] >> 4) == 0x3) fcSeen.TrySetResult(true);
+        };
+        var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+
+        // 20 bytes => FF carries 6, CF1 carries 7, CF2 carries the last 7.
+        byte[] payload = Enumerable.Range(0, 20).Select(i => (byte)(i + 0x40)).ToArray();
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId),
+            IsoTpFrameCodec.BuildFirstFrame(epPeer, payload.Length, payload.AsSpan(0, ffData), isCanFd: false)));
+        await fcSeen.Task.WaitAsync(ShortTimeout);
+
+        // A shortened CF1: SN 1 with only 4 of its 7 bytes, CAN_DL 5 — not the last CF, so it
+        // does not conform and is ignored.
+        var shortCf1 = IsoTpFrameCodec.BuildConsecutiveFrame(epPeer, sequenceNumber: 1,
+            payload.AsSpan(ffData, 4), isCanFd: false, padding: false);
+        shortCf1.Length.Should().Be(5);
+        busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), shortCf1));
+
+        // The conforming CF1 and CF2 complete the PDU as sent.
+        busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId),
+            IsoTpFrameCodec.BuildConsecutiveFrame(epPeer, sequenceNumber: 1, payload.AsSpan(ffData, 7), isCanFd: false, padding: true)));
+        busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId),
+            IsoTpFrameCodec.BuildConsecutiveFrame(epPeer, sequenceNumber: 2, payload.AsSpan(ffData + 7), isCanFd: false, padding: true)));
+
+        (await recvTask).Should().Equal(payload, "the shortened CF was ignored, not copied");
+    }
+
+    // --------------------------------------------------------------------------------
+    // #26: a First Frame announcing more than MaxReceivePduLength is answered with FC(OVFLW)
+    // and nothing is allocated for it; the default is 65 535 bytes, and the option raises it.
+    // The FD bus carries the escape First Frame that can announce ~2 GB.
+    // --------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(null, FlowStatus.Overflow)]     // default: 65 536 bytes is one too many
+    [InlineData(100_000, FlowStatus.ClearToSend)] // raised: the same First Frame is accepted
+    public async Task Rx_FirstFrame_Above_MaxReceivePduLength_Sends_Overflow(int? maxReceivePduLength, FlowStatus expected)
+    {
+        var session = NewSession();
+        using var busA = OpenCanFd(session, 0);
+        using var busB = OpenCanFd(session, 1);
+
+        var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+        var options = FastOptions(useCanFd: true).With(maxReceivePduLength: maxReceivePduLength);
+        options.MaxReceivePduLength.Should().Be(maxReceivePduLength ?? 0xFFFF);
+        using var receiver = IsoTpFactory.Open(busA, epRecv, options);
+
+        var fc = new TaskCompletionSource<FlowStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x7E0) return;
+            var data = e.CanFrame.Data.ToArray();
+            if (data.Length >= 1 && (data[0] >> 4) == 0x3) fc.TrySetResult((FlowStatus)(data[0] & 0x0F));
+        };
+
+        // Escape First Frame announcing 65 536 bytes, with a full 64-byte first chunk.
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: true, usesAddressExtension: false, useLongLength: true);
+        var ff = IsoTpFrameCodec.BuildFirstFrame(epPeer, 0x1_0000, new byte[ffData], isCanFd: true);
+        busB.Transmit(CanFrame.Fd(0x7E8, ff));
+
+        (await fc.Task.WaitAsync(ShortTimeout)).Should().Be(expected);
+    }
+
+    // --------------------------------------------------------------------------------
+    // #25: the STmin timer belongs to its transfer. A send cancelled while waiting out STmin
+    // and replaced at once by another SendAsync must not have the old timer send a Consecutive
+    // Frame of the new PDU under the old sequence number. The sender runs on a clock the test
+    // owns: STmin is armed but cannot elapse before the cancel has been applied, and the moment
+    // the stale timer would fire is a clock advance the test makes after the new transfer's
+    // First Frame — after which nothing may follow until the peer's Flow Control.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Stale_StMin_Timer_Does_Not_Send_A_ConsecutiveFrame_Of_The_Next_Transfer()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var clock = new VirtualClock();
+        using var serviceA = new CanBusService(busA);
+        var senderActor = clock.NewActor();
+        var stMin = TimeSpan.FromMilliseconds(100); // encodable as STmin raw 0x64; 300 ms would clamp to 127
+
+        var epSender = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+        using var sender = new IsoTpChannel(serviceA, epSender, FastOptions(nBs: TimeSpan.FromSeconds(3)), ownsService: false, senderActor);
+
+        var fromSender = Channel.CreateUnbounded<byte[]>();
+        busB.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == 0x7E0) fromSender.Writer.TryWrite(e.CanFrame.Data.ToArray());
+        };
+        async Task<byte[]> NextAsync() => await fromSender.Reader.ReadAsync(new CancellationTokenSource(ShortTimeout).Token);
+
+        byte[] first = Enumerable.Range(0, 20).Select(i => (byte)(0xA0 + i)).ToArray();
+        byte[] second = Enumerable.Range(0, 20).Select(i => (byte)(0xB0 + i)).ToArray();
+
+        using var cancel = new CancellationTokenSource();
+        var firstSend = sender.SendAsync(first, cancel.Token);
+        (await NextAsync())[0].Should().Be(0x10, "FF of the first PDU");
+        busB.Transmit(CanFrame.Classic(0x7E8, IsoTpFrameCodec.BuildFlowControl(epPeer, FlowStatus.ClearToSend,
+            blockSize: 0, stMinRaw: IsoTpFrameCodec.EncodeStMin(stMin), isCanFd: false, padding: true)));
+        await clock.WaitUntilTimerArmedAsync(senderActor, stMin, ShortTimeout); // STmin armed, on a clock that has not moved
+
+        cancel.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => firstSend);
+        await clock.SettleAsync(); // the cancel's cleanup has run on the actor
+
+        var secondSend = sender.SendAsync(second, new CancellationTokenSource(ShortTimeout).Token);
+        var ff2 = await NextAsync();
+        ff2[0].Should().Be(0x10, "FF of the second PDU");
+        ff2.Skip(2).Take(6).Should().Equal(second.Take(6));
+
+        // Now the old STmin elapses. Nothing may follow the FF: the peer has not sent Flow Control.
+        await clock.AdvanceAsync(stMin);
+        await clock.SettleAsync();
+        await Task.Delay(100); // a frame the timer released would be on the wire by now
+        fromSender.Reader.TryRead(out var stray).Should().BeFalse(
+            $"no Consecutive Frame may go out before the peer's Flow Control, but one did: {(stray is null ? "" : BitConverter.ToString(stray))}");
+
+        busB.Transmit(CanFrame.Classic(0x7E8, IsoTpFrameCodec.BuildFlowControl(epPeer, FlowStatus.ClearToSend,
+            blockSize: 0, stMinRaw: 0, isCanFd: false, padding: true)));
+        var cf1 = await NextAsync();
+        var cf2 = await NextAsync();
+        cf1[0].Should().Be(0x21);
+        cf2[0].Should().Be(0x22);
+        cf1.Skip(1).Take(7).Concat(cf2.Skip(1).Take(7)).Should().Equal(second.Skip(6));
+        await secondSend.WaitAsync(ShortTimeout);
+    }
+
+    // --------------------------------------------------------------------------------
     // FR-TP-010 (N_As): the TX-confirm of the First Frame never resolves -> SendAsync must
     // fault with IsoTpTimeoutException(Timer = NAs) instead of hanging. N_As was previously
     // only covered indirectly via the L2 echo-timeout test.

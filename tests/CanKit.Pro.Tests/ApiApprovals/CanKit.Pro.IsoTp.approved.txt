@@ -40,6 +40,7 @@ namespace CanKit.Pro.IsoTp
         public IsoTpChannelOptions() { }
         public byte LocalBlockSize { get; init; }
         public System.TimeSpan LocalStMin { get; init; }
+        public int MaxReceivePduLength { get; init; }
         public System.TimeSpan NAs { get; init; }
         public System.TimeSpan NBs { get; init; }
         public System.TimeSpan NCr { get; init; }
@@ -48,7 +49,7 @@ namespace CanKit.Pro.IsoTp
         public bool UseCanFd { get; init; }
         public bool UsePadding { get; init; }
         public int WftMax { get; init; }
-        public CanKit.Pro.IsoTp.IsoTpChannelOptions With(bool? useCanFd = default, bool? usePadding = default, byte? paddingByte = default, byte? localBlockSize = default, System.TimeSpan? localStMin = default, System.TimeSpan? nAs = default, System.TimeSpan? nBs = default, System.TimeSpan? nCr = default, int? wftMax = default, int? receiveBufferCapacity = default) { }
+        public CanKit.Pro.IsoTp.IsoTpChannelOptions With(bool? useCanFd = default, bool? usePadding = default, byte? paddingByte = default, byte? localBlockSize = default, System.TimeSpan? localStMin = default, System.TimeSpan? nAs = default, System.TimeSpan? nBs = default, System.TimeSpan? nCr = default, int? wftMax = default, int? receiveBufferCapacity = default, int? maxReceivePduLength = default) { }
     }
     public sealed class IsoTpDatagramReceivedEventArgs : System.EventArgs
     {

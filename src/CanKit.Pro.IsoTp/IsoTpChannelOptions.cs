@@ -90,6 +90,16 @@ public sealed class IsoTpChannelOptions
     public int ReceiveBufferCapacity { get; init; } = 64;
 
     /// <summary>
+    /// Largest PDU this channel reassembles. A First Frame announcing more is answered with
+    /// <c>FC(OVFLW)</c> and nothing is allocated for it (ISO 15765-2 §9.6.5.2: the receiver
+    /// "does not have enough buffer"), so six bytes from any bus participant cannot make the
+    /// process reserve the ~2 GB a CAN-FD escape First Frame may announce (#26). Defaults to
+    /// 65 535 bytes; classic CAN transfers are bounded by the codec at 4095 regardless.
+    /// Outbound <see cref="IIsoTpChannel.SendAsync"/> is not bounded by this.
+    /// </summary>
+    public int MaxReceivePduLength { get; init; } = 0xFFFF;
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that want to tweak one field of a shared default template.
     /// </summary>
@@ -103,7 +113,8 @@ public sealed class IsoTpChannelOptions
         TimeSpan? nBs = null,
         TimeSpan? nCr = null,
         int? wftMax = null,
-        int? receiveBufferCapacity = null)
+        int? receiveBufferCapacity = null,
+        int? maxReceivePduLength = null)
         => new()
         {
             UseCanFd = useCanFd ?? UseCanFd,
@@ -116,5 +127,6 @@ public sealed class IsoTpChannelOptions
             NCr = nCr ?? NCr,
             WftMax = wftMax ?? WftMax,
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
+            MaxReceivePduLength = maxReceivePduLength ?? MaxReceivePduLength,
         };
 }

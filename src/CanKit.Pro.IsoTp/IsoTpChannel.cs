@@ -575,10 +575,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         SendFrameOnBus(payload, expectTx: TxExpect.FirstFrameConfirm);
     }
 
-    private void SendNextConsecutiveFrame()
+    private void SendNextConsecutiveFrame(TxState tx)
     {
-        var tx = _tx;
-        if (tx is null) return; // canceled/failed while STmin scheduled
+        if (!ReferenceEquals(_tx, tx)) return; // canceled/failed/replaced while STmin scheduled
+        tx.StMinTimer = null;
 
         int cfCap = IsoTpFrameCodec.ConsecutiveFrameMaxDataLength(_options.UseCanFd,
             _endpoint.UsesAddressExtension);
@@ -809,11 +809,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         if (tx.StMin > TimeSpan.Zero)
         {
-            _actor.Schedule(tx.StMin, SendNextConsecutiveFrame);
+            // The timer belongs to this transfer: it is disposed on every completion path, and
+            // should it still fire, it sends only if this transfer is still the one in flight —
+            // never a Consecutive Frame of the transfer that replaced it, carrying the new PDU's
+            // bytes under the old sequence number (#25).
+            tx.StMinTimer?.Dispose();
+            tx.StMinTimer = _actor.Schedule(tx.StMin, () => SendNextConsecutiveFrame(tx));
         }
         else
         {
-            SendNextConsecutiveFrame();
+            SendNextConsecutiveFrame(tx);
         }
     }
 
@@ -838,6 +843,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var tx = _tx;
         if (tx is null) return;
         tx.NBsDeadline?.Complete();
+        tx.StMinTimer?.Dispose();
         _tx = null;
         tx.Tcs.TrySetResult(tx.LastFrameTransmitTimestamp);
     }
@@ -868,6 +874,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 if (tx is not null && ReferenceEquals(tx.Tcs, tcs))
                 {
                     tx.NBsDeadline?.Complete();
+                    tx.StMinTimer?.Dispose();
                     _tx = null;
                 }
             });
@@ -932,10 +939,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 "ISO-TP First Frame aborted in-flight multi-frame reception."));
         }
 
-        // Cap reassembly allocation to the same outbound SendAsync / codec limit for this
-        // frame kind (Bugbot 3596212802). A CAN-FD escape FF can announce up to int.MaxValue;
+        // A First Frame must be a full frame: classic CAN_DL 8, CAN FD at least 8 — its CAN_DL
+        // is the RX_DL every Consecutive Frame of the transfer is held to (ISO 15765-2 §9.8,
+        // #27). A shorter one is not a First Frame; it is ignored.
+        if (payload.Length < IsoTpFrameCodec.ClassicCanMaxData) return;
+
+        // Cap reassembly allocation to the codec limit for this frame kind (Bugbot 3596212802)
+        // and to MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to int.MaxValue;
         // refuse with FC(OVFLW) and do not allocate.
-        if (pci.Length < 1 || pci.Length > MaxPduLength)
+        if (pci.Length < 1 || pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
         {
             SendOverflowFlowControl();
             return;
@@ -977,7 +989,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         _rx = new RxState(buffer, received: firstChunk,
             expectedSn: IsoTpFrameCodec.FirstConsecutiveSequenceNumber,
-            blockCounter: _options.LocalBlockSize);
+            blockCounter: _options.LocalBlockSize,
+            rxDl: payload.Length);
         ArmNCr();
     }
 
@@ -999,12 +1012,17 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         int remaining = rx.Buffer.Length - rx.Received;
         int available = payload.Length - pci.DataOffset;
-        int copy = Math.Min(remaining, Math.Max(0, available));
-        // Empty CF (PCI-only / no user data): ignore without advancing SN, BS, or N_Cr.
-        // Advancing ExpectedSn here would desync reassembly so a valid next CF mismatches
-        // or stalls until N_Cr aborts (Bugbot 3596378393).
-        if (copy == 0)
-            return;
+        // CAN_DL validation (ISO 15765-2 §9.8, #27): a Consecutive Frame that is not the last
+        // carries RX_DL bytes, the CAN_DL the First Frame set; the last one carries at least the
+        // remaining bytes and no more than RX_DL. Anything else — a shortened CF whose 4 bytes
+        // would shift everything after it, a PCI-only CF (Bugbot 3596378393) — is ignored: not
+        // copied, no SN or BS advance, N_Cr untouched, as if it had not arrived.
+        bool isLast = remaining <= rx.RxDl - pci.DataOffset;
+        bool conforming = isLast
+            ? available >= remaining && payload.Length <= rx.RxDl
+            : payload.Length == rx.RxDl;
+        if (!conforming) return;
+        int copy = Math.Min(remaining, available);
 
         Array.Copy(payload, pci.DataOffset, rx.Buffer, rx.Received, copy);
         rx.Received += copy;
@@ -1318,6 +1336,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         public IDeadline? NBsDeadline { get; set; }
 
+        /// <summary>The STmin timer armed for this transfer's next Consecutive Frame, disposed
+        /// with the transfer so it cannot fire into the next one (#25).</summary>
+        public IDisposable? StMinTimer { get; set; }
+
         /// <summary>
         /// Flow-Control frames that arrived while FF/last-CF-of-block TX confirmation was still
         /// outstanding (Bugbot 3596580056 / 3597408323). Kept as a list so multiple Wait FCs in
@@ -1329,21 +1351,28 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         {
             NBsDeadline?.Dispose();
             NBsDeadline = null;
+            StMinTimer?.Dispose();
+            StMinTimer = null;
             Tcs.TrySetException(ex);
         }
     }
 
     private sealed class RxState
     {
-        public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter)
+        public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter, int rxDl)
         {
             Buffer = buffer;
             Received = received;
             ExpectedSn = expectedSn;
             BlockCounter = blockCounter;
+            RxDl = rxDl;
         }
 
         public byte[] Buffer { get; }
+
+        /// <summary>The First Frame's CAN_DL: the data length every Consecutive Frame of this
+        /// transfer but the last must have (ISO 15765-2 §9.8).</summary>
+        public int RxDl { get; }
         public int Received { get; set; }
         public byte ExpectedSn { get; set; }
         public int BlockCounter { get; set; }
