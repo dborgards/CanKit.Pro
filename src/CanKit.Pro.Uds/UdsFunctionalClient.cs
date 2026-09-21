@@ -42,6 +42,10 @@ public sealed class UdsFunctionalClient : IDisposable
     // disposed: a call queued behind another must not go out on a disposed client (Codex and
     // Bugbot on #150).
     private readonly CancellationTokenSource _lifetimeCts = new();
+
+    // Test hook: how late the listener's worker starts reading its subscription, standing in
+    // for a thread pool that schedules it after the window has run out (Codex on #150).
+    internal TimeSpan ListenerStartDelay { get; set; }
     private int _disposed;
 
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan responseWindow,
@@ -253,6 +257,9 @@ public sealed class UdsFunctionalClient : IDisposable
     {
         try
         {
+            if (ListenerStartDelay > TimeSpan.Zero)
+                await Task.Delay(ListenerStartDelay, _lifetimeCts.Token).ConfigureAwait(false);
+            bool drained = false;
             while (true)
             {
                 TimeSpan remaining;
@@ -264,11 +271,20 @@ public sealed class UdsFunctionalClient : IDisposable
                     if (!_openWindows.TryGetDeadline(sid, out var until)
                         || (remaining = SuppressedResponseWindows.Remaining(until)) <= TimeSpan.Zero)
                     {
-                        Retire(sid, ears);
-                        return;
+                        if (drained)
+                        {
+                            Retire(sid, ears);
+                            return;
+                        }
+                        // Not before what the subscription buffered is read: it was made
+                        // before the send, and holds what arrived while this worker was
+                        // still being scheduled -- a punctual 0x78 among it moves the window
+                        // out, and the decision is taken again (Codex on #150).
+                        remaining = TimeSpan.Zero;
                     }
                 }
                 var heard = await ears.CollectAsync(remaining, _lifetimeCts.Token).ConfigureAwait(false);
+                drained = remaining == TimeSpan.Zero;
                 foreach (var pending in heard.Where(r => IsResponsePending(r.Data)))
                 {
                     byte pendingSid = pending.Data[1];

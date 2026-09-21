@@ -503,6 +503,43 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the 0x78 from after P2 did not revive the window");
     }
 
+    // Codex on #150: the listener's subscription is made before the send, but its worker may
+    // start after the window has run out; what the subscription buffered meanwhile -- here
+    // the immediate 0x78 -- is read before the worker retires, not abandoned with it.
+    [Fact]
+    public async Task A_Listener_Starting_After_The_Window_Still_Hears_What_It_Buffered()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x10, 0x78 });
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x10, 0x12 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x50, 0x03, 0x00, 0x32, 0x01, 0xF4 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if ((e.CanFrame.Data.Span[2] & 0x80) != 0)
+            {
+                busEcus.Transmit(pending);
+                _ = Task.Run(async () => { await Task.Delay(250); busEcus.Transmit(negative); });
+            }
+            else busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(400));
+        functional.ListenerStartDelay = TimeSpan.FromMilliseconds(150); // past the 100 ms window
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.SendRawAsync(new byte[] { 0x10, 0x83 }, Window, cts.Token); // suppressed: the 0x78 is buffered before the worker runs
+
+        var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the late worker read the buffered 0x78 and kept the window to 400 ms, past the negative at 250");
+    }
+
     // Codex on #150: a cancelled collection loses what it collected, but the listener that
     // owns the window heard the 0x78 too, and the next call waits P2* from it.
     [Fact]
