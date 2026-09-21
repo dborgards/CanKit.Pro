@@ -588,7 +588,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
-        var service = new CanBusService(busA);
+        using var service = new CanBusService(busA); // disposed below; the using covers a throw before that (CodeQL)
         using var client = IsoTpFactory.OpenFunctional(service, 0x7DF, 0x7E8, 0x7EF, FastOptions(), leaveOpen: true);
 
         using var listener = client.Listen();
