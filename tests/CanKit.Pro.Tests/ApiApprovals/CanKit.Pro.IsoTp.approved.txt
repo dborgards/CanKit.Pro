@@ -13,6 +13,7 @@ namespace CanKit.Pro.IsoTp
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         event System.EventHandler<CanKit.Pro.IsoTp.IsoTpDatagramReceivedEventArgs>? DatagramReceived;
         int DiscardPendingPdus();
+        System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpReceptionInProgress> GetReceptionsInProgress();
         System.Collections.Generic.IAsyncEnumerable<byte[]> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpReceivedPdu> ReceiveWithArrivalAsync(System.Threading.CancellationToken cancellationToken = default);
@@ -141,8 +142,17 @@ namespace CanKit.Pro.IsoTp
     public readonly struct IsoTpReceivedPdu
     {
         public IsoTpReceivedPdu(byte[] pdu, long arrivalTimestamp) { }
+        public IsoTpReceivedPdu(byte[] pdu, long arrivalTimestamp, long firstFrameArrivalTimestamp) { }
         public long ArrivalTimestamp { get; }
+        public long FirstFrameArrivalTimestamp { get; }
         public byte[] Pdu { get; }
+    }
+    public sealed class IsoTpReceptionInProgress
+    {
+        public IsoTpReceptionInProgress(long firstFrameArrivalTimestamp, int announcedLength, System.ReadOnlyMemory<byte> firstFrameData) { }
+        public int AnnouncedLength { get; }
+        public long FirstFrameArrivalTimestamp { get; }
+        public System.ReadOnlyMemory<byte> FirstFrameData { get; }
     }
     public sealed class IsoTpSendRejectedException : CanKit.Pro.IsoTp.IsoTpException
     {

@@ -27,9 +27,20 @@ public readonly struct IsoTpReceivedPdu
     /// <param name="arrivalTimestamp">A <see cref="Stopwatch.GetTimestamp"/> reading taken when
     /// the PDU was queued.</param>
     public IsoTpReceivedPdu(byte[] pdu, long arrivalTimestamp)
+        : this(pdu, arrivalTimestamp, arrivalTimestamp)
+    {
+    }
+
+    /// <summary>Creates a delivery record of a multi-frame PDU.</summary>
+    /// <param name="pdu">The reassembled PDU.</param>
+    /// <param name="arrivalTimestamp">A <see cref="Stopwatch.GetTimestamp"/> reading taken when
+    /// the PDU's final frame arrived.</param>
+    /// <param name="firstFrameArrivalTimestamp">The same reading for its first frame.</param>
+    public IsoTpReceivedPdu(byte[] pdu, long arrivalTimestamp, long firstFrameArrivalTimestamp)
     {
         Pdu = pdu;
         ArrivalTimestamp = arrivalTimestamp;
+        FirstFrameArrivalTimestamp = firstFrameArrivalTimestamp;
     }
 
     /// <summary>The reassembled PDU.</summary>
@@ -42,4 +53,13 @@ public readonly struct IsoTpReceivedPdu
     /// observation time, up to one channel hop between the demux and the channel's reader.
     /// </summary>
     public long ArrivalTimestamp { get; }
+
+    /// <summary>
+    /// The same reading for the PDU's <b>first</b> frame — the Single Frame itself, or the First
+    /// Frame of a multi-frame PDU. This is the instant a response <em>began</em>, which is what
+    /// ISO 14229-2 measures P2 against: P2 ends with the first frame of the response, the rest
+    /// of the transfer is the transport's (N_Cr) business (#28). Equal to
+    /// <see cref="ArrivalTimestamp"/> for a Single Frame.
+    /// </summary>
+    public long FirstFrameArrivalTimestamp { get; }
 }

@@ -47,7 +47,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     /// The returned <see cref="IDisposable"/> tears down the whole stack in the right order.
     /// </summary>
     private static (IUdsClient client, SimulatedUdsEcu ecu, IDisposable dispose) BuildPair(
-        Action<SimulatedUdsEcu> configure, UdsClientOptions? options = null, bool useCanFd = false)
+        Action<SimulatedUdsEcu> configure, UdsClientOptions? options = null, bool useCanFd = false,
+        IsoTpChannelOptions? clientIsoTp = null)
     {
         var session = NewSession();
         var busClient = useCanFd ? OpenCanFd(session, 0) : OpenClassic(session, 0);
@@ -56,7 +57,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         var clientEndpoint = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
         var ecuEndpoint = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
 
-        var clientChannel = IsoTpFactory.Open(busClient, clientEndpoint, FastIsoTp(useCanFd));
+        var clientChannel = IsoTpFactory.Open(busClient, clientEndpoint, clientIsoTp ?? FastIsoTp(useCanFd));
         var ecuChannel = IsoTpFactory.Open(busEcu, ecuEndpoint, FastIsoTp(useCanFd));
 
         var ecu = new SimulatedUdsEcu(ecuChannel);
@@ -304,6 +305,142 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
             unlocked.Should().BeTrue();
             sentKey.Should().Equal(seed.Select(b => (byte)(b ^ 0x55)).ToArray());
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #29 — ISO 14229-1 §9.4.5.3: a seed of all zeroes says the level is already unlocked.
+    // The client must complete without sending a key; a key for that seed earns NRC 0x24.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task SecurityAccess_Treats_An_AllZero_Seed_As_Already_Unlocked()
+    {
+        int keyRequests = 0;
+        int keysComputed = 0;
+
+        var (client, _, dispose) = BuildPair(e => e
+            .On(0x27, req =>
+            {
+                if (req[1] == 0x01)
+                    return new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00 }; // the usual length, zeroes
+                if (req[1] == 0x02)
+                {
+                    Interlocked.Increment(ref keyRequests);
+                    throw new EcuNegativeResponse(0x24); // requestSequenceError
+                }
+                throw new EcuNegativeResponse(0x12);
+            }));
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SecurityAccessAsync(
+                requestSeedLevel: 0x01,
+                computeKey: s =>
+                {
+                    Interlocked.Increment(ref keysComputed);
+                    return s.Select(b => (byte)(b ^ 0x55)).ToArray();
+                },
+                cancellationToken: cts.Token);
+
+            keyRequests.Should().Be(0, "an all-zero seed means already unlocked; no sendKey");
+            keysComputed.Should().Be(0);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #28 — ISO 14229-2: P2 ends with the *first* frame of the response. A multi-frame
+    // response whose transfer outlasts P2 (here: paced by the client's own STmin) is not a
+    // timeout; the remainder is the transport's, bounded by N_Cr.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task P2_Ends_With_The_First_Frame_Of_A_MultiFrame_Response()
+    {
+        // 90-byte response = FF (6 data bytes) + 12 CFs. The client advertises STmin = 127 ms,
+        // so the ECU cannot deliver the last CF earlier than 12 x 127 ms = 1.5 s after the
+        // First Frame -- three times the P2 budget below. The First Frame itself is answered
+        // at once; the quantity the host perturbs is that single round trip, against a 500 ms
+        // budget the suite's other P2 tests already trust at 80 ms.
+        var record = Enumerable.Range(0, 87).Select(i => (byte)i).ToArray();
+        var p2 = TimeSpan.FromMilliseconds(500);
+
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, req =>
+            {
+                var body = new byte[2 + record.Length];
+                body[0] = 0xF1;
+                body[1] = 0x90;
+                Buffer.BlockCopy(record, 0, body, 2, record.Length);
+                return body;
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 },
+            clientIsoTp: new IsoTpChannelOptions
+            {
+                UseCanFd = false,
+                UsePadding = true,
+                NAs = TimeSpan.FromMilliseconds(500),
+                NBs = TimeSpan.FromMilliseconds(500),
+                NCr = TimeSpan.FromMilliseconds(500),
+                LocalStMin = TimeSpan.FromMilliseconds(127),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var sw = Stopwatch.StartNew();
+            var data = await client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            sw.Stop();
+
+            data.Should().Equal(record);
+            // The transfer really outlasted P2 -- otherwise the assertion above would hold for
+            // a client that still measures P2 against the last frame.
+            sw.Elapsed.Should().BeGreaterThan(p2);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #28, Codex on #143 — the wait beyond P2 is for *this* request's response. A multi-frame
+    // transfer for another service that began inside the budget does not extend it: the peer
+    // is busy with that transfer, so the real answer cannot start in time anyway.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task P2_Is_Not_Extended_By_A_MultiFrame_Transfer_For_Another_Service()
+    {
+        // The ECU answers the RDBI request with silence, but first starts a 146-byte
+        // ReadDTCInformation response (SID 0x59): FF + 20 CFs at the client's STmin of 127 ms,
+        // i.e. 2.5 s on the wire. The client must time out at P2 (500 ms), not after the
+        // transfer; the bound below leaves 1 s for the host between the two.
+        var unrelated = new byte[146];
+        unrelated[0] = 0x59;
+        var p2 = TimeSpan.FromMilliseconds(500);
+
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, req =>
+            {
+                _ = e.Channel.SendAsync(unrelated);
+                throw new EcuSilent();
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 },
+            clientIsoTp: new IsoTpChannelOptions
+            {
+                UseCanFd = false,
+                UsePadding = true,
+                NAs = TimeSpan.FromMilliseconds(500),
+                NBs = TimeSpan.FromMilliseconds(500),
+                NCr = TimeSpan.FromMilliseconds(500),
+                LocalStMin = TimeSpan.FromMilliseconds(127),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var sw = Stopwatch.StartNew();
+            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            await act.Should().ThrowAsync<UdsTimeoutException>();
+            sw.Stop();
+
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(1500),
+                "an unrelated transfer must not hold the request past its budget");
         }
     }
 

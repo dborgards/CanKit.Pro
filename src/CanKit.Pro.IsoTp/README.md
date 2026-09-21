@@ -47,6 +47,18 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   ISO 15765-2 error cases.
 - `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived` — three surfaces onto the same bounded,
   drop-oldest PDU inbox (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64).
+  `ReceiveWithArrivalAsync` returns an `IsoTpReceivedPdu` stamped with the arrival of its last
+  frame *and* of its first (`FirstFrameArrivalTimestamp`), because an application deadline
+  such as UDS P2 ends with the first frame; `GetReceptionsInProgress` reports the multi-frame
+  receptions that have begun but not completed, oldest first, each as an
+  `IsoTpReceptionInProgress` — that stamp, the announced length and the First Frame's data
+  bytes, so the application layer can tell whose response it is. A record is published when
+  the First Frame is taken from the subscription, before the channel's actor has processed it
+  (several can be pending while the actor is behind), and withdrawn on its outcome or if the
+  actor refuses the frame; the call itself drains what the demux has buffered first, so the
+  answer does not wait for the reader task's scheduling either. A caller waiting on one
+  re-checks rather than waiting unboundedly. `DiscardPendingPdus` drains the demux buffer the
+  same way before clearing, so a frame buffered at discard time is part of what it drops.
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NBs` (peer-FC wait), `NCr` (next CF wait) and
   `WftMax` (max consecutive `Wait` FCs) are configurable; defaults are conservative 1 s / 10.
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535

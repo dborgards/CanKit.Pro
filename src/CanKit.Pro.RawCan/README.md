@@ -130,6 +130,12 @@ await foreach (var e in sub.Frames) Use(e.Frame.Data);
 `TryRead` gains an `out CanFrameEvent`, and predicates and callbacks take `CanFrameEvent`. Reach
 the frame through `.Frame`.
 
+`ISubscription.WaitToReadAsync` is the pull-style counterpart to `Frames` beside `TryRead`: a
+consumer that must also drain the buffer from another thread — a deadline check that cannot wait
+for the consumer's own scheduling — waits with it and drains under its own lock with `TryRead`,
+so the two cannot reorder frames the way a caller overtaking an enumerator would. CanKit.Pro.IsoTp
+reads its subscription this way.
+
 **On a bus not configured for echo, nothing else changes.** On an echo bus, a subscription now
 withholds host echoes unless it passes `includeEcho: true` — read the *Echoes* section above
 before choosing, in particular the part about the flag being host-scoped rather than

@@ -77,6 +77,15 @@ await uds.DownloadAsync(
   active timing budget (P2 first, then P2* after every 0x78).
 * Stray or mismatched responses received while a request is pending are silently discarded;
   the wait continues inside the *same* budget so a chatty ECU cannot extend a P2 window.
+* P2 and P2* end with the **first frame** of the response (ISO 14229-2), not its last: a
+  multi-frame response whose First Frame arrived inside the budget — and whose first byte is
+  this request's positive response SID — is waited for beyond it, and the remainder of the
+  transfer is bounded by the ISO-TP `NCr` timer instead. A 4 KB record paced at STmin 5 ms
+  takes seconds on the wire and is not a P2 timeout. A transfer for another service does not
+  extend the budget: the peer is busy with it, so the answer cannot start in time anyway.
+* `SecurityAccessAsync` treats a seed of all zeroes — of any length, including zero — as
+  *already unlocked* (ISO 14229-1 §9.4.5.3) and returns without sending a key; the ECU would
+  answer a key for that seed with NRC 0x24.
 * Transport-layer failures (ISO-TP timeout, overflow, WFTmax, etc.) are re-thrown as their
   original `IsoTpException` subclasses so callers can distinguish "ECU said no" from "wire
   broken".

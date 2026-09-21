@@ -64,6 +64,7 @@ namespace CanKit.Pro.RawCan
         void Reconfigure(CanKit.Pro.RawCan.CanIdFilter filter);
         void Reconfigure(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate);
         bool TryRead(out CanKit.Pro.RawCan.CanFrameEvent frameEvent);
+        System.Threading.Tasks.ValueTask<bool> WaitToReadAsync(System.Threading.CancellationToken cancellationToken = default);
     }
     public static class ProtocolErrorCodes
     {

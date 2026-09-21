@@ -303,13 +303,17 @@ internal sealed class UdsClientImpl : IUdsClient
             var seedResponse = await ExecuteCoreAsync(UdsServiceId.SecurityAccess, seedRequest,
                 linkedToken).ConfigureAwait(false);
 
-            // Positive response: [0]=0x67 [1]=requestSeedLevel [2..]=seed. A zero-length seed means
-            // "already unlocked" per ISO 14229-1 §9.4.5.3 — the client MUST NOT send the key.
+            // Positive response: [0]=0x67 [1]=requestSeedLevel [2..]=seed. A seed of all zeroes
+            // means "already unlocked" per ISO 14229-1 §9.4.5.3 -- the length is the server's
+            // usual seed length, the bytes are 0x00 -- and the client MUST NOT send the key
+            // (#29): a key computed for that seed gets NRC 0x24 back. A zero-length seed is kept
+            // as the defensive reading of the same answer.
             if (seedResponse.Length < 2 || seedResponse[1] != requestSeedLevel)
                 throw new UdsProtocolException(
                     $"SecurityAccess seed response sub-function mismatch (expected 0x{requestSeedLevel:X2}).");
             int seedLen = seedResponse.Length - 2;
             if (seedLen == 0) return;
+            if (IsAllZero(seedResponse, 2, seedLen)) return;
 
             var seed = new byte[seedLen];
             Buffer.BlockCopy(seedResponse, 2, seed, 0, seedLen);
@@ -802,6 +806,10 @@ internal sealed class UdsClientImpl : IUdsClient
         // behaviour, which is worse but not broken; treating zero as a timestamp would read as
         // infinitely long ago and time out every request.
         var budgetStart = transmitStamp > 0 ? transmitStamp : Stopwatch.GetTimestamp();
+        // Only a wire instant can say a response *predates* the request: a budget started on
+        // this client's clock after the send completed is later than the request itself, and a
+        // fast response can legitimately be stamped before it (Codex on #143, test H).
+        var startedOnWire = transmitStamp > 0;
         var timeout = _options.P2ClientMax;
         var timerKind = UdsTimeoutTimer.P2;
         int pendingCount = 0;
@@ -811,7 +819,7 @@ internal sealed class UdsClientImpl : IUdsClient
             while (true)
             {
                 var received = await ReceiveWithTimeoutAsync(
-                    serviceId, timerKind, timeout, ElapsedSince(budgetStart), linkedToken)
+                    serviceId, timerKind, timeout, budgetStart, startedOnWire, linkedToken)
                     .ConfigureAwait(false);
 
                 // The budget is enforced here, not by the cancellation that raced it.
@@ -829,7 +837,18 @@ internal sealed class UdsClientImpl : IUdsClient
                 // punctual response observed late would be rejected -- swapping a rare wrong
                 // accept for a frequent wrong reject under precisely the load that causes the
                 // bug.
-                var arrival = ElapsedSince(budgetStart, received.ArrivalTimestamp);
+                // Against the response's *first* frame: ISO 14229-2 ends P2 (and P2*) with the
+                // first frame of the response, and leaves the rest of a multi-frame transfer to
+                // the transport's timers (#28). Measured against the last frame, every response
+                // that spends longer on the wire than P2 -- a 4 KB record at STmin 5 ms takes
+                // seconds -- would time out although the server answered in time.
+                // And a response whose first frame predates the budget's start is not this
+                // request's at all -- it began before the request was on the wire, so it answers
+                // an earlier one (Codex on #143). ElapsedSince clamps a negative interval to
+                // zero, which would read as "punctual"; it is a stray, and the wait goes on.
+                if (startedOnWire && received.FirstFrameArrivalTimestamp < budgetStart)
+                    continue;
+                var arrival = ElapsedSince(budgetStart, received.FirstFrameArrivalTimestamp);
                 if (arrival > timeout)
                     throw new UdsTimeoutException(serviceId, timerKind, timeout);
 
@@ -869,7 +888,8 @@ internal sealed class UdsClientImpl : IUdsClient
                         // -- 100 ms after the 0x78, against an 80 ms P2* -- measure as zero and
                         // be accepted. Same scheduling independence as the check above, and for
                         // the same reason.
-                        budgetStart = received.ArrivalTimestamp;
+                        budgetStart = received.FirstFrameArrivalTimestamp;
+                        startedOnWire = true;
                         timeout = _options.P2StarClientMax;
                         timerKind = UdsTimeoutTimer.P2Star;
                         continue;
@@ -897,6 +917,15 @@ internal sealed class UdsClientImpl : IUdsClient
         }
     }
 
+    private static bool IsAllZero(byte[] data, int offset, int count)
+    {
+        for (int i = offset; i < offset + count; i++)
+        {
+            if (data[i] != 0) return false;
+        }
+        return true;
+    }
+
     private void DiscardStalePdus()
     {
         try
@@ -912,16 +941,19 @@ internal sealed class UdsClientImpl : IUdsClient
     /// <summary>
     /// Waits on <see cref="IIsoTpChannel.ReceiveAsync"/> with the currently applicable
     /// (P2 or P2*) timeout, taking already-elapsed time into account so a single wait budget
-    /// isn't re-set to full when the loop iterates for a stray frame.
+    /// isn't re-set to full when the loop iterates for a stray frame. A multi-frame response
+    /// whose First Frame arrived inside the budget is waited for beyond it: the budget ended
+    /// with that frame (ISO 14229-2), and the transport's N_Cr bounds the rest (#28).
     /// </summary>
     private async Task<IsoTpReceivedPdu> ReceiveWithTimeoutAsync(UdsServiceId serviceId,
-        UdsTimeoutTimer timerKind, TimeSpan budget, TimeSpan elapsedInBudget,
+        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, bool startedOnWire,
         CancellationToken linkedToken)
     {
         // How long to wait and whether what turns up was in time are two questions, and only the
         // first one is answered here. The second belongs to the caller's arrival check, because
         // the answer must not depend on when this client got scheduled -- so neither exit below
         // may discard a PDU unread on the strength of a clock reading taken now.
+        var elapsedInBudget = ElapsedSince(budgetStart);
         var remaining = budget - elapsedInBudget;
         if (remaining <= TimeSpan.Zero)
         {
@@ -931,10 +963,8 @@ internal sealed class UdsClientImpl : IUdsClient
             // already-cancelled token wins against a queued item. Take what is there and let the
             // caller judge its stamp; only an empty inbox means nothing arrived in time
             // (Bugbot on #112).
-            if (_channel.TryReceiveWithArrival(out var queued))
-                return queued;
-
-            throw new UdsTimeoutException(serviceId, timerKind, elapsedInBudget);
+            return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
+                startedOnWire, elapsedInBudget, linkedToken).ConfigureAwait(false);
         }
 
         using var timeoutCts = new CancellationTokenSource(remaining);
@@ -951,11 +981,82 @@ internal sealed class UdsClientImpl : IUdsClient
             // The deadline callback won the race -- which says nothing about whether a punctual
             // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
             // before declaring a timeout.
-            if (_channel.TryReceiveWithArrival(out var raced))
-                return raced;
-
-            throw new UdsTimeoutException(serviceId, timerKind, budget);
+            return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
+                startedOnWire, budget, linkedToken).ConfigureAwait(false);
         }
+    }
+
+    // How long a wait for a reception in progress runs before it re-checks that the reception
+    // is still there. The channel publishes a First Frame when it is read off the bus and
+    // withdraws it if the actor then refuses the frame -- with nothing put in the inbox -- so
+    // a wait on it must not be unbounded. The re-check costs nothing when the PDU arrives:
+    // completion or abort puts an item in the inbox and the wait returns at once.
+    private static readonly TimeSpan InProgressRecheck = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// The budget is spent. What can still be returned is a PDU already in the inbox, or the
+    /// response being waited for if its First Frame arrived inside the budget: P2 ended there
+    /// (ISO 14229-2), and the remainder of the transfer is the transport's, bounded by N_Cr.
+    /// Anything else is a timeout.
+    /// </summary>
+    private async Task<IsoTpReceivedPdu> TakeQueuedOrInProgressAsync(UdsServiceId serviceId,
+        UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, bool startedOnWire,
+        TimeSpan elapsedReported, CancellationToken linkedToken)
+    {
+        while (true)
+        {
+            // The in-progress check goes first: the channel withdraws the record only after the
+            // completed PDU (or the abort's error item) is in the inbox, so a reception seen in
+            // progress here is found by the wait below, and one not seen is either absent or
+            // already queued for the peek.
+            if (!ResponseBeganInTime(serviceId, budget, budgetStart, startedOnWire))
+            {
+                if (_channel.TryReceiveWithArrival(out var queued))
+                    return queued;
+
+                throw new UdsTimeoutException(serviceId, timerKind, elapsedReported);
+            }
+
+            using var recheck = new CancellationTokenSource(InProgressRecheck);
+            using var combined = CancellationTokenSource.CreateLinkedTokenSource(
+                linkedToken, recheck.Token);
+            try
+            {
+                return await _channel.ReceiveWithArrivalAsync(combined.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (recheck.IsCancellationRequested
+                                                     && !linkedToken.IsCancellationRequested)
+            {
+                // Still nothing in the inbox: loop, and let the check above decide whether the
+                // reception is still in progress.
+            }
+        }
+    }
+
+    // A multi-frame response is being reassembled, its First Frame arrived inside the budget,
+    // and it is *this* request's response -- its first byte is the positive response SID. Any
+    // other transfer (a late answer to an earlier request, an unsolicited response for another
+    // service) does not extend the budget: the peer is busy with it, so this request's answer
+    // cannot start in time anyway, and waiting it out would only delay the timeout by the length
+    // of a transfer that is then discarded as stray (Codex on #143). A negative response is a
+    // Single Frame and never gets here.
+    private bool ResponseBeganInTime(UdsServiceId serviceId, TimeSpan budget, long budgetStart,
+        bool startedOnWire)
+    {
+        byte positiveSid = (byte)((byte)serviceId + PositiveResponseOffset);
+        // Several can be pending when the channel's actor is behind the bus; any one that is
+        // this request's response and began in time keeps the wait going.
+        foreach (var reception in _channel.GetReceptionsInProgress())
+        {
+            // Inside the budget on both ends: one that began before the request went out
+            // answers an earlier request, however long it takes to finish (Codex on #143).
+            if ((!startedOnWire || reception.FirstFrameArrivalTimestamp >= budgetStart)
+                && ElapsedSince(budgetStart, reception.FirstFrameArrivalTimestamp) <= budget
+                && reception.FirstFrameData.Length > 0
+                && reception.FirstFrameData.Span[0] == positiveSid)
+                return true;
+        }
+        return false;
     }
 
     /// <summary>

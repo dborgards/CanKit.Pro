@@ -51,6 +51,10 @@ public sealed class SimulatedUdsEcu : IDisposable
     /// <summary>Last request the ECU saw (or <c>null</c>).</summary>
     public byte[]? LastRequest => Volatile.Read(ref _lastRequest);
 
+    /// <summary>The ECU's own ISO-TP channel, for a handler that puts something on the wire
+    /// other than the response the loop would build for it.</summary>
+    public IIsoTpChannel Channel => _channel;
+
     /// <summary>Creates an ECU bound to <paramref name="channel"/>. The caller retains channel
     /// ownership.</summary>
     public SimulatedUdsEcu(IIsoTpChannel channel)
