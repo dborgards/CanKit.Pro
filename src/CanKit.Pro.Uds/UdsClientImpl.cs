@@ -1029,8 +1029,14 @@ internal sealed class UdsClientImpl : IUdsClient
                 // at all -- it began before the request was handed to the channel, so it answers
                 // an earlier one (Codex on #143). ElapsedSince clamps a negative interval to
                 // zero, which would read as "punctual"; it is a stray, and the wait goes on.
+                // A stray that is a 0x78 for a suppressed send still open -- answered while
+                // this request was being handed over -- still moves that send's window out
+                // (Bugbot on #150); the branch below does the same for a later one.
                 if (received.FirstFrameArrivalTimestamp < notBefore)
+                {
+                    RouteStrayPending(received);
                     continue;
+                }
                 var arrival = ElapsedSince(budgetStart, received.FirstFrameArrivalTimestamp);
                 if (arrival > timeout)
                     throw new UdsTimeoutException(serviceId, timerKind, timeout);

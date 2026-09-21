@@ -32,7 +32,8 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly TimeSpan _responseWindow;
     private readonly TimeSpan _responsePendingWindow;
     private readonly SuppressedResponseWindows _openWindows = new();
-    private readonly Dictionary<byte, Task> _listeners = new();
+    // Per service: the standing subscription that hears the window out, and the task reading it.
+    private readonly Dictionary<byte, (IsoTpFunctionalListener Ears, Task Run)> _listeners = new();
     // One request on the wire at a time, its collection window included: overlapping calls
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
@@ -151,9 +152,6 @@ public sealed class UdsFunctionalClient : IDisposable
         StartListening(sid, Stopwatch.GetTimestamp());
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
-        // Through StartListening again: a confirmation that outlasted the window has let the
-        // listener retire, and the moved-out window needs one (Codex on #150).
-        StartListening(sid, Stopwatch.GetTimestamp() - Ticks(window));
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
@@ -171,9 +169,13 @@ public sealed class UdsFunctionalClient : IDisposable
             // P2* runs from the 0x78's arrival, which the response carries. The listener sees
             // the same frame; the earlier of the two to act moves the window, the later is idle.
             if (IsResponsePending(data, sid))
-                _openWindows.Extend(sid, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
+                Extend(sid, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
+        // Through StartListening again, after the 0x78s above moved the window: a confirmation
+        // that outlasted the window has let the listener retire, and the moved-out window
+        // needs one (Codex on #150).
+        StartListening(sid, Stopwatch.GetTimestamp() - Ticks(window));
         return responses;
     }
 
@@ -182,66 +184,117 @@ public sealed class UdsFunctionalClient : IDisposable
     // loses nothing (Codex on #150). It moves the window out on every 0x78 it hears -- for its
     // own service in the table and for any other service with a window open -- and ends when
     // the window has run out, forgetting it. Started under the request lock.
+    //
+    // The subscription is made here, on the caller's stack, before StartListening returns and
+    // so before the send: a 0x78 an ECU answers the instant the request is on the bus is
+    // buffered for the listener's first collection, not lost to a listener still being
+    // scheduled (Codex and Bugbot on #150). And it is one subscription for the listener's whole
+    // life, so nothing arriving between two of its collections is lost either.
+    //
+    // Noting the window, starting a listener and retiring one happen under the listeners lock,
+    // so a note that moves the window out either finds the listener still reading -- and it
+    // re-reads the deadline before retiring -- or finds none and starts one; a listener cannot
+    // retire, forgetting the window, between the note and the check (Codex on #150).
     private void StartListening(byte sid, long from)
     {
-        _openWindows.Note(sid, from, _responseWindow);
         lock (_listeners)
         {
-            if (_listeners.ContainsKey(sid)) return; // running already; it reads the moved-out deadline
-            // A window already over -- a collection that outlasted P2 -- needs no listener; one
-            // started for it would complete before it was registered, remove a key not yet
-            // there, and be stored as a zombie that blocks every later one (Bugbot on #150).
-            if (!_openWindows.TryGetDeadline(sid, out var until)
-                || SuppressedResponseWindows.Remaining(until) <= TimeSpan.Zero)
-            {
-                _openWindows.Forget(sid);
-                return;
-            }
-            // Started off this stack: the listener's clean-up runs after the registration.
-            _listeners[sid] = Task.Run(() => ListenAsync(sid));
+            _openWindows.Note(sid, from, _responseWindow);
+            EnsureListener(sid);
         }
     }
 
-    private async Task ListenAsync(byte sid)
+    // Under the listeners lock. Starts a listener for the service's window if the window is
+    // open and none is reading it; forgets a window already over -- a collection that outlasted
+    // P2 -- because a listener for it would only retire on its first read (Bugbot on #150).
+    private void EnsureListener(byte sid)
+    {
+        if (_listeners.ContainsKey(sid)) return;
+        if (!_openWindows.TryGetDeadline(sid, out var until)
+            || SuppressedResponseWindows.Remaining(until) <= TimeSpan.Zero)
+        {
+            _openWindows.Forget(sid);
+            return;
+        }
+        var ears = _client.Listen();
+        // Started off this stack: its retirement takes this lock, so it runs after the entry.
+        _listeners[sid] = (ears, Task.Run(() => ListenAsync(sid, ears)));
+    }
+
+    private void Extend(byte sid, long until)
+    {
+        lock (_listeners) _openWindows.Extend(sid, until);
+    }
+
+    private async Task ListenAsync(byte sid, IsoTpFunctionalListener ears)
     {
         try
         {
-            while (_openWindows.TryGetDeadline(sid, out var until))
+            while (true)
             {
-                var remaining = SuppressedResponseWindows.Remaining(until);
-                if (remaining <= TimeSpan.Zero) break;
-                var heard = await _client.CollectResponsesAsync(remaining, _lifetimeCts.Token).ConfigureAwait(false);
+                TimeSpan remaining;
+                lock (_listeners)
+                {
+                    // Retirement is decided under the lock that notes and moves the window,
+                    // and the entry goes with it: a note after this reads no listener and
+                    // starts one, a note before it moved the deadline this reads.
+                    if (!_openWindows.TryGetDeadline(sid, out var until)
+                        || (remaining = SuppressedResponseWindows.Remaining(until)) <= TimeSpan.Zero)
+                    {
+                        Retire(sid, ears);
+                        return;
+                    }
+                }
+                var heard = await ears.CollectAsync(remaining, _lifetimeCts.Token).ConfigureAwait(false);
                 foreach (var pending in heard.Where(r => IsResponsePending(r.Data)))
                 {
                     byte pendingSid = pending.Data[1];
-                    if (pendingSid == sid || _openWindows.TryGetDeadline(pendingSid, out _))
-                        _openWindows.Extend(pendingSid, pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
+                    lock (_listeners)
+                    {
+                        if (pendingSid == sid || _openWindows.TryGetDeadline(pendingSid, out _))
+                            _openWindows.Extend(pendingSid, pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
+                    }
                 }
             }
         }
         catch (OperationCanceledException)
         {
             // disposed: the window dies with the client
+            lock (_listeners) Retire(sid, ears);
         }
         catch (ObjectDisposedException)
         {
             // likewise
+            lock (_listeners) Retire(sid, ears);
         }
-        finally
+    }
+
+    // Under the listeners lock. Removes this listener's entry -- not a successor's -- and the
+    // window with it, and ends its subscription.
+    private void Retire(byte sid, IsoTpFunctionalListener ears)
+    {
+        if (_listeners.TryGetValue(sid, out var entry) && ReferenceEquals(entry.Ears, ears))
         {
+            _listeners.Remove(sid);
             _openWindows.Forget(sid);
-            lock (_listeners) _listeners.Remove(sid);
         }
+        ears.Dispose();
     }
 
     // Under the request lock. Waits for the listener still open for this service, if any: an
     // earlier request may still be answered -- a suppressed send, or one whose collection
     // window ended before the ECU's P2 did -- and that answer must not land in this call's
-    // window. The listener is not cancelled with the caller; it keeps the window.
+    // window. The listener is not cancelled with the caller; it keeps the window. A window
+    // moved out by a 0x78 another service's listener heard after this service's own retired
+    // has no listener yet; it gets one here, and is waited out the same.
     private async Task WaitOutOpenWindowAsync(byte sid, CancellationToken cancellationToken)
     {
         Task? listener;
-        lock (_listeners) _listeners.TryGetValue(sid, out listener);
+        lock (_listeners)
+        {
+            EnsureListener(sid);
+            listener = _listeners.TryGetValue(sid, out var entry) ? entry.Run : null;
+        }
         if (listener is null) return;
         var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), cancelled))

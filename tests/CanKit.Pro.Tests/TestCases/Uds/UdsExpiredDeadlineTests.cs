@@ -449,6 +449,50 @@ public class UdsExpiredDeadlineTests
         await act.Should().NotThrowAsync<IsoTpException>("the queued fault is stale and dropped");
     }
 
+    /// <summary>
+    /// Bugbot on #150 — a 0x78 for a service with a suppressed send open, answered while the
+    /// next request was being handed to the driver, predates that request's handoff and is
+    /// dropped as a stray; it must still move the suppressed send's window out by P2*.
+    /// </summary>
+    [Fact]
+    public async Task Q_A_Stray_Pending_From_Before_The_Handoff_Still_Moves_Its_Services_Window()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            StrayPendingBeforeHandoffFor = 0x3E,
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(1),
+            LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(1),
+        };
+        // P2* well apart from P2, so which of the two the third send waited is measurable.
+        var pendingBudget = TimeSpan.FromMilliseconds(300);
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            P2ClientMax = Budget,
+            P2StarClientMax = pendingBudget,
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: opens the window, P2 from the send
+        await client.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, cts.Token); // its stray is the 0x78, stamped before its handoff
+
+        // The next TesterPresent waits the window out: P2* from the 0x78 if it was routed, else
+        // P2 from the first send -- which the second send followed within a few milliseconds.
+        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await next.Should().ThrowAsync<UdsTimeoutException>(); // never answered; what matters is when it sent
+
+        long gapTicks;
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCount(3);
+            gapTicks = channel.Sent[2].StartedAt - channel.Sent[1].StartedAt;
+        }
+        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
+            pendingBudget - TimeSpan.FromMilliseconds(5),
+            "the 0x78 heard before the second request's handoff moved the suppressed send's window out by P2*");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -531,6 +575,14 @@ public class UdsExpiredDeadlineTests
         /// <summary>When set, a send observes the token while it waits for its confirmation.</summary>
         public bool CancellableSend { get; init; }
 
+        /// <summary>
+        /// A <c>7F sid 78</c> handed over first, once a request is out, stamped a millisecond
+        /// before that request's last-frame handoff: answered to an earlier send while this
+        /// one was being handed to the driver (Bugbot on #150).
+        /// </summary>
+        public byte? StrayPendingBeforeHandoffFor { get; init; }
+        private bool _straySent;
+
         public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
@@ -560,6 +612,21 @@ public class UdsExpiredDeadlineTests
         {
             if (Gate is not null)
                 await Gate.Task.ConfigureAwait(false);
+
+            if (StrayPendingBeforeHandoffFor is { } straySid && _sent && !_straySent)
+            {
+                _straySent = true;
+                return new IsoTpReceivedPdu(new byte[] { 0x7F, straySid, 0x78 },
+                    _arrivalStamp - Ticks(LastFrameHandoffBeforeTransmit) - Ticks(TimeSpan.FromMilliseconds(1)));
+            }
+
+            // An inbox empties: the one queued response, once delivered, is not delivered
+            // again -- a later read waits, as it would on an empty inbox, until cancelled.
+            if (_delivered)
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+                throw new OperationCanceledException(cancellationToken);
+            }
 
             // Deliberately not observing the token: this models the write winning the race.
             if (RespondPendingFirst && !_pendingSent)

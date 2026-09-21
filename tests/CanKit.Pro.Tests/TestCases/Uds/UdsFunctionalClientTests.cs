@@ -389,7 +389,9 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         bus.DeferredEchoes.ReleaseNext();
         await first;
 
-        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        // The second collects for the whole P2: its answer is timed, and a host that delays the
+        // timer past a short window would leave the collection empty (macOS CI on #150).
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the count never decreases
         bus.DeferredEchoes.ReleaseNext();
         _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
