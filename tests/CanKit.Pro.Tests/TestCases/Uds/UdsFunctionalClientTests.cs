@@ -637,6 +637,47 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the second request waited out the window anchored at the first's late confirmation");
     }
 
+    // Codex on #150: with the confirmation held past the window, the pre-send listener has
+    // retired by the time the collection runs; a collection the caller then cancels leaves by
+    // exception, and the window must still be anchored for the request that went out.
+    [Fact]
+    public async Task A_Cancelled_Collection_After_A_Late_Confirmation_Still_Anchors_Its_Window()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(2) };
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400));
+
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+
+        // The confirmation is held for 500 ms, past the 400 ms window of the pre-send listener;
+        // the collection is then cancelled 50 ms in, and the ECU answers negatively after that,
+        // 150 ms after the confirmation -- inside its P2 from the transmission.
+        using var early = new CancellationTokenSource();
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await Task.Delay(500);
+        bus.DeferredEchoes.ReleaseNext();
+        await Task.Delay(50);
+        early.Cancel();
+        Func<Task> cancelled = () => first;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        _ = Task.Run(async () => { await Task.Delay(100); bus.RaiseObserved(negative, isEcho: false); });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext();
+        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
+        var responses = await second;
+
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the cancelled request's late negative answer fell in the window anchored when its collection was cancelled");
+    }
+
     // Bugbot on #150: a collection that outlasts P2 anchors a window already over; that must
     // not leave a completed listener behind that blocks the next window's real one.
     [Fact]

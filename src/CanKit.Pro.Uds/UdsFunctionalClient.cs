@@ -150,8 +150,21 @@ public sealed class UdsFunctionalClient : IDisposable
         // ran for `window` from the transmit confirmation, so that instant is at least now
         // less `window`, however long the confirmation took (Codex on #150).
         StartListening(sid, Stopwatch.GetTimestamp());
-        var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
-            .ConfigureAwait(false);
+        IReadOnlyList<IsoTpFunctionalResponse> raw;
+        try
+        {
+            raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            // A collection that ends in a cancellation or a transport fault may still have put
+            // the request on the bus, and a confirmation that outlasted the window has let the
+            // pre-send listener retire; the ECUs' P2 from the transmission is at most P2 from
+            // now, so that window is noted before the exception leaves (Codex on #150).
+            StartListening(sid, Stopwatch.GetTimestamp());
+            throw;
+        }
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
