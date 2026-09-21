@@ -566,7 +566,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, 0x7E8, 0x7EF, FastOptions());
 
         // Delivered to the subscription, and confirmed as delivered, before any collection.
-        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> delivered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         busA.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)EcuResponseId)) delivered.TrySetResult(true); };
         using var listener = client.Listen();
         busB.Transmit(frame);
@@ -580,6 +580,14 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         // Not returned twice: the next collection starts from an empty buffer.
         (await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout)).Should().BeEmpty();
         (await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout)).Should().BeEmpty();
+
+        // A negative window reads the buffer the same: what is buffered arrived before the
+        // call, whatever the window says about the past (Codex on #150).
+        delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.Transmit(frame);
+        await delivered.Task.WaitAsync(ShortTimeout);
+        (await listener.CollectAsync(TimeSpan.FromSeconds(-1)).WaitAsync(ShortTimeout))
+            .Should().ContainSingle("a window in the past does not carry a buffered response to the next collection");
     }
 
     // Bugbot on #150: a subscription completed underneath -- the service disposed -- ends the

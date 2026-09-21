@@ -57,16 +57,19 @@ public sealed class IsoTpFunctionalListener : IDisposable
         if (Volatile.Read(ref _disposed) != 0 || _ended)
             throw new ObjectDisposedException(nameof(IsoTpFunctionalListener),
                 _ended ? "The subscription ended: the service was disposed." : null);
-        long deadline = Stopwatch.GetTimestamp() + (long)(window.TotalSeconds * Stopwatch.Frequency);
+        long now = Stopwatch.GetTimestamp();
         var responses = new List<IsoTpFunctionalResponse>(_carried);
         _carried.Clear();
         if (window <= TimeSpan.Zero)
         {
             // No timer for a read of the buffer: its callback would need a thread-pool thread,
-            // which a starved pool grants about once a second (macOS CI on #150).
-            TakeBuffered(responses, deadline);
+            // which a starved pool grants about once a second (macOS CI on #150). The
+            // deadline is now, not now less the window: what is buffered arrived before this
+            // call, and a negative window must not carry it to the next (Codex on #150).
+            TakeBuffered(responses, now);
             return responses.AsReadOnly();
         }
+        long deadline = now + (long)(window.TotalSeconds * Stopwatch.Frequency);
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         windowCts.CancelAfter(window);
         try
