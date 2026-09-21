@@ -720,6 +720,8 @@ public class UdsExpiredDeadlineTests
         public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
             => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
 
+        public Task SettleAsync() => Task.CompletedTask; // nothing is ever on its way: the stub is its own actor
+
         public int DiscardPendingPdus() => 0;
 
         public IAsyncEnumerable<byte[]> ReceiveAllAsync(CancellationToken cancellationToken = default)

@@ -644,6 +644,41 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: a 0x78 stamped inside a suppressed send's window may still be on its way
+    // through the channel's actor when the window is measured as over; the next request for
+    // the service waits for the channel to settle before it reads the inbox empty.
+    [Fact]
+    public async Task A_Pending_Answer_Still_On_Its_Way_Through_The_Channel_Extends_The_Window()
+    {
+        using var service = new StarvedReaderBusService();
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp(useCanFd: false), leaveOpen: true);
+        var pendingBudget = TimeSpan.FromMilliseconds(600);
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            P2ClientMax = TimeSpan.FromMilliseconds(100),
+            P2StarClientMax = pendingBudget,
+        });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+        // The ECU's 0x78, stamped 20 ms in, buffered by the demux -- the reader task that would
+        // take it to the actor is starved by construction.
+        await Task.Delay(20);
+        byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), Stopwatch.GetTimestamp());
+        await Task.Delay(150); // the window has run out, as measured
+
+        // The next TesterPresent waits the window out: P2* from the 0x78 if the channel was
+        // settled before the inbox was read empty, else nothing. It is never answered; what
+        // matters is how long it waited before it sent, a lower bound a loaded host only raises.
+        var sw = Stopwatch.StartNew();
+        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await next.Should().ThrowAsync<UdsTimeoutException>();
+        sw.Stop();
+        sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(400),
+            "the 0x78 on its way through the channel moved the window out to 620 ms");
+    }
+
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()

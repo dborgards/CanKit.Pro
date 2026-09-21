@@ -467,7 +467,10 @@ internal sealed class UdsClientImpl : IUdsClient
                 if (remaining <= TimeSpan.Zero)
                 {
                     // The window is over as measured now -- but a 0x78 may be queued already,
-                    // and it moves the window out (Bugbot on #150). Only an empty inbox ends it.
+                    // and it moves the window out (Bugbot on #150). Only an empty inbox ends
+                    // it, and only once the channel has settled: a 0x78 stamped inside the
+                    // window may still be on its way through its actor (Codex on #150).
+                    await SettleAsync().ConfigureAwait(false);
                     if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
@@ -480,6 +483,7 @@ internal sealed class UdsClientImpl : IUdsClient
                 }
                 catch (OperationCanceledException) when (slice.IsCancellationRequested && !linkedToken.IsCancellationRequested)
                 {
+                    await SettleAsync().ConfigureAwait(false);
                     if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
@@ -957,7 +961,7 @@ internal sealed class UdsClientImpl : IUdsClient
         // Drop any late reply left over from a previous aborted/timed-out wait before we put a
         // new request on the wire. SID correlation alone is insufficient when the next request
         // uses the same service (the stale positive response SID would match).
-        DiscardStalePdus();
+        await DiscardStalePdusAsync().ConfigureAwait(false);
 
         // The stamp the channel took as the request's last frame went to the bus -- not a reading
         // taken here. P2 starts when the request was transmitted, and this continuation resumes
@@ -1120,6 +1124,26 @@ internal sealed class UdsClientImpl : IUdsClient
         return true;
     }
 
+    // The pre-send discard: what is on its way through the channel is settled first, so a 0x78
+    // among it is routed to its service's window rather than dropped unseen (Codex on #150).
+    private async Task DiscardStalePdusAsync()
+    {
+        await SettleAsync().ConfigureAwait(false);
+        DiscardStalePdus();
+    }
+
+    private async Task SettleAsync()
+    {
+        try
+        {
+            await _channel.SettleAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // channel gone: nothing on its way
+        }
+    }
+
     private void DiscardStalePdus()
     {
         try
@@ -1227,6 +1251,10 @@ internal sealed class UdsClientImpl : IUdsClient
     {
         while (true)
         {
+            // Settled first: a Single Frame stamped inside the budget may still be on its way
+            // through the channel's actor when the deadline fires; after this it is in the
+            // inbox, or its reception is on record (Codex on #150).
+            await SettleAsync().ConfigureAwait(false);
             // The in-progress check goes first: the channel withdraws the record only after the
             // completed PDU (or the abort's error item) is in the inbox, so a reception seen in
             // progress here is found by the wait below, and one not seen is either absent or
