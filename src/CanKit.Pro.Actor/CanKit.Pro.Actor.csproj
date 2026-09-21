@@ -20,6 +20,11 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CanKit.Pro.J1939</_Parameter1>
     </AssemblyAttribute>
+    <!-- CANopen measures inhibit times and TPDO event timers against the same source, for the
+         same reason: a test drives the clock by hand instead of sleeping. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.CANopen</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

@@ -1,14 +1,14 @@
 namespace CanKit.Pro.CANopen.Sdo;
 
 /// <summary>
-/// A subset of the CiA 301 §7.2.4.3 Table 45 SDO abort codes needed by the MVP. Values are the
+/// The CiA 301 §7.2.4.3.17 Table 22 SDO abort codes this node emits or matches. Values are the
 /// exact 32-bit codes carried in an SDO Abort frame's data bytes 4..7 (little-endian).
 /// </summary>
 /// <remarks>
-/// Only the codes actually emitted or matched by the MVP are enumerated. The wider CANopen
-/// standard defines dozens more; unrecognized abort codes coming in from a remote peer are still
-/// preserved as raw <c>uint</c> in <see cref="SdoAbortException"/> so callers see the exact
-/// vendor-specified code.
+/// Table 22 is a protocol reference, not an implementation order: only the codes for conditions
+/// this node actually detects are named here. Unrecognized abort codes coming in from a remote
+/// peer are still preserved as raw <c>uint</c> in <see cref="SdoAbortException"/> so callers see
+/// the exact vendor-specified code.
 /// </remarks>
 public enum SdoAbortCode : uint
 {
@@ -23,6 +23,12 @@ public enum SdoAbortCode : uint
 
     /// <summary>Invalid block size (only used by block transfer).</summary>
     InvalidBlockSize = 0x05040002u,
+
+    /// <summary>Invalid sequence number (block mode only) — CiA 301 Table 22, 0504 0003h. A block
+    /// segment's seqno must satisfy <c>0 &lt; seqno &lt; 128</c> (§7.2.4.3.10 / §7.2.4.3.14) and
+    /// cannot exceed the blksize in force for the sub-block; a receiver aborts with this code when
+    /// it does.</summary>
+    InvalidSequenceNumber = 0x05040003u,
 
     /// <summary>CRC error (block transfer only). Set when the CRC-16 carried in the end-of-block
     /// frame does not match the CRC computed by the receiver over the reassembled payload.</summary>
@@ -44,16 +50,22 @@ public enum SdoAbortCode : uint
     /// <summary>Object does not exist in the object dictionary.</summary>
     ObjectDoesNotExist = 0x06020000u,
 
-    /// <summary>Object cannot be mapped to a PDO (CiA 301 §7.2.4.6, PDO mapping parameter).</summary>
+    /// <summary>Object cannot be mapped to a PDO (CiA 301 §7.5.2.36 / §7.5.2.38): the target is
+    /// not mappable, or its declared size does not match the mapped bit length.</summary>
     ObjectCannotBeMapped = 0x06040041u,
 
-    /// <summary>The number and length of the objects to be mapped would exceed the PDO capacity
-    /// (CiA 301 §7.2.4.6 — more than 8 assembled payload bytes in this MVP).</summary>
+    /// <summary>The number and length of the objects to be mapped would exceed the PDO length
+    /// (CiA 301 §7.5.2.36 / §7.5.2.38 — more than 8 assembled payload bytes).</summary>
     PdoMappingLengthExceeded = 0x06040042u,
 
+    /// <summary>General parameter incompatibility reason (CiA 301 Table 22). Emitted for a
+    /// consumer heartbeat time (<c>1016h</c>) that names a node-id another sub-index already
+    /// monitors (§7.5.2.19).</summary>
+    GeneralParameterIncompatibility = 0x06040043u,
+
     /// <summary>Data type does not match / length of service parameter does not match
-    /// (CiA 301 §7.2.4.6 — used for PDO mapping entries whose bit length is not a positive
-    /// multiple of eight, and for wrong widths when writing mapping parameter records).</summary>
+    /// (used for PDO mapping entries whose bit length is not a positive multiple of eight, and
+    /// for wrong widths when writing parameter records).</summary>
     DataTypeLengthMismatch = 0x06070010u,
 
     /// <summary>Data type does not match — length of service parameter too high.</summary>
@@ -65,6 +77,25 @@ public enum SdoAbortCode : uint
     /// <summary>Sub-index does not exist.</summary>
     SubIndexDoesNotExist = 0x06090011u,
 
+    /// <summary>Value range of parameter exceeded, write access only — CiA 301 Table 22 words it
+    /// "0609 0030h Invalid value for parameter (download only)"; the member name keeps the older,
+    /// more widely quoted phrasing. The code the profile text prescribes for a download whose
+    /// value is outside what the object accepts: an unsupported transmission type (§7.5.2.35 /
+    /// §7.5.2.37), the 29-bit frame bit on a node that supports base frames only (§7.5.2.5,
+    /// §7.5.2.17, §7.5.2.33), a reserved bit set in a communication parameter, and a change to
+    /// the CAN-ID part of a COB-ID while the object exists and is valid.</summary>
+    ValueRangeExceeded = 0x06090030u,
+
     /// <summary>General error / unspecified.</summary>
     General = 0x08000000u,
+
+    /// <summary>Data cannot be transferred or stored to the application (CiA 301 Table 22).
+    /// Emitted for a wrong signature written to <c>1010h</c> / <c>1011h</c> (§7.5.2.13 /
+    /// §7.5.2.14, "abort code: 0800 002xh").</summary>
+    DataCannotBeTransferred = 0x08000020u,
+
+    /// <summary>Data cannot be transferred or stored to the application because of the present
+    /// device state (CiA 301 Table 22). Emitted for an SDO server session that was open when the
+    /// node entered NMT state Stopped, where SDO is not available (§7.3.2.2.5 Table 37).</summary>
+    DataCannotBeTransferredDeviceState = 0x08000022u,
 }

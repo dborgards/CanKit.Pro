@@ -3,7 +3,7 @@ using System;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// Data types supported by the MVP Object Dictionary (subset of CiA 301 Table 44). Each type
+/// Data types supported by the Object Dictionary (subset of CiA 301 Table 44). Each type
 /// implies a fixed on-the-wire size (little-endian) used by SDO expedited encoding and PDO
 /// mapping (FR-CO-001 / FR-CO-005).
 /// </summary>
@@ -34,7 +34,8 @@ public enum OdDataType : byte
 
 /// <summary>
 /// Read/write access flag for an <see cref="OdEntry"/>. SDO write attempts against a read-only
-/// entry produce SDO abort <c>0x06010002</c> ("attempt to write a read-only object").
+/// entry produce SDO abort <c>0x06010002</c> ("attempt to write a read-only object"). CiA 301's
+/// <c>const</c> access is represented as <see cref="ReadOnly"/>: on the bus both behave the same.
 /// </summary>
 [Flags]
 public enum OdAccess : byte
@@ -51,23 +52,27 @@ public enum OdAccess : byte
 
 /// <summary>
 /// A single subindex entry in the local Object Dictionary (FR-CO-001): value + declared data
-/// type + access flags. Stored inside <see cref="ObjectDictionary"/>; not intended to be
-/// constructed directly by callers — use the fluent <c>Add*</c> methods on the dictionary.
+/// type + access flags + PDO mappability. Stored inside <see cref="ObjectDictionary"/>; not
+/// intended to be constructed directly by callers — use the fluent <c>Add*</c> methods on the
+/// dictionary.
 /// </summary>
 /// <remarks>
 /// The stored raw value is a little-endian byte array in the same layout SDO expedited encoding
 /// uses on the wire. This keeps the SDO server code path allocation-cheap (no round-trip through
 /// typed converters on every request) while typed accessors on <see cref="ObjectDictionary"/>
-/// preserve type-safety for local reads/writes.
+/// preserve type-safety for local reads/writes. The value is only ever read or replaced under
+/// the dictionary's lock; the non-copying <see cref="RawSpan"/> view is therefore internal and
+/// used solely from code paths that already hold that lock.
 /// </remarks>
 public sealed class OdEntry
 {
     private byte[] _value;
 
-    internal OdEntry(OdDataType type, OdAccess access, byte[] value)
+    internal OdEntry(OdDataType type, OdAccess access, byte[] value, bool pdoMappable)
     {
         DataType = type;
         Access = access;
+        PdoMappable = pdoMappable;
         _value = value;
     }
 
@@ -76,6 +81,15 @@ public sealed class OdEntry
 
     /// <summary>Access permissions (read-only / write-only / read-write).</summary>
     public OdAccess Access { get; }
+
+    /// <summary>
+    /// Whether the entry may be mapped into a PDO — the <c>PDOMapping</c> attribute of a
+    /// CiA 306 device description. Communication-profile objects (<c>1000h</c>–<c>1FFFh</c>)
+    /// are not mappable per CiA 301; application objects default to mappable. A mapping
+    /// entry that references a non-mappable object is rejected with SDO abort
+    /// <c>0604 0041h</c> (CiA 301 §7.5.2.36 / §7.5.2.38).
+    /// </summary>
+    public bool PdoMappable { get; }
 
     /// <summary>Fixed on-the-wire size in bytes for the entry's <see cref="DataType"/>. For
     /// <see cref="OdDataType.Domain"/> the value is variable and this property returns the
@@ -86,8 +100,9 @@ public sealed class OdEntry
     /// fresh copy and cannot mutate the dictionary's private buffer.</summary>
     public byte[] GetRawValue()
     {
-        var copy = new byte[_value.Length];
-        Buffer.BlockCopy(_value, 0, copy, 0, _value.Length);
+        var current = _value;
+        var copy = new byte[current.Length];
+        Buffer.BlockCopy(current, 0, copy, 0, current.Length);
         return copy;
     }
 
@@ -104,7 +119,7 @@ public sealed class OdEntry
         _value = value;
     }
 
-    /// <summary>Non-copying view of the current raw bytes, for the SDO server hot path.</summary>
+    /// <summary>Non-copying view of the current raw bytes, for callers holding the OD lock.</summary>
     internal ReadOnlySpan<byte> RawSpan => _value;
 }
 

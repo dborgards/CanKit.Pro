@@ -3,7 +3,8 @@ using System;
 namespace CanKit.Pro.CANopen.Sdo;
 
 /// <summary>
-/// Encode/decode helpers for the CiA 301 §7.2.4.3.15 SDO block transfer protocol (FR-CO-004).
+/// Encode/decode helpers for the CiA 301 v4.2.0 §7.2.4.3.8–§7.2.4.3.16 SDO block transfer
+/// protocols (FR-CO-004).
 /// Both block download (client → server) and block upload (server → client) share the same
 /// command-specifier layout, only the direction and the meaning of the "cc" / "sc" (client /
 /// server CRC-supported) bits differ.
@@ -234,8 +235,11 @@ internal static class SdoBlockFrames
     internal static bool ReadCrcSupportedBit(byte cs) => (cs & 0x04) != 0;
 
     /// <summary>Computes CRC-16/XMODEM (poly 0x1021, init 0x0000, no reflection, no xor-out)
-    /// over <paramref name="data"/>. This is the algorithm CiA 301 §7.2.4.3.15 references for the
-    /// block-transfer CRC.</summary>
+    /// over <paramref name="data"/>. This is the algorithm CiA 301 v4.2.0 §7.2.4.3.16 ("CRC
+    /// calculation algorithm to verify SDO block transfer") defines for the end-of-block CRC:
+    /// polynomial x^16 + x^12 + x^5 + 1, width 16 bit, initial value 0000h, and the check value
+    /// it supplies — CRC of "123456789" = 31C3h — is pinned by a unit test. The end-of-block
+    /// frames that carry it are §7.2.4.3.11 (download) and §7.2.4.3.15 (upload).</summary>
     internal static ushort ComputeCrc16Xmodem(ReadOnlySpan<byte> data)
     {
         ushort crc = 0;

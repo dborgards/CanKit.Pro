@@ -106,7 +106,13 @@ internal sealed partial class CanOpenNode
 
     private void SendNodeGuardingRtr(byte producerNodeId)
     {
-        // RTR (remote transmission request) with zero-length payload on 0x700 + producer.
+        // RTR (remote transmission request) on 0x700 + producer. CiA 301 §7.2.8.3.2.1 Figure 44
+        // draws the request with DLC 1, the length of the response it asks for. CanKit derives a
+        // frame's DLC from its data length and refuses data on a remote frame
+        // (CanFrame.Classic throws), so the RTR this node can send carries DLC 0 — a limitation
+        // of the upstream frame model, recorded in #59, not a choice made here. Every producer
+        // answers a guarding RTR by CAN-ID, and the reply's own DLC is what matters to the
+        // consumer.
         // Preserving IsRemoteFrame end-to-end depends on the reader loop forwarding it into
         // HandleIncoming and on the adapter (Virtual: preserves via Duplicate) round-tripping it.
         var frame = CanFrame.Classic(
@@ -184,11 +190,13 @@ internal sealed partial class CanOpenNode
             return;
         }
 
-        // An unsolicited frame that is *not* boot-up still gets through, and deliberately so
-        // after a round of review on it. HandleNmtCommand emits a heartbeat on every state
-        // change even with the periodic producer off -- the configuration node-guarding runs in,
-        // since CiA 301 7.2.8.3 makes the two mutually exclusive -- and it carries a real state
-        // with bit 7 clear, indistinguishable on the wire from a toggle-0 reply.
+        // An unsolicited frame that is *not* boot-up would still get through here, because the
+        // wire carries nothing that distinguishes it from a toggle-0 reply. This node's own
+        // producer no longer emits one in the configuration node guarding runs in: the
+        // state-change heartbeat of ApplyNmtTransition goes out only while the heartbeat
+        // protocol is in use (1017h != 0), and CiA 301 7.2.8.3.2.2 makes the two protocols
+        // mutually exclusive on a producer (#43, second half). A foreign producer that does
+        // emit such frames is judged by the toggle alone, which is what the norm provides.
         //
         // A one-bit "a poll is outstanding" gate was written here for that and taken back out:
         // it has to be spent by the frame that arrives, and the alternation check below is what
@@ -196,10 +204,6 @@ internal sealed partial class CanOpenNode
         // is known. A delayed reply or a state-change heartbeat consumed it and the producer's
         // real reply was then dropped outright -- worse than the case it was meant to catch
         // (Bugbot, plus two adjacent findings from Codex on the same mechanism).
-        //
-        // Doing it properly means telling a reply from an unsolicited frame, and the wire carries
-        // nothing that distinguishes them. That is a design question and it belongs with the
-        // producer-side life guarding in #43, not in the baseline fix above.
         bool toggle = (b & 0x80) != 0;
         byte stateByte = (byte)(b & 0x7F);
         NmtState state = stateByte switch
@@ -241,15 +245,97 @@ internal sealed partial class CanOpenNode
     {
         if (!_options.RespondToNodeGuardingRtr) return;
 
-        // CiA 301 §7.2.8.3 mandates heartbeat and node-guarding are mutually exclusive on the
-        // producer side. If we're actively producing heartbeats, silently ignore the RTR so the
-        // consumer falls back on heartbeat error control.
+        // CiA 301 §7.2.8.3.2.2: "It is not allowed to use both error control mechanisms guarding
+        // protocol and heartbeat protocol on one NMT slave at the same time. If the heartbeat
+        // producer time is unequal 0 the heartbeat protocol is used." So while 1017h ≠ 0 the RTR
+        // is ignored and the consumer falls back on heartbeat error control.
         if (_heartbeatProducerInterval > TimeSpan.Zero) return;
 
         byte state = (byte)_state;
         byte payload = (byte)((_nodeGuardingProducerToggle ? 0x80 : 0x00) | (state & 0x7F));
         _nodeGuardingProducerToggle = !_nodeGuardingProducerToggle;
-        _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { payload });
+        // Through the chain every frame of this node on 0x700 + id goes through: a poll already
+        // in the mailbox when a reset ran is answered behind the reset's boot-up, not ahead of it
+        // — two toggle-0 frames in the wrong order read as a guarding error (Bugbot on #133).
+        _ = EmitHeartbeat(payload);
+
+        OnGuardingPollReceived();
+    }
+
+    // =========================================================================================
+    // Producer-side life guarding (CiA 301 §7.2.8.2.2 / §7.2.8.3.2.1, objects 100Ch / 100Dh).
+    // =========================================================================================
+
+    /// <summary>
+    /// "Guarding starts for the NMT slave when the first RTR for its guarding CAN-ID is
+    /// received" (§7.2.8.2.2): every poll re-arms the node life time, and a poll after the
+    /// life guarding event had occurred resolves it (§7.2.8.2.2.2).
+    /// </summary>
+    private void OnGuardingPollReceived()
+    {
+        if (_guardTime <= TimeSpan.Zero || _lifeTimeFactor == 0) return;
+        var lifeTime = ScaleLifeTime(_guardTime, _lifeTimeFactor);
+        var deadline = _lifeGuardingDeadline;
+        if (deadline is null || deadline.IsExpired || deadline.IsCancelled || !deadline.Rearm(lifeTime))
+        {
+            deadline?.Dispose();
+            _lifeGuardingDeadline = _deadlines.Arm(lifeTime, OnLifeGuardingExpired);
+        }
+        if (_lifeGuardingOccurred)
+        {
+            _lifeGuardingOccurred = false;
+            RaiseLifeGuardingEvent(LifeGuardingState.Resolved);
+        }
+    }
+
+    private void OnLifeGuardingExpired()
+    {
+        if (_guardTime <= TimeSpan.Zero || _lifeTimeFactor == 0) return;
+        // One indication per lapse: the event is resolved by the next poll, not repeated by the
+        // clock. A master that never returns produces exactly one "occurred".
+        _lifeGuardingOccurred = true;
+        RaiseLifeGuardingEvent(LifeGuardingState.Occurred);
+    }
+
+    /// <summary>100Ch / 100Dh changed in the OD: "The value of 0000h shall disable the life
+    /// guarding" (§7.5.2.11), likewise a life time factor of 00h (§7.5.2.12). A running
+    /// life time takes the new length; otherwise guarding starts with the next poll.</summary>
+    private void ApplyLifeGuardingConfiguration()
+    {
+        var ms = (ushort)_od.ReadUnsigned(Co.GuardTime, 0x00);
+        _guardTime = ms == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(ms);
+        _lifeTimeFactor = (byte)_od.ReadUnsigned(Co.LifeTimeFactor, 0x00);
+        if (_guardTime <= TimeSpan.Zero || _lifeTimeFactor == 0)
+        {
+            ResetLifeGuardingState();
+            return;
+        }
+        if (_lifeGuardingDeadline is { } running && !running.IsExpired && !running.IsCancelled)
+        {
+            var lifeTime = ScaleLifeTime(_guardTime, _lifeTimeFactor);
+            if (!running.Rearm(lifeTime))
+            {
+                running.Dispose();
+                _lifeGuardingDeadline = _deadlines.Arm(lifeTime, OnLifeGuardingExpired);
+            }
+        }
+    }
+
+    private void ResetLifeGuardingState()
+    {
+        _lifeGuardingDeadline?.Dispose();
+        _lifeGuardingDeadline = null;
+        _lifeGuardingOccurred = false;
+    }
+
+    private void RaiseLifeGuardingEvent(LifeGuardingState state)
+    {
+        var args = new LifeGuardingEventArgs(state, _guardTime, _lifeTimeFactor);
+        EnqueueEvent(() =>
+        {
+            try { LifeGuardingEvent?.Invoke(this, args); }
+            catch (Exception ex) { RaiseBackgroundException(ex); }
+        });
     }
 
     private static TimeSpan ScaleLifeTime(TimeSpan guardTime, byte lifeTimeFactor)
