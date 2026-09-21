@@ -535,6 +535,7 @@ public class UdsExpiredDeadlineTests
             CancellationToken cancellationToken = default)
         {
             lock (Sent) Sent.Add((pdu.ToArray(), Stopwatch.GetTimestamp()));
+            _sent = true;
             if (TransmissionTime > TimeSpan.Zero)
                 await Task.Delay(TransmissionTime, CancellableSend ? cancellationToken : CancellationToken.None).ConfigureAwait(false);
 
@@ -598,6 +599,7 @@ public class UdsExpiredDeadlineTests
         /// the caller's clock — decides whether it counts.
         /// </summary>
         private bool _handedOver;
+        private bool _sent;
 
         /// <summary>A queued reassembly fault, thrown by the first non-blocking take (#150).</summary>
         public bool QueuedFault { get; init; }
@@ -612,7 +614,13 @@ public class UdsExpiredDeadlineTests
             }
 
             // An inbox empties: the one queued response is handed over once (#150 -- a drain
-            // that reads until the inbox is empty would otherwise never end here).
+            // that reads until the inbox is empty would otherwise never end here), and only
+            // once the request is out -- a response cannot be queued before it.
+            if (!_sent)
+            {
+                pdu = default;
+                return false;
+            }
             if (!_handedOver && RespondPendingFirst && _pendingSent)
             {
                 _handedOver = true;

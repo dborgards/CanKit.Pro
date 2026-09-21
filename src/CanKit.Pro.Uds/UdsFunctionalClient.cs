@@ -188,7 +188,17 @@ public sealed class UdsFunctionalClient : IDisposable
         lock (_listeners)
         {
             if (_listeners.ContainsKey(sid)) return; // running already; it reads the moved-out deadline
-            _listeners[sid] = ListenAsync(sid);
+            // A window already over -- a collection that outlasted P2 -- needs no listener; one
+            // started for it would complete before it was registered, remove a key not yet
+            // there, and be stored as a zombie that blocks every later one (Bugbot on #150).
+            if (!_openWindows.TryGetDeadline(sid, out var until)
+                || SuppressedResponseWindows.Remaining(until) <= TimeSpan.Zero)
+            {
+                _openWindows.Forget(sid);
+                return;
+            }
+            // Started off this stack: the listener's clean-up runs after the registration.
+            _listeners[sid] = Task.Run(() => ListenAsync(sid));
         }
     }
 

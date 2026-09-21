@@ -1051,7 +1051,10 @@ internal sealed class UdsClientImpl : IUdsClient
                     if (echoed != serviceId)
                     {
                         // Stray NRC for a different SID — treat as background noise and keep
-                        // waiting inside the same budget.
+                        // waiting inside the same budget. Unless it is a 0x78 for a service
+                        // with a suppressed send still open: that send's final answer is still
+                        // coming, and its window moves out (Codex on #150).
+                        RouteStrayPending(received);
                         continue;
                     }
 
@@ -1113,12 +1116,38 @@ internal sealed class UdsClientImpl : IUdsClient
     {
         try
         {
+            // Read before the bulk discard: a queued 0x78 for a service with a suppressed send
+            // still open moves that window out rather than vanishing (Codex on #150). A queued
+            // transport fault is stale here and dropped like the rest.
+            while (true)
+            {
+                IsoTpReceivedPdu queued;
+                try
+                {
+                    if (!_channel.TryReceiveWithArrival(out queued)) break;
+                }
+                catch (IsoTpException)
+                {
+                    continue;
+                }
+                RouteStrayPending(queued);
+            }
             _channel.DiscardPendingPdus();
         }
         catch (ObjectDisposedException)
         {
             // Channel is going away; nothing left to drain.
         }
+    }
+
+    // A 0x78 not for the request in hand, for a service with a suppressed send still open:
+    // that send's window moves out by P2* from the 0x78's arrival.
+    private void RouteStrayPending(in IsoTpReceivedPdu pdu)
+    {
+        var data = pdu.Pdu;
+        if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending) return;
+        if (_suppressedWindows.TryGetDeadline(data[1], out _))
+            _suppressedWindows.Extend(data[1], pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency));
     }
 
     /// <summary>

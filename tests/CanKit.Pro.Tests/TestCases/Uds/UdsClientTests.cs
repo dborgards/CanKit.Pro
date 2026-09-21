@@ -682,6 +682,44 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: a 0x78 for service A, consumed as a stray while service B's request runs
+    // (or dropped by B's pre-send discard), still moves A's window out.
+    [Fact]
+    public async Task A_Pending_Answer_Consumed_As_Another_Requests_Stray_Still_Extends_Its_Window()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromMilliseconds(650));
+                    Thread.Sleep(400); // A's request, out at 600 ms without the routing, is answered at 1000: the stale negative at 750 is first in line
+                    return new byte[] { 0x01 };
+                })
+                .On(0x22, req =>
+                {
+                    Thread.Sleep(200); // B's request is on the wire while A's 0x78 arrives
+                    return new byte[] { 0xF1, 0x90, 0xAA };
+                }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(600),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: 0x78 at 100 ms, negative at 750 ms
+            await client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, another service, consumes A's 0x78 as a stray
+
+            // A's request follows: its window must reach past 750 ms.
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            reset.Should().Equal(0x51, 0x01);
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()
