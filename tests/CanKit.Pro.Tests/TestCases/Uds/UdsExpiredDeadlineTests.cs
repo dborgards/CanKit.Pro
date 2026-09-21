@@ -423,6 +423,48 @@ public class UdsExpiredDeadlineTests
     }
 
     /// <summary>
+    /// Codex on #150 — the same, with the transmission outlasting the window noted before the
+    /// send: cancelled then, the frame is on the bus with that window already over, and the
+    /// window is noted again from the cancellation -- P2 from the transmission is at most that.
+    /// </summary>
+    [Fact]
+    public async Task R_A_Suppressed_Send_Cancelled_After_Its_Provisional_Window_Still_Opens_One()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(300),
+            CancellableSend = true,
+            HonorCancellation = true,
+        };
+        using var client = NewClient(channel);
+
+        // Cancelled at 150 ms: past the 80 ms window noted before the send, inside the 300 ms
+        // the send takes.
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+        Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        var cancelledAt = Stopwatch.GetTimestamp();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        Func<Task> next = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await next.Should().ThrowAsync<Exception>(); // the stub never answers; what matters is when it sent
+
+        long gapTicks;
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCount(2);
+            gapTicks = channel.Sent[1].StartedAt - cancelledAt;
+        }
+        // The second send waited P2 from the cancellation, less a margin for the note preceding
+        // the throw; with only the pre-send window, already over, it would go out at once.
+        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
+            Budget - TimeSpan.FromMilliseconds(5),
+            "the cancelled send's window was noted again from the cancellation");
+    }
+
+    /// <summary>
     /// Bugbot on #150 — the drain that ends a wait-out reads the inbox, and a queued reassembly
     /// fault throws from that read. It is stale, as it is for the discard that follows, and
     /// must not fail the request before it is sent.

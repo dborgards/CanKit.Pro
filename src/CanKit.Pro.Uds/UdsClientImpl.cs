@@ -439,7 +439,19 @@ internal sealed class UdsClientImpl : IUdsClient
             // confirmation, the frame is on the bus and may still be answered (Codex on #150).
             // Moved out to the transmit stamp afterwards.
             _suppressedWindows.Note(request[0], Stopwatch.GetTimestamp(), _options.P2ClientMax);
-            var stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+            IsoTpTransmitStamps stamps;
+            try
+            {
+                stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // A send that leaves by exception -- cancelled, or a transport fault -- may
+                // have put the frame on the bus after the provisional window ran out; its P2
+                // from the transmission is at most P2 from now (Codex on #150).
+                _suppressedWindows.Note(request[0], Stopwatch.GetTimestamp(), _options.P2ClientMax);
+                throw;
+            }
             var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
             _suppressedWindows.Note(request[0], sent, _options.P2ClientMax);
         }
