@@ -156,6 +156,9 @@ public sealed class UdsFunctionalClient : IDisposable
         if (window <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(window), window,
                 "The collection window must be positive for a request that is answered.");
+        if (window > MaxCollectionWindow)
+            throw new ArgumentOutOfRangeException(nameof(window), window,
+                "The collection window exceeds what a timer can measure (about 49 days).");
 
         // A read for more than one DID is answered with all of them in one PDU, which a Single
         // Frame cannot hold with their data; and only the first DID would be correlated here,
@@ -291,6 +294,11 @@ public sealed class UdsFunctionalClient : IDisposable
     {
         lock (_listeners) _openWindows.ExtendIfOpenAt(sid, arrival, until);
     }
+
+    // The longest window a timer measures (CancellationTokenSource.CancelAfter's bound); a
+    // longer one is refused before anything is transmitted, as a non-positive one is
+    // (Codex on #150).
+    private static readonly TimeSpan MaxCollectionWindow = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     // How long a listener kept alive by a send in flight collects before it looks again.
     private static readonly TimeSpan InFlightSlice = TimeSpan.FromMilliseconds(20);

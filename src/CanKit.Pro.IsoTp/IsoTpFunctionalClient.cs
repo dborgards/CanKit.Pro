@@ -57,6 +57,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
     // Shared dummy parsing endpoint for Normal addressing (no AE byte) — used in TryParsePci.
     private static readonly IsoTpEndpoint NormalParseEndpoint = IsoTpEndpoint.Normal(0, 0);
 
+    // CancellationTokenSource.CancelAfter's bound.
+    private static readonly TimeSpan MaxWindow = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
+
     private int _disposed;
 
     internal IsoTpFunctionalClient(
@@ -125,6 +128,11 @@ public sealed class IsoTpFunctionalClient : IDisposable
         ThrowIfDisposed();
         if (pdu.Length == 0)
             throw new ArgumentException("ISO-TP PDU must be non-empty.", nameof(pdu));
+        // A window the collector's timer would refuse is refused here, before the frame goes
+        // out: the send is not undone by the argument error that would follow it (Codex on #150).
+        if (window < TimeSpan.Zero || window > MaxWindow)
+            throw new ArgumentOutOfRangeException(nameof(window), window,
+                "The collection window must be between zero and what a timer can measure (about 49 days).");
 
         // Drain-before-send: subscribe, synchronously discard whatever is already buffered
         // (background chatter, a previous request's late reply, an unrelated broadcast, …),

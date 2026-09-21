@@ -613,6 +613,24 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         sw.Elapsed.Should().BeLessThan(ShortTimeout, "it throws instead of waiting the window");
     }
 
+    // Codex on #150: a window the collector's timer would refuse is refused before the frame
+    // goes out, not by the timer after it.
+    [Fact]
+    public async Task Functional_Send_Refuses_A_Window_Beyond_A_Timers_Reach_Before_Transmitting()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        int seen = 0;
+        busB.FrameObserved += (_, e) => { if (e.CanFrame.ID == 0x7DF) Interlocked.Increment(ref seen); };
+        using var client = IsoTpFactory.OpenFunctional(busA, 0x7DF, 0x7E8, 0x7EF, FastOptions());
+
+        Func<Task> act = () => client.SendAndCollectAsync(new byte[] { 0x3E, 0x00 }, TimeSpan.MaxValue);
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        await Task.Delay(50);
+        seen.Should().Be(0, "nothing was transmitted");
+    }
+
     [Fact]
     public async Task Functional_Listener_Disposal_Ends_A_Collection_In_Progress()
     {

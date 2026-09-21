@@ -689,9 +689,13 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the 0x78 in the gap moved the window past the negative at 500 ms");
     }
 
-    // Codex on #150: a window the collector would reject is checked before anything goes out.
-    [Fact]
-    public async Task An_Invalid_Collection_Window_Transmits_Nothing()
+    // Codex on #150: a window the collector would reject -- non-positive, or longer than a
+    // timer measures -- is checked before anything goes out.
+    [Theory]
+    [InlineData(-2)]
+    [InlineData(0)]
+    [InlineData(long.MaxValue)]
+    public async Task An_Invalid_Collection_Window_Transmits_Nothing(long windowMilliseconds)
     {
         var session = NewSession();
         using var busTester = OpenClassic(session, 0);
@@ -702,8 +706,10 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
 
-        Func<Task> act = () => functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, TimeSpan.FromMilliseconds(-2));
+        var window = windowMilliseconds == long.MaxValue ? TimeSpan.MaxValue : TimeSpan.FromMilliseconds(windowMilliseconds);
+        Func<Task> act = () => functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, window);
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        await Task.Delay(50);
         seen.Should().Be(0, "nothing was transmitted");
     }
 
