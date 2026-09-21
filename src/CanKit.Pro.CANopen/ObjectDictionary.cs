@@ -376,24 +376,30 @@ public sealed class ObjectDictionary
     /// </summary>
     public void WriteUnsigned(ushort index, byte subindex, uint value)
     {
-        OdDataType type;
-        lock (_sync)
+        // The type is resolved under the write gate, so a re-declaration is either fully before
+        // or fully after this write: the value is encoded and range-checked against the
+        // declaration it lands on (Codex on #133).
+        lock (_writeGate)
         {
-            type = Require(index, subindex).DataType;
+            OdDataType type;
+            lock (_sync)
+            {
+                type = Require(index, subindex).DataType;
+            }
+            byte[] raw = type switch
+            {
+                OdDataType.Unsigned8 => value > byte.MaxValue
+                    ? throw ValueOutOfRange(index, subindex, type)
+                    : new[] { (byte)value },
+                OdDataType.Unsigned16 => value > ushort.MaxValue
+                    ? throw ValueOutOfRange(index, subindex, type)
+                    : new[] { (byte)(value & 0xFF), (byte)((value >> 8) & 0xFF) },
+                OdDataType.Unsigned32 => EncodeU32(value),
+                _ => throw new InvalidOperationException(
+                    $"OD entry 0x{index:X4}:{subindex:X2} is {type}, not an unsigned type."),
+            };
+            WriteRaw(index, subindex, raw);
         }
-        byte[] raw = type switch
-        {
-            OdDataType.Unsigned8 => value > byte.MaxValue
-                ? throw ValueOutOfRange(index, subindex, type)
-                : new[] { (byte)value },
-            OdDataType.Unsigned16 => value > ushort.MaxValue
-                ? throw ValueOutOfRange(index, subindex, type)
-                : new[] { (byte)(value & 0xFF), (byte)((value >> 8) & 0xFF) },
-            OdDataType.Unsigned32 => EncodeU32(value),
-            _ => throw new InvalidOperationException(
-                $"OD entry 0x{index:X4}:{subindex:X2} is {type}, not an unsigned type."),
-        };
-        WriteRaw(index, subindex, raw);
     }
 
     private OdEntry Add(ushort index, byte subindex, OdDataType type, OdAccess access, byte[] value,

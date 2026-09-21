@@ -445,6 +445,45 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x2000, 0x00).Should().Be(1u);
     }
 
+    // FR-CO-014 (#133 review) — a typed write resolves the entry's type under the write gate, so
+    // a re-declaration is either fully before or fully after it: the value is encoded and
+    // range-checked against the declaration it lands on. The test holds the gate in another
+    // write's validator, starts the typed write, re-declares the entry inside the held gate,
+    // releases — and the write must land on the new declaration.
+    [Fact]
+    public async Task A_Typed_Write_Resolves_Its_Type_Under_The_Write_Gate()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x2000, 0x00, 0);
+        od.AddU8(0x2001, 0x00, 0);
+
+        var inner = od.WriteValidator!;
+        using var gateHeld = new ManualResetEventSlim(false);
+        using var writeStarted = new ManualResetEventSlim(false);
+        od.WriteValidator = (index, subindex, value) =>
+        {
+            if (index == 0x2001 && !gateHeld.IsSet)
+            {
+                gateHeld.Set();
+                writeStarted.Wait(ShortTimeout);
+                Thread.Sleep(200);          // the typed write has started and waits for the gate
+                od.AddU32(0x2000, 0x00, 0); // re-declared while the gate is held
+            }
+            return inner(index, subindex, value);
+        };
+        var holder = Task.Run(() => od.WriteUnsigned(0x2001, 0x00, 1));
+        gateHeld.Wait(ShortTimeout).Should().BeTrue();
+
+        writeStarted.Set();
+        var write = () => od.WriteUnsigned(0x2000, 0x00, 0x1122_3344);
+        write.Should().NotThrow("the type is resolved once the gate is free — U32, which the value fits");
+        await holder.WithTimeoutAsync(ShortTimeout);
+        od.ReadUnsigned(0x2000, 0x00).Should().Be(0x1122_3344u);
+    }
+
     // FR-CO-014 (d, #133 review) — the guard covers additions too: a sub-index the node does not
     // declare under a managed object cannot be added by the application, or the generic SDO
     // server would serve it — 1800h:04 is reserved and answers 0609 0011h, 1200h has no sub-index
