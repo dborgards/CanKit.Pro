@@ -582,6 +582,42 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         responses.Should().ContainSingle().Which.Response.Should().Equal(0x6F, 0xF1, 0x90, 0x03, 0x00);
     }
 
+    // Codex on #150: a transmit confirmation that outlasts the window lets the pre-send
+    // listener retire; anchoring the window afterwards must start one again, or the next call
+    // has nothing to wait for.
+    [Fact]
+    public async Task A_Listener_Is_Restarted_When_The_Confirmation_Outlasted_The_Window()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(200));
+
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        // The first request's confirmation is held for 300 ms -- longer than the 200 ms window
+        // the pre-send listener was given; the ECU answers negatively 150 ms after the frame
+        // is confirmed, inside the window as anchored at the transmission.
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await Task.Delay(300);
+        bus.DeferredEchoes.ReleaseNext();
+        _ = Task.Run(async () => { await Task.Delay(150); bus.RaiseObserved(negative, isEcho: false); });
+        await first;
+
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext();
+        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
+        var responses = await second;
+
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "the second request waited out the window anchored at the first's late confirmation");
+    }
+
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.
     [Fact]
     public async Task A_Functional_Read_For_More_Than_One_Did_Is_Refused()

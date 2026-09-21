@@ -122,7 +122,9 @@ public sealed class UdsFunctionalClient : IDisposable
             // is moved out to the confirmation afterwards.
             StartListening(sid, Stopwatch.GetTimestamp());
             await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            _openWindows.Note(sid, Stopwatch.GetTimestamp(), _responseWindow);
+            // Through StartListening again: a confirmation that outlasted the window has let
+            // the listener retire, and the moved-out window needs one (Codex on #150).
+            StartListening(sid, Stopwatch.GetTimestamp());
             return Array.Empty<UdsFunctionalResponse>();
         }
 
@@ -149,7 +151,9 @@ public sealed class UdsFunctionalClient : IDisposable
         StartListening(sid, Stopwatch.GetTimestamp());
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
-        _openWindows.Note(sid, Stopwatch.GetTimestamp() - Ticks(window), _responseWindow);
+        // Through StartListening again: a confirmation that outlasted the window has let the
+        // listener retire, and the moved-out window needs one (Codex on #150).
+        StartListening(sid, Stopwatch.GetTimestamp() - Ticks(window));
         var req = request.Span;
         byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
