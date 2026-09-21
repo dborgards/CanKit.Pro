@@ -610,6 +610,40 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: the converse -- a 0x78 queued after the window ran out answers nothing
+    // the window covers, and does not revive it for a full P2*.
+    [Fact]
+    public async Task A_Queued_Pending_Answer_From_After_The_Windows_End_Does_Not_Revive_It()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                        delayBefore: TimeSpan.FromMilliseconds(500), delayAfter: TimeSpan.FromSeconds(3));
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+            await Task.Delay(700); // the window ran out at 200 ms; the 0x78 at 500 ms is queued
+
+            // Revived, the window would reach 2500 ms and this call would wait most of two
+            // seconds; a loaded host only makes the call slower, so the bound is wide.
+            var sw = Stopwatch.StartNew();
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the queued 0x78 from after the window did not revive it");
+        }
+    }
+
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()

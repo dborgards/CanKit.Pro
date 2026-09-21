@@ -537,7 +537,9 @@ internal sealed class UdsClientImpl : IUdsClient
             _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp, extendedUntil);
             return false;
         }
-        if (extendedUntil <= until) return false;
+        // This service's: likewise only if the window was still open when it arrived -- a
+        // 0x78 queued after P2 ran out answers nothing the window covers (Codex on #150).
+        if (pdu.FirstFrameArrivalTimestamp > until || extendedUntil <= until) return false;
         until = extendedUntil;
         return true;
     }
