@@ -62,6 +62,12 @@ internal sealed class UdsClientImpl : IUdsClient
             throw new ArgumentException("P2ClientMax must be positive.", nameof(options));
         if (options.P2StarClientMax <= TimeSpan.Zero)
             throw new ArgumentException("P2StarClientMax must be positive.", nameof(options));
+        if (options.MaxBusyRepeatRequests < 0)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                "MaxBusyRepeatRequests must be >= 0 (0 disables the repeat).");
+        if (options.BusyRepeatRequestDelay < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                "BusyRepeatRequestDelay must not be negative.");
         if (options.MaxResponsePendingCount < 0)
             throw new ArgumentException("MaxResponsePendingCount must be non-negative.", nameof(options));
         if (options.TesterPresentPeriod <= TimeSpan.Zero)

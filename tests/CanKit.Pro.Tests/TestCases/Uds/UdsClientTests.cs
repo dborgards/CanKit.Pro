@@ -508,6 +508,17 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: a negative repeat count is a configuration mistake, not "disabled".
+    [Fact]
+    public void A_Negative_Busy_Repeat_Count_Is_Rejected_At_Construction()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp());
+        Action act = () => UdsClient.Create(channel, new UdsClientOptions { MaxBusyRepeatRequests = -1 });
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
     // Codex on #150: the With(...) clone carries the busy-repeat settings.
     [Fact]
     public void Options_With_Carries_The_Busy_Repeat_Settings()

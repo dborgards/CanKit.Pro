@@ -107,6 +107,36 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         responses.Should().ContainSingle().Which.SourceCanId.Should().Be(Ecu1);
     }
 
+    // Codex on #150: two overlapping calls with the same SID would each collect the other's
+    // answers; they run one after the other, the collection window included.
+    [Fact]
+    public async Task Overlapping_Functional_Requests_Run_One_After_The_Other()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        // The ECU answers the DID it was asked for.
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            var req = e.CanFrame.Data.ToArray();
+            busEcus.Transmit(SingleFrameFrom(Ecu1, new byte[] { 0x62, req[2], req[3], req[3] }));
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, cts.Token);
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        var firstResponses = await first;
+        var secondResponses = await second;
+
+        firstResponses.Should().ContainSingle().Which.Response.Should().Equal(0x62, 0xF1, 0x90, 0x90);
+        secondResponses.Should().ContainSingle().Which.Response.Should().Equal(0x62, 0xF1, 0x91, 0x91);
+    }
+
     [Fact]
     public async Task An_Unsuppressed_TesterPresent_Needs_A_Window()
     {

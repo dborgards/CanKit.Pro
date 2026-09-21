@@ -25,6 +25,10 @@ public sealed class UdsFunctionalClient : IDisposable
 
     private readonly IsoTpFunctionalClient _client;
     private readonly bool _ownsClient;
+    // One request on the wire at a time, its collection window included: overlapping calls
+    // with the same SID would each collect the other's answers (Codex on #150), as the
+    // physical client's request lock prevents there.
+    private readonly SemaphoreSlim _requestLock = new(1, 1);
     private int _disposed;
 
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient)
@@ -58,6 +62,20 @@ public sealed class UdsFunctionalClient : IDisposable
         if (request.Length == 0)
             throw new ArgumentException("Request must contain at least a SID byte.", nameof(request));
 
+        await _requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await SendRawLockedAsync(request, window, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _requestLock.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<UdsFunctionalResponse>> SendRawLockedAsync(ReadOnlyMemory<byte> request,
+        TimeSpan window, CancellationToken cancellationToken)
+    {
         if (request.Length >= 2 && HasSubFunction(request.Span[0])
             && (request.Span[1] & SuppressPositiveResponseBit) != 0)
         {
@@ -137,5 +155,7 @@ public sealed class UdsFunctionalClient : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         if (_ownsClient) _client.Dispose();
+        // Not disposed: a call still inside its window releases it on the way out, and a
+        // SemaphoreSlim without a wait handle holds nothing that needs disposing.
     }
 }
