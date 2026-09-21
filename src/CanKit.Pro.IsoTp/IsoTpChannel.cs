@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
@@ -337,16 +338,21 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     public int DiscardPendingPdus()
     {
         // Everything that arrived up to now is pending. The stamp goes first, so a frame the
-        // pump below posts -- or the reader task posts concurrently -- is dropped by the actor
-        // if it arrived before it, and answered with no Flow Control that would invite the
-        // rest of a transfer the caller has given up on (Bugbot on #143).
-        var stamp = Stopwatch.GetTimestamp();
-        Volatile.Write(ref _discardStamp, stamp);
-        // Whatever the demux has buffered is posted now rather than after the caller's next
-        // request, so its outcome -- dropped -- is settled by the time the clear below runs.
-        // An event without a host stamp was buffered before this instant, so it is stamped
-        // as such rather than as "now", which would read as after the discard.
-        PumpSubscription(unstampedArrival: stamp - 1);
+        // pump posts -- or the reader task posts concurrently -- is dropped by the actor if it
+        // arrived before it, and answered with no Flow Control that would invite the rest of
+        // a transfer the caller has given up on (Bugbot on #143). Whatever the demux has
+        // buffered is posted now rather than after the caller's next request, so its outcome
+        // -- dropped -- is settled by the time the clear below runs. Stamp and drain happen
+        // under the pump lock: an event without a host stamp is stamped when taken, and the
+        // reader task taking one between the two would stamp a frame buffered before the
+        // discard as after it (Codex on #143).
+        long stamp;
+        lock (_pumpGate)
+        {
+            stamp = Stopwatch.GetTimestamp();
+            Volatile.Write(ref _discardStamp, stamp);
+            PumpSubscription(unstampedArrival: stamp - 1);
+        }
 
         // Clear the actor-side state on the actor: the reassembly, the records and the inbox
         // items that belong to receptions from before the stamp. Silent -- not AbortRx -- so
@@ -368,11 +374,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                         rx.CancelDeadline();
                         _rx = null;
                     }
-                    foreach (var reception in Volatile.Read(ref _receptionsInProgress))
-                    {
-                        if (reception.FirstFrameArrivalTimestamp < stamp)
-                            WithdrawReception(reception);
-                    }
+                    foreach (var reception in Volatile.Read(ref _receptionsInProgress)
+                                 .Where(r => r.FirstFrameArrivalTimestamp < stamp))
+                        WithdrawReception(reception);
                     // Drain both PDU and AbortRx-fault items from before the stamp. Leaving a
                     // fault behind would poison the next ReceiveAsync after a higher-layer
                     // timeout/cancel -- the opposite of the reset intent. Items from after it
@@ -399,8 +403,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             cleared.TrySetResult(0);
         }
 
-        try { return cleared.Task.GetAwaiter().GetResult(); }
-        catch { return 0; /* channel tearing down */ }
+        // The job completes the source with a result on every path, so nothing to catch.
+        return cleared.Task.GetAwaiter().GetResult();
     }
 
     /// <inheritdoc />
