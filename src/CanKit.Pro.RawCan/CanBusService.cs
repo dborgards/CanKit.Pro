@@ -322,6 +322,7 @@ namespace CanKit.Pro.RawCan
             // (Codex on #112). ExecuteSynchronously is what observes completion closest; when the
             // runtime declines to inline it the reading is what it would have been anyway.
             var stamp = new StrongBox<long>();
+            var handoffStart = Stopwatch.GetTimestamp();
             var accepted = await _bus.TransmitAsync(frame, cancellationToken)
                 .ContinueWith(
                     static (completed, state) =>
@@ -340,7 +341,7 @@ namespace CanKit.Pro.RawCan
                 .ConfigureAwait(false);
             var handoff = stamp.Value;
             return accepted > 0
-                ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff }
+                ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff, HostHandoffTimestamp = handoffStart }
                 : new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Rejected };
         }
 
@@ -349,7 +350,7 @@ namespace CanKit.Pro.RawCan
             var pending = new PendingSend(PendingKey.ForPendingSend(frame.ID, frame.Data, frame.Flags, frame.FrameKind));
 
             int accepted;
-            long handoff = 0;
+            long handoff = 0, handoffStart = 0;
             try
             {
                 // Register and transmit as one atomic step under _pendingGate: this is what makes
@@ -384,6 +385,9 @@ namespace CanKit.Pro.RawCan
                         throw new ObjectDisposedException(nameof(CanBusService));
 
                     RegisterPending(pending);
+                    // The other end of the driver call, inside the lock: a caller's cutoff for
+                    // what can still be a response to this frame (Codex on #147).
+                    handoffStart = Stopwatch.GetTimestamp();
                     accepted = _bus.Transmit(in frame);
 
                     // Taken here, inside the lock and immediately after the driver call returns:
@@ -411,7 +415,7 @@ namespace CanKit.Pro.RawCan
             {
                 var confirmation = await WaitForPendingAsync(pending, timeout, cancellationToken)
                     .ConfigureAwait(false);
-                return confirmation with { HostTransmitTimestamp = handoff };
+                return confirmation with { HostTransmitTimestamp = handoff, HostHandoffTimestamp = handoffStart };
             }
             finally
             {

@@ -84,5 +84,23 @@ namespace CanKit.Pro.RawCan
         /// let a late response pass for a punctual one (#92).
         /// </remarks>
         public long HostTransmitTimestamp { get; init; }
+
+        /// <summary>
+        /// The host-monotonic <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading
+        /// taken immediately <em>before</em> the driver call, inside the service's send lock, or
+        /// zero when nothing was handed to the driver. Comparable with
+        /// <see cref="HostTransmitTimestamp"/> and with the demux's <c>HostArrivalTimestamp</c>.
+        /// </summary>
+        /// <remarks>
+        /// The other end of the driver call. <see cref="HostTransmitTimestamp"/> is where a
+        /// response deadline starts, and is taken after the call -- which on an in-process bus
+        /// includes the peer's answer, and on an asynchronous adapter a completion callback -- so
+        /// a fast peer's response can be stamped by the demux before it. A caller deciding
+        /// whether a received frame can be a response to this transmission at all needs an
+        /// instant no later than the frame's wire instant: this one. Taken inside the lock, so
+        /// no wait for another sender's driver call sits between it and the handoff (Codex on
+        /// #147).
+        /// </remarks>
+        public long HostHandoffTimestamp { get; init; }
     }
 }

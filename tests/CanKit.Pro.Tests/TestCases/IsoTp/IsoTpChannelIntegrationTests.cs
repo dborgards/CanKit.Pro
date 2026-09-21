@@ -389,29 +389,81 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
-    // First-Frame that already carries the full announced length must complete without
-    // waiting for a Consecutive Frame (otherwise N_Cr fires and the PDU is never emitted).
-    // Classic CAN: inject FF with DL=6 so the 6 data bytes fill the frame.
+    // #56 — a First Frame announcing what a Single Frame of the same CAN_DL could carry is not
+    // a First Frame: ISO 15765-2 §9.6.3.1 has the receiver ignore it. No Flow Control goes out
+    // and nothing is delivered -- the previous behaviour, answering it and completing a PDU
+    // from it, was pinned by the test this one replaces.
     // --------------------------------------------------------------------------------
-    [Fact]
-    public async Task FirstFrame_With_Full_Payload_Completes_Without_ConsecutiveFrame()
+    [Theory]
+    [InlineData(6)] // fills the First Frame's own six data bytes
+    [InlineData(7)] // the Single Frame capacity at CAN_DL 8
+    public async Task A_First_Frame_That_Fits_A_Single_Frame_Is_Ignored(int announced)
     {
-        var session = NewSession();
-        using var busA = OpenClassic(session, 0);
-        using var busB = OpenClassic(session, 1);
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
 
-        var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
-        using var receiver = IsoTpFactory.Open(busA, epRecv,
-            FastOptions(nCr: TimeSpan.FromMilliseconds(300)));
+        byte[] ff = { 0x10, (byte)announced, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
 
-        var receiveTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        // Pumped on this thread, then settled on the actor.
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
 
-        // FF PCI 0x10 0x06 + 6 data bytes — announced length equals FF data capacity.
-        byte[] ff = { 0x10, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
-        busB.Transmit(CanFrame.Classic(0x7E8, ff));
+        lock (service.Sent)
+            service.Sent.Should().BeEmpty("an ignored First Frame gets no Flow Control");
+        channel.TryReceiveWithArrival(out _).Should().BeFalse("an ignored First Frame delivers nothing");
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
 
-        var got = await receiveTask;
-        got.Should().Equal(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+    // Bugbot on #147: ignored means no effect at all -- a reassembly in flight survives a
+    // stray First Frame that fits a Single Frame, and a short one (#27).
+    [Theory]
+    [InlineData(new byte[] { 0x10, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 })] // fits a Single Frame
+    [InlineData(new byte[] { 0x10, 0x14, 0x11, 0x22, 0x33 })]                   // short
+    public async Task An_Ignored_First_Frame_Leaves_A_Reassembly_In_Flight_Alone(byte[] stray)
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        var faults = new List<Exception>();
+        channel.BackgroundExceptionOccurred += (_, ex) => { lock (faults) faults.Add(ex); };
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x40, 12).Select(i => (byte)i).ToArray();
+        var peer = IsoTpEndpoint.Normal(0x7E8, 0x7E0);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, IsoTpFrameCodec.BuildFirstFrame(peer, pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false), FrameFlags.None));
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, stray, FrameFlags.None));
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, IsoTpFrameCodec.BuildConsecutiveFrame(peer, sequenceNumber: 1, pdu.AsSpan(ffData), isCanFd: false, padding: true, paddingByte: 0xCC), FrameFlags.None));
+        channel.GetReceptionsInProgress();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.TryReceiveWithArrival(out var received).Should().BeTrue("the transfer completed past the stray frame");
+        received.Pdu.Should().Equal(pdu);
+        lock (faults) faults.Should().BeEmpty();
+    }
+
+    // The boundary from the other side: one byte more than a Single Frame carries is a First
+    // Frame, answered with Flow Control and reassembled.
+    [Fact]
+    public async Task A_First_Frame_One_Byte_Over_Single_Frame_Capacity_Is_Accepted()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        byte[] ff = { 0x10, 0x08, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+        channel.GetReceptionsInProgress().Should().HaveCount(1);
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        lock (service.Sent)
+            service.Sent.Should().ContainSingle().Which[0].Should().Be(0x30, "FC.CTS");
+        channel.GetReceptionsInProgress().Should().HaveCount(1);
     }
 
     // --------------------------------------------------------------------------------
@@ -1687,6 +1739,122 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             + "it exactly like the tester's own transmissions");
     }
 
+    // #56 -- the one endpoint shape where the host echo flag *is* the only thing that tells the
+    // channel's frame from the peer's: transmit and receive on the same identifier. There the
+    // echo is withheld, or the channel would receive every PDU it sends.
+    [Fact]
+    public async Task A_Channel_On_One_Identifier_Does_Not_Receive_Its_Own_Frames()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var channel = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Normal(txCanId: 0x7DF, rxCanId: 0x7DF));
+
+        await channel.SendAsync(new byte[] { 0x3E, 0x80 });
+
+        // The echo, if it were delivered, would be in the inbox by the time the send confirmed
+        // and the actor settled; a real peer frame on the same identifier still arrives.
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        channel.DiscardPendingPdus().Should().Be(0, "the channel's own echo is not a received PDU");
+        // A peer's frame on the same identifier: observed, not echoed.
+        bus.RaiseObserved(CanFrame.Classic(0x7DF, new byte[] { 0x02, 0x7E, 0x80 }), isEcho: false);
+        (await channel.ReceiveAsync(cts.Token)).Should().Equal(0x7E, 0x80);
+    }
+
+    // Codex on #147: on one identifier, Extended addressing still tells the directions apart
+    // by the address-extension byte, so a reciprocal pair sharing an echo-capable service must
+    // keep exchanging -- the echo is withheld only when the extension byte coincides too.
+    [Fact]
+    public async Task Reciprocal_Extended_Channels_On_One_Identifier_Still_Exchange()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var tester = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Extended(txCanId: 0x7DF, rxCanId: 0x7DF, sourceAddress: 0xF1, targetAddress: 0x10));
+        using var ecu = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Extended(txCanId: 0x7DF, rxCanId: 0x7DF, sourceAddress: 0x10, targetAddress: 0xF1));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var ecuReceive = ecu.ReceiveAsync(cts.Token);
+        await tester.SendAsync(new byte[] { 0x22, 0xF1, 0x90 });
+        (await ecuReceive).Should().Equal(0x22, 0xF1, 0x90);
+
+        var testerReceive = tester.ReceiveAsync(cts.Token);
+        await ecu.SendAsync(new byte[] { 0x62, 0xF1, 0x90, 0xAA });
+        (await testerReceive).Should().Equal(0x62, 0xF1, 0x90, 0xAA);
+    }
+
+    // #56 -- BS and STmin are the first FC.CTS's for the whole transfer; a later FC.CTS's
+    // values are ignored (ISO 15765-2). The peer grants two frames per block, then says one:
+    // the sender must still send two before waiting, or it waits for a Flow Control the peer
+    // never sends and N_Bs faults the send.
+    [Fact]
+    public async Task Flow_Parameters_Come_From_The_First_Flow_Control_Only()
+    {
+        var session = NewSession();
+        using var busSender = OpenClassic(session, 0);
+        using var busPeer = OpenClassic(session, 1);
+
+        var epSender = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var sender = IsoTpFactory.Open(busSender, epSender, FastOptions(nBs: TimeSpan.FromMilliseconds(300)));
+
+        int cfs = 0;
+        var epPeer = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+        busPeer.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x7E0) return;
+            var data = e.CanFrame.Data.Span;
+            if (data.Length == 0) return;
+            switch (data[0] >> 4)
+            {
+                case 0x1: // First Frame: grant two per block, STmin 0
+                    busPeer.Transmit(CanFrame.Classic(0x7E8, IsoTpFrameCodec.BuildFlowControl(epPeer, FlowStatus.ClearToSend, blockSize: 2, stMinRaw: 0, isCanFd: false, padding: true, paddingByte: 0xCC)));
+                    break;
+                case 0x2: // Consecutive Frame
+                    int n = Interlocked.Increment(ref cfs);
+                    // After the first block, a second FC.CTS that says one per block -- to be ignored.
+                    if (n == 2)
+                        busPeer.Transmit(CanFrame.Classic(0x7E8, IsoTpFrameCodec.BuildFlowControl(epPeer, FlowStatus.ClearToSend, blockSize: 1, stMinRaw: 0, isCanFd: false, padding: true, paddingByte: 0xCC)));
+                    break;
+            }
+        };
+
+        // 34 bytes: FF (6) + 4 CFs. Blocks of two: CF1, CF2, FC, CF3, CF4 -- done.
+        byte[] pdu = Enumerable.Range(0, 34).Select(i => (byte)i).ToArray();
+        await sender.SendAsync(pdu).WaitAsync(ShortTimeout);
+        cfs.Should().Be(4);
+    }
+
+    // #56 -- DiscardPendingPdus called from a BackgroundExceptionOccurred handler, which runs on
+    // the actor: the post-and-wait would wait for the loop it is on. It runs inline there.
+    [Fact]
+    public async Task Discard_From_A_Background_Exception_Handler_Does_Not_Deadlock()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        var discardedFromHandler = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // A discard that threw would leave the source unset and the wait below would time out:
+        // still a failure, only less specific.
+        channel.BackgroundExceptionOccurred += (_, _) =>
+            discardedFromHandler.TrySetResult(channel.DiscardPendingPdus());
+
+        // A reassembly, then a Consecutive Frame out of sequence: AbortRx raises the event on
+        // the actor.
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x40, 20).Select(i => (byte)i).ToArray();
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false), FrameFlags.None));
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, new byte[] { 0x25, 1, 2, 3, 4, 5, 6, 7 }, FrameFlags.None));
+        channel.GetReceptionsInProgress(); // pumps both frames to the actor
+
+        var discarded = await discardedFromHandler.Task.WaitAsync(ShortTimeout);
+        discarded.Should().Be(1, "the abort's error item was in the inbox when the handler discarded");
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        channel.TryReceiveWithArrival(out _).Should().BeFalse();
+    }
+
     // #112 -- the non-blocking take, on the real channel. The UDS client reaches for it exactly
     // when its budget is spent, and every test of that behaviour runs on a channel stub, so the
     // real implementation's hand-over path had no coverage at all: the branch that returns a
@@ -1727,6 +1895,43 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             "the one queued PDU has been taken");
     }
 
+    // Codex on #147 -- the handoff instant is taken inside the service's send lock, immediately
+    // before the driver call. A reading the channel takes before calling the service precedes
+    // another sender's lock wait: with channel A parked inside its driver call, channel B's
+    // frame waits on the lock, and B's handoff instant must be after A's release, not before.
+    [Fact]
+    public async Task Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var a = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
+        using var b = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(txCanId: 0x7E1, rxCanId: 0x7E9));
+
+        using var aTransmitting = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        bus.OnTransmitting = frame =>
+        {
+            if (frame.ID != 0x7E0) return;
+            aTransmitting.Set();
+            release.Wait(ShortTimeout);
+        };
+
+        var sendA = a.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
+        aTransmitting.Wait(ShortTimeout).Should().BeTrue("A's frame must reach the driver call");
+
+        // B enters the service and waits on the lock A holds across its driver call.
+        var sendB = b.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
+        await Task.Delay(50); // B has had time to reach the lock; a shorter wait only weakens the check
+        var releasedAt = Stopwatch.GetTimestamp();
+        release.Set();
+
+        await sendA.WaitAsync(ShortTimeout);
+        var stampsB = await sendB.WaitAsync(ShortTimeout);
+
+        stampsB.LastFrameHandoffTimestamp.Should().BeGreaterThan(releasedAt,
+            "B's handoff instant is taken inside the lock, which A held until the instant above");
+    }
+
     // #112 -- the transmit stamp must come from the bus's own hand-off to the driver, not from
     // anywhere upstream of it. The UDS-level tests for this run on a channel stub, which by
     // construction cannot say where in the real path the reading is taken (Codex on #112); this
@@ -1746,8 +1951,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         using var transmitting = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
+        long enteredAt = 0;
         bus.OnTransmitting = _ =>
         {
+            enteredAt = Stopwatch.GetTimestamp();
             transmitting.Set();
             release.Wait(ShortTimeout);
         };
@@ -1758,11 +1965,16 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var releasedAt = Stopwatch.GetTimestamp();
         release.Set();
 
-        var transmitStamp = await send.WaitAsync(ShortTimeout);
+        var stamps = await send.WaitAsync(ShortTimeout);
 
-        transmitStamp.Should().BeGreaterThan(releasedAt,
+        stamps.LastFrameTransmitTimestamp.Should().BeGreaterThan(releasedAt,
             "the stamp must be taken after the driver accepted the frame, and this test held the "
             + "driver call open until the instant above");
+        // Codex on #147: the last frame's handoff is stamped before the driver call, so a
+        // caller's stale-response cutoff cannot be later than the frame's wire instant.
+        stamps.LastFrameHandoffTimestamp.Should().BeGreaterThan(0)
+            .And.BeLessThanOrEqualTo(enteredAt,
+                "the handoff instant precedes the driver call this test observed entering");
     }
 
     // #113 -- who disposes the actor when construction fails. The seam's contract is that a

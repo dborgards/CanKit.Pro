@@ -277,6 +277,61 @@ public class UdsExpiredDeadlineTests
             "a response that began before the request was sent answers an earlier request");
     }
 
+    /// <summary>
+    /// #146 — the transmit stamp is "no later than the driver accepted the frame", taken after a
+    /// synchronous delivery or a completion callback, and a fast peer's answer can be stamped by
+    /// the demux <em>before</em> it. Such a response is the request's, and a rule keyed on the
+    /// transmit stamp rejected it as an earlier request's. Here the last frame's driver call
+    /// took 2 ms and the response is stamped 1 ms before the acceptance stamp.
+    /// </summary>
+    [Fact]
+    public async Task K_A_Response_Stamped_Before_The_Transmit_Confirmation_Is_Still_The_Response()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(20),
+            LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(2),
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(-1),
+        };
+        using var client = NewClient(channel);
+
+        var data = await client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        data.Should().Equal(0xAA);
+    }
+
+    /// <summary>
+    /// Codex on #147 — the cutoff for "an earlier request's response" is the channel's handoff
+    /// of the request's <em>last</em> frame: a peer answers only a complete request, and a late
+    /// response to the previous request that arrives while this one is still being sent is not
+    /// this one's, whether it arrives after the client entered the channel or after the first
+    /// frame went out. Here the request took 20 ms to send, the last frame was handed over 5 ms
+    /// before the acceptance stamp, and the stale response arrived 10 ms before it — during the
+    /// transmission.
+    /// </summary>
+    [Fact]
+    public async Task L_A_Response_From_Before_The_Last_Frame_Handoff_Is_A_Stray()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(20),
+            LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(5),
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(-10),
+            HonorCancellation = true,
+            FirstFrameOffsetFromTransmit = TimeSpan.FromMilliseconds(-10),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "a response that arrived before the request's last frame was handed over is an earlier request's");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -343,7 +398,14 @@ public class UdsExpiredDeadlineTests
 
         public IsoTpChannelOptions Options { get; } = new();
 
-        public async Task<long> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
+        /// <summary>
+        /// How long before the transmit stamp the last frame was handed to the driver: the
+        /// driver call's own duration, which on an in-process bus includes the peer's answer.
+        /// Defaults to zero.
+        /// </summary>
+        public TimeSpan LastFrameHandoffBeforeTransmit { get; init; }
+
+        public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
             if (TransmissionTime > TimeSpan.Zero)
@@ -357,7 +419,8 @@ public class UdsExpiredDeadlineTests
             if (SendObservationDelay > TimeSpan.Zero)
                 await Task.Delay(SendObservationDelay, CancellationToken.None).ConfigureAwait(false);
 
-            return ReportNoTransmitStamp ? 0 : _arrivalStamp;
+            if (ReportNoTransmitStamp) return default;
+            return new IsoTpTransmitStamps(_arrivalStamp - Ticks(LastFrameHandoffBeforeTransmit), _arrivalStamp);
         }
 
         public async Task SendAsync(ReadOnlyMemory<byte> pdu,
