@@ -446,10 +446,41 @@ internal sealed class UdsClientImpl : IUdsClient
     }
 
     // Under the request lock. A request for a service with a suppressed send still open waits
-    // out that send's P2 -- the discard that follows drains what arrived -- so a late negative
-    // response to the suppressed send cannot be taken for this request's.
-    private Task WaitOutSuppressedResponseWindowAsync(UdsServiceId serviceId, CancellationToken linkedToken)
-        => _suppressedWindows.WaitOutAsync((byte)serviceId, linkedToken);
+    // out that send's P2, reading what arrives: it is the suppressed send's and is dropped --
+    // except NRC 0x78, which says the peer's final answer is still coming and moves the window
+    // out by P2* (Codex on #150). So a late negative response to the suppressed send cannot
+    // be taken for this request's.
+    private async Task WaitOutSuppressedResponseWindowAsync(UdsServiceId serviceId, CancellationToken linkedToken)
+    {
+        byte sid = (byte)serviceId;
+        if (!_suppressedWindows.TryGetDeadline(sid, out var until)) return;
+        try
+        {
+            while (true)
+            {
+                var remaining = SuppressedResponseWindows.Remaining(until);
+                if (remaining <= TimeSpan.Zero) break;
+                using var slice = new CancellationTokenSource(remaining);
+                using var combined = CancellationTokenSource.CreateLinkedTokenSource(linkedToken, slice.Token);
+                IsoTpReceivedPdu pdu;
+                try
+                {
+                    pdu = await _channel.ReceiveWithArrivalAsync(combined.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (slice.IsCancellationRequested && !linkedToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                var data = pdu.Pdu;
+                if (data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending)
+                    until = pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency);
+            }
+        }
+        finally
+        {
+            _suppressedWindows.Forget(sid);
+        }
+    }
 
     // The services whose second byte is a sub-function parameter, and so carry the
     // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column).

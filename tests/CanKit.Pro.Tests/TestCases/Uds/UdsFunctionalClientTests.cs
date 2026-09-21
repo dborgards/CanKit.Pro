@@ -242,7 +242,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, suppressedResponseWindow: TimeSpan.FromMilliseconds(300));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.TesterPresentAsync(cancellationToken: cts.Token);
@@ -250,6 +250,39 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the late negative answer belongs to the suppressed send and is not collected");
+    }
+
+    // Codex on #150: a request's collection window may end before the ECU's P2 does; its late
+    // negative answer must not land in the next same-service call's window either.
+    [Fact]
+    public async Task A_Late_Negative_Answer_To_A_Previous_Request_Does_Not_Land_In_The_Next_Window()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            if (e.CanFrame.Data.Span[3] == 0x90)
+                _ = Task.Run(async () => { await Task.Delay(150); busEcus.Transmit(negative); });
+            else
+                busEcus.Transmit(positive);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        // A short collection window: the negative answer comes after it.
+        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token);
+        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
+            "F190's late negative answer is the previous request's");
     }
 
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.

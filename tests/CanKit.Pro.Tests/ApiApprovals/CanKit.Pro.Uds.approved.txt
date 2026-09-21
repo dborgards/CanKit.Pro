@@ -69,7 +69,7 @@ namespace CanKit.Pro.Uds
         public void Dispose() { }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.Uds.UdsFunctionalResponse>> SendRawAsync(System.ReadOnlyMemory<byte> request, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.Uds.UdsFunctionalResponse>> TesterPresentAsync(bool suppressPositiveResponse = true, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
-        public static CanKit.Pro.Uds.UdsFunctionalClient Create(CanKit.Pro.IsoTp.IsoTpFunctionalClient client, bool ownsClient = false, System.TimeSpan? suppressedResponseWindow = default) { }
+        public static CanKit.Pro.Uds.UdsFunctionalClient Create(CanKit.Pro.IsoTp.IsoTpFunctionalClient client, bool ownsClient = false, System.TimeSpan? responseWindow = default, System.TimeSpan? responsePendingWindow = default) { }
     }
     public sealed class UdsFunctionalResponse
     {

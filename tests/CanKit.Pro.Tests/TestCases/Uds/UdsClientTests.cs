@@ -549,6 +549,37 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: NRC 0x78 to a suppressed send says the final answer is still coming, up
+    // to P2* later; the window moves out with it.
+    [Fact]
+    public async Task A_Pending_Answer_To_A_Suppressed_Send_Extends_Its_Window_By_P2Star()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                        delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(400));
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+
+            // 0x78 at 50 ms, the negative at 450 ms: past P2, inside P2* from the 0x78.
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the negative answer belongs to the suppressed send");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()

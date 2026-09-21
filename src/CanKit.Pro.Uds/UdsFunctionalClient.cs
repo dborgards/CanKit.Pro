@@ -23,11 +23,13 @@ public sealed class UdsFunctionalClient : IDisposable
 {
     private const byte SuppressPositiveResponseBit = 0x80;
     private const byte NegativeResponseSid = 0x7F;
+    private const byte NrcResponsePending = 0x78;
 
     private readonly IsoTpFunctionalClient _client;
     private readonly bool _ownsClient;
-    private readonly TimeSpan _suppressedResponseWindow;
-    private readonly SuppressedResponseWindows _suppressedWindows = new();
+    private readonly TimeSpan _responseWindow;
+    private readonly TimeSpan _responsePendingWindow;
+    private readonly SuppressedResponseWindows _openWindows = new();
     // One request on the wire at a time, its collection window included: overlapping calls
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
@@ -38,25 +40,32 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly CancellationTokenSource _lifetimeCts = new();
     private int _disposed;
 
-    private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan suppressedResponseWindow)
+    private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan responseWindow,
+        TimeSpan responsePendingWindow)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
-        if (suppressedResponseWindow <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(suppressedResponseWindow), "The window must be positive.");
+        if (responseWindow <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(responseWindow), "The window must be positive.");
+        if (responsePendingWindow <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(responsePendingWindow), "The window must be positive.");
         _ownsClient = ownsClient;
-        _suppressedResponseWindow = suppressedResponseWindow;
+        _responseWindow = responseWindow;
+        _responsePendingWindow = responsePendingWindow;
     }
 
     /// <summary>
     /// Wraps an open <see cref="IsoTpFunctionalClient"/>. With <paramref name="ownsClient"/>,
-    /// disposing this client disposes it. <paramref name="suppressedResponseWindow"/> is how
-    /// long after a suppressed send an ECU may still answer it negatively -- P2 -- and so how
-    /// long the next call for the same service waits before it collects; the default is
-    /// <see cref="UdsClientOptions.DefaultP2"/>.
+    /// disposing this client disposes it. <paramref name="responseWindow"/> is how long after a
+    /// request an ECU may still answer it -- P2 -- and so how long the next call for the same
+    /// service waits before it collects, whether the request was suppressed or its collection
+    /// window simply ended sooner; <paramref name="responsePendingWindow"/> is what an NRC 0x78
+    /// seen in that time extends it by -- P2*. The defaults are
+    /// <see cref="UdsClientOptions.DefaultP2"/> and <see cref="UdsClientOptions.DefaultP2Star"/>.
     /// </summary>
     public static UdsFunctionalClient Create(IsoTpFunctionalClient client, bool ownsClient = false,
-        TimeSpan? suppressedResponseWindow = null)
-        => new(client, ownsClient, suppressedResponseWindow ?? UdsClientOptions.DefaultP2);
+        TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
+        => new(client, ownsClient, responseWindow ?? UdsClientOptions.DefaultP2,
+            responsePendingWindow ?? UdsClientOptions.DefaultP2Star);
 
     /// <summary>The underlying ISO-TP functional client.</summary>
     public IsoTpFunctionalClient Channel => _client;
@@ -85,9 +94,10 @@ public sealed class UdsFunctionalClient : IDisposable
         {
             // Disposed while queued behind another call: the lock is released, not used.
             ThrowIfDisposed();
-            // A suppressed send for this service may still be answered negatively; that answer
-            // must not land in this call's window (Codex on #150).
-            await _suppressedWindows.WaitOutAsync(request.Span[0], linkedToken).ConfigureAwait(false);
+            // An earlier request for this service may still be answered -- a suppressed send,
+            // or one whose collection window ended before the ECU's P2 did; that answer must
+            // not land in this call's window (Codex on #150).
+            await WaitOutOpenWindowAsync(request.Span[0], linkedToken).ConfigureAwait(false);
             return await SendRawLockedAsync(request, window, linkedToken).ConfigureAwait(false);
         }
         finally
@@ -103,7 +113,7 @@ public sealed class UdsFunctionalClient : IDisposable
             && (request.Span[1] & SuppressPositiveResponseBit) != 0)
         {
             await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            _suppressedWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _suppressedResponseWindow);
+            _openWindows.Note(request.Span[0], Stopwatch.GetTimestamp(), _responseWindow);
             return Array.Empty<UdsFunctionalResponse>();
         }
 
@@ -115,8 +125,12 @@ public sealed class UdsFunctionalClient : IDisposable
                 "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
                 nameof(request));
 
+        // Noted before the collection: what the ECUs may still send after the window ends is
+        // the remainder of their P2 from the request, not from now.
+        var sentAt = Stopwatch.GetTimestamp();
         var raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
             .ConfigureAwait(false);
+        _openWindows.Note(request.Span[0], sentAt, _responseWindow);
         var req = request.Span;
         byte sid = req[0];
         byte positiveSid = (byte)(sid + 0x40);
@@ -131,9 +145,38 @@ public sealed class UdsFunctionalClient : IDisposable
             var data = r.Data;
             bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed);
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
+            if (negative && data[2] == NrcResponsePending)
+                _openWindows.Extend(sid, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
         return responses;
+    }
+
+    // Under the request lock. Waits out the window still open for this service, listening the
+    // while: an NRC 0x78 in it says an ECU's final answer is still coming and moves the window
+    // out by P2* (Codex on #150). Everything heard belongs to the earlier request and is dropped.
+    private async Task WaitOutOpenWindowAsync(byte sid, CancellationToken cancellationToken)
+    {
+        if (!_openWindows.TryGetDeadline(sid, out var until)) return;
+        try
+        {
+            while (true)
+            {
+                var remaining = SuppressedResponseWindows.Remaining(until);
+                if (remaining <= TimeSpan.Zero) break;
+                var heard = await _client.CollectResponsesAsync(remaining, cancellationToken).ConfigureAwait(false);
+                foreach (var r in heard)
+                {
+                    var data = r.Data;
+                    if (data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid && data[2] == NrcResponsePending)
+                        until = Math.Max(until, Stopwatch.GetTimestamp() + (long)(_responsePendingWindow.TotalSeconds * Stopwatch.Frequency));
+                }
+            }
+        }
+        finally
+        {
+            _openWindows.Forget(sid);
+        }
     }
 
     /// <summary>

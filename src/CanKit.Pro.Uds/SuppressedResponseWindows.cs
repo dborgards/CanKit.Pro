@@ -1,28 +1,31 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace CanKit.Pro.Uds;
 
 /// <summary>
-/// The response windows still open after suppressed sends, per service. A suppressed send
-/// draws no positive response but may still draw a negative one, up to P2 after it went out;
-/// the next request for the same service waits that window out rather than taking the
-/// negative response as its own (Codex on #150). One entry per service, since a suppressed
-/// send for another service in between must not shorten the first's window.
+/// The response windows still open from earlier sends, per service: how long a peer may still
+/// answer a request whose answer nobody is waiting for -- a suppressed send, or a functional
+/// request whose collection window ended before the peer's P2 did. The next request for the
+/// same service waits such a window out rather than taking the late answer as its own (Codex
+/// on #150). One entry per service, since a send for another service in between must not
+/// shorten the first's window; a later window for the same service replaces an earlier one
+/// only if it ends later.
 /// </summary>
 internal sealed class SuppressedResponseWindows
 {
     private readonly Dictionary<byte, long> _until = new();
     private readonly object _gate = new();
 
-    /// <summary>Notes that a suppressed send for <paramref name="sid"/> went out at
-    /// <paramref name="sentTimestamp"/> and may be answered negatively for <paramref name="window"/>.</summary>
+    /// <summary>Notes that a request for <paramref name="sid"/> went out at
+    /// <paramref name="sentTimestamp"/> and may be answered for <paramref name="window"/>.</summary>
     public void Note(byte sid, long sentTimestamp, TimeSpan window)
+        => Extend(sid, sentTimestamp + (long)(window.TotalSeconds * Stopwatch.Frequency));
+
+    /// <summary>Moves the window for <paramref name="sid"/> out to <paramref name="until"/>, if later.</summary>
+    public void Extend(byte sid, long until)
     {
-        var until = sentTimestamp + (long)(window.TotalSeconds * Stopwatch.Frequency);
         lock (_gate)
         {
             if (!_until.TryGetValue(sid, out var existing) || existing < until)
@@ -30,21 +33,22 @@ internal sealed class SuppressedResponseWindows
         }
     }
 
-    /// <summary>Waits until every window for <paramref name="sid"/> has closed, then forgets it.</summary>
-    public async Task WaitOutAsync(byte sid, CancellationToken cancellationToken)
+    /// <summary>The instant the window for <paramref name="sid"/> ends, if one is open.</summary>
+    public bool TryGetDeadline(byte sid, out long until)
     {
-        long until;
-        lock (_gate)
-        {
-            if (!_until.TryGetValue(sid, out until)) return;
-        }
+        lock (_gate) return _until.TryGetValue(sid, out until);
+    }
+
+    /// <summary>Closes the window for <paramref name="sid"/>.</summary>
+    public void Forget(byte sid)
+    {
+        lock (_gate) _until.Remove(sid);
+    }
+
+    /// <summary>How long from now until <paramref name="until"/>, or zero if it has passed.</summary>
+    public static TimeSpan Remaining(long until)
+    {
         var ticks = until - Stopwatch.GetTimestamp();
-        if (ticks > 0)
-            await Task.Delay(TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency), cancellationToken)
-                .ConfigureAwait(false);
-        lock (_gate)
-        {
-            if (_until.TryGetValue(sid, out var current) && current == until) _until.Remove(sid);
-        }
+        return ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 }
