@@ -760,6 +760,50 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: the same, heard while another service's wait-out runs rather than by a
+    // request's stray branch.
+    [Fact]
+    public async Task A_Pending_Answer_From_After_A_Windows_End_Heard_In_A_Wait_Out_Does_Not_Revive_It()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(1500), delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x01 };
+                })
+                .On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x00 };
+                }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B, suppressed: window to 200 ms; its 0x78 comes at 1500 ms
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, suppressed: its own 0x78 at 100 ms moves its window to 2100 ms
+            await client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token); // A again: waits its window out until 2100 ms, hearing B's late 0x78 at 1500
+
+            // B's next request: revived at 1500 ms, B's window would reach 3500 ms and this
+            // call, at ~2100 ms, would wait most of 1.5 s.
+            var sw = Stopwatch.StartNew();
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            sw.Stop();
+            reset.Should().Equal(0x51, 0x01);
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the late 0x78 heard in the wait-out did not revive the window");
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()

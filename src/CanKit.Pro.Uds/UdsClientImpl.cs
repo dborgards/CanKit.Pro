@@ -533,8 +533,8 @@ internal sealed class UdsClientImpl : IUdsClient
         var extendedUntil = pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency);
         if (data[1] != sid)
         {
-            if (_suppressedWindows.TryGetDeadline(data[1], out _))
-                _suppressedWindows.Extend(data[1], extendedUntil);
+            // Another service's: only a window still open when the 0x78 arrived (Codex on #150).
+            _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp, extendedUntil);
             return false;
         }
         if (extendedUntil <= until) return false;
