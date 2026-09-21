@@ -1140,7 +1140,9 @@ internal sealed class UdsClientImpl : IUdsClient
         {
             // Best-effort: if a PDU is already sitting in the inbox when we abort (e.g. cancel
             // raced with arrival), drop it under the lock so it cannot poison the next caller.
-            DiscardStalePdus(Stopwatch.GetTimestamp());
+            // As the pre-send discard: settled and read first, so a 0x78 for a suppressed send
+            // among it is routed to that send's window rather than dropped (Codex on #150).
+            await DiscardStalePdusAsync().ConfigureAwait(false);
             throw;
         }
     }

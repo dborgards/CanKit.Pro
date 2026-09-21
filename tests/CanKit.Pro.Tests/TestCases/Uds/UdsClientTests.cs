@@ -737,6 +737,46 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: the discard on an aborted request -- here, one the caller cancelled --
+    // settles the channel and routes what it holds before dropping it, as the pre-send
+    // discard does; a 0x78 for a suppressed send still on its way is not dropped unrouted.
+    [Fact]
+    public async Task A_Pending_Answer_Still_On_Its_Way_Is_Routed_By_An_Aborted_Requests_Discard()
+    {
+        using var service = new StarvedReaderBusService();
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp(useCanFd: false), leaveOpen: true);
+        var pendingBudget = TimeSpan.FromMilliseconds(600);
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            P2ClientMax = TimeSpan.FromMilliseconds(100),
+            P2StarClientMax = pendingBudget,
+        });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+
+        // Another service's request, cancelled by its caller at 50 ms; the 0x78 arrives while
+        // it waits -- after its pre-send discard, which would route it, and before its abort,
+        // whose discard is the one under test. (A host that delays either instant past the
+        // other lets the pre-send discard route it instead: a pass for the wrong reason, never
+        // a failure.)
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var other = client.ReadDataByIdentifierAsync(0xF190, early.Token);
+        await Task.Delay(20);
+        long arrival = Stopwatch.GetTimestamp();
+        byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
+        Func<Task> cancelled = () => other;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        // The next TesterPresent waits P2* from the 0x78 if the abort routed it, else nothing.
+        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await next.Should().ThrowAsync<UdsTimeoutException>();
+        var sinceArrival = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - arrival) / (double)Stopwatch.Frequency);
+        sinceArrival.Should().BeGreaterThanOrEqualTo(pendingBudget,
+            "the aborted request's discard routed the 0x78 to the suppressed send's window");
+    }
+
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()
