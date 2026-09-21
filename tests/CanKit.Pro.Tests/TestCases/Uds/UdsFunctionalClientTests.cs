@@ -555,6 +555,33 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         seen.Should().Be(0, "nothing was transmitted");
     }
 
+    // Codex on #150: InputOutputControlByIdentifier echoes its DID; another tester's control of
+    // a different DID is not this call's answer.
+    [Fact]
+    public async Task An_IO_Control_Answer_For_Another_Did_Is_Not_Attributed()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        var other = SingleFrameFrom(Ecu1, new byte[] { 0x6F, 0xF1, 0x91, 0x03, 0x00 });
+        var ours = SingleFrameFrom(Ecu1, new byte[] { 0x6F, 0xF1, 0x90, 0x03, 0x00 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            busEcus.Transmit(other);
+            busEcus.Transmit(ours);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x2F, 0xF1, 0x90, 0x03, 0x00 }, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.Response.Should().Equal(0x6F, 0xF1, 0x90, 0x03, 0x00);
+    }
+
     // Codex on #150: only one DID is correlated, and a Single Frame holds no more anyway.
     [Fact]
     public async Task A_Functional_Read_For_More_Than_One_Did_Is_Refused()

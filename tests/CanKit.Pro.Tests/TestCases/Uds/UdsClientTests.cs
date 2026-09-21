@@ -647,7 +647,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_For_Another_Service_Heard_During_A_Wait_Extends_That_Services_Window()
     {
-        var (client, ecu, dispose) = BuildPair(
+        var (client, _, dispose) = BuildPair(
             e => e
                 .On(0x3E, req =>
                 {

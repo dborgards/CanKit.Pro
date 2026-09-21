@@ -275,12 +275,13 @@ public sealed class UdsFunctionalClient : IDisposable
 
     // How many request bytes after the SID a positive response repeats, for the services
     // whose response layout starts with them (ISO 14229-1, the response tables of each
-    // service): the sub-function where there is one, then a DID (0x22 the first, 0x2E), the
-    // routine identifier (0x31), the block sequence counter (0x36).
+    // service): the sub-function where there is one, then a DID (0x22 the first, 0x24, 0x2E,
+    // 0x2F -- Codex on #150), the sub-function and DID (0x2C), the routine identifier (0x31),
+    // the block sequence counter (0x36).
     private static int EchoedRequestBytes(byte sid) => sid switch
     {
-        0x22 or 0x2E => 2,
-        0x31 => 3,
+        0x22 or 0x24 or 0x2E or 0x2F => 2,
+        0x2C or 0x31 => 3,
         0x36 => 1,
         _ => HasSubFunction(sid) ? 1 : 0,
     };
