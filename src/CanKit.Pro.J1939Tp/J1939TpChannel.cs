@@ -560,12 +560,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // Unexpected SN means the transfer cannot complete. Tear the session down immediately
             // (Cancel() disposes T1/T2) and AbortRx so a blocked ReceiveAsync / ReceiveAllAsync
             // completes with the same exception observers see on BackgroundExceptionOccurred.
-            // CM: abort on the wire with table 7's code for it -- 7, bad sequence number, or 8
-            // when the packet is the one just received again (#33). BAM: no ack channel, so
-            // local notify only.
+            // CM: abort on the wire with table 7's code for it -- 8 when the packet is one
+            // already received, 7 otherwise, packet 0 included since no message has one (#33).
+            // BAM: no ack channel, so local notify only.
             byte expected = match.NextExpectedSn;
             uint pgn = match.Pgn;
-            var snReason = sn == expected - 1
+            var snReason = sn > 0 && sn < expected
                 ? J1939TpAbortReason.DuplicateSequenceNumber
                 : J1939TpAbortReason.BadSequenceNumber;
             if (match.Kind == J1939TpKind.Cm)
@@ -796,8 +796,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             {
                 // A CTS for a packet already sent is a retransmit request, which this stack
                 // does not serve -- its limit is reached at once (table 7, code 5); one for a
-                // packet beyond the next is a sequence number nothing can recover from (code 7).
-                AbortTx(session, nextSn < expectedSn
+                // packet beyond the next, or for packet 0, which no message has, is a sequence
+                // number nothing can recover from (code 7).
+                AbortTx(session, nextSn > 0 && nextSn < expectedSn
                         ? J1939TpAbortReason.MaximumRetransmitRequestsReached
                         : J1939TpAbortReason.BadSequenceNumber,
                     $"Peer requested SN {nextSn} but we expected SN {expectedSn}.");
