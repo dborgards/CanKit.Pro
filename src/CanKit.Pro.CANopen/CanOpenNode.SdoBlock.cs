@@ -233,11 +233,15 @@ internal sealed partial class CanOpenNode
                         AbortBlockClient(session, SdoAbortCode.InvalidBlockSize);
                         return true;
                     }
-                    session.NegotiatedBlockSize = nextBlkSize;
                     if (ackseq < session.SubBlockLastSeqno)
                     {
                         // Partial ACK: rewind to the first unconfirmed segment and retransmit
                         // from there with the ORIGINAL sub-block seqnos, instead of aborting.
+                        // The advertised blksize is for "the following block" (§7.2.4.3.15): the
+                        // current sub-block keeps its bound through the retransmission, or a
+                        // size below ackseq + 1 would leave nothing to resend and the transfer
+                        // waiting for a confirm that cannot come (#134). The peer restates the
+                        // size with the confirm that completes this sub-block.
                         // Bounded by CanOpenNodeOptions.SdoBlockMaxRetransmissions against
                         // peers that never confirm progress (0 restores the old abort behavior).
                         if (++session.Retransmissions > _options.SdoBlockMaxRetransmissions)
@@ -253,7 +257,9 @@ internal sealed partial class CanOpenNode
                         SendNextBlockDownloadSubBlock(session);
                         return true;
                     }
-                    // Full confirmation of the current sub-block: the next one restarts at 1.
+                    // Full confirmation of the current sub-block: the next one restarts at 1
+                    // and is the first to use the advertised size.
+                    session.NegotiatedBlockSize = nextBlkSize;
                     session.ResumeSeqno = 1;
                     if (session.Offset >= session.Payload!.Length)
                     {
@@ -934,13 +940,13 @@ internal sealed partial class CanOpenNode
             session.Deadline?.Dispose();
             return;
         }
-        session.NegotiatedBlockSize = nextBlkSize;
-
         if (ackseq < session.SubBlockLastSeqno)
         {
             // Partial ACK: rewind to the first unconfirmed segment and retransmit from there
             // with the original sub-block seqnos (CiA 301 §7.2.4.3.15), bounded by
             // CanOpenNodeOptions.SdoBlockMaxRetransmissions (0 restores the old abort behavior).
+            // The advertised blksize is for the following sub-block, not this retransmission
+            // (#134, see the download client).
             if (++session.Retransmissions > _options.SdoBlockMaxRetransmissions)
             {
                 _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId),
@@ -958,7 +964,9 @@ internal sealed partial class CanOpenNode
             return;
         }
 
-        // Full confirmation of the current sub-block: the next one restarts at seqno 1.
+        // Full confirmation of the current sub-block: the next one restarts at seqno 1 and is
+        // the first to use the advertised size.
+        session.NegotiatedBlockSize = nextBlkSize;
         session.ResumeSeqno = 1;
         if (session.Offset >= session.Buffer.Length)
         {
