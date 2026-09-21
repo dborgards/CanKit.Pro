@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace CanKit.Pro.RawCan
 {
@@ -52,6 +54,21 @@ namespace CanKit.Pro.RawCan
         /// <param name="frameEvent">The buffered frame, if any; otherwise the default value.</param>
         /// <returns><c>true</c> if a frame was removed; <c>false</c> if the buffer was empty.</returns>
         bool TryRead(out CanFrameEvent frameEvent);
+
+        /// <summary>
+        /// Waits until <see cref="TryRead"/> would succeed. Returns <c>false</c> once the
+        /// subscription (or its owning service) is disposed and the buffer is empty.
+        /// </summary>
+        /// <remarks>
+        /// With <see cref="TryRead"/> this is the pull-style counterpart to <see cref="Frames"/>
+        /// for a consumer that must also be able to drain the buffer from another thread
+        /// without reordering frames: it waits here, and drains under its own lock with
+        /// <see cref="TryRead"/>, so a caller that needs the buffered frames <em>now</em> — a
+        /// deadline check that must not wait for the consumer's own scheduling — can drain the
+        /// same way. An enumerator over <see cref="Frames"/> removes a frame before handing it
+        /// over, which such a caller could overtake.
+        /// </remarks>
+        ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Replaces this subscription's filter with an ID-range/mask fast-path filter (FR-RAW-014).

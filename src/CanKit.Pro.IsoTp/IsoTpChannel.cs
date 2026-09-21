@@ -91,6 +91,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // Written on the actor loop with _rx; read from any thread by TryGetReceptionInProgress.
     // Copy-on-write: the reader appends, the actor withdraws, callers read a snapshot.
     private IsoTpReceptionInProgress[] _receptionsInProgress = Array.Empty<IsoTpReceptionInProgress>();
+    // Frames are taken from the subscription and posted to the actor under this lock, by the
+    // reader task and by any caller that needs what is buffered *now* (see PumpSubscription).
+    private readonly object _pumpGate = new();
+    // Bumped by DiscardPendingPdus on the actor. A frame taken from the subscription before
+    // the bump but posted after it is a pending PDU the discard was asked to drop; the actor
+    // recognises it by the generation it was taken under (Codex on #143).
+    private int _rxGeneration;
 
     private int _disposed;
 
@@ -271,7 +278,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     /// <inheritdoc />
     public IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress()
-        => Array.AsReadOnly(Volatile.Read(ref _receptionsInProgress));
+    {
+        // The reader task is one more scheduling hop the answer must not wait for: what the
+        // demux has buffered is published here, on the caller's thread, before the snapshot
+        // (Codex on #143, third round).
+        PumpSubscription();
+        return Array.AsReadOnly(Volatile.Read(ref _receptionsInProgress));
+    }
 
     private void PublishReception(IsoTpReceptionInProgress reception)
     {
@@ -323,6 +336,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // not AbortRx — so we do not raise BackgroundExceptionOccurred or enqueue a fault that
         // we would immediately drain. Post+wait so any CF already queued on the actor mailbox
         // observes _rx == null and drops (HandleRxConsecutiveFrame).
+        // Whatever the demux has buffered at this moment is pending too: post it ahead of the
+        // clear below, so it is reassembled -- or not -- and drained with the rest, instead of
+        // surfacing to the next receiver as a PDU from before the discard.
+        PumpSubscription();
         var rxCleared = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
@@ -330,6 +347,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             {
                 try
                 {
+                    Interlocked.Increment(ref _rxGeneration);
                     _rx?.CancelDeadline();
                     _rx = null;
                     Volatile.Write(ref _receptionsInProgress, Array.Empty<IsoTpReceptionInProgress>());
@@ -440,62 +458,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         try
         {
-            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
-                .ConfigureAwait(false))
-            {
-                // The demux stamps every frame before it is buffered for any subscription, so
-                // neither this reader's channel wait, nor the actor mailbox, nor reassembly
-                // contributes to it -- all three are scheduling, and a deadline measured after
-                // scheduling is not a deadline. The adapter's own ReceiveTimestamp cannot serve:
-                // zero on adapters that do not timestamp, and documented as not comparable
-                // across buses.
-                //
-                // Falling back to "now" keeps an event built outside the demux (a hand-rolled
-                // ISubscription in a test, say) usable rather than making it look infinitely
-                // old, which is what a zero stamp would mean to a deadline.
-                var frameArrival = frameEvent.HostArrivalTimestamp > 0
-                    ? frameEvent.HostArrivalTimestamp
-                    : Stopwatch.GetTimestamp();
-                var frame = frameEvent.Frame;
-                // Not the hazard the previous comment described: the subscription already hands
-                // out a payload it owns, so nothing the adapter does can corrupt it. What it hands
-                // out is one array shared by every subscription that matched the frame, and it is
-                // a ReadOnlyMemory<byte> while the state machine below wants a byte[] it keeps
-                // across await points -- so this stays a copy, now as this channel's private
-                // buffer rather than as protection against the RX lease.
-                var payload = frame.Data.ToArray();
-                var addrExt = _endpoint.UsesAddressExtension;
-                // Endpoint uses an address-extension byte and the first byte does not match:
-                // skip this frame silently (matches ISO 15765-2 §5.2.4.4 semantics for a foreign
-                // address-extension on the same CAN-ID).
-                //
-                // Fix (Bugbot 3594960802): filter on the *RX* address extension. For Extended
-                // addressing that is the local node's source address (which the peer writes into
-                // the AE byte when it addresses us), NOT our outbound target-address byte.
-                // For Mixed addressing the two are the same, so this is unchanged there.
-                if (addrExt && (payload.Length == 0 || payload[0] != _endpoint.RxAddressExtension))
-                    continue;
-
-                // Pass the on-wire frame kind into TryParsePci so CAN-FD escape SF/FF headers are
-                // accepted only for real FD frames (develop codec API: isCanFd required).
-                bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
-                // A First Frame is published here, on the reader, before the actor sees it: a
-                // caller whose deadline fires while the actor is behind must find the frame at
-                // its arrival, not at its processing (Codex on #143). Appended, not written
-                // over: a PDU whose frames are all still in the mailbox is a reception in
-                // progress too, and the next First Frame must not hide it (Codex, again). The
-                // actor withdraws each record on its outcome.
-                IsoTpReceptionInProgress? announce = null;
-                if (IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci)
-                    && pci.Type == PciType.FirstFrame)
-                {
-                    announce = new IsoTpReceptionInProgress(frameArrival, pci.Length,
-                        new ReadOnlyMemory<byte>(payload, pci.DataOffset,
-                            Math.Max(0, payload.Length - pci.DataOffset)));
-                    PublishReception(announce);
-                }
-                _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival, announce));
-            }
+            while (await _subscription.WaitToReadAsync(_readerCts.Token).ConfigureAwait(false))
+                PumpSubscription();
         }
         catch (OperationCanceledException)
         {
@@ -505,6 +469,89 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         {
             RaiseBackgroundException(ex);
         }
+    }
+
+    /// <summary>
+    /// Takes every frame the subscription has buffered and posts it to the actor, in order.
+    /// Run by the reader task when frames arrive, and by a caller that must see the buffered
+    /// frames now -- a deadline check, a discard -- rather than after the reader's next
+    /// scheduling. The lock keeps the two from interleaving, which would reorder frames.
+    /// </summary>
+    private void PumpSubscription()
+    {
+        lock (_pumpGate)
+        {
+            while (true)
+            {
+                // Read before the frame is taken: a discard that lands between the two leaves
+                // the frame with the older generation, and the actor drops it.
+                int generation = Volatile.Read(ref _rxGeneration);
+                if (!_subscription.TryRead(out var frameEvent)) return;
+                try
+                {
+                    IngestFrame(frameEvent, generation);
+                }
+                catch (ObjectDisposedException)
+                {
+                    return; // actor gone: the channel is tearing down
+                }
+            }
+        }
+    }
+
+    private void IngestFrame(in CanFrameEvent frameEvent, int generation)
+    {
+        // The demux stamps every frame before it is buffered for any subscription, so
+        // neither this reader's channel wait, nor the actor mailbox, nor reassembly
+        // contributes to it -- all three are scheduling, and a deadline measured after
+        // scheduling is not a deadline. The adapter's own ReceiveTimestamp cannot serve:
+        // zero on adapters that do not timestamp, and documented as not comparable
+        // across buses.
+        //
+        // Falling back to "now" keeps an event built outside the demux (a hand-rolled
+        // ISubscription in a test, say) usable rather than making it look infinitely
+        // old, which is what a zero stamp would mean to a deadline.
+        var frameArrival = frameEvent.HostArrivalTimestamp > 0
+            ? frameEvent.HostArrivalTimestamp
+            : Stopwatch.GetTimestamp();
+        var frame = frameEvent.Frame;
+        // Not the hazard the previous comment described: the subscription already hands
+        // out a payload it owns, so nothing the adapter does can corrupt it. What it hands
+        // out is one array shared by every subscription that matched the frame, and it is
+        // a ReadOnlyMemory<byte> while the state machine below wants a byte[] it keeps
+        // across await points -- so this stays a copy, now as this channel's private
+        // buffer rather than as protection against the RX lease.
+        var payload = frame.Data.ToArray();
+        var addrExt = _endpoint.UsesAddressExtension;
+        // Endpoint uses an address-extension byte and the first byte does not match:
+        // skip this frame silently (matches ISO 15765-2 §5.2.4.4 semantics for a foreign
+        // address-extension on the same CAN-ID).
+        //
+        // Fix (Bugbot 3594960802): filter on the *RX* address extension. For Extended
+        // addressing that is the local node's source address (which the peer writes into
+        // the AE byte when it addresses us), NOT our outbound target-address byte.
+        // For Mixed addressing the two are the same, so this is unchanged there.
+        if (addrExt && (payload.Length == 0 || payload[0] != _endpoint.RxAddressExtension))
+            return;
+
+        // Pass the on-wire frame kind into TryParsePci so CAN-FD escape SF/FF headers are
+        // accepted only for real FD frames (develop codec API: isCanFd required).
+        bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
+        // A First Frame is published here, before the actor sees it: a caller whose deadline
+        // fires while the actor is behind must find the frame at its arrival, not at its
+        // processing (Codex on #143). Appended, not written over: a PDU whose frames are all
+        // still in the mailbox is a reception in progress too, and the next First Frame must
+        // not hide it (Codex, again). The actor withdraws each record on its outcome.
+        IsoTpReceptionInProgress? announce = null;
+        if (IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci)
+            && pci.Type == PciType.FirstFrame)
+        {
+            announce = new IsoTpReceptionInProgress(frameArrival, pci.Length,
+                new ReadOnlyMemory<byte>(payload, pci.DataOffset,
+                    Math.Max(0, payload.Length - pci.DataOffset)));
+            PublishReception(announce);
+        }
+        _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival, announce, generation));
     }
 
     private void RaiseBackgroundException(Exception ex)
@@ -944,10 +991,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // -----------------------------------------------------------------------------------------
 
     private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival,
-        IsoTpReceptionInProgress? announce)
+        IsoTpReceptionInProgress? announce, int generation)
     {
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
+
+        // Taken from the subscription before a DiscardPendingPdus ran, posted after it: the
+        // frame is part of what the discard was asked to drop. Flow Control is exempt -- it
+        // belongs to an outbound transfer the discard does not concern.
+        if (pci.Type != PciType.FlowControl && generation != Volatile.Read(ref _rxGeneration))
+        {
+            if (announce is not null) WithdrawReception(announce);
+            return;
+        }
 
         switch (pci.Type)
         {

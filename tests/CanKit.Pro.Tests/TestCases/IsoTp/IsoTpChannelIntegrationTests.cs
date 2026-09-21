@@ -194,6 +194,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             public bool TryRead(out CanFrameEvent frameEvent)
                 => _frames.Reader.TryRead(out frameEvent);
 
+            public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+                => _frames.Reader.WaitToReadAsync(cancellationToken);
+
             public void Reconfigure(CanIdFilter filter) { }
 
             public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
@@ -2155,6 +2158,134 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         seen = receiver.GetReceptionsInProgress();
         seen.Should().HaveCount(1);
         seen[0].FirstFrameData.Span[0].Should().Be(0x59);
+    }
+
+    // Codex on #143, third round: the hop from the demux buffer to the reader task is
+    // scheduling too. A First Frame the demux has buffered is reported in progress on demand,
+    // pumped on the caller's thread, even while the reader task is starved.
+    [Fact]
+    public void A_Buffered_First_Frame_Is_In_Progress_While_The_Reader_Task_Is_Starved()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x62, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+
+        var seen = channel.GetReceptionsInProgress();
+        seen.Should().HaveCount(1, "the buffered First Frame is pumped on the caller's thread");
+        seen[0].AnnouncedLength.Should().Be(20);
+        seen[0].FirstFrameData.Span[0].Should().Be(0x62);
+    }
+
+    // And a frame the demux has buffered when DiscardPendingPdus is called is part of what
+    // the discard drops: it does not surface to the next receiver once the reader task runs.
+    [Fact]
+    public async Task A_Frame_Buffered_At_Discard_Time_Does_Not_Surface_Afterwards()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        // A complete Single Frame, buffered while the reader task is starved.
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x03, 0x62, 0xF1, 0x90 }, FrameFlags.None));
+
+        channel.DiscardPendingPdus();
+
+        // Now let the reader task run and settle everything it posts.
+        service.ResetDrained();
+        service.WakeReader();
+        await service.PumpDrained.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.TryReceiveWithArrival(out _).Should().BeFalse(
+            "the frame was buffered before the discard and belongs to what it dropped");
+    }
+
+    /// <summary>
+    /// A bus service whose subscription's <c>WaitToReadAsync</c> stays pending until
+    /// <see cref="WakeReader"/>, so the channel's reader task is starved by construction and
+    /// only a caller-side pump sees what <see cref="Deliver"/> buffered.
+    /// </summary>
+    private sealed class StarvedReaderBusService : ICanBusService
+    {
+        private readonly Channel<CanFrameEvent> _frames = Channel.CreateUnbounded<CanFrameEvent>();
+        private readonly TaskCompletionSource<bool> _wake = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private TaskCompletionSource<bool> _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _wakesServed;
+
+        public void Deliver(CanFrameView frame) => _frames.Writer.TryWrite(
+            new CanFrameEvent(frame, isEcho: false, TimeSpan.Zero));
+
+        /// <summary>Lets the reader task's wait complete once; every later wait stays pending.</summary>
+        public void WakeReader() => _wake.TrySetResult(true);
+
+        /// <summary>Completes when a pump has emptied the buffer (a TryRead returned false).</summary>
+        public Task PumpDrained => _drained.Task;
+
+        public void ResetDrained() => _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 1;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add { }
+            remove { }
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null,
+            int? bufferCapacity = null, bool includeEcho = false)
+            => new Sub(this);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => new Sub(this);
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => Array.Empty<FilterOverlap>();
+
+        public void Dispose() => _frames.Writer.TryComplete();
+
+        private sealed class Sub : ISubscription
+        {
+            private readonly StarvedReaderBusService _owner;
+            public Sub(StarvedReaderBusService owner) => _owner = owner;
+
+            public IAsyncEnumerable<CanFrameEvent> Frames => _owner._frames.Reader.ReadAllAsync();
+
+            public bool TryRead(out CanFrameEvent frameEvent)
+            {
+                bool ok = _owner._frames.Reader.TryRead(out frameEvent);
+                if (!ok) _owner._drained.TrySetResult(true);
+                return ok;
+            }
+
+            public async ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+            {
+                if (Interlocked.Exchange(ref _owner._wakesServed, 1) == 0)
+                    return await _owner._wake.Task.WaitAsync(cancellationToken);
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+                return false;
+            }
+
+            public void Reconfigure(CanIdFilter filter) { }
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
+
+            public void Dispose() { }
+        }
     }
 
     private static async Task<IReadOnlyList<IsoTpReceptionInProgress>> WaitForReceptionsAsync(

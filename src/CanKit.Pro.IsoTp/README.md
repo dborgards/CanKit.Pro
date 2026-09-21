@@ -53,9 +53,12 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   receptions that have begun but not completed, oldest first, each as an
   `IsoTpReceptionInProgress` — that stamp, the announced length and the First Frame's data
   bytes, so the application layer can tell whose response it is. A record is published when
-  the First Frame is read off the bus, before the channel's actor has processed it (several
-  can be pending while the actor is behind), and withdrawn on its outcome or if the actor
-  refuses the frame; a caller waiting on one re-checks rather than waiting unboundedly.
+  the First Frame is taken from the subscription, before the channel's actor has processed it
+  (several can be pending while the actor is behind), and withdrawn on its outcome or if the
+  actor refuses the frame; the call itself drains what the demux has buffered first, so the
+  answer does not wait for the reader task's scheduling either. A caller waiting on one
+  re-checks rather than waiting unboundedly. `DiscardPendingPdus` drains the demux buffer the
+  same way before clearing, so a frame buffered at discard time is part of what it drops.
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NBs` (peer-FC wait), `NCr` (next CF wait) and
   `WftMax` (max consecutive `Wait` FCs) are configurable; defaults are conservative 1 s / 10.
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535

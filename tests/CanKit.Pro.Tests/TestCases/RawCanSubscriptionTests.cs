@@ -477,6 +477,9 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
             public bool TryRead(out CanFrameEvent frameEvent) { frameEvent = default; return false; }
 
+            public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+                => throw new NotSupportedException();
+
             public void Reconfigure(CanIdFilter filter) { }
 
             public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
