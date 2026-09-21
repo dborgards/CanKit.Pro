@@ -277,6 +277,30 @@ public class UdsExpiredDeadlineTests
             "a response that began before the request was sent answers an earlier request");
     }
 
+    /// <summary>
+    /// #146 — the transmit stamp is "no later than the driver accepted the frame", taken after a
+    /// synchronous delivery or a completion callback, and a fast peer's answer can be stamped by
+    /// the demux <em>before</em> it. Such a response is the request's, and a rule keyed on the
+    /// transmit stamp rejected it as an earlier request's. Here the response is stamped 1 ms
+    /// before the transmit stamp, on a request that took 20 ms to send.
+    /// </summary>
+    [Fact]
+    public async Task K_A_Response_Stamped_Before_The_Transmit_Confirmation_Is_Still_The_Response()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            TransmissionTime = TimeSpan.FromMilliseconds(20),
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(-1),
+        };
+        using var client = NewClient(channel);
+
+        var data = await client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+
+        data.Should().Equal(0xAA);
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
