@@ -367,7 +367,7 @@ public class UdsExpiredDeadlineTests
             deliverAfter: TimeSpan.Zero,
             stampArrivalAtDelivery: true)
         { Gate = gate };
-        var client = NewClient(channel);
+        using var client = NewClient(channel); // a second Dispose is idempotent
         ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(100);
 
         var inFlight = client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);

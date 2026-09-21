@@ -459,8 +459,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using (dispose)
         {
-            Func<Task> act = () => client.DiagnosticSessionControlAsync(sessionType,
-                new CancellationTokenSource(ShortTimeout).Token);
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            Func<Task> act = () => client.DiagnosticSessionControlAsync(sessionType, cts.Token);
             await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
             ecu.RequestsHandled.Should().Be(0, "nothing was sent");
         }
