@@ -87,6 +87,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // RX state (only accessed on the actor loop). Null while no multi-frame reassembly in flight.
     private RxState? _rx;
 
+    // The arrival stamp of the First Frame of the reception in progress, or 0 when there is none.
+    // Written on the actor loop with _rx; read from any thread by TryGetReceptionInProgress.
+    private long _rxFirstFrameArrival;
+
     private int _disposed;
 
     /// <summary>
@@ -259,9 +263,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         while (await _pduInbox.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {
             if (_pduInbox.Reader.TryRead(out var item))
-                return new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp);
+                return new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
         }
         throw new InvalidOperationException("Channel is disposed; no more PDUs will arrive.");
+    }
+
+    /// <inheritdoc />
+    public bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp)
+    {
+        firstFrameArrivalTimestamp = Interlocked.Read(ref _rxFirstFrameArrival);
+        return firstFrameArrivalTimestamp != 0;
     }
 
     /// <inheritdoc />
@@ -269,7 +280,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         if (_pduInbox.Reader.TryRead(out var item))
         {
-            pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp);
+            pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
             return true;
         }
 
@@ -294,6 +305,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 {
                     _rx?.CancelDeadline();
                     _rx = null;
+                    Interlocked.Exchange(ref _rxFirstFrameArrival, 0);
                 }
                 finally
                 {
@@ -990,7 +1002,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         _rx = new RxState(buffer, received: firstChunk,
             expectedSn: IsoTpFrameCodec.FirstConsecutiveSequenceNumber,
             blockCounter: _options.LocalBlockSize,
-            rxDl: payload.Length);
+            rxDl: payload.Length,
+            firstFrameArrival: frameArrival);
+        Interlocked.Exchange(ref _rxFirstFrameArrival, frameArrival);
         ArmNCr();
     }
 
@@ -1034,8 +1048,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             var pdu = rx.Buffer;
             _rx = null;
             // The last consecutive frame's arrival: a PDU is complete when its final frame
-            // lands, not when its first one did.
-            EmitPdu(pdu, frameArrival);
+            // lands, not when its first one did -- and the first frame's arrival goes with it,
+            // for a caller whose deadline ended there (#28).
+            EmitPdu(pdu, frameArrival, rx.FirstFrameArrival);
+            // Cleared only once the PDU is in the inbox: a caller whose deadline expires in
+            // between must find either the reception in progress or the PDU, never neither.
+            Interlocked.Exchange(ref _rxFirstFrameArrival, 0);
             return;
         }
 
@@ -1194,6 +1212,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         RaiseBackgroundException(ex);
         _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex));
+        // After the error item, for the same reason the completion path clears it after the
+        // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
+        Interlocked.Exchange(ref _rxFirstFrameArrival, 0);
     }
 
     private void SendOverflowFlowControl()
@@ -1234,13 +1255,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         });
     }
 
-    private void EmitPdu(byte[] pdu, long frameArrival)
+    private void EmitPdu(byte[] pdu, long frameArrival) => EmitPdu(pdu, frameArrival, frameArrival);
+
+    private void EmitPdu(byte[] pdu, long frameArrival, long firstFrameArrival)
     {
         // Enqueue first so ReceiveAsync/ReceiveAllAsync can observe the PDU even if a
         // DatagramReceived handler blocks. Raise the event off the actor loop so a sync wait
         // on ReceiveAsync / SendAsync / DiscardPendingPdus cannot deadlock the mailbox
         // (Bugbot 3596580061).
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival));
+        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
 
         var handler = DatagramReceived;
         if (handler is null)
@@ -1269,12 +1292,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// </summary>
     private readonly struct RxInboxItem
     {
-        private RxInboxItem(byte[]? pdu, Exception? error, long arrivalTimestamp)
+        private RxInboxItem(byte[]? pdu, Exception? error, long arrivalTimestamp, long firstFrameArrivalTimestamp)
         {
             Pdu = pdu;
             Error = error;
             ArrivalTimestamp = arrivalTimestamp;
+            FirstFrameArrivalTimestamp = firstFrameArrivalTimestamp;
         }
+
+        /// <summary>The arrival stamp of the PDU's first frame (see <see cref="IsoTpReceivedPdu.FirstFrameArrivalTimestamp"/>).</summary>
+        public long FirstFrameArrivalTimestamp { get; }
 
         public byte[]? Pdu { get; }
         public Exception? Error { get; }
@@ -1286,11 +1313,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         /// </summary>
         public long ArrivalTimestamp { get; }
 
-        public static RxInboxItem FromPdu(byte[] pdu, long arrivalTimestamp)
-            => new(pdu, null, arrivalTimestamp);
+        public static RxInboxItem FromPdu(byte[] pdu, long arrivalTimestamp, long firstFrameArrivalTimestamp)
+            => new(pdu, null, arrivalTimestamp, firstFrameArrivalTimestamp);
 
         public static RxInboxItem FromError(Exception error)
-            => new(null, error, Stopwatch.GetTimestamp());
+        {
+            var now = Stopwatch.GetTimestamp();
+            return new(null, error, now, now);
+        }
     }
 
     private enum TxStage
@@ -1359,14 +1389,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private sealed class RxState
     {
-        public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter, int rxDl)
+        public RxState(byte[] buffer, int received, byte expectedSn, int blockCounter, int rxDl, long firstFrameArrival)
         {
             Buffer = buffer;
             Received = received;
             ExpectedSn = expectedSn;
             BlockCounter = blockCounter;
             RxDl = rxDl;
+            FirstFrameArrival = firstFrameArrival;
         }
+
+        /// <summary>The First Frame's arrival stamp, delivered with the PDU (#28).</summary>
+        public long FirstFrameArrival { get; }
 
         public byte[] Buffer { get; }
 

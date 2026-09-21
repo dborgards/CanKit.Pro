@@ -111,6 +111,17 @@ public interface IIsoTpChannel : IDisposable
     bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu);
 
     /// <summary>
+    /// Whether a multi-frame reception is in progress — a First Frame was accepted and its last
+    /// Consecutive Frame has not arrived — and if so, when that First Frame arrived, as a
+    /// <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/> reading. For a caller whose own
+    /// deadline ends with the first frame of a response and not with its last (ISO 14229-2 P2,
+    /// #28): a response that began in time is then waited for without that deadline, bounded by
+    /// the transport's N_Cr instead. Answered from the channel's current state; a reception can
+    /// begin or complete the moment after.
+    /// </summary>
+    bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp);
+
+    /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
     /// faults enqueued by <c>AbortRx</c> — and returns how many were dropped. Also silently
     /// aborts any in-flight multi-frame reassembly on the actor so leftover consecutive frames

@@ -348,6 +348,12 @@ public class UdsExpiredDeadlineTests
             return false;
         }
 
+        public bool TryGetReceptionInProgress(out long firstFrameArrivalTimestamp)
+        {
+            firstFrameArrivalTimestamp = 0;
+            return false;
+        }
+
         private long FinalArrivalStamp() => _arrivalStamp + Ticks(PendingToFinalArrivalGap);
 
         private static long Ticks(TimeSpan span)
