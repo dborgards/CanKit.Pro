@@ -103,8 +103,8 @@ await uds.DownloadAsync(
   the functional identifier, every ECU's Single-Frame answer collected within a window and read
   as UDS (`UdsFunctionalResponse` with source identifier, bytes, `IsNegative` and the NRC). Only
   answers correlated to the request are attributed: a positive response echoing the request's
-  leading bytes (sub-function, DID, routine identifier, block counter), or a negative response
-  naming the service. Calls run one at a time. Every send starts a listener for its service
+  leading bytes (sub-function, DID, routine identifier, block counter, memory address and
+  size), or a negative response naming the service. Calls run one at a time. Every send starts a listener for its service
   that stays up for the ECUs' P2 (`Create`'s `responseWindow`, default P2) and moves the
   window out by P2* (`responsePendingWindow`, default P2*) on each NRC 0x78 it hears, so
   nothing in the window goes unobserved — a suppressed send included — and a call for that

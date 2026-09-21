@@ -1152,8 +1152,10 @@ internal sealed class UdsClientImpl : IUdsClient
     {
         var data = pdu.Pdu;
         if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending) return;
-        if (_suppressedWindows.TryGetDeadline(data[1], out _))
-            _suppressedWindows.Extend(data[1], pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency));
+        // Only a window still open when the 0x78 arrived: one that had run out is not revived
+        // for a full P2* by a late frame (Codex on #150).
+        _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp,
+            pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency));
     }
 
     /// <summary>

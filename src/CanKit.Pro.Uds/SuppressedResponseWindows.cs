@@ -34,6 +34,21 @@ internal sealed class SuppressedResponseWindows
     }
 
     /// <summary>The instant the window for <paramref name="sid"/> ends, if one is open.</summary>
+    /// <summary>
+    /// Extends the window for <paramref name="sid"/> to <paramref name="until"/> only if one is
+    /// noted and was still open at <paramref name="arrival"/>: a 0x78 that arrived after a
+    /// window's deadline answers nothing the window still covers, and must not revive it
+    /// (Codex on #150).
+    /// </summary>
+    public void ExtendIfOpenAt(byte sid, long arrival, long until)
+    {
+        lock (_gate)
+        {
+            if (_until.TryGetValue(sid, out var existing) && arrival <= existing && existing < until)
+                _until[sid] = until;
+        }
+    }
+
     public bool TryGetDeadline(byte sid, out long until)
     {
         lock (_gate) return _until.TryGetValue(sid, out until);

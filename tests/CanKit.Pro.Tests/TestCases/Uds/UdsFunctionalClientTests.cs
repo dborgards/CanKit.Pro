@@ -333,6 +333,34 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the cancelled request's window was kept for the next call");
     }
 
+    // Codex on #150: WriteMemoryByAddress echoes the addressAndLengthFormatIdentifier and the
+    // address and size it sizes; an answer for another address is not this request's.
+    [Fact]
+    public async Task A_Memory_Write_Is_Correlated_On_Its_Address_And_Size()
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+
+        // ALFID 0x11: a one-byte address (0x34) and a one-byte size (2), then two data bytes.
+        var ours = SingleFrameFrom(Ecu1, new byte[] { 0x7D, 0x11, 0x34, 0x02 });
+        var other = SingleFrameFrom(Ecu2, new byte[] { 0x7D, 0x11, 0x35, 0x02 });
+        busEcus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
+            busEcus.Transmit(other);
+            busEcus.Transmit(ours);
+        };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var responses = await functional.SendRawAsync(new byte[] { 0x3D, 0x11, 0x34, 0x02, 0xAA, 0xBB }, Window, cts.Token);
+
+        responses.Should().ContainSingle().Which.Response.Should().Equal(0x7D, 0x11, 0x34, 0x02);
+    }
+
     // Codex on #150: ReadDataByPeriodicIdentifier echoes nothing; its answer names the
     // periodic identifier it carries data for, which must be one the request asked for.
     [Fact]

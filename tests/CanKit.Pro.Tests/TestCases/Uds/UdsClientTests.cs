@@ -720,6 +720,46 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #150: a 0x78 for service A that arrives after A's window has run out answers
+    // nothing the window still covers; routed from B's wait, it must not revive A's window
+    // for a full P2*, or A's next request waits seconds for nothing.
+    [Fact]
+    public async Task A_Pending_Answer_From_After_A_Windows_End_Does_Not_Revive_It()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(500), delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x01 };
+                })
+                .On(0x22, req => throw new EcuResponsePending(pendingCount: 1,
+                    finalResponse: new byte[] { 0xF1, 0x90, 0xAA }, delayBetween: TimeSpan.FromMilliseconds(700))),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: window P2 = 200 ms; its 0x78 comes at 500 ms
+            await client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, waiting in P2* until 700 ms, consumes A's late 0x78 as a stray
+
+            // A's next request: the window ran out at 200 ms, and the 0x78 at 500 did not
+            // reopen it -- revived, it would reach 2500 ms, and this call would wait most of
+            // two seconds. A loaded host only makes the call slower, so the bound is wide.
+            var sw = Stopwatch.StartNew();
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            sw.Stop();
+            reset.Should().Equal(0x51, 0x01);
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the late 0x78 did not revive the window");
+        }
+    }
+
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
     [Fact]
     public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()
