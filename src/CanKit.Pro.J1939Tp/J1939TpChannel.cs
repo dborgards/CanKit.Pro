@@ -66,6 +66,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // different identifiers on the wire (TX is per-destination, RX is per-source). Both maps are
     // only ever touched from the actor loop, so no lock is needed.
     private readonly Dictionary<TxSessionKey, TxSession> _txSessions = new();
+    // Sends waiting for a destination whose session slot is busy (#32). TP.DT carries no PGN, so
+    // two sessions to one destination would interleave frames a receiver cannot tell apart --
+    // J1939-21 has one BAM per source at a time and one CM connection per (SA, DA) pair. The
+    // queue is what makes IJ1939TpChannel's "one PDU at a time per destination" true.
+    private readonly Dictionary<byte, Queue<PendingTx>> _txQueues = new();
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
 
     private int _disposed;
@@ -213,7 +218,6 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         if (_txSessions.TryGetValue(key, out var session) && ReferenceEquals(session.Tcs, tcs))
         {
-            _txSessions.Remove(key);
             session.Deadline?.Dispose();
             session.Deadline = null;
             if (session.IsCm)
@@ -224,9 +228,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn),
                     destinationAddress: key.DestinationAddress);
             }
+            // Complete with the caller's token (do not go through TxSession.Cancel, which would
+            // TrySetCanceled() without the token and win the race against this call).
+            tcs.TrySetCanceled(token);
+            EndTx(key);
+            return;
         }
-        // Complete with the caller's token (do not go through TxSession.Cancel, which would
-        // TrySetCanceled() without the token and win the race against this call).
+        // Not on the wire yet: still queued behind another session to the same destination, or
+        // never started. Either way the caller's token decides; a queued entry stays in the
+        // queue as completed and EndTx skips it when its turn comes.
         tcs.TrySetCanceled(token);
     }
 
@@ -283,6 +293,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 foreach (var kv in _txSessions)
                     kv.Value.Fail(new ObjectDisposedException(nameof(J1939TpChannel)));
                 _txSessions.Clear();
+                foreach (var kv in _txQueues)
+                {
+                    foreach (var pending in kv.Value)
+                        pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
+                }
+                _txQueues.Clear();
                 foreach (var kv in _rxSessions)
                     kv.Value.Cancel();
                 _rxSessions.Clear();
@@ -394,6 +410,17 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         byte control = payload[0];
         uint dataPgn = J1939TpFrames.ReadDataPgn(payload);
+
+        // The reader lets frames addressed to us or to the global address through; which of the
+        // two a control frame may carry depends on the control byte (#30). A BAM is a broadcast
+        // and only ever global. Every connection-mode frame -- RTS, CTS, EndOfMsgAck, Abort --
+        // addresses one node: an RTS sent to 0xFF would open a session on every node on the bus
+        // and each would answer, and a global CTS or Abort would drive or tear down sessions it
+        // was never part of. Such frames are not for us and are dropped without a reply; an
+        // abort in answer to a global RTS would be one more frame of the same storm.
+        bool global = da == J1939Pgn.GlobalAddress;
+        if (control == J1939TpFrames.ControlBam ? !global : global)
+            return;
 
         switch (control)
         {
@@ -626,13 +653,61 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // do not register a session or emit TP.CM/TP.DT for an already-canceled send.
         if (tcs.Task.IsCompleted)
             return;
-        if (_txSessions.ContainsKey(key))
+        if (_txSessions.ContainsKey(key) || IsQueued(key))
         {
             tcs.TrySetException(new InvalidOperationException(
                 $"A J1939-TP {(isCm ? "TP.CM" : "TP.BAM")} session for destination 0x{key.DestinationAddress:X2} PGN 0x{key.Pgn:X} is already in flight."));
             return;
         }
+        if (HasSessionTo(key.DestinationAddress))
+        {
+            if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue))
+                _txQueues[key.DestinationAddress] = queue = new Queue<PendingTx>();
+            queue.Enqueue(new PendingTx(key, pdu, tcs, isCm));
+            return;
+        }
+        StartTx(key, pdu, tcs, isCm);
+    }
 
+    private bool HasSessionTo(byte destinationAddress)
+    {
+        foreach (var kv in _txSessions)
+        {
+            if (kv.Key.DestinationAddress == destinationAddress) return true;
+        }
+        return false;
+    }
+
+    private bool IsQueued(TxSessionKey key)
+    {
+        if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return false;
+        foreach (var pending in queue)
+        {
+            if (pending.Key.Equals(key) && !pending.Tcs.Task.IsCompleted) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Removes a finished TX session and starts the next send queued for its destination, if
+    /// any. Every path that ends a session goes through here so the queue cannot stall.
+    /// </summary>
+    private void EndTx(TxSessionKey key)
+    {
+        _txSessions.Remove(key);
+        if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
+        while (queue.Count > 0)
+        {
+            var next = queue.Dequeue();
+            if (next.Tcs.Task.IsCompleted) continue; // cancelled while waiting
+            StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
+            break;
+        }
+        if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
+    }
+
+    private void StartTx(TxSessionKey key, byte[] pdu, TaskCompletionSource<object?> tcs, bool isCm)
+    {
         int totalPackets = J1939TpFrames.TotalPackets(pdu.Length);
         var session = new TxSession(key, pdu, totalPackets, tcs, isCm);
         _txSessions[key] = session;
@@ -757,19 +832,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 return;
             }
 
-            _txSessions.Remove(key);
             session.Deadline?.Dispose();
             session.Deadline = null;
             session.Tcs.TrySetResult(null);
+            EndTx(key);
         }
         else if (control == J1939TpFrames.ControlAbort)
         {
             var reason = (J1939TpAbortReason)payload[1];
-            _txSessions.Remove(key);
             session.Deadline?.Dispose();
             session.Deadline = null;
             session.Tcs.TrySetException(new J1939TpAbortException(reason, session.Key.Pgn,
                 $"Peer 0x{sa:X2} aborted TP.CM session for PGN 0x{session.Key.Pgn:X}: {reason}."));
+            EndTx(key);
         }
     }
 
@@ -795,8 +870,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (nextSn > session.TotalPackets)
         {
             // BAM has no ack -- complete once every DT has been transmitted.
-            _txSessions.Remove(key);
             session.Tcs.TrySetResult(null);
+            EndTx(key);
             return;
         }
 
@@ -894,13 +969,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     private void AbortTx(TxSession session, J1939TpAbortReason reason, string message)
     {
-        _txSessions.Remove(session.Key);
         session.Deadline?.Dispose();
         session.Deadline = null;
         // Notify peer.
         SendTpCm(J1939TpFrames.BuildAbort(reason, session.Key.Pgn),
             destinationAddress: session.Key.DestinationAddress);
         session.Tcs.TrySetException(new J1939TpAbortException(reason, session.Key.Pgn, message));
+        EndTx(session.Key);
     }
 
     // =========================================================================================
@@ -914,10 +989,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         if (session is not null && _txSessions.TryGetValue(session.Key, out var current) && ReferenceEquals(current, session))
         {
-            _txSessions.Remove(session.Key);
             session.Deadline?.Dispose();
             session.Deadline = null;
             session.Tcs.TrySetException(ex);
+            EndTx(session.Key);
         }
         else
         {
@@ -1077,6 +1152,23 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     }
 
     private enum TxStage : byte { WaitCts, SendingDt, WaitEom }
+
+    /// <summary>A send waiting for its destination's session slot (see <see cref="_txQueues"/>).</summary>
+    private sealed class PendingTx
+    {
+        public PendingTx(TxSessionKey key, byte[] pdu, TaskCompletionSource<object?> tcs, bool isCm)
+        {
+            Key = key;
+            Pdu = pdu;
+            Tcs = tcs;
+            IsCm = isCm;
+        }
+
+        public TxSessionKey Key { get; }
+        public byte[] Pdu { get; }
+        public TaskCompletionSource<object?> Tcs { get; }
+        public bool IsCm { get; }
+    }
 
     private sealed class TxSession
     {
