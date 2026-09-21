@@ -689,6 +689,38 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the 0x78 in the gap moved the window past the negative at 500 ms");
     }
 
+    // Codex on #150: a request the functional client refuses before transmitting -- longer
+    // than a Single Frame carries -- reaches no ECU, and leaves no window for the next call
+    // to wait out; suppressed or not.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_Request_The_Client_Refuses_Leaves_No_Window(bool suppressed)
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var busEcus = OpenClassic(session, 1);
+        var positive = SingleFrameFrom(Ecu1, new byte[] { 0x7E, 0x00 });
+        busEcus.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) busEcus.Transmit(positive); };
+
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
+            ownsClient: true, responseWindow: TimeSpan.FromSeconds(2));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var oversized = new byte[] { 0x3E, suppressed ? (byte)0x80 : (byte)0x00, 1, 2, 3, 4, 5, 6 }; // eight bytes: one too many
+        Func<Task> refused = () => functional.SendRawAsync(oversized, Window, cts.Token);
+        await refused.Should().ThrowAsync<InvalidOperationException>();
+
+        // Left with a window, this call would wait 2 s before sending; a loaded host only
+        // makes the call slower, so the bound is wide.
+        var sw = Stopwatch.StartNew();
+        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, TimeSpan.FromMilliseconds(100), cts.Token);
+        sw.Stop();
+        responses.Should().ContainSingle();
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "nothing was transmitted, so nothing is answered");
+    }
+
     // Codex on #150: the windows a client is created with are bounded as a collection window
     // is; a listener collecting for longer than a timer measures would fault and leave its
     // window unwaited.

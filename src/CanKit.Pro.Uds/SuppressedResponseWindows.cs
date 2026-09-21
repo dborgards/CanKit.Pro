@@ -49,6 +49,20 @@ internal sealed class SuppressedResponseWindows
         }
     }
 
+    /// <summary>
+    /// Puts the window for <paramref name="sid"/> back to what <see cref="TryGetDeadline"/>
+    /// reported before a note that turned out to be for nothing -- a send the channel refused
+    /// before transmitting (Codex on #150).
+    /// </summary>
+    public void Restore(byte sid, bool had, long until)
+    {
+        lock (_gate)
+        {
+            if (had) _until[sid] = until;
+            else _until.Remove(sid);
+        }
+    }
+
     public bool TryGetDeadline(byte sid, out long until)
     {
         lock (_gate) return _until.TryGetValue(sid, out until);

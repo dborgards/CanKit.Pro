@@ -443,11 +443,18 @@ internal sealed class UdsClientImpl : IUdsClient
             // Noted before the send as well: cancelled between the driver's acceptance and the
             // confirmation, the frame is on the bus and may still be answered (Codex on #150).
             // Moved out to the transmit stamp afterwards.
+            bool hadWindow = _suppressedWindows.TryGetDeadline(request[0], out var previousUntil);
             _suppressedWindows.Note(request[0], Stopwatch.GetTimestamp(), _options.P2ClientMax);
             IsoTpTransmitStamps stamps;
             try
             {
                 stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (RefusedBeforeTransmission(ex))
+            {
+                // Nothing reached the bus: the window noted for it is put back (Codex on #150).
+                _suppressedWindows.Restore(request[0], hadWindow, previousUntil);
+                throw;
             }
             catch
             {
@@ -465,6 +472,12 @@ internal sealed class UdsClientImpl : IUdsClient
             _requestLock.Release();
         }
     }
+
+    // The channel refuses a request before transmitting it with an argument error -- an
+    // empty or oversized PDU -- or because it is disposed; a cancellation or a transport fault
+    // comes after the frame may be out.
+    private static bool RefusedBeforeTransmission(Exception ex)
+        => ex is ArgumentException or InvalidOperationException or ObjectDisposedException;
 
     // Under the request lock. A request for a service with a suppressed send still open waits
     // out that send's P2, reading what arrives: it is the suppressed send's and is dropped --

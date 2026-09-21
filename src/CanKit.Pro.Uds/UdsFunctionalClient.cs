@@ -141,17 +141,29 @@ public sealed class UdsFunctionalClient : IDisposable
             // a negative answer, a 0x78 -- goes unobserved, and a send cancelled between the
             // driver's acceptance and the confirmation is covered (Codex on #150). Its window
             // is moved out to the confirmation afterwards.
+            bool hadWindow;
+            long previousUntil;
+            lock (_listeners) hadWindow = _openWindows.TryGetDeadline(sid, out previousUntil);
             StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
             try
             {
                 await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
             }
-            finally
+            catch (Exception ex) when (RefusedBeforeTransmission(ex))
             {
-                // Through StartListening again: the window is moved out to the confirmation,
-                // and the listener, kept through the send, reads it (Codex on #150).
-                StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
+                // Nothing reached the bus: the window noted for it is put back, and the
+                // listener retires on finding it gone or as it was (Codex on #150).
+                RestoreWindow(sid, hadWindow, previousUntil);
+                throw;
             }
+            catch
+            {
+                StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
+                throw;
+            }
+            // Through StartListening again: the window is moved out to the confirmation, and
+            // the listener, kept through the send, reads it (Codex on #150).
+            StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
             return Array.Empty<UdsFunctionalResponse>();
         }
 
@@ -178,12 +190,21 @@ public sealed class UdsFunctionalClient : IDisposable
         // is over, the window is moved out to the send's own instant plus P2: the collection
         // ran for `window` from the transmit confirmation, so that instant is at least now
         // less `window`, however long the confirmation took (Codex on #150).
+        bool hadWindowBefore;
+        long previousUntilBefore;
+        lock (_listeners) hadWindowBefore = _openWindows.TryGetDeadline(sid, out previousUntilBefore);
         StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
         IReadOnlyList<IsoTpFunctionalResponse> raw;
         try
         {
             raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
                 .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (RefusedBeforeTransmission(ex))
+        {
+            // Nothing reached the bus: the window noted for it is put back (Codex on #150).
+            RestoreWindow(sid, hadWindowBefore, previousUntilBefore);
+            throw;
         }
         catch
         {
@@ -261,6 +282,25 @@ public sealed class UdsFunctionalClient : IDisposable
                 NoteAnchored(sid, from);
             }
             EnsureListener(sid);
+        }
+    }
+
+    // The functional client refuses a request before transmitting it -- oversized for a Single
+    // Frame, an argument error -- or because it is disposed; a cancellation or a transport fault
+    // comes after the frame may be out.
+    private static bool RefusedBeforeTransmission(Exception ex)
+        => ex is ArgumentException or InvalidOperationException or ObjectDisposedException;
+
+    private void RestoreWindow(byte sid, bool had, long until)
+    {
+        lock (_listeners)
+        {
+            _inFlight.Remove(sid);
+            _openWindows.Restore(sid, had, until);
+            // The listener started for the send is collecting for the window it was given;
+            // retired here, its subscription ends and the collection with it, so the next call
+            // does not wait on it. A window put back still open gets a listener from that call.
+            if (_listeners.TryGetValue(sid, out var entry)) Retire(sid, entry.Ears);
         }
     }
 

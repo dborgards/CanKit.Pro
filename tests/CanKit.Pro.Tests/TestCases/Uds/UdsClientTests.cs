@@ -680,6 +680,34 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             "the 0x78 on its way through the channel moved the window out to P2* from its arrival");
     }
 
+    // Codex on #150: a suppressed request the channel refuses before transmitting -- here,
+    // longer than a classic-CAN ISO-TP PDU can be -- reaches no ECU, and leaves no window for
+    // the next request to wait out.
+    [Fact]
+    public async Task A_Suppressed_Send_The_Channel_Refuses_Leaves_No_Window()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req => new byte[] { 0x00 }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromSeconds(2), P2StarClientMax = TimeSpan.FromSeconds(2) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var oversized = new byte[4200];
+            oversized[0] = 0x3E;
+            oversized[1] = 0x80;
+            Func<Task> refused = () => client.SendRawAsync(oversized, cts.Token);
+            await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
+
+            // Left with a window, this call would wait P2 = 2 s before sending; a loaded host
+            // only makes the call slower, so the bound is wide.
+            var sw = Stopwatch.StartNew();
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "nothing was transmitted, so nothing is answered");
+        }
+    }
+
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()
