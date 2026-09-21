@@ -273,9 +273,16 @@ internal sealed partial class CanOpenNode
     private OdWriteDecision ValidateConsumerHeartbeatCountWrite(byte count)
     {
         if (count > CanOpenCobId.MaxNodeId) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        // A slot beyond the current count is out of the duplicate check while it is hidden, so
+        // growing the array again brings its entry back into view: the proposed range may hold
+        // one consumer per producer, as every single write is held to (Codex on #133).
+        var producers = new HashSet<byte>();
         for (int s = 1; s <= count; s++)
         {
-            if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)s, out _)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+            if (!_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+            byte nodeId = (byte)((v >> 16) & 0xFF);
+            if ((ushort)(v & 0xFFFF) == 0 || nodeId is < CanOpenCobId.MinNodeId or > CanOpenCobId.MaxNodeId) continue;
+            if (!producers.Add(nodeId)) return OdWriteDecision.Reject(SdoAbortCode.GeneralParameterIncompatibility);
         }
         return OdWriteDecision.Accept;
     }
@@ -580,7 +587,7 @@ internal sealed partial class CanOpenNode
         // node is in the configuration node guarding runs in, and an unsolicited data frame on
         // 0x700 + id is indistinguishable from a toggle-0 guarding reply (#43).
         if (_heartbeatProducerInterval > TimeSpan.Zero)
-            _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new[] { (byte)_state });
+            _ = EmitHeartbeat((byte)_state);
     }
 
     /// <summary>
@@ -614,12 +621,16 @@ internal sealed partial class CanOpenNode
 
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
-        // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat.
-        _ = _heartbeatProducerInterval > TimeSpan.Zero
-            ? SendOrderedControlFrames(
-                (CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 }),
-                (CanOpenCobId.Heartbeat(_nodeId), new[] { (byte)NmtState.PreOperational }))
-            : SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 });
+        // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
+        // producer's cycle restarts from it: the restore armed the tick before the application's
+        // hook ran, so a tick that became due meanwhile would otherwise fire right behind this.
+        _ = EmitHeartbeat(0x00);
+        if (_heartbeatProducerInterval > TimeSpan.Zero)
+        {
+            _ = EmitHeartbeat((byte)NmtState.PreOperational);
+            _heartbeatProducerHandle?.Dispose();
+            ScheduleHeartbeatProducerTick();
+        }
     }
 
     private void AbortServerSessions(SdoAbortCode code)

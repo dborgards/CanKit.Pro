@@ -966,6 +966,68 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         slave.State.Should().Be(NmtState.PreOperational);
     }
 
+    // FR-CO-019 / FR-CO-022 (#133 review) — with the producer on, the restore arms its tick before
+    // the application's reset hook runs; a hook longer than the interval leaves the tick due when
+    // it returns. Two things hold: every heartbeat of the node goes out through one chain, so the
+    // boot-up is the first frame on the bus whatever became due meanwhile — and the producer's
+    // cycle restarts from the boot-up (§7.2.8.3.2.2 regards it as the first heartbeat), so the
+    // tick that became due during the hook is not fired behind it but replaced by one a full
+    // interval later. The clock is a manual one, advanced from inside the hook; the bus parks
+    // each transmission's confirmation, so what is on the wire at each step is exact.
+    [Fact]
+    public async Task A_Producer_Tick_Due_During_ApplicationReset_Stays_Behind_The_Bootup_And_Restarts_The_Cycle()
+    {
+        var session = NewSession();
+        using var bus = ControllableBus.DeferredEchoCapable(session);
+        var clock = new ManualTimeSource();
+        using var slave = new CanOpenNode(new CanBusService(bus), Slave, new CanOpenNodeOptions(), ownsService: true, clock);
+        var wire = new List<byte>();
+        bus.OnTransmitting = frame =>
+        {
+            if (frame.ID == CanOpenCobId.Heartbeat(Slave)) lock (wire) wire.Add(frame.Data.Span[0]);
+        };
+        async Task SettleAsync()
+        {
+            await slave.PostToActorAsync(() => { }).WithTimeoutAsync(ShortTimeout);
+            await slave.PostToActorAsync(() => { }).WithTimeoutAsync(ShortTimeout);
+        }
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the opening boot-up
+        bus.DeferredEchoes.ReleaseAll();
+        var interval = TimeSpan.FromMilliseconds(50);
+        slave.StartHeartbeatProducer(interval); // armed on the manual clock: no tick until it moves
+        slave.StoreParameters();
+        await SettleAsync();
+        int transmitsBefore = bus.TransmitCount;
+        int enqueuedBefore = bus.DeferredEchoes.Enqueued;
+        lock (wire) wire.Clear();
+        slave.ApplicationReset += (_, _) => clock.Advance(interval + interval); // the restore's tick is overdue when the hook returns
+
+        bus.RaiseObserved(CanFrame.Classic(0x000, new byte[] { (byte)NmtCommand.ResetCommunication, Slave }), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(enqueuedBefore + 1, ShortTimeout); // the boot-up is on the wire, unconfirmed
+        await SettleAsync();
+        bus.TransmitCount.Should().Be(transmitsBefore + 1, "while the boot-up is unconfirmed nothing else of the node's heartbeat is on the wire");
+        lock (wire) wire.Should().Equal(new byte[] { 0x00 }, "the boot-up is the first frame after the reset");
+
+        // The restarted cycle's first tick becomes due while the boot-up is still unconfirmed:
+        // it waits behind it in the chain instead of reaching the wire on its own.
+        clock.Advance(interval);
+        await SettleAsync();
+        await Task.Delay(100);
+        bus.TransmitCount.Should().Be(transmitsBefore + 1, "a tick due while the boot-up is unconfirmed waits behind it");
+
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();                                   // boot-up confirmed
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(enqueuedBefore + 2, ShortTimeout);      // the Pre-operational heartbeat
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(enqueuedBefore + 3, ShortTimeout);      // the tick, one interval after the boot-up
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await SettleAsync();
+        await Task.Delay(100);
+        bus.DeferredEchoes.Enqueued.Should().Be(enqueuedBefore + 3,
+            "one tick: the one due during the hook was replaced by the restarted cycle's, not fired in addition to it");
+        lock (wire) wire.Should().Equal(new byte[] { 0x00, (byte)NmtState.PreOperational, (byte)NmtState.PreOperational },
+            "boot-up, the state heartbeat, then the producer's cycle restarted from the boot-up");
+    }
+
     // FR-CO-019 (#133 review) — a handler that throws does not stop the reset: the exception is
     // reported and the boot-up still goes out.
     [Fact]
@@ -1256,6 +1318,31 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "and so is one that names every declared slot");
         node.AddHeartbeatConsumer(0x14, TimeSpan.FromSeconds(1));
         od.ReadUnsigned(0x1016, 0x00).Should().Be(3u, "the array still grows");
+    }
+
+    // FR-CO-023 (#133 review) — a slot beyond the count is out of the duplicate check while it is
+    // hidden, so growing the array again brings its entry back into view: a count that would
+    // make two entries name one producer is refused with 0604 0043h, as a single write is.
+    [Fact]
+    public void Growing_1016h_Back_Over_A_Slot_That_Duplicates_A_Producer_Is_Rejected()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+        var od = node.ObjectDictionary;
+        node.AddHeartbeatConsumer(0x12, TimeSpan.FromSeconds(1)); // slot 1: 0x12
+        node.AddHeartbeatConsumer(0x13, TimeSpan.FromSeconds(2)); // slot 2: 0x13
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u);
+
+        od.WriteUnsigned(0x1016, 0x00, 1);                            // slot 2 hidden
+        od.WriteUnsigned(0x1016, 0x01, HeartbeatEntry(0x13, 1000));   // slot 1 now 0x13 too — legal while slot 2 is hidden
+        var grow = () => od.WriteUnsigned(0x1016, 0x00, 2);
+        grow.Should().Throw<ArgumentException>().Which.Message.Should().Contain("06040043");
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(1u, "the count that would show two consumers for 0x13 is refused");
+
+        od.WriteUnsigned(0x1016, 0x01, HeartbeatEntry(0x12, 1000));
+        od.WriteUnsigned(0x1016, 0x00, 2);
+        od.ReadUnsigned(0x1016, 0x00).Should().Be(2u, "with one consumer per producer the array grows back");
     }
 
     // FR-CO-023: RemoveHeartbeatConsumer clears the producer's slot and the consumer stops

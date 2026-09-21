@@ -249,7 +249,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             ApplyAllCommunicationObjects();
             _state = NmtState.PreOperational;
-            _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { 0x00 });
+            _ = EmitHeartbeat(0x00);
         });
     }
 
@@ -401,6 +401,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // Every EMCY this node transmits goes out through one chain, so the wire order is the order
     // the actor decided — the order the error register was written in. Actor loop only.
     private Task _emcySendChain = Task.CompletedTask;
+
+    // Every heartbeat of this node — boot-up, state change, producer tick — goes out through one
+    // chain likewise, so a boot-up ordered by a reset is on the bus before the tick that became
+    // due while the application's reset hook ran (Codex on #133). Actor loop only.
+    private Task _heartbeatSendChain = Task.CompletedTask;
+
+    private Task EmitHeartbeat(byte state)
+    {
+        uint cobId = CanOpenCobId.Heartbeat(_nodeId);
+        var frame = new[] { state };
+        var link = _heartbeatSendChain.ContinueWith(
+            _ => SendControlFrame(cobId, frame),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+        _heartbeatSendChain = link;
+        return link;
+    }
 
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default)
     {
@@ -943,7 +959,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             try
             {
                 if (_disposed != 0) return;
-                _ = SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), new byte[] { (byte)_state });
+                _ = EmitHeartbeat((byte)_state);
             }
             finally
             {
