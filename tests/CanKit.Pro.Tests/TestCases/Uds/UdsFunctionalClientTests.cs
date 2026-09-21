@@ -689,6 +689,25 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             "the 0x78 in the gap moved the window past the negative at 500 ms");
     }
 
+    // Codex on #150: the windows a client is created with are bounded as a collection window
+    // is; a listener collecting for longer than a timer measures would fault and leave its
+    // window unwaited.
+    [Theory]
+    [InlineData(0, 100)]
+    [InlineData(100, 0)]
+    [InlineData(50 * 24 * 3600 * 1000L, 100)]
+    [InlineData(100, 50 * 24 * 3600 * 1000L)]
+    public void A_Window_Outside_A_Timers_Reach_Is_Rejected_At_Creation(long responseMs, long pendingMs)
+    {
+        var session = NewSession();
+        using var busTester = OpenClassic(session, 0);
+        using var client = IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions());
+
+        Action act = () => UdsFunctionalClient.Create(client, ownsClient: false,
+            responseWindow: TimeSpan.FromMilliseconds(responseMs), responsePendingWindow: TimeSpan.FromMilliseconds(pendingMs));
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
     // Codex on #150: a window the collector would reject -- non-positive, or longer than a
     // timer measures -- is checked before anything goes out.
     [Theory]

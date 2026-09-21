@@ -56,10 +56,14 @@ public sealed class UdsFunctionalClient : IDisposable
         TimeSpan responsePendingWindow)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
-        if (responseWindow <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(responseWindow), "The window must be positive.");
-        if (responsePendingWindow <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(responsePendingWindow), "The window must be positive.");
+        // Bounded above as a collection window is: a listener collecting for longer than a
+        // timer measures would fault, and the window it owned go unwaited (Codex on #150).
+        if (responseWindow <= TimeSpan.Zero || responseWindow > MaxCollectionWindow)
+            throw new ArgumentOutOfRangeException(nameof(responseWindow), responseWindow,
+                "The window must be positive and within what a timer can measure (about 49 days).");
+        if (responsePendingWindow <= TimeSpan.Zero || responsePendingWindow > MaxCollectionWindow)
+            throw new ArgumentOutOfRangeException(nameof(responsePendingWindow), responsePendingWindow,
+                "The window must be positive and within what a timer can measure (about 49 days).");
         _ownsClient = ownsClient;
         _responseWindow = responseWindow;
         _responsePendingWindow = responsePendingWindow;
