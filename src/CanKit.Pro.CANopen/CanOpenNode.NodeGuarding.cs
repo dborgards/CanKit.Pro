@@ -254,12 +254,15 @@ internal sealed partial class CanOpenNode
         byte state = (byte)_state;
         byte payload = (byte)((_nodeGuardingProducerToggle ? 0x80 : 0x00) | (state & 0x7F));
         _nodeGuardingProducerToggle = !_nodeGuardingProducerToggle;
+        // The life time first, the reply second: the reply leaves through a thread-pool hop and
+        // can be on the bus before this callback has moved on, so anything that reads "the reply
+        // is on the wire" as "guarding has started" — a consumer, a test moving a clock — must
+        // find the deadline armed by then (#141).
+        OnGuardingPollReceived();
         // Through the chain every frame of this node on 0x700 + id goes through: a poll already
         // in the mailbox when a reset ran is answered behind the reset's boot-up, not ahead of it
         // — two toggle-0 frames in the wrong order read as a guarding error (Bugbot on #133).
         _ = EmitHeartbeat(payload);
-
-        OnGuardingPollReceived();
     }
 
     // =========================================================================================
