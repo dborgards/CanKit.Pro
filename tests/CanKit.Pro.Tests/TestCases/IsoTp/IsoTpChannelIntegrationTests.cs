@@ -1761,6 +1761,29 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await channel.ReceiveAsync(cts.Token)).Should().Equal(0x7E, 0x80);
     }
 
+    // Codex on #147: on one identifier, Extended addressing still tells the directions apart
+    // by the address-extension byte, so a reciprocal pair sharing an echo-capable service must
+    // keep exchanging -- the echo is withheld only when the extension byte coincides too.
+    [Fact]
+    public async Task Reciprocal_Extended_Channels_On_One_Identifier_Still_Exchange()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var tester = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Extended(txCanId: 0x7DF, rxCanId: 0x7DF, sourceAddress: 0xF1, targetAddress: 0x10));
+        using var ecu = IsoTpFactory.Open(
+            service, IsoTpEndpoint.Extended(txCanId: 0x7DF, rxCanId: 0x7DF, sourceAddress: 0x10, targetAddress: 0xF1));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var ecuReceive = ecu.ReceiveAsync(cts.Token);
+        await tester.SendAsync(new byte[] { 0x22, 0xF1, 0x90 });
+        (await ecuReceive).Should().Equal(0x22, 0xF1, 0x90);
+
+        var testerReceive = tester.ReceiveAsync(cts.Token);
+        await ecu.SendAsync(new byte[] { 0x62, 0xF1, 0x90, 0xAA });
+        (await testerReceive).Should().Equal(0x62, 0xF1, 0x90, 0xAA);
+    }
+
     // #56 -- BS and STmin are the first FC.CTS's for the whole transfer; a later FC.CTS's
     // values are ignored (ISO 15765-2). The peer grants two frames per block, then says one:
     // the sender must still send two before waiting, or it waits for a Flow Control the peer

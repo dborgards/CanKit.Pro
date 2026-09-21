@@ -72,9 +72,11 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   the values a later FC.CTS carries, as ISO 15765-2 requires (#56).
 - Echoes: a channel receives on `RxCanId` and transmits on `TxCanId`, so on an echo-capable bus
   its own frames never match its filter and host echoes are kept — two reciprocal channels in
-  one process are peers. The one exception is an endpoint with `TxCanId == RxCanId`, where the
-  host echo flag is the only thing telling the channel's frame from the peer's; there host
-  echoes are withheld (#56).
+  one process are peers. The one exception is an endpoint with `TxCanId == RxCanId` and no
+  address-extension byte telling the directions apart (Normal addressing, or Mixed with its one
+  shared byte): there the host echo flag is the only thing telling the channel's frame from the
+  peer's, and host echoes are withheld (#56). Extended addressing on one identifier keeps them,
+  the source and target bytes doing the telling.
 - `DiscardPendingPdus` may be called from a `BackgroundExceptionOccurred` handler, which runs on
   the channel's actor: the clear then runs inline instead of waiting on the loop it is on (#56).
 

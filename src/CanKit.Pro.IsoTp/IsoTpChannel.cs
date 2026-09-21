@@ -183,11 +183,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             //
             // The endpoint is the instance-level identity, and this filter already applies it: a
             // channel transmits on TxCanId and accepts only RxCanId, so its own frames cannot
-            // match its own filter -- unless the two are the same identifier, the one shape
-            // where a host echo of this channel's own frame does match. There the echo is
-            // withheld (#56): nothing else tells the channel's frame from the peer's, and a
-            // reciprocal in-process pair on one identifier is unreachable by construction.
-            bool selfAddressed = _endpoint.TxCanId == _endpoint.RxCanId;
+            // match its own filter -- unless the two are the same identifier and nothing in the
+            // payload tells the directions apart either: Extended addressing writes the target
+            // byte outbound and accepts only the source byte inbound, which the reader's
+            // address-extension filter already applies (Codex on #147). Only when the
+            // identifier *and* the extension byte coincide is a host echo of this channel's own
+            // frame indistinguishable from the peer's, and there it is withheld (#56); a
+            // reciprocal in-process pair of that shape is unreachable by construction.
+            bool selfAddressed = _endpoint.TxCanId == _endpoint.RxCanId
+                && (!_endpoint.UsesAddressExtension
+                    || _endpoint.AddressExtension == _endpoint.RxAddressExtension);
             _subscription = _service.Subscribe(idFilter, includeEcho: !selfAddressed);
         }
         catch
