@@ -1096,7 +1096,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // (#119, Codex). Same rule the CANopen guard states for 0x600 + id -- an explicitly
             // directed frame is ours to serve whoever sent it -- and it cannot swallow a
             // broadcast, because a broadcast is either PDU2 or carries da == 0xFF.
-            if (myAddr >= 0 && sa == (byte)myAddr && !(isPdu1 && da == (byte)myAddr)) return;
+            //
+            // The ledger is consulted first, whichever guard then decides: an echo that the
+            // source-address check drops has still come back and its entry has to go, or it
+            // would match a peer's identical frame under that address after a re-claim (Bugbot
+            // on #140). And the carve-out needs an address to be directed to — while the node
+            // holds none, -1 cast to a byte is the global address, and a broadcast echo would
+            // read as directed to us (Bugbot on #140).
+            bool ownFrame = TryTakeOwnFrame(canId, payload);
+            bool directedToUs = myAddr >= 0 && isPdu1 && da == (byte)myAddr;
+            if (myAddr >= 0 && sa == (byte)myAddr && !directedToUs) return;
 
             // The echo of a frame this node sent under an address it no longer holds: BeginClaimRound
             // clears the address before announcing the new one, so the check above cannot fire
@@ -1106,7 +1115,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // node transmitted, not against an address and a window: a frame this node did not
             // send, whoever holds that address now, is a peer's and is heard. A frame directed
             // to this node is served whoever sent it, as above.
-            if (TryTakeOwnFrame(canId, payload) && !(isPdu1 && da == (byte)myAddr)) return;
+            if (ownFrame && !directedToUs) return;
 
             // Only surface application PGNs that are either broadcast (PDU2) or directed at us.
             if (isPdu1 && da != J1939Pgn.GlobalAddress && (myAddr < 0 || da != (byte)myAddr))

@@ -1668,6 +1668,110 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await reclaim.WithTimeout(ShortTimeout);
     }
 
+    // Bugbot on #140: an echo the source-address guard drops has still come back, and its ledger
+    // entry must go with it -- otherwise a peer sending the identical frame under that address
+    // after a re-claim would match the stale entry and be dropped as an echo. Both echo worlds:
+    // the source-address guard is what catches the echo here, the same in both.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task An_Echo_Dropped_By_The_Source_Address_Guard_Still_Leaves_The_Ledger(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        // Sent under 0x11, echoed at once, dropped by the source-address guard.
+        const uint pgn = 0xFEF9u;
+        await node.SendAsync(new J1939Message(pgn, new byte[] { 7, 7, 7 },
+            destinationAddress: J1939Pgn.GlobalAddress)).WithTimeout(ShortTimeout);
+        // Barrier: a peer frame after it has been processed once it is raised.
+        const uint barrierPgn = 0xFEFAu;
+        echo.InjectPeerFrame(CanFrame.Classic((int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true));
+        var barrier = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < barrier)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
+            await Task.Delay(5);
+        }
+
+        // Move away from 0x11; a peer then sends the very same frame under it.
+        await node.ClaimAddressAsync(0x22).WithTimeout(ShortTimeout);
+        echo.InjectPeerFrame(CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x11),
+            new byte[] { 7, 7, 7 }, isExtendedFrame: true));
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == pgn)) break; }
+            await Task.Delay(5);
+        }
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+        snapshot.Should().Contain(m => m.Pgn == pgn && m.SourceAddress == 0x11,
+            "our own echo of this frame came back long ago and left the ledger; what arrives now is a peer's");
+    }
+
+    // Bugbot on #140: the carve-out that serves a frame directed to this node needs an address to
+    // be directed to. While the node holds none (a re-claim in flight), -1 cast to a byte is the
+    // global address, and a broadcast echo -- a Request this node sent to everyone -- would read
+    // as directed to us and be raised. Reproduced with the echo withheld until the address is gone.
+    [Fact]
+    public async Task A_Broadcast_Echo_Arriving_While_The_Node_Holds_No_Address_Is_Still_Dropped()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        var claimA = node.ClaimAddressAsync(0x11);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await claimA.WithTimeout(ShortTimeout);
+
+        var seen = new List<J1939Message>();
+        var seenLock = new object();
+        node.MessageReceived += (_, m) => { lock (seenLock) seen.Add(m); };
+
+        // A broadcast Request (PDU1 to 0xFF) whose echo the bus holds back.
+        var request = node.RequestPgnAsync(0xFEEEu, destinationAddress: J1939Pgn.GlobalAddress);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+
+        // Re-claim: the address is cleared for the arbitration window. Deliver the request's echo
+        // now, while the node holds no address, then let the claim finish.
+        var claimB = node.ClaimAddressAsync(0x22);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
+        node.Address.Should().BeNull();
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();  // the request's echo, arriving while unclaimed
+        // The request's own task faults: its address was invalidated in flight, the rule
+        // Send_InFlightAcrossReclaim_FailsWithNoAddressException pins. The frame was on the wire.
+        await Assert.ThrowsAsync<J1939NoAddressException>(() => request.WithTimeout(ShortTimeout));
+        const uint barrierPgn = 0xFEFAu;
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        var barrier = DateTime.UtcNow + ShortTimeout;
+        while (DateTime.UtcNow < barrier)
+        {
+            lock (seenLock) { if (seen.Any(m => m.Pgn == barrierPgn)) break; }
+            await Task.Delay(5);
+        }
+        List<J1939Message> snapshot;
+        lock (seenLock) snapshot = new List<J1939Message>(seen);
+        snapshot.Should().Contain(m => m.Pgn == barrierPgn);
+        snapshot.Should().NotContain(m => J1939Pgn.IsRequest(m.Pgn),
+            "the node sent this request itself; a broadcast is not directed to a node that holds no address");
+
+        bus.DeferredEchoes.ReleaseAll();
+        await claimB.WithTimeout(ShortTimeout);
+    }
+
     // #121 across claim rounds: a re-claim replaced while in flight, then completed for a third
     // address, and the echo of the frame sent under the first address still arrives after all of
     // it. The ledger is not touched by claim rounds at all, so nothing here can forget the frame;
