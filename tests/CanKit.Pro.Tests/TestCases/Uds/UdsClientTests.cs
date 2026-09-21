@@ -333,6 +333,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using (dispose)
         {
+            using var cts = new CancellationTokenSource(ShortTimeout);
             await client.SecurityAccessAsync(
                 requestSeedLevel: 0x01,
                 computeKey: s =>
@@ -340,7 +341,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                     Interlocked.Increment(ref keysComputed);
                     return s.Select(b => (byte)(b ^ 0x55)).ToArray();
                 },
-                cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
+                cancellationToken: cts.Token);
 
             keyRequests.Should().Be(0, "an all-zero seed means already unlocked; no sendKey");
             keysComputed.Should().Be(0);
@@ -385,9 +386,9 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using (dispose)
         {
+            using var cts = new CancellationTokenSource(ShortTimeout);
             var sw = Stopwatch.StartNew();
-            var data = await client.ReadDataByIdentifierAsync(0xF190,
-                new CancellationTokenSource(ShortTimeout).Token);
+            var data = await client.ReadDataByIdentifierAsync(0xF190, cts.Token);
             sw.Stop();
 
             data.Should().Equal(record);
