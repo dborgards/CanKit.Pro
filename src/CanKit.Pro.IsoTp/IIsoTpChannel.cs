@@ -151,6 +151,17 @@ public interface IIsoTpChannel : IDisposable
     int DiscardPendingPdus();
 
     /// <summary>
+    /// As <see cref="DiscardPendingPdus()"/>, dropping what arrived before
+    /// <paramref name="arrivedBefore"/> (a <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>
+    /// reading) rather than before now, and keeping what arrived since. For a caller that
+    /// inspects the inbox before discarding — routing an NRC 0x78 to its window — the stamp
+    /// taken before the inspection makes the two one step: everything the discard drops was
+    /// inspected, and a frame arriving between the inspection and the discard is kept for the
+    /// caller's next read instead of vanishing (Codex on #150).
+    /// </summary>
+    int DiscardPendingPdus(long arrivedBefore);
+
+    /// <summary>
     /// Enumerates every fully reassembled inbound PDU as it becomes available. The enumeration
     /// ends when the channel is disposed. A reassembly abort (N_Cr / CF sequence mismatch /
     /// SF·FF supersede) faults the enumerator with the same exception
@@ -163,7 +174,7 @@ public interface IIsoTpChannel : IDisposable
     /// Raised (on a thread-pool thread) every time a full PDU is reassembled. The same PDU is
     /// enqueued for <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/> before the event
     /// fires, so a handler that synchronously waits on those APIs — or on
-    /// <see cref="DiscardPendingPdus"/> — cannot deadlock the protocol actor. Handlers must be
+    /// <see cref="DiscardPendingPdus()"/> — cannot deadlock the protocol actor. Handlers must be
     /// non-throwing; a throwing handler is caught and surfaced via
     /// <see cref="BackgroundExceptionOccurred"/>.
     /// </summary>

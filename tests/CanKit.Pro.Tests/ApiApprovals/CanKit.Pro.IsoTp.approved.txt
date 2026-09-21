@@ -13,6 +13,7 @@ namespace CanKit.Pro.IsoTp
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         event System.EventHandler<CanKit.Pro.IsoTp.IsoTpDatagramReceivedEventArgs>? DatagramReceived;
         int DiscardPendingPdus();
+        int DiscardPendingPdus(long arrivedBefore);
         System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpReceptionInProgress> GetReceptionsInProgress();
         System.Collections.Generic.IAsyncEnumerable<byte[]> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken = default);

@@ -443,6 +443,36 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         pdu.FirstFrameArrivalTimestamp.Should().Be(arrival, "the stamp is the demux's, not the settle's");
     }
 
+    // Codex on #150: a discard given the caller's stamp drops what arrived before it and keeps
+    // what arrived since -- so a caller that read the inbox after taking the stamp has seen
+    // everything the discard drops, and a frame from between the read and the discard is not
+    // lost.
+    [Fact]
+    public async Task A_Discard_Given_A_Stamp_Keeps_What_Arrived_After_It()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        long stamp = Stopwatch.GetTimestamp();
+        await Task.Delay(5);
+        byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), Stopwatch.GetTimestamp());
+
+        channel.DiscardPendingPdus(stamp).Should().Be(0, "the frame arrived after the stamp");
+        await channel.SettleAsync().WaitAsync(ShortTimeout);
+        channel.TryReceiveWithArrival(out var pdu).Should().BeTrue("a frame from after the stamp is kept");
+        pdu.Pdu.Should().Equal(0x7F, 0x3E, 0x78);
+
+        // The parameterless discard drops what arrived up to now -- by the actor refusing the
+        // pumped frame, which never reaches the inbox and so is not in the count.
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), Stopwatch.GetTimestamp());
+        channel.DiscardPendingPdus();
+        await channel.SettleAsync().WaitAsync(ShortTimeout);
+        channel.TryReceiveWithArrival(out _).Should().BeFalse("a frame from before the discard is dropped");
+    }
+
     // Bugbot on #147: ignored means no effect at all -- a reassembly in flight survives a
     // stray First Frame that fits a Single Frame, and a short one (#27).
     [Theory]

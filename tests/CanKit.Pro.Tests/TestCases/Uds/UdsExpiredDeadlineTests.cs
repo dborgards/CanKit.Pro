@@ -766,6 +766,8 @@ public class UdsExpiredDeadlineTests
 
         public int DiscardPendingPdus() => 0;
 
+        public int DiscardPendingPdus(long arrivedBefore) => 0;
+
         public IAsyncEnumerable<byte[]> ReceiveAllAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 

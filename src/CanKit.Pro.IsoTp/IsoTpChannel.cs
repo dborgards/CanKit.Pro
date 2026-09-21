@@ -367,9 +367,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
-    public int DiscardPendingPdus()
+    public int DiscardPendingPdus() => DiscardPendingPdus(arrivedBefore: 0);
+
+    /// <inheritdoc />
+    public int DiscardPendingPdus(long arrivedBefore)
     {
-        // Everything that arrived up to now is pending. The stamp goes first, so a frame the
+        // Everything that arrived up to now is pending -- or up to the caller's stamp, which
+        // may be earlier (Codex on #150); the discard stamp never moves back, so a frame
+        // already admitted stays admitted. The stamp goes first, so a frame the
         // pump posts -- or the reader task posts concurrently -- is dropped by the actor if it
         // arrived before it, and answered with no Flow Control that would invite the rest of
         // a transfer the caller has given up on (Bugbot on #143). Whatever the demux has
@@ -381,8 +386,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         long stamp;
         lock (_pumpGate)
         {
-            stamp = Stopwatch.GetTimestamp();
-            Volatile.Write(ref _discardStamp, stamp);
+            stamp = arrivedBefore > 0 ? arrivedBefore : Stopwatch.GetTimestamp();
+            if (stamp > Volatile.Read(ref _discardStamp)) Volatile.Write(ref _discardStamp, stamp);
             PumpSubscription(unstampedArrival: stamp - 1);
         }
 
