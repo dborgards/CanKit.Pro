@@ -1411,7 +1411,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             options: new J1939TpOptions().With(tr: TimeSpan.FromSeconds(5)));
 
         var cmFrames = new List<byte[]>();
-        var frameReady = new SemaphoreSlim(0);
+        using var frameReady = new SemaphoreSlim(0);
         peerBus.FrameObserved += (_, e) =>
         {
             var frame = e.CanFrame;
@@ -1470,7 +1470,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             options: new J1939TpOptions().With(t3: TimeSpan.FromSeconds(5)));
 
         var fromSender = new List<(uint pgn, byte[] data)>();
-        var frameReady = new SemaphoreSlim(0);
+        using var frameReady = new SemaphoreSlim(0);
         peerBus.FrameObserved += (_, e) =>
         {
             var frame = e.CanFrame;
