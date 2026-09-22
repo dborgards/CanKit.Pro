@@ -803,9 +803,14 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // awaiting SendConfirmed, NextSn has not yet advanced — but a fast peer (Virtual
             // loopback) may already have received that DT and emitted the next CTS. Accept a CTS
             // that asks for NextSn + BlockRemaining in that race, and apply it once the block drains.
-            int expectedSn = session.State == TxStage.SendingDt && session.BlockRemaining > 0
-                ? session.NextSn + session.BlockRemaining
-                : (session.NextSn == 0 ? 1 : session.NextSn);
+            // With every packet sent, the next would be TotalPackets + 1 -- as an int, since a
+            // 255-packet message wraps the byte NextSn to 0, and a retransmit request for its
+            // last packet must still read as one (Codex on #152).
+            int expectedSn = session.State == TxStage.WaitEom
+                ? session.TotalPackets + 1
+                : session.State == TxStage.SendingDt && session.BlockRemaining > 0
+                    ? session.NextSn + session.BlockRemaining
+                    : (session.NextSn == 0 ? 1 : session.NextSn);
             bool retransmit = nextSn > 0 && nextSn < expectedSn;
             if (nextSn != expectedSn && !retransmit)
             {
@@ -870,7 +875,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // OnCmDtConfirmed (SendingDt → WaitEom). Do NOT treat NextSn >= TotalPackets alone as
             // sufficient: CTS for the final SN sets NextSn to TotalPackets before any DT is queued.
             bool lastDtOnWire = session.State == TxStage.SendingDt && session.LastDtQueued;
-            if (session.State != TxStage.WaitEom && !lastDtOnWire)
+            // After a retransmit that did not reach the last packet, the originator waits for
+            // a CTS; a receiver that has the rest already sends EndOfMsgAck instead, and every
+            // packet having gone out at least once makes that a valid end (Bugbot on #152).
+            if (session.State != TxStage.WaitEom && !lastDtOnWire && !session.AllPacketsSent)
             {
                 AbortTx(session, J1939TpAbortReason.BadSequenceNumber,
                     $"Peer sent EndOfMsgAck while TX session was in {session.State} (expected WaitEom).");
@@ -957,6 +965,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.NextSn = (byte)nextSn;
         session.BlockRemaining--;
         int sentPackets = confirmedSn;
+        if (sentPackets >= session.TotalPackets) session.AllPacketsSent = true;
 
         if (sentPackets >= session.TotalPackets && !session.HasPendingCts)
         {
@@ -1261,6 +1270,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public byte PendingCtsNumPackets { get; set; }
         /// <summary>How many CTS for a packet already sent this session has served (#58).</summary>
         public int RetransmitRequests { get; set; }
+        /// <summary>
+        /// Every packet has been confirmed sent at least once: from here on an EndOfMsgAck is a
+        /// valid end whatever block a retransmit left the session in (Bugbot on #152).
+        /// </summary>
+        public bool AllPacketsSent { get; set; }
         /// <summary>
         /// Set when <see cref="TrySendNextCmDt"/> queues the final TP.DT (SN == TotalPackets).
         /// Used to accept an early EndOfMsgAck that races ahead of SendConfirmed → WaitEom.

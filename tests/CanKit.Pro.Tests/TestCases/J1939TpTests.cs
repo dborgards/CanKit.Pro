@@ -2061,6 +2061,59 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await failed.Should().ThrowAsync<J1939TpAbortException>();
     }
 
+    // Bugbot on #152: a receiver that asked for one packet again and then has the whole
+    // message sends EndOfMsgAck, not another CTS; the originator, every packet sent at least
+    // once, completes on it.
+    [Fact]
+    public async Task An_End_Of_Message_After_A_Partial_Retransmit_Completes_The_Send()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC5u;
+        var payload = RandomPayload(21, seed: 6); // three packets
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn)); // packet 2 again
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(21, 3, pgn));
+        await send.WaitAsync(ShortTimeout);
+    }
+
+    // Codex on #152: a 255-packet message wraps the byte NextSn to 0 once every packet is
+    // sent; a retransmit request for its last packet must still read as one, and be served.
+    [Fact]
+    public async Task A_Retransmit_Request_For_The_Last_Of_255_Packets_Is_Served()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC0u;
+        var payload = RandomPayload(J1939TpFrames.MaxTpPayloadLength, seed: 255); // 255 packets
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 255, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(255, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 255, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(256, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(J1939TpFrames.MaxTpPayloadLength, 255, pgn));
+        await send.WaitAsync(ShortTimeout);
+    }
+
     // #58: the datagram is in the inbox before DatagramReceived is raised, and the event is
     // raised off the actor -- so a handler that waits on ReceiveAsync gets the datagram
     // rather than deadlocking the channel, as an ISO-TP handler does.
@@ -2084,9 +2137,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
                 using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 fromHandler.TrySetResult(receiver.ReceiveAsync(wait.Token).GetAwaiter().GetResult());
             }
-            catch (Exception ex)
+            catch (OperationCanceledException ex)
             {
-                fromHandler.TrySetException(ex);
+                fromHandler.TrySetException(ex); // the wait timed out: the datagram was not receivable
             }
         };
 

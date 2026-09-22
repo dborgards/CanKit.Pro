@@ -79,10 +79,13 @@ public interface IJ1939TpChannel : IDisposable
     IAsyncEnumerable<J1939TpDatagram> ReceiveAllAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Raised on the actor's loop thread every time a full PDU is reassembled. The same datagram
-    /// is also enqueued for <see cref="ReceiveAsync"/> / <see cref="ReceiveAllAsync"/>. Handlers
-    /// must be lightweight and non-throwing; a throwing handler is caught and surfaced via
-    /// <see cref="BackgroundExceptionOccurred"/>.
+    /// Raised every time a full PDU is reassembled, after the datagram has been enqueued for
+    /// <see cref="ReceiveAsync"/> / <see cref="ReceiveAllAsync"/>, and on the thread pool, not
+    /// on the actor's loop -- so a handler that waits on this channel synchronously gets the
+    /// datagram rather than deadlocking the actor (#58; as ISO-TP delivers). Two datagrams
+    /// reassembled close together may therefore reach their handlers concurrently, and not
+    /// necessarily in the order they completed; <see cref="ReceiveAsync"/> keeps that order.
+    /// A throwing handler is caught and surfaced via <see cref="BackgroundExceptionOccurred"/>.
     /// </summary>
     event EventHandler<J1939TpDatagram>? DatagramReceived;
 
