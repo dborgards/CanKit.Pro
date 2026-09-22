@@ -2088,6 +2088,46 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await send.WaitAsync(ShortTimeout);
     }
 
+    // Codex on #152: a retransmit request that arrives while a block is still draining takes
+    // effect as soon as the outstanding DT is confirmed -- the receiver is missing a packet,
+    // and every later one it gets meanwhile is out of sequence to it -- not after the block.
+    [Fact]
+    public async Task A_Retransmit_Request_Mid_Block_Takes_Effect_After_The_Outstanding_Packet()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC6u;
+        var payload = RandomPayload(21, seed: 7); // three packets
+        using var sender = J1939TpFactory.Open(service, sourceAddress: subjectSa);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            if (fields.Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        // Packet 1 asked for again while DT 1 is still outstanding.
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await Task.Delay(50); // the CTS is on the actor before the confirmation is released
+        bus.DeferredEchoes.ReleaseNext();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the next DT
+
+        byte[] sns;
+        lock (dtSns) sns = dtSns.ToArray();
+        sns.Should().Equal(new byte[] { 1, 1 }, "the retransmit took effect after the outstanding packet, not after the block");
+    }
+
     // Codex on #152: a 255-packet message wraps the byte NextSn to 0 once every packet is
     // sent; a retransmit request for its last packet must still read as one, and be served.
     [Fact]

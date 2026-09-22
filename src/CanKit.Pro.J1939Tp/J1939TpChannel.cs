@@ -848,11 +848,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 return;
             }
 
-            // Early CTS while the current block is still draining: stash and apply on block end.
+            // Early CTS while the current block is still draining: stash and apply on block end
+            // -- or, for a retransmit request, as soon as the outstanding DT is confirmed: the
+            // receiver is missing a packet and every later one it gets meanwhile is out of
+            // sequence to it (Codex on #152).
             if (session.State == TxStage.SendingDt && session.BlockRemaining > 0)
             {
                 session.PendingCtsNumPackets = numPackets;
                 session.PendingCtsNextSn = nextSn;
+                session.PendingCtsIsRetransmit = retransmit;
                 session.HasPendingCts = true;
                 session.Deadline?.Dispose();
                 session.Deadline = null;
@@ -967,6 +971,14 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         int sentPackets = confirmedSn;
         if (sentPackets >= session.TotalPackets) session.AllPacketsSent = true;
 
+        // A retransmit request stashed while this block was draining takes effect now, with
+        // the outstanding DT confirmed, rather than after the block (Codex on #152).
+        if (session.HasPendingCts && session.PendingCtsIsRetransmit)
+        {
+            ApplyPendingCts(key, session);
+            return;
+        }
+
         if (sentPackets >= session.TotalPackets && !session.HasPendingCts)
         {
             // Last packet -- wait for EndOfMsgAck (T3). A CTS stashed meanwhile is a
@@ -985,14 +997,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // T2 is the receiver's (#31).
             if (session.HasPendingCts)
             {
-                session.HasPendingCts = false;
-                session.State = TxStage.SendingDt;
-                session.NextSn = session.PendingCtsNextSn;
-                session.BlockRemaining = session.PendingCtsNumPackets;
-                session.LastDtQueued = false;
-                session.Deadline?.Dispose();
-                session.Deadline = null;
-                TrySendNextCmDt(key);
+                ApplyPendingCts(key, session);
                 return;
             }
 
@@ -1005,6 +1010,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // Send the next DT in the same block; chained via confirmation so DTs cannot race each
         // other in the underlying Task.Run pool (which would otherwise let SN N+1 hit the wire
         // before SN N when the transport is very fast, as happens on virtual/loopback buses).
+        TrySendNextCmDt(key);
+    }
+
+    private void ApplyPendingCts(TxSessionKey key, TxSession session)
+    {
+        session.HasPendingCts = false;
+        session.PendingCtsIsRetransmit = false;
+        session.State = TxStage.SendingDt;
+        session.NextSn = session.PendingCtsNextSn;
+        session.BlockRemaining = session.PendingCtsNumPackets;
+        session.LastDtQueued = false;
+        session.Deadline?.Dispose();
+        session.Deadline = null;
         TrySendNextCmDt(key);
     }
 
@@ -1268,6 +1286,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         /// </summary>
         public bool HasPendingCts { get; set; }
         public byte PendingCtsNumPackets { get; set; }
+        /// <summary>The stashed CTS asks for a packet already sent: applied as soon as the outstanding DT is confirmed (Codex on #152).</summary>
+        public bool PendingCtsIsRetransmit { get; set; }
         /// <summary>How many CTS for a packet already sent this session has served (#58).</summary>
         public int RetransmitRequests { get; set; }
         /// <summary>
