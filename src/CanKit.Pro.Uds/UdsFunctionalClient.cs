@@ -145,9 +145,10 @@ public sealed class UdsFunctionalClient : IDisposable
             long previousUntil;
             lock (_listeners) hadWindow = _openWindows.TryGetDeadline(sid, out previousUntil);
             StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
+            IsoTpTransmitStamps stamps;
             try
             {
-                await _client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+                stamps = await _client.SendWithTransmitStampAsync(request, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (RefusedBeforeTransmission(ex))
             {
@@ -161,9 +162,11 @@ public sealed class UdsFunctionalClient : IDisposable
                 StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
                 throw;
             }
-            // Through StartListening again: the window is moved out to the confirmation, and
-            // the listener, kept through the send, reads it (Codex on #150).
-            StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
+            // Through StartListening again: the window is moved out to the transmission -- the
+            // confirmation where the driver reports none -- and the listener, kept through the
+            // send, reads it; a 0x78 heard from before the handoff answered something else
+            // (Codex on #150).
+            StartListening(sid, TransmittedAt(stamps), inFlight: false, cutoff: stamps.LastFrameHandoffTimestamp);
             return Array.Empty<UdsFunctionalResponse>();
         }
 
@@ -194,10 +197,10 @@ public sealed class UdsFunctionalClient : IDisposable
         long previousUntilBefore;
         lock (_listeners) hadWindowBefore = _openWindows.TryGetDeadline(sid, out previousUntilBefore);
         StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
-        IReadOnlyList<IsoTpFunctionalResponse> raw;
+        IsoTpFunctionalCollection collected;
         try
         {
-            raw = await _client.SendAndCollectAsync(request, window, cancellationToken)
+            collected = await _client.SendAndCollectWithTransmitStampAsync(request, window, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (Exception ex) when (RefusedBeforeTransmission(ex))
@@ -223,13 +226,17 @@ public sealed class UdsFunctionalClient : IDisposable
         // parameter, arriving in this window, is told apart
         // (Codex on #150, twice). How many bytes, per service, is in EchoedRequestBytes.
         int echoed = Math.Min(EchoedRequestBytes(req), req.Length - 1);
-        // The window as anchored at the transmission -- the collection ran for `window` from
-        // the transmit confirmation, so the send was at least `window` ago -- noted before the
-        // 0x78s are read: a listener that retired while the confirmation outlasted the
-        // provisional window has forgotten it, and a 0x78 inside the ECU's P2 must still move
-        // it out (Codex on #150).
-        long transmitted = Stopwatch.GetTimestamp() - Ticks(window);
-        lock (_listeners) NoteAnchored(sid, transmitted);
+        // The window as anchored at the transmission, noted before the 0x78s are read: a
+        // listener that retired while the confirmation outlasted the provisional window has
+        // forgotten it, and a 0x78 inside the ECU's P2 must still move it out (Codex on #150).
+        // The transmission as the driver reported it; where it reports none, the collection
+        // ran for `window` from the confirmation, so the send was at least `window` ago.
+        var raw = collected.Responses;
+        long cutoff = collected.TransmitStamps.LastFrameHandoffTimestamp;
+        long transmitted = collected.TransmitStamps.LastFrameTransmitTimestamp > 0
+            ? collected.TransmitStamps.LastFrameTransmitTimestamp
+            : Stopwatch.GetTimestamp() - Ticks(window);
+        lock (_listeners) NoteAnchored(sid, transmitted, cutoff);
         var responses = new List<UdsFunctionalResponse>(raw.Count);
         foreach (var r in raw)
         {
@@ -241,7 +248,7 @@ public sealed class UdsFunctionalClient : IDisposable
             // the same frame; the earlier of the two to act moves the window, the later is
             // idle. Only a 0x78 that arrived while the window was open: a collection window
             // longer than P2 may hold one from after it, which revives nothing (Codex on #150).
-            if (IsResponsePending(data, sid))
+            if (IsResponsePending(data, sid) && r.HostArrivalTimestamp >= cutoff)
                 Extend(sid, r.HostArrivalTimestamp, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
@@ -268,7 +275,7 @@ public sealed class UdsFunctionalClient : IDisposable
     // so a note that moves the window out either finds the listener still reading -- and it
     // re-reads the deadline before retiring -- or finds none and starts one; a listener cannot
     // retire, forgetting the window, between the note and the check (Codex on #150).
-    private void StartListening(byte sid, long from, bool inFlight)
+    private void StartListening(byte sid, long from, bool inFlight, long cutoff = 0)
     {
         lock (_listeners)
         {
@@ -279,11 +286,14 @@ public sealed class UdsFunctionalClient : IDisposable
             }
             else
             {
-                NoteAnchored(sid, from);
+                NoteAnchored(sid, from, cutoff);
             }
             EnsureListener(sid);
         }
     }
+
+    private static long TransmittedAt(IsoTpTransmitStamps stamps)
+        => stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
 
     // The functional client refuses a request before transmitting it -- oversized for a Single
     // Frame, an argument error -- or because it is disposed; a cancellation or a transport fault
@@ -310,13 +320,18 @@ public sealed class UdsFunctionalClient : IDisposable
     // from the anchor the send gave, then applies the 0x78s heard meanwhile in arrival order,
     // each only if the window was open when it arrived -- one at the transmission moves it
     // out, one from after P2 does not (Codex on #150).
-    private void NoteAnchored(byte sid, long from)
+    private void NoteAnchored(byte sid, long from, long cutoff)
     {
         _openWindows.Note(sid, from, _responseWindow);
         if (!_inFlight.TryGetValue(sid, out var heard)) return;
         _inFlight.Remove(sid);
+        // Each only if it arrived at or after the cutoff -- the handoff to the driver; one
+        // from before it answered something else (Codex on #150).
         foreach (var arrival in heard)
-            _openWindows.ExtendIfOpenAt(sid, arrival, arrival + Ticks(_responsePendingWindow));
+        {
+            if (arrival >= cutoff)
+                _openWindows.ExtendIfOpenAt(sid, arrival, arrival + Ticks(_responsePendingWindow));
+        }
     }
 
     // Under the listeners lock. Starts a listener for the service's window if the window is
