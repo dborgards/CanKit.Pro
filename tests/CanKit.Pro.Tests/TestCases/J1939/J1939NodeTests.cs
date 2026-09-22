@@ -306,6 +306,74 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         J1939Pgn.IsAddressClaim(decomposed.Pgn).Should().BeTrue();
     }
 
+    // #58 (SAE J1939-81 §4.4.4.3): a node that lost arbitration sends its Cannot Claim after a
+    // pseudo-random 0..153 ms derived from its NAME -- the bytes summed, modulo 255, times
+    // 0.6 ms -- so two nodes colliding on an address do not answer in lockstep. The loser's
+    // NAME here gives 78 ms; the gap between the winner's re-announcement, which is what the
+    // loser answers, and the Cannot Claim is at least that, a lower bound a loaded host only
+    // raises.
+    [Fact]
+    public async Task CannotClaim_Is_Sent_After_The_Names_Pseudo_Random_Backoff()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2); // spectator
+
+        long reannouncedAt = 0, cannotClaimedAt = 0;
+        var winnerClaimed = new[] { false };
+        var cannotClaimSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == 0x60 && Interlocked.Read(ref reannouncedAt) == 0 && Volatile.Read(ref winnerClaimed[0]))
+                Interlocked.Exchange(ref reannouncedAt, Stopwatch.GetTimestamp());
+            if (fields.SourceAddress == J1939Pgn.NullAddress)
+            {
+                Interlocked.Exchange(ref cannotClaimedAt, Stopwatch.GetTimestamp());
+                cannotClaimSeen.TrySetResult(true);
+            }
+        };
+
+        var loserName = Name(0x0000E0); // byte sum mod 255 = 130: 78 ms
+        var loserBackoff = TimeSpan.FromMilliseconds((loserName.ToBytes().Sum(b => (int)b) % 255) * 0.6);
+        loserBackoff.Should().Be(TimeSpan.FromMilliseconds(78), "the NAME was chosen for it");
+
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
+        using var loser = J1939Node.Open(busB, new J1939NodeOptions(loserName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
+
+        await winner.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
+        Volatile.Write(ref winnerClaimed[0], true);
+        Func<Task> act = () => loser.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        await cannotClaimSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        Interlocked.Read(ref reannouncedAt).Should().NotBe(0, "the winner re-announced its claim, which is what the loser lost to");
+        var gap = TimeSpan.FromSeconds((Interlocked.Read(ref cannotClaimedAt) - Interlocked.Read(ref reannouncedAt)) / (double)Stopwatch.Frequency);
+        gap.Should().BeGreaterThanOrEqualTo(loserBackoff - TimeSpan.FromMilliseconds(5),
+            "the Cannot Claim waited the NAME's backoff after the claim it lost to");
+    }
+
+    // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
+    // cancelling the first, whose caller is waiting on it.
+    [Fact]
+    public async Task A_Second_Claim_During_Arbitration_Faults_And_Leaves_The_First_Alone()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(0x000030)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
+
+        var first = node.ClaimAddressAsync(0x70);
+        Func<Task> second = () => node.ClaimAddressAsync(0x71).WithTimeout(ShortTimeout);
+        await second.Should().ThrowAsync<InvalidOperationException>();
+
+        await first.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x70);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
     // ---------------------------------------------------------------------------------------
     // #34 (SAE J1939-81 §4.2.2): a Request for PGN 0xEE00 is answered by the node itself —
     // with its Address Claimed while it holds an address, with Cannot-Claim (SA 0xFE) while it
@@ -1772,13 +1840,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await claimB.WithTimeout(ShortTimeout);
     }
 
-    // #121 across claim rounds: a re-claim replaced while in flight, then completed for a third
+    // #121 across claim rounds: a re-claim cancelled while in flight, then completed for a third
     // address, and the echo of the frame sent under the first address still arrives after all of
     // it. The ledger is not touched by claim rounds at all, so nothing here can forget the frame;
-    // the test pins that the replacement does not either (#119 had a marker that a second round
-    // wiped).
+    // the test pins that the cancellation does not either (#119 had a marker that a second round
+    // wiped). Since #58 a second claim no longer replaces one in flight -- it faults -- so the
+    // first is cancelled by its caller here.
     [Fact]
-    public async Task An_Echo_Sent_Under_The_Vacated_Address_Is_Not_Raised_After_A_Replaced_Reclaim()
+    public async Task An_Echo_Sent_Under_The_Vacated_Address_Is_Not_Raised_After_A_Cancelled_Reclaim()
     {
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
@@ -1801,12 +1870,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             destinationAddress: J1939Pgn.GlobalAddress));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
 
-        var superseded = node.ClaimAddressAsync(0x22);
+        using var cancel = new CancellationTokenSource();
+        var superseded = node.ClaimAddressAsync(0x22, cancel.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
-        var reclaim = node.ClaimAddressAsync(0x23);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
+        cancel.Cancel();
         Func<Task> awaitSuperseded = () => superseded.WithTimeout(ShortTimeout);
         await awaitSuperseded.Should().ThrowAsync<TaskCanceledException>();
+        var reclaim = node.ClaimAddressAsync(0x23);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
 
         bus.DeferredEchoes.DiscardNext().Should().BeTrue();  // the broadcast's echo, held back
         bus.DeferredEchoes.ReleaseAll();                     // both claims' announcements

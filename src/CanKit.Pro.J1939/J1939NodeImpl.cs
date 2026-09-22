@@ -307,12 +307,49 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return;
         }
 
-        // Cancel any previous in-flight claim.
-        _pendingClaim?.Deadline?.Dispose();
-        _pendingClaim?.Tcs.TrySetCanceled();
-        _pendingClaim?.CtRegistration.Dispose();
+        // A claim still in arbitration is not silently replaced: the caller who started it
+        // is waiting on it, and a second one is a programming error (#58). A re-claim on a
+        // node that holds an address, or holds none, is what this method is for. A pending
+        // claim whose task has already completed -- cancelled by its caller, whose cancel is
+        // still on its way to this loop -- is over, and is swept here so that awaiting the
+        // cancellation and claiming again is race-free.
+        if (_pendingClaim is { } inFlight)
+        {
+            if (!inFlight.Tcs.Task.IsCompleted)
+            {
+                ctr.Dispose();
+                tcs.TrySetException(new InvalidOperationException(
+                    $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
+                return;
+            }
+            _pendingClaim = null;
+            inFlight.Deadline?.Dispose();
+            inFlight.CtRegistration.Dispose();
+        }
 
         BeginClaimRound(preferredAddress, tcs, ctr);
+    }
+
+    // J1939-81 §4.4.4.3: a node that lost arbitration delays its Cannot Claim, and an
+    // arbitrary-address node its next claim, by a pseudo-random 0..153 ms derived from its
+    // NAME -- the eight bytes summed, modulo 255, times 0.6 ms -- so two nodes colliding on an
+    // address do not answer in lockstep for ever (#58). Fixed by the NAME, so a test can
+    // choose it; scheduled on the actor, so the state it acts on is the state it read.
+    private TimeSpan ClaimBackoff
+    {
+        get
+        {
+            int sum = 0;
+            foreach (var b in _name.ToBytes()) sum += b;
+            return TimeSpan.FromMilliseconds((sum % 255) * 0.6);
+        }
+    }
+
+    private void AfterClaimBackoff(Action onLoop)
+    {
+        var delay = ClaimBackoff;
+        if (delay <= TimeSpan.Zero) { onLoop(); return; }
+        _deadlines.Arm(delay, () => { if (_disposed == 0) onLoop(); });
     }
 
     // Starts (or restarts, for the arbitrary-address fallback) a single arbitration round for
@@ -532,7 +569,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 {
                     // The caller's TCS and its cancellation registration stay alive across
                     // retries; only the arbitration round is restarted.
-                    BeginClaimRound(nextCandidate, pending.Tcs, pending.CtRegistration, scanStart);
+                    AfterClaimBackoff(() => BeginClaimRound(nextCandidate, pending.Tcs, pending.CtRegistration, scanStart));
                     return;
                 }
 
@@ -543,7 +580,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
-                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+                AfterClaimBackoff(() => SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress));
                 pending.Tcs.TrySetException(new J1939CannotClaimException(pending.PreferredAddress));
                 return;
             }
@@ -572,7 +609,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
                     _ = tcs.Task.ContinueWith(t => RaiseBackgroundException(t.Exception!.GetBaseException()),
                         CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                    BeginClaimRound(nextCandidate, tcs, default, scanStart);
+                    AfterClaimBackoff(() => BeginClaimRound(nextCandidate, tcs, default, scanStart));
                     return;
                 }
                 // Broadcast Cannot-Claim and transition.
@@ -580,7 +617,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
-                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+                AfterClaimBackoff(() => SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress));
             }
             else
             {
@@ -631,31 +668,36 @@ internal sealed class J1939NodeImpl : IJ1939Node
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
             destinationAddress: J1939Pgn.GlobalAddress);
-        byte preferred = sourceAddress;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-                var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
-                if (!confirmation.Confirmed)
-                {
-                    var ex = new J1939NodeException(
-                        $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
-                    try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
-                    catch (ObjectDisposedException) { }
-                    return;
-                }
+        // Called directly rather than through Task.Run: SendConfirmed's synchronous part is
+        // the driver hand-off, and its continuation already runs off this loop; a pool hop
+        // in front of it bought nothing and cost one per claim round -- a full arbitrary-
+        // address scan is 240 of them (#58).
+        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress);
+    }
 
-                try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
-                catch (ObjectDisposedException) { }
-            }
-            catch (Exception ex)
+    private async Task TransmitAddressClaimConfirmedAsync(uint canId, byte[] payload, byte preferred)
+    {
+        try
+        {
+            using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
+            var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+            if (!confirmation.Confirmed)
             {
+                var ex = new J1939NodeException(
+                    $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
                 try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
                 catch (ObjectDisposedException) { }
+                return;
             }
-        });
+
+            try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
+            catch (ObjectDisposedException) { }
+        }
+        catch (Exception ex)
+        {
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
+            catch (ObjectDisposedException) { }
+        }
     }
 
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
@@ -887,22 +929,24 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         // Fire-and-forget: address-claim traffic doesn't need a task, but we still want a
         // background exception if the driver rejects it. SendConfirmed is used consistently
-        // with the rest of the CanKit.Pro stack.
-        _ = Task.Run(async () =>
+        // with the rest of the CanKit.Pro stack. No Task.Run hop in front of it (#58).
+        _ = TransmitFrameAsync(canId, payload);
+    }
+
+    private async Task TransmitFrameAsync(uint canId, byte[] payload)
+    {
+        try
         {
-            try
-            {
-                using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-                var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
-                if (!confirmation.Confirmed)
-                    RaiseBackgroundException(new J1939NodeException(
-                        $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
-            }
-            catch (Exception ex)
-            {
-                RaiseBackgroundException(ex);
-            }
-        });
+            using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
+            var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+            if (!confirmation.Confirmed)
+                RaiseBackgroundException(new J1939NodeException(
+                    $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
+        }
+        catch (Exception ex)
+        {
+            RaiseBackgroundException(ex);
+        }
     }
 
     // =========================================================================================
