@@ -755,15 +755,17 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource(ShortTimeout);
         await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
 
-        // Another service's request, cancelled by its caller at 50 ms; the 0x78 arrives while
-        // it waits -- after its pre-send discard, which would route it, and before its abort,
-        // whose discard is the one under test. (A host that delays either instant past the
-        // other lets the pre-send discard route it instead: a pass for the wrong reason, never
-        // a failure.)
+        // Another service's request, cancelled by its caller at 50 ms; the 0x78 is stamped
+        // right after the request's synchronous start -- after its pre-send discard's stamp,
+        // which would otherwise drop the frame as older, and inside the window by construction
+        // rather than by a timer (macOS CI on #150) -- and delivered while the request waits,
+        // before its abort, whose discard is the one under test. (A host that delays the
+        // delivery past the abort lets the next call's wait-out route it instead: a pass for
+        // the wrong reason, never a failure.)
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
         var other = client.ReadDataByIdentifierAsync(0xF190, early.Token);
-        await Task.Delay(20);
         long arrival = Stopwatch.GetTimestamp();
+        await Task.Delay(20);
         byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
         Func<Task> cancelled = () => other;
