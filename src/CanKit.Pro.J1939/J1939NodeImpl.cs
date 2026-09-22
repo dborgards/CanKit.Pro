@@ -489,7 +489,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void HandleIncomingAddressClaim(byte peerSa, byte[] payload)
     {
         if (payload.Length < 8) return; // malformed
-        var peerName = J1939Name.Decompose(BitConverter.ToUInt64(payload, 0));
+        var peerName = J1939Name.FromBytes(payload); // the wire order, not the host's (#55)
 
         // A frame carrying our own NAME cannot be a claim we have to arbitrate against: equal
         // NAME fails HasHigherClaimPriorityThan in both directions, so both parties would take
@@ -619,13 +619,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         TransmitFrame(canId, payload);
     }
 
-    private byte[] BuildAddressClaimPayload()
-    {
-        var payload = new byte[8];
-        ulong v = _name.Value;
-        for (int i = 0; i < 8; i++) payload[i] = (byte)((v >> (8 * i)) & 0xFF);
-        return payload;
-    }
+    private byte[] BuildAddressClaimPayload() => _name.ToBytes();
 
     /// <summary>
     /// Sends the initial Address Claim with <see cref="ICanBusService.SendConfirmed"/> and

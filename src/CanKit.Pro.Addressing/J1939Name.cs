@@ -148,6 +148,51 @@ namespace CanKit.Pro.Addressing
         public static J1939Name Decompose(ulong value) => new J1939Name(value);
 
         /// <summary>
+        /// The NAME as it travels in the data field of an Address Claimed message: eight bytes,
+        /// least significant first (SAE J1939-81 §4.1 -- byte 1 carries bits 1-8 of the
+        /// Identity Number, byte 8 the Industry Group and the Arbitrary Address Capable bit).
+        /// Fixed by the standard, not by the host: a platform-endian conversion of
+        /// <see cref="Value"/> is wrong on a big-endian host (#55).
+        /// </summary>
+        public byte[] ToBytes()
+        {
+            var bytes = new byte[8];
+            WriteTo(bytes, 0);
+            return bytes;
+        }
+
+        /// <summary>
+        /// Writes the NAME's eight bytes, least significant first, into
+        /// <paramref name="destination"/> at <paramref name="offset"/>. See <see cref="ToBytes"/>.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="destination"/> is <c>null</c>.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">Fewer than eight bytes from <paramref name="offset"/>.</exception>
+        public void WriteTo(byte[] destination, int offset = 0)
+        {
+            if (destination is null) throw new ArgumentNullException(nameof(destination));
+            if (offset < 0 || destination.Length - offset < 8)
+                throw new ArgumentOutOfRangeException(nameof(offset), offset, "A NAME takes eight bytes.");
+            for (int i = 0; i < 8; i++) destination[offset + i] = (byte)(Value >> (8 * i));
+        }
+
+        /// <summary>
+        /// Reads a NAME from eight bytes, least significant first, at <paramref name="offset"/>
+        /// in <paramref name="source"/> -- the data field of an Address Claimed message. See
+        /// <see cref="ToBytes"/>.
+        /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="source"/> is <c>null</c>.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">Fewer than eight bytes from <paramref name="offset"/>.</exception>
+        public static J1939Name FromBytes(byte[] source, int offset = 0)
+        {
+            if (source is null) throw new ArgumentNullException(nameof(source));
+            if (offset < 0 || source.Length - offset < 8)
+                throw new ArgumentOutOfRangeException(nameof(offset), offset, "A NAME takes eight bytes.");
+            ulong value = 0;
+            for (int i = 7; i >= 0; i--) value = (value << 8) | source[offset + i];
+            return new J1939Name(value);
+        }
+
+        /// <summary>
         /// Compares two NAMEs for SAE J1939-81 address claiming priority.
         /// </summary>
         /// <returns>
