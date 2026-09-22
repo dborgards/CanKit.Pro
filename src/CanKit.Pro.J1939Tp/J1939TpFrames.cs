@@ -170,8 +170,14 @@ internal static class J1939TpFrames
     public static uint ReadDataPgn(ReadOnlySpan<byte> tpCmPayload)
     {
         if (tpCmPayload.Length < 8) throw new ArgumentException("TP.CM payload must be 8 bytes.", nameof(tpCmPayload));
-        return ((uint)tpCmPayload[5] | ((uint)tpCmPayload[6] << 8) | ((uint)tpCmPayload[7] << 16))
-               & J1939Pgn.MaxValue;
+        uint pgn = ((uint)tpCmPayload[5] | ((uint)tpCmPayload[6] << 8) | ((uint)tpCmPayload[7] << 16))
+                   & J1939Pgn.MaxValue;
+        // A PDU1 PGN (PDU Format < 240) has a PDU Specific byte of 0 (SAE J1939-21); a stack
+        // that writes the destination address into it instead names the same group, and its
+        // CTS or EndOfMsgAck must still find the session keyed on the PGN. Normalised here, so
+        // every reader of the field agrees (#58).
+        if (((pgn >> 8) & 0xFF) < 240) pgn &= 0x3FF00u;
+        return pgn;
     }
 
     private static void WriteDataPgn(byte[] payload, uint dataPgn)

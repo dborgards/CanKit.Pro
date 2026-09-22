@@ -18,7 +18,7 @@ namespace CanKit.Pro.J1939Tp;
 /// Actor-driven <see cref="IJ1939TpChannel"/> that composes on top of the CanKit.Pro L2
 /// services: <see cref="ICanBusService"/> for RX demux and TX confirmation,
 /// <see cref="IProtocolActor"/> for single-writer per-session state, and
-/// <see cref="DeadlineScheduler"/> for the J1939-21 §5.10.2.4 timers T1..T4/Th (SRS
+/// <see cref="DeadlineScheduler"/> for the J1939-21 §5.10.2.4 timers T1..T4 and the BAM packet spacing (SRS
 /// FR-TP-032/034).
 ///
 /// <para>
@@ -185,6 +185,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         if (pgn > J1939Pgn.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(pgn), pgn, "PGN must fit in 18 bits.");
+        // A PDU1 PGN's low byte is 0 (SAE J1939-21); the destination is the address argument,
+        // and a value with the byte set is not a PGN -- as J1939Id.ComposePgn refuses it (#55,
+        // #58). Refused here rather than normalised, so the session is keyed on what the peer
+        // will name in its CTS and EndOfMsgAck.
+        if (((pgn >> 8) & 0xFF) < 240 && (pgn & 0xFF) != 0)
+            throw new ArgumentOutOfRangeException(nameof(pgn), pgn,
+                "A PDU1 PGN (PDU Format < 240) has a low byte of 0; the destination address is a separate argument.");
         if (payloadLength < J1939TpFrames.MinTpPayloadLength || payloadLength > J1939TpFrames.MaxTpPayloadLength)
             throw new ArgumentOutOfRangeException(nameof(payloadLength), payloadLength,
                 $"J1939-TP payload length must be in [{J1939TpFrames.MinTpPayloadLength}, {J1939TpFrames.MaxTpPayloadLength}] bytes.");
@@ -486,13 +493,20 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                         return;
                     }
 
+                    // An RTS that allows no packet per CTS can never be served: every CTS this
+                    // side may send would be a CTS(0) hold. It is not "no limit" -- that is 0xFF
+                    // (§5.10.3.1) -- and no session is opened for it; the originator's T3 closes
+                    // its side, as for the other malformed RTS above (#58).
+                    if (maxCts == 0)
+                        return;
+
                     // Send CTS for the first block, capping at our advertised max-packets-per-CTS
                     // and at the peer's own RTS cap (0xFF = "no limit" per §5.10.3.1).
                     // Build the CTS *before* registering the RX session so a validation failure
                     // cannot leave a timerless orphan that blocks further CM from this source
                     // (§5.10.3).
                     byte cap = _options.MaxPacketsPerCts;
-                    if (maxCts != 0xFF && maxCts > 0 && maxCts < cap) cap = maxCts;
+                    if (maxCts != 0xFF && maxCts < cap) cap = maxCts;
                     byte block = (byte)Math.Min(cap, totalPackets);
                     var cts = J1939TpFrames.BuildCts(block, 1, dataPgn);
                     var session = RxSession.NewCm(sa, dataPgn, totalBytes, totalPackets, cap,
@@ -747,7 +761,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             var bam = J1939TpFrames.BuildBam(pdu.Length, totalPackets, key.Pgn);
             // Do not schedule TP.DT until the BAM announce is TX-confirmed. Otherwise a rejected
-            // BAM can still complete SendBamAsync after Th once DTs finish (Bugbot 3596183535).
+            // BAM can still complete SendBamAsync after the packet spacing once DTs finish (Bugbot 3596183535).
             SendTpCm(bam, destinationAddress: J1939TpFrames.GlobalDestinationAddress, session,
                 onConfirmed: () => OnBamAnnounceConfirmed(key));
         }
@@ -756,10 +770,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private void OnBamAnnounceConfirmed(TxSessionKey key)
     {
         if (!_txSessions.TryGetValue(key, out var session) || session.IsCm) return;
-        // BAM sender: hold-off Th between BAM and first DT, then Th between subsequent DTs.
+        // BAM sender: the packet spacing between BAM and first DT, then between subsequent DTs.
         session.State = TxStage.SendingDt;
         session.NextSn = 1;
-        _actor.Schedule(_options.Th, () => TrySendNextBamDt(key));
+        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(key));
     }
 
     private void HandleRxTxSideResponse(byte sa, uint dataPgn, byte[] payload)
@@ -792,22 +806,35 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             int expectedSn = session.State == TxStage.SendingDt && session.BlockRemaining > 0
                 ? session.NextSn + session.BlockRemaining
                 : (session.NextSn == 0 ? 1 : session.NextSn);
-            if (nextSn != expectedSn)
+            bool retransmit = nextSn > 0 && nextSn < expectedSn;
+            if (nextSn != expectedSn && !retransmit)
             {
-                // A CTS for a packet already sent is a retransmit request, which this stack
-                // does not serve -- its limit is reached at once (table 7, code 5); one for a
-                // packet beyond the next, or for packet 0, which no message has, is a sequence
-                // number nothing can recover from (code 7).
-                AbortTx(session, nextSn > 0 && nextSn < expectedSn
-                        ? J1939TpAbortReason.MaximumRetransmitRequestsReached
-                        : J1939TpAbortReason.BadSequenceNumber,
+                // A CTS for a packet beyond the next, or for packet 0, which no message has,
+                // is a sequence number nothing can recover from (table 7, code 7).
+                AbortTx(session, J1939TpAbortReason.BadSequenceNumber,
                     $"Peer requested SN {nextSn} but we expected SN {expectedSn}.");
                 return;
             }
+            if (retransmit)
+            {
+                // A CTS for a packet already sent asks for it again (§5.10.2.4): served, from
+                // that packet on, up to MaxRetransmitRequests times per session; the next one
+                // reaches the limit table 7's code 5 names (#58). The whole PDU is in hand, so
+                // nothing is lost by starting over from an earlier packet.
+                if (session.RetransmitRequests >= _options.MaxRetransmitRequests)
+                {
+                    AbortTx(session, J1939TpAbortReason.MaximumRetransmitRequestsReached,
+                        $"Peer requested SN {nextSn} again after {session.RetransmitRequests} retransmit request(s), the limit.");
+                    return;
+                }
+                session.RetransmitRequests++;
+            }
 
-            int packetsBeforeNextBlock = session.State == TxStage.SendingDt
-                ? Math.Max(0, session.NextSn + Math.Max(0, session.BlockRemaining) - 1)
-                : Math.Max(0, (session.NextSn == 0 ? 1 : session.NextSn) - 1);
+            int packetsBeforeNextBlock = retransmit
+                ? nextSn - 1
+                : session.State == TxStage.SendingDt
+                    ? Math.Max(0, session.NextSn + Math.Max(0, session.BlockRemaining) - 1)
+                    : Math.Max(0, (session.NextSn == 0 ? 1 : session.NextSn) - 1);
             int totalRemaining = session.TotalPackets - packetsBeforeNextBlock;
             if (numPackets > totalRemaining)
             {
@@ -831,6 +858,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             session.NextSn = nextSn;
             session.BlockRemaining = numPackets;
             session.HasPendingCts = false;
+            session.LastDtQueued = false; // a retransmit re-queues the last packet
             session.Deadline?.Dispose();
             session.Deadline = null;
             TrySendNextCmDt(key);
@@ -902,8 +930,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
 
         session.NextSn = (byte)nextSn;
-        // Th hold-off between two consecutive BAM DTs (J1939-21 §5.10.3, 50..200 ms).
-        _actor.Schedule(_options.Th, () => TrySendNextBamDt(key));
+        // The spacing between two consecutive BAM DTs (J1939-21 §5.10.3, 50..200 ms).
+        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(key));
     }
 
     private void TrySendNextCmDt(TxSessionKey key)
@@ -930,9 +958,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.BlockRemaining--;
         int sentPackets = confirmedSn;
 
-        if (sentPackets >= session.TotalPackets)
+        if (sentPackets >= session.TotalPackets && !session.HasPendingCts)
         {
-            // Last packet -- wait for EndOfMsgAck (T3).
+            // Last packet -- wait for EndOfMsgAck (T3). A CTS stashed meanwhile is a
+            // retransmit request, applied below like any block's (#58).
             session.State = TxStage.WaitEom;
             session.Deadline?.Dispose();
             session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
@@ -951,6 +980,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 session.State = TxStage.SendingDt;
                 session.NextSn = session.PendingCtsNextSn;
                 session.BlockRemaining = session.PendingCtsNumPackets;
+                session.LastDtQueued = false;
                 session.Deadline?.Dispose();
                 session.Deadline = null;
                 TrySendNextCmDt(key);
@@ -1068,15 +1098,26 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // =========================================================================================
     private void EmitPdu(J1939TpDatagram datagram)
     {
-        try
-        {
-            DatagramReceived?.Invoke(this, datagram);
-        }
-        catch (Exception ex)
-        {
-            RaiseBackgroundException(ex);
-        }
+        // Enqueued first, so ReceiveAsync / ReceiveAllAsync see the datagram even if a
+        // DatagramReceived handler blocks; raised off the actor's loop, so a handler that
+        // waits on this channel -- ReceiveAsync, a send -- cannot deadlock the mailbox. As
+        // IsoTpChannel.EmitPdu (#58).
         _pduInbox.Writer.TryWrite(RxInboxItem.FromDatagram(datagram));
+
+        var handler = DatagramReceived;
+        if (handler is null)
+            return;
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                handler.Invoke(this, datagram);
+            }
+            catch (Exception ex)
+            {
+                RaiseBackgroundException(ex);
+            }
+        });
     }
 
     /// <summary>
@@ -1218,6 +1259,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         /// </summary>
         public bool HasPendingCts { get; set; }
         public byte PendingCtsNumPackets { get; set; }
+        /// <summary>How many CTS for a packet already sent this session has served (#58).</summary>
+        public int RetransmitRequests { get; set; }
         /// <summary>
         /// Set when <see cref="TrySendNextCmDt"/> queues the final TP.DT (SN == TotalPackets).
         /// Used to accept an early EndOfMsgAck that races ahead of SendConfirmed → WaitEom.

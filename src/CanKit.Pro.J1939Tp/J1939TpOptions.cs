@@ -15,10 +15,12 @@ namespace CanKit.Pro.J1939Tp;
 ///   <item><description><see cref="T2"/> = 1250 ms — CTS→first TP.DT timeout at the receiver.</description></item>
 ///   <item><description><see cref="T3"/> = 1250 ms — RTS→CTS, block→next CTS and last DT→EndOfMsgAck timeout at the originator.</description></item>
 ///   <item><description><see cref="T4"/> = 1050 ms — TP.CM hold timeout at the originator after CTS(0) (§5.10.2.4).</description></item>
-///   <item><description><see cref="Th"/> = 50 ms — hold-off between two consecutive BAM DTs (50..200 ms).</description></item>
 /// </list>
 /// The standard's Tr (200 ms) is the time a node has to <em>send</em> a response it owes, not
-/// a timer a peer is held to; this stack answers at once and has no option for it (#31).
+/// a timer a peer is held to; this stack answers at once and has no option for it (#31). Its
+/// Th (500 ms) is the holding time between two CTS(0) messages a responder sends; this stack
+/// sends none and has no option for it either (#144). <see cref="BamPacketSpacing"/> (50 ms)
+/// is the spacing between two BAM packets, §5.10.3's 50..200 ms -- not a timer of §5.10.2.4.
 /// </remarks>
 public sealed class J1939TpOptions
 {
@@ -46,11 +48,22 @@ public sealed class J1939TpOptions
     public TimeSpan T4 { get; init; } = TimeSpan.FromMilliseconds(1050);
 
     /// <summary>
-    /// Th — minimum hold-off between two consecutive BAM TP.DT frames on the wire (§5.10.3
+    /// Minimum spacing between two consecutive BAM TP.DT frames on the wire (§5.10.3
     /// "50..200 ms"). Default 50 ms to stay at the lower recommended bound while still gating
-    /// against a receiver that cannot keep up.
+    /// against a receiver that cannot keep up. Not the standard's Th, which is the holding time
+    /// between CTS(0) messages and which this stack does not use; this option was named Th
+    /// before #144.
     /// </summary>
-    public TimeSpan Th { get; init; } = TimeSpan.FromMilliseconds(50);
+    public TimeSpan BamPacketSpacing { get; init; } = TimeSpan.FromMilliseconds(50);
+
+    /// <summary>
+    /// How many times per TP.CM session this originator serves a CTS that asks for a packet it
+    /// has already sent -- a retransmit request (§5.10.2.4); the next one is answered with
+    /// Connection Abort reason 5, "maximum retransmit request limit reached" (table 7). The
+    /// standard names the limit and leaves its value to the implementation. Default 2; 0 serves
+    /// none (#58).
+    /// </summary>
+    public int MaxRetransmitRequests { get; init; } = 2;
 
     /// <summary>
     /// TX priority for TP.CM / TP.DT frames sent by this channel (0..7, 0 = highest). J1939-21
@@ -85,14 +98,18 @@ public sealed class J1939TpOptions
         TimeSpan? t2 = null,
         TimeSpan? t3 = null,
         TimeSpan? t4 = null,
-        TimeSpan? th = null,
+        TimeSpan? bamPacketSpacing = null,
         byte? priority = null,
         byte? maxPacketsPerCts = null,
-        int? receiveBufferCapacity = null)
+        int? receiveBufferCapacity = null,
+        int? maxRetransmitRequests = null)
     {
         if (maxPacketsPerCts is 0)
             throw new ArgumentOutOfRangeException(nameof(maxPacketsPerCts), maxPacketsPerCts,
                 "MaxPacketsPerCts must be in [1, 255]; 0 is not a valid CTS grant size.");
+        if (maxRetransmitRequests < 0)
+            throw new ArgumentOutOfRangeException(nameof(maxRetransmitRequests), maxRetransmitRequests,
+                "MaxRetransmitRequests must be >= 0 (0 serves none).");
 
         return new()
         {
@@ -100,10 +117,11 @@ public sealed class J1939TpOptions
             T2 = t2 ?? T2,
             T3 = t3 ?? T3,
             T4 = t4 ?? T4,
-            Th = th ?? Th,
+            BamPacketSpacing = bamPacketSpacing ?? BamPacketSpacing,
             Priority = priority ?? Priority,
             MaxPacketsPerCts = maxPacketsPerCts ?? MaxPacketsPerCts,
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
+            MaxRetransmitRequests = maxRetransmitRequests ?? MaxRetransmitRequests,
         };
     }
 
@@ -122,5 +140,8 @@ public sealed class J1939TpOptions
         if (ReceiveBufferCapacity < 1)
             throw new ArgumentOutOfRangeException(nameof(ReceiveBufferCapacity), ReceiveBufferCapacity,
                 "ReceiveBufferCapacity must be >= 1.");
+        if (MaxRetransmitRequests < 0)
+            throw new ArgumentOutOfRangeException(nameof(MaxRetransmitRequests), MaxRetransmitRequests,
+                "MaxRetransmitRequests must be >= 0 (0 serves none).");
     }
 }

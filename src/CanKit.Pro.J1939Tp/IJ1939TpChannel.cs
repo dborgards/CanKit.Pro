@@ -13,7 +13,7 @@ namespace CanKit.Pro.J1939Tp;
 /// <remarks>
 /// <para>
 /// Threading model (SRS FR-TP-034 = FR-TP-016/017 applied to J1939-TP): every session's state
-/// (sequence numbers, remaining bytes, block counters, T1..T4/Th deadlines) lives inside a
+/// (sequence numbers, remaining bytes, block counters, T1..T4 deadlines and the BAM packet spacing) lives inside a
 /// single <see cref="Actor.IProtocolActor"/> mailbox and is only ever read/written on the
 /// actor's loop thread. Callers may invoke <see cref="SendBamAsync"/> or
 /// <see cref="SendCmAsync"/> concurrently from any thread; the channel serializes them per

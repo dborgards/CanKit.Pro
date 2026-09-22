@@ -623,11 +623,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // Shorten Th so the multi-frame test runs in <1s while still exercising the timer.
         var senderOpts = new J1939NodeOptions(Name(1))
         {
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5)),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5)),
         };
         var receiverOpts = new J1939NodeOptions(Name(2))
         {
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5)),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5)),
         };
 
         using var sender = J1939Node.Open(busA, senderOpts);
@@ -680,7 +680,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // and surfaces the directed multi-frame PDU on MessageReceived.
         using var receiver = J1939Node.Open(busB, new J1939NodeOptions(Name(2))
         {
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5)),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5)),
         });
         await receiver.ClaimAddressAsync(0xA0).WithTimeout(ShortTimeout);
         receiver.ClaimState.Should().Be(J1939ClaimState.Claimed);
@@ -690,7 +690,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // J1939-TP channel from a different SA so the frames actually travel across the
         // virtual bus and hit the node's transport RX filter.
         using var peerTp = CanKit.Pro.J1939Tp.J1939Tp.Open(busA, sourceAddress: 0x55,
-            new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5)));
+            new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5)));
 
         var payload = new byte[24];
         for (int i = 0; i < payload.Length; i++) payload[i] = (byte)(0xB0 + i);
@@ -1014,7 +1014,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var opts = new J1939NodeOptions(Name(1))
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(40),
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(2)),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(2)),
         };
         using var node = J1939Node.Open(busNode, opts);
 
@@ -1042,11 +1042,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
 
         using var peerTp = CanKit.Pro.J1939Tp.J1939Tp.Open(busPeer, sourceAddress: 0x77,
-            new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(2)));
+            new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(2)));
         // A second source address for the probes: one SA may only run one BAM session at a
         // time, and the probe must not have to queue behind the background stream.
         using var probeTp = CanKit.Pro.J1939Tp.J1939Tp.Open(busProbe, sourceAddress: 0x78,
-            new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(2)));
+            new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(2)));
 
         int sent = 0;
         using var peerCts = new CancellationTokenSource();
@@ -1156,7 +1156,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var opts = new J1939NodeOptions(Name(1))
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(60)),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(60)),
         };
         using var node = J1939Node.Open(busA, opts);
         await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
@@ -1393,7 +1393,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         var nodeOptions = new J1939NodeOptions(Name(1))
         {
-            TransportOptions = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(1)),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(1)),
         };
         var senderActor = clock.NewActor();
         using var sender = new J1939NodeImpl(service, nodeOptions, ownsService: false, senderActor);

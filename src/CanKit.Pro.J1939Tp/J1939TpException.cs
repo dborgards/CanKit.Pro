@@ -23,7 +23,7 @@ public class J1939TpException : CanKitException
 
 /// <summary>
 /// Raised when a J1939-21 §5.10.5 Connection Abort is issued or received on a TP.CM session,
-/// or when a BAM/TP.CM session gives up because one of T1/T2/T3/T4/Th expired.
+/// or when a BAM/TP.CM session gives up because one of T1/T2/T3/T4 expired.
 /// </summary>
 public sealed class J1939TpAbortException : J1939TpException
 {
