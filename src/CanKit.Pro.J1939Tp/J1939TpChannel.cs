@@ -799,23 +799,20 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 return;
             }
 
-            // Expected SN for the *next* block. While the last DT of the current block is still
-            // awaiting SendConfirmed, NextSn has not yet advanced — but a fast peer (Virtual
-            // loopback) may already have received that DT and emitted the next CTS. Accept a CTS
-            // that asks for NextSn + BlockRemaining in that race, and apply it once the block drains.
-            // With every packet sent, the next would be TotalPackets + 1 -- as an int, since a
-            // 255-packet message wraps the byte NextSn to 0, and a retransmit request for its
-            // last packet must still read as one (Codex on #152).
-            int expectedSn = session.State == TxStage.WaitEom
-                ? session.TotalPackets + 1
-                : session.State == TxStage.SendingDt && session.BlockRemaining > 0
-                    ? session.NextSn + session.BlockRemaining
-                    : (session.NextSn == 0 ? 1 : session.NextSn);
-            // While a block drains, a packet is "already sent" only up to the one outstanding
-            // (NextSn, unconfirmed); a CTS for a later packet of the grant would skip the ones
-            // between, and is a sequence error, not a retransmit (Codex on #152).
+            // What has gone out: the highest packet ever confirmed (HighestSentSn -- an int, so a
+            // 255-packet message's last packet counts, where the byte NextSn wraps to 0), and,
+            // while a block drains, the one outstanding (NextSn, unconfirmed). A CTS for a
+            // packet at or below that frontier asks for it again; one for the packet right
+            // after it is the next block; anything else is a sequence error (table 7, code 7).
+            // After a partial retransmit the cursor is below the frontier, and packets between
+            // the two were sent -- classified against the frontier, not the cursor (Codex on
+            // #152, three times). While a block drains, a fast peer (Virtual loopback) may
+            // already have received the outstanding DT and asked for the block after it:
+            // accepted, and applied once the block drains.
             bool midBlock = session.State == TxStage.SendingDt && session.BlockRemaining > 0;
-            bool retransmit = nextSn > 0 && (midBlock ? nextSn <= session.NextSn : nextSn < expectedSn);
+            int frontier = midBlock ? Math.Max(session.HighestSentSn, session.NextSn) : session.HighestSentSn;
+            int expectedSn = midBlock ? session.NextSn + session.BlockRemaining : session.HighestSentSn + 1;
+            bool retransmit = nextSn > 0 && nextSn <= frontier;
             if (nextSn != expectedSn && !retransmit)
             {
                 // A CTS for a packet beyond the next, or for packet 0, which no message has,
@@ -839,11 +836,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 session.RetransmitRequests++;
             }
 
-            int packetsBeforeNextBlock = retransmit
-                ? nextSn - 1
-                : session.State == TxStage.SendingDt
-                    ? Math.Max(0, session.NextSn + Math.Max(0, session.BlockRemaining) - 1)
-                    : Math.Max(0, (session.NextSn == 0 ? 1 : session.NextSn) - 1);
+            int packetsBeforeNextBlock = nextSn - 1;
             int totalRemaining = session.TotalPackets - packetsBeforeNextBlock;
             if (numPackets > totalRemaining)
             {
@@ -973,7 +966,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.NextSn = (byte)nextSn;
         session.BlockRemaining--;
         int sentPackets = confirmedSn;
-        if (sentPackets >= session.TotalPackets) session.AllPacketsSent = true;
+        if (confirmedSn > session.HighestSentSn) session.HighestSentSn = confirmedSn;
+        if (session.HighestSentSn >= session.TotalPackets) session.AllPacketsSent = true;
 
         // A retransmit request stashed while this block was draining takes effect now, with
         // the outstanding DT confirmed, rather than after the block (Codex on #152).
@@ -1294,6 +1288,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public bool PendingCtsIsRetransmit { get; set; }
         /// <summary>How many CTS for a packet already sent this session has served (#58).</summary>
         public int RetransmitRequests { get; set; }
+        /// <summary>
+        /// The highest packet ever confirmed sent -- the frontier a retransmit request is told
+        /// from the next block by, which the cursor NextSn is not after a partial retransmit
+        /// (Codex on #152). An int: the byte NextSn wraps at 255.
+        /// </summary>
+        public int HighestSentSn { get; set; }
         /// <summary>
         /// Every packet has been confirmed sent at least once: from here on an EndOfMsgAck is a
         /// valid end whatever block a retransmit left the session in (Bugbot on #152).

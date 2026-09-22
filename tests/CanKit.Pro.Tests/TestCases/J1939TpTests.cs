@@ -2173,6 +2173,64 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         lock (aborts) aborts.Should().ContainSingle().Which[1].Should().Be((byte)J1939TpAbortReason.BadSequenceNumber);
     }
 
+    // Codex on #152: after a partial retransmit the cursor is below the highest packet sent,
+    // and a request for a packet between the two is a retransmit -- served, and counted.
+    [Fact]
+    public async Task A_Retransmit_Request_Above_The_Cursor_But_Below_The_Highest_Sent_Is_Served()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC8u;
+        var payload = RandomPayload(21, seed: 9); // three packets
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)); // packet 1 again: cursor 2
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 3, dataPgn: pgn)); // packet 3 again: above the cursor, sent before
+        await peer.WaitForDtCountAsync(5, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(21, 3, pgn));
+        await send.WaitAsync(ShortTimeout);
+    }
+
+    // Codex on #152: and a request for the packet at the cursor after a partial retransmit is
+    // a retransmit too -- not the next block -- and counts against the limit.
+    [Fact]
+    public async Task A_Retransmit_Request_At_The_Cursor_After_A_Partial_Retransmit_Counts()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 10); // three packets
+        var opts = new J1939TpOptions().With(maxRetransmitRequests: 1);
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa, options: opts);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)); // the one retransmit allowed
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn)); // at the cursor, sent before: the second
+        var abort = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlAbort, ShortTimeout);
+        abort[1].Should().Be((byte)J1939TpAbortReason.MaximumRetransmitRequestsReached);
+        Func<Task> failed = () => send;
+        await failed.Should().ThrowAsync<J1939TpAbortException>();
+    }
+
     // Codex on #152: a 255-packet message wraps the byte NextSn to 0 once every packet is
     // sent; a retransmit request for its last packet must still read as one, and be served.
     [Fact]
