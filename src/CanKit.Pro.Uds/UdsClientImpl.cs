@@ -440,6 +440,13 @@ internal sealed class UdsClientImpl : IUdsClient
         await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
         try
         {
+            // The stale-reply discard the answered path runs before its send, here too: a late
+            // 0x78 to an earlier request for this service, queued since that request's abort,
+            // would otherwise be read by the next call's wait-out as inside this send's window
+            // -- it predates the send, which the window's end alone does not say -- and move
+            // the window out by P2* for nothing (Codex on #150). A 0x78 for a service with a
+            // window still open is routed to it by the discard, as always.
+            await DiscardStalePdusAsync().ConfigureAwait(false);
             // Noted before the send as well: cancelled between the driver's acceptance and the
             // confirmation, the frame is on the bus and may still be answered (Codex on #150).
             // Moved out to the transmit stamp afterwards.

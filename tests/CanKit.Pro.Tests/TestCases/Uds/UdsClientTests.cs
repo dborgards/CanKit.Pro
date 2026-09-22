@@ -777,6 +777,53 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             "the aborted request's discard routed the 0x78 to the suppressed send's window");
     }
 
+    // Codex on #150: a late 0x78 to an earlier request for the service, queued since that
+    // request was cancelled, is not the suppressed send's; the suppressed send discards it
+    // before it goes out, and the next call does not wait P2* on it.
+    [Fact]
+    public async Task A_Stale_Pending_Answer_Queued_Before_A_Suppressed_Send_Does_Not_Extend_Its_Window()
+    {
+        int calls = 0;
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                switch (Interlocked.Increment(ref calls))
+                {
+                    case 1: // the request the caller cancels: its 0x78 at 100 ms is stale by then, its negative never comes in time
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
+                    case 2: // the suppressed send: no answer
+                        throw new EcuSilent();
+                    default:
+                        return new byte[] { 0x00 };
+                }
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(100),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+            Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, early.Token);
+            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+            await Task.Delay(150); // the stale 0x78 (100 ms) is queued
+
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+
+            // Read as this send's, the stale 0x78 would move the window out to 2100 ms and this
+            // call wait most of two seconds; a loaded host only makes it slower.
+            var sw = Stopwatch.StartNew();
+            var answer = await client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+            sw.Stop();
+            answer.Should().Equal(0x7E, 0x00);
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the stale 0x78 was discarded before the suppressed send");
+        }
+    }
+
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()
