@@ -121,7 +121,14 @@ namespace CanKit.Pro.IsoTp
         public void Dispose() { }
         public CanKit.Pro.IsoTp.IsoTpFunctionalListener Listen() { }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> SendAndCollectAsync(System.ReadOnlyMemory<byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpFunctionalCollection> SendAndCollectWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
         public System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpTransmitStamps> SendWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public readonly struct IsoTpFunctionalCollection
+    {
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse> Responses { get; }
+        public CanKit.Pro.IsoTp.IsoTpTransmitStamps TransmitStamps { get; }
     }
     public sealed class IsoTpFunctionalListener : System.IDisposable
     {

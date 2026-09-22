@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -124,6 +125,21 @@ public sealed class IsoTpFunctionalClient : IDisposable
         ReadOnlyMemory<byte> pdu,
         TimeSpan window,
         CancellationToken cancellationToken = default)
+        => (await SendAndCollectWithTransmitStampAsync(pdu, window, cancellationToken).ConfigureAwait(false)).Responses;
+
+    /// <summary>
+    /// As <see cref="SendAndCollectAsync"/>, also returning when the request was handed to the
+    /// driver and when it was transmitted (<see cref="IsoTpTransmitStamps"/>, zero where the
+    /// driver reports neither). A response that arrived before the handoff answers something
+    /// else -- the subscription is made before the send, and a frame from between the two is
+    /// not this request's -- and is left out (Codex on #150); a caller keeping its own deadline
+    /// from a response, such as UDS P2* from an NRC 0x78, anchors it no earlier than the
+    /// handoff for the same reason.
+    /// </summary>
+    public async Task<IsoTpFunctionalCollection> SendAndCollectWithTransmitStampAsync(
+        ReadOnlyMemory<byte> pdu,
+        TimeSpan window,
+        CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         if (pdu.Length == 0)
@@ -153,9 +169,13 @@ public sealed class IsoTpFunctionalClient : IDisposable
         using var sub = _service.Subscribe(_responseFilter, includeEcho: true);
         DrainBuffered(sub);
 
-        await SendSingleFrameAsync(pdu, cancellationToken).ConfigureAwait(false);
+        var stamps = await SendSingleFrameAsync(pdu, cancellationToken).ConfigureAwait(false);
 
-        return await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
+        var collected = await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
+        long cutoff = stamps.LastFrameHandoffTimestamp;
+        if (cutoff > 0 && collected.Any(r => r.HostArrivalTimestamp < cutoff))
+            collected = collected.Where(r => r.HostArrivalTimestamp >= cutoff).ToList().AsReadOnly();
+        return new IsoTpFunctionalCollection(collected, stamps);
     }
 
     /// <summary>
@@ -173,6 +193,14 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// </exception>
     /// <exception cref="IsoTpException">TX-confirm failed.</exception>
     public Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
+        => SendWithTransmitStampAsync(pdu, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="SendAsync"/>, returning when the frame was handed to the driver and when
+    /// it was transmitted (<see cref="IsoTpTransmitStamps"/>, zero where the driver reports
+    /// neither), for a caller that keeps a deadline from the transmission (Codex on #150).
+    /// </summary>
+    public Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         if (pdu.Length == 0)
@@ -231,7 +259,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// Sends <paramref name="pdu"/> as a functional Single Frame and awaits the CAN driver's
     /// TX confirmation.
     /// </summary>
-    private async Task SendSingleFrameAsync(ReadOnlyMemory<byte> pdu, CancellationToken ct)
+    private async Task<IsoTpTransmitStamps> SendSingleFrameAsync(ReadOnlyMemory<byte> pdu, CancellationToken ct)
     {
         int sfMax = IsoTpFrameCodec.SingleFrameMaxDataLength(_options.UseCanFd,
             _txEndpoint.UsesAddressExtension);
@@ -271,6 +299,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
                     new IsoTpException("Functional Single Frame TX confirmation failed with unknown reason."),
             };
         }
+        return new IsoTpTransmitStamps(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
     }
 
     private static async Task<IReadOnlyList<IsoTpFunctionalResponse>> CollectFromSubscriptionAsync(

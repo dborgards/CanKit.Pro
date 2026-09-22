@@ -135,6 +135,12 @@ foreach (var r in responses)
   collected in arrival order.
 - `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `UsePadding`, `PaddingByte`,
   and `NAs` (TX-confirm timeout).
+- **When the request went out**: `SendWithTransmitStampAsync` and
+  `SendAndCollectWithTransmitStampAsync` return `IsoTpTransmitStamps` — the instant the frame was
+  handed to the driver and the instant it was transmitted — for a caller that keeps a deadline
+  from the transmission. A response that arrived before the handoff answers something else (the
+  subscription is made before the send, and another sender may hold the service's transmit lock
+  in between) and is left out of the collection.
 - **Listening across collections**: `CollectResponsesAsync` subscribes per call, so a response
   that arrives between two calls — or between a `SendAsync` and the first call — is missed.
   `client.Listen()` subscribes once and returns an `IsoTpFunctionalListener` whose
