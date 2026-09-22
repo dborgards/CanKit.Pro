@@ -26,8 +26,10 @@ CanIdRange.ValidateStandard(0x800);   // throws ArgumentOutOfRangeException
 // J1939: build a 29-bit ID from priority/PGN/source/destination
 var id = J1939Id.ComposePgn(priority: 3, pgn: 0xFED9, sourceAddress: 0x17);
 
-// J1939: decompose a received 29-bit ID
-var fields = J1939Id.Decompose(id);
+// J1939: decompose a received 29-bit ID. The value alone cannot tell an 11-bit identifier
+// from a 29-bit one, so pass the frame's kind where you have it; a PDU1 PGN with a non-zero
+// low byte is refused by ComposePgn rather than truncated (#55).
+var fields = J1939Id.Decompose(id, isExtendedFrame: true);
 fields.Priority;            // 3
 fields.Pgn;                 // 0xFED9
 fields.SourceAddress;       // 0x17
@@ -53,6 +55,11 @@ var name = new J1939Name(
     arbitraryAddressCapable: true);
 var sameName = J1939Name.Decompose(name.Value);
 J1939Name.CompareClaimPriority(name, sameName); // 0; lower unsigned NAME wins address claiming
+
+// J1939: the NAME on the wire -- the eight data bytes of an Address Claimed message, least
+// significant first (SAE J1939-81), whatever the host's byte order
+byte[] claimData = name.ToBytes();
+var claimed = J1939Name.FromBytes(claimData);
 ```
 
 `CanKit.Pro.RawCan`'s `CanIdFilter` also gained an `Overlaps(CanIdFilter other)` method and
