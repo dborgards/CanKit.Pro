@@ -307,9 +307,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // #58 (SAE J1939-81 §4.4.4.3): a node that lost arbitration sends its Cannot Claim after a
-    // pseudo-random 0..153 ms derived from its NAME -- the bytes summed, modulo 255, times
+    // pseudo-random 0..153 ms derived from its NAME -- the low byte of the bytes' sum, times
     // 0.6 ms -- so two nodes colliding on an address do not answer in lockstep. The loser's
-    // NAME here gives 78 ms; the gap between the winner's re-announcement, which is what the
+    // NAME here sums to exactly 255, the 153 ms endpoint that a modulo 255 would have mapped
+    // to zero (Codex on #153); the gap between the winner's re-announcement, which is what the
     // loser answers, and the Cannot Claim is at least that, a lower bound a loaded host only
     // raises.
     [Fact]
@@ -337,9 +338,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             }
         };
 
-        var loserName = Name(0x0000E0); // byte sum mod 255 = 130: 78 ms
-        var loserBackoff = TimeSpan.FromMilliseconds((loserName.ToBytes().Sum(b => (int)b) % 255) * 0.6);
-        loserBackoff.Should().Be(TimeSpan.FromMilliseconds(78), "the NAME was chosen for it");
+        var loserName = Name(0x00015D); // byte sum 255: the 153 ms endpoint
+        loserName.ToBytes().Sum(b => (int)b).Should().Be(255, "the NAME was chosen for it");
+        var loserBackoff = TimeSpan.FromMilliseconds(153);
 
         using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
         using var loser = J1939Node.Open(busB, new J1939NodeOptions(loserName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
@@ -370,7 +371,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         const byte contended = 0x40;
 
         var ownerName = Name(0x000158); // backoff 150 ms
-        ((ownerName.ToBytes().Sum(b => (int)b) % 255) * 0.6).Should().Be(150);
+        ((ownerName.ToBytes().Sum(b => (int)b) & 0xFF) * 0.6).Should().Be(150);
         using var owner = J1939Node.Open(busA, new J1939NodeOptions(ownerName)
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
@@ -383,7 +384,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await owner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
 
         long winnerClaimAt = 0;
-        var claiming = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // What the handler reads is read in the actor's step that made the transition; read
+        // after the await, the address could be the re-claimed one already on a host that
+        // schedules the continuation late (macOS CI on #153).
+        var claiming = new TaskCompletionSource<(long At, byte? Address)>(TaskCreationOptions.RunContinuationsAsynchronously);
         busA.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
@@ -391,11 +395,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended && Interlocked.Read(ref winnerClaimAt) == 0 && !e.IsEcho)
                 Interlocked.Exchange(ref winnerClaimAt, Stopwatch.GetTimestamp());
         };
-        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult(Stopwatch.GetTimestamp()); };
+        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult((Stopwatch.GetTimestamp(), owner.Address)); };
 
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        var claimingAt = await claiming.Task.AsTaskWithTimeout(ShortTimeout);
-        owner.Address.Should().BeNull("the address is the winner's from the instant its claim was heard");
+        var (claimingAt, addressThen) = await claiming.Task.AsTaskWithTimeout(ShortTimeout);
+        addressThen.Should().BeNull("the address is the winner's from the instant its claim was heard");
         Interlocked.Read(ref winnerClaimAt).Should().NotBe(0);
         var reaction = TimeSpan.FromSeconds((claimingAt - Interlocked.Read(ref winnerClaimAt)) / (double)Stopwatch.Frequency);
         reaction.Should().BeLessThan(TimeSpan.FromMilliseconds(75), "the invalidation does not wait the backoff");
@@ -708,10 +712,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator for the final Cannot-Claim broadcast
 
-        // A NAME whose §4.4.4.3 backoff is zero (bytes summed, modulo 255 == 0): the scan
+        // A NAME whose §4.4.4.3 backoff is zero (the bytes sum to 256, low byte 0): the scan
         // pays the backoff before every one of its 240 rounds, and this test's subject is the
         // exhaustion, not the delay -- with a 56 ms backoff it took 13 s more (#153).
-        var nodeName = Name(0x00015D);
+        var nodeName = Name(0x00005F);
         var peerName = Name(0x000001);
         var opts = new J1939NodeOptions(nodeName)
         {

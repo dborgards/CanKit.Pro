@@ -80,8 +80,8 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     ///     <see cref="J1939CannotClaimException"/> (SRS FR-J1939-004).</description></item>
     /// </list>
     /// The Cannot Claim, and an arbitrary-address node's next claim after losing, go out after
-    /// the pseudo-random 0..153 ms backoff of SAE J1939-81 §4.4.4.3 -- the NAME's bytes summed,
-    /// modulo 255, times 0.6 ms -- so two nodes colliding on an address do not answer in
+    /// the pseudo-random 0..153 ms backoff of SAE J1939-81 §4.4.4.3 -- the low byte of the
+    /// NAME's bytes summed, times 0.6 ms -- so two nodes colliding on an address do not answer in
     /// lockstep (#58).
     /// </summary>
     /// <exception cref="J1939CannotClaimException">The preferred address was lost to a

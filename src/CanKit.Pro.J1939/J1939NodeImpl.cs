@@ -336,16 +336,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     // J1939-81 §4.4.4.3: a node that lost arbitration delays its Cannot Claim, and an
     // arbitrary-address node its next claim, by a pseudo-random 0..153 ms derived from its
-    // NAME -- the eight bytes summed, modulo 255, times 0.6 ms -- so two nodes colliding on an
-    // address do not answer in lockstep for ever (#58). Fixed by the NAME, so a test can
-    // choose it; scheduled on the actor, so the state it acts on is the state it read.
+    // NAME -- the low byte of the eight bytes' sum, times 0.6 ms, so 255 slots reach the
+    // 153 ms endpoint (Codex on #153: modulo 255 mapped a sum of 255 to zero) -- so two nodes
+    // colliding on an address do not answer in lockstep for ever (#58). Fixed by the NAME, so
+    // a test can choose it; scheduled on the actor, so the state it acts on is the state it
+    // read.
     private TimeSpan ClaimBackoff
     {
         get
         {
             int sum = 0;
             foreach (var b in _name.ToBytes()) sum += b;
-            return TimeSpan.FromMilliseconds((sum % 255) * 0.6);
+            return TimeSpan.FromMilliseconds((sum & 0xFF) * 0.6);
         }
     }
 

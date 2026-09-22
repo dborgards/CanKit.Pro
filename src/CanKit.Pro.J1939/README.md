@@ -25,8 +25,8 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   the NAME's Arbitrary Address Capable bit). A move after a successful claim
   is announced through `AddressClaimChanged`; nobody awaits it. The Cannot
   Claim, and the next claim after losing, go out after the pseudo-random
-  0..153 ms backoff of SAE J1939-81 §4.4.4.3 (the NAME's bytes summed, modulo
-  255, times 0.6 ms), so two nodes colliding on an address do not answer in
+  0..153 ms backoff of SAE J1939-81 §4.4.4.3 (the low byte of the NAME's bytes
+  summed, times 0.6 ms), so two nodes colliding on an address do not answer in
   lockstep; and a second `ClaimAddressAsync` while one is in arbitration faults
   with `InvalidOperationException` rather than silently cancelling the first (#58).
 - **Request for Address Claimed** (SAE J1939-81 §4.2.2): a Request for PGN
