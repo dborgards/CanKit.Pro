@@ -307,6 +307,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return;
         }
 
+        // A Cannot Claim still waiting its backoff is overtaken by this claim (Codex on #153).
+        _cannotClaimBackoff?.Dispose();
+        _cannotClaimBackoff = null;
+
         // A claim still in arbitration is not silently replaced: the caller who started it
         // is waiting on it, and a second one is a programming error (#58). A re-claim on a
         // node that holds an address, or holds none, is what this method is for. A pending
@@ -345,20 +349,46 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
-    // The delayed Cannot Claim of a lost arbitration: dropped if a new claim has started
-    // meanwhile -- its announcement is the newer word on the bus, and a Cannot Claim after it
-    // would retract it (Codex on #153).
-    private void SendCannotClaimIfStillUnclaimed()
+    // The delayed Cannot Claim of a lost arbitration, tied to the loss that scheduled it: a
+    // new claim cancels it -- its announcement is the newer word on the bus, and a Cannot
+    // Claim after it would retract it -- and a second loss reschedules a full backoff rather
+    // than inheriting the remainder of the first (Codex on #153, twice). The state check is
+    // the second line.
+    private IDeadline? _cannotClaimBackoff;
+
+    private void ScheduleCannotClaim()
     {
-        if ((J1939ClaimState)Volatile.Read(ref _claimStateStore) != J1939ClaimState.CannotClaim) return;
-        SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+        _cannotClaimBackoff?.Dispose();
+        _cannotClaimBackoff = AfterClaimBackoff(() =>
+        {
+            _cannotClaimBackoff = null;
+            if ((J1939ClaimState)Volatile.Read(ref _claimStateStore) != J1939ClaimState.CannotClaim) return;
+            SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+        });
     }
 
-    private void AfterClaimBackoff(Action onLoop)
+    private IDeadline? AfterClaimBackoff(Action onLoop)
     {
         var delay = ClaimBackoff;
-        if (delay <= TimeSpan.Zero) { onLoop(); return; }
-        _deadlines.Arm(delay, () => { if (_disposed == 0) onLoop(); });
+        if (delay <= TimeSpan.Zero) { onLoop(); return null; }
+        return _deadlines.Arm(delay, () => { if (_disposed == 0) onLoop(); });
+    }
+
+    // Registers `retry` as the claim in hand and starts its round after the backoff; a Request
+    // for Address Claimed or a contest for the candidate starts it at once (Codex on #153).
+    private void BeginClaimRoundAfterBackoff(PendingClaim retry, byte candidate, byte? scanStart)
+    {
+        _pendingClaim = retry;
+        void Start()
+        {
+            if (!ReferenceEquals(_pendingClaim, retry) || retry.Tcs.Task.IsCompleted) return;
+            retry.StartRound = null;
+            retry.Deadline?.Dispose();
+            retry.Deadline = null;
+            BeginClaimRound(candidate, retry.Tcs, retry.CtRegistration, scanStart);
+        }
+        retry.StartRound = Start;
+        retry.Deadline = AfterClaimBackoff(Start);
     }
 
     // Starts (or restarts, for the arbitrary-address fallback) a single arbitration round for
@@ -588,12 +618,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     {
                         ArbitraryScanStart = scanStart,
                     };
-                    _pendingClaim = retry; // the next candidate is what is being claimed now
-                    AfterClaimBackoff(() =>
-                    {
-                        if (!ReferenceEquals(_pendingClaim, retry) || retry.Tcs.Task.IsCompleted) return;
-                        BeginClaimRound(nextCandidate, retry.Tcs, retry.CtRegistration, scanStart);
-                    });
+                    BeginClaimRoundAfterBackoff(retry, nextCandidate, scanStart);
                     return;
                 }
 
@@ -605,14 +630,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
-                AfterClaimBackoff(SendCannotClaimIfStillUnclaimed);
+                ScheduleCannotClaim();
                 pending.Tcs.TrySetException(new J1939CannotClaimException(pending.PreferredAddress));
                 return;
             }
 
             // Peer's NAME is >= ours: they lose. Re-announce our own claim so they hear it,
-            // then keep waiting on our deadline.
-            SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
+            // then keep waiting on our deadline. A round still waiting its backoff has nothing
+            // to re-announce yet: it starts now, and its announcement is the answer (Codex on
+            // #153).
+            if (pending.BackingOff) pending.StartRound!();
+            else SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
             return;
         }
 
@@ -643,12 +671,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     RebindTransportOnLoop(J1939Pgn.NullAddress);
                     SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
                     var unseated = new PendingClaim(nextCandidate, tcs, deadline: null, default) { ArbitraryScanStart = scanStart };
-                    _pendingClaim = unseated;
-                    AfterClaimBackoff(() =>
-                    {
-                        if (!ReferenceEquals(_pendingClaim, unseated) || tcs.Task.IsCompleted) return;
-                        BeginClaimRound(nextCandidate, tcs, default, scanStart);
-                    });
+                    BeginClaimRoundAfterBackoff(unseated, nextCandidate, scanStart);
                     return;
                 }
                 // Broadcast Cannot-Claim and transition.
@@ -656,7 +679,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
-                AfterClaimBackoff(SendCannotClaimIfStillUnclaimed);
+                ScheduleCannotClaim();
             }
             else
             {
@@ -675,8 +698,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 break;
             case J1939ClaimState.Claiming when _pendingClaim is { } pending:
                 // Arbitrating: the claim for the preferred address is the answer, and a peer
-                // that hears it contests it now rather than after the window (§4.4.3).
-                SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
+                // that hears it contests it now rather than after the window (§4.4.3). A round
+                // still waiting its backoff has announced nothing; the request is the moment to
+                // -- it starts the round, which announces (Codex on #153).
+                if (pending.BackingOff) pending.StartRound!();
+                else SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
                 break;
             default:
                 SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
@@ -1339,6 +1365,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
         /// null while no fallback round has run yet. Carried across retries via
         /// <c>BeginClaimRound</c>.</summary>
         public byte? ArbitraryScanStart { get; set; }
+        /// <summary>
+        /// The round waits the §4.4.4.3 backoff and has announced nothing yet; <see cref="Deadline"/>
+        /// is the backoff, and <see cref="StartRound"/> starts the round -- now, when a Request for
+        /// Address Claimed or a contest for the candidate makes waiting pointless (Codex on #153).
+        /// </summary>
+        public Action? StartRound { get; set; }
+        public bool BackingOff => StartRound is not null;
     }
 
     /// <summary>

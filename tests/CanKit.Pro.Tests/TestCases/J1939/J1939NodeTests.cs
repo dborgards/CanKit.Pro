@@ -463,6 +463,90 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         loser.Address.Should().Be(0x61);
     }
 
+    // Codex on #153: the delayed Cannot Claim belongs to the loss that scheduled it. A second
+    // claim cancels the first's; when the second loses too, its Cannot Claim waits a full
+    // backoff from its own loss rather than the remainder of the first's -- measured from the
+    // second J1939CannotClaimException to the first SA 0xFE frame, a lower bound a loaded host
+    // only raises.
+    [Fact]
+    public async Task A_Second_Loss_Waits_Its_Own_Full_Backoff_Before_Cannot_Claim()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2); // spectator
+
+        long cannotClaimAt = 0;
+        var cannotClaimSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress
+                && Interlocked.CompareExchange(ref cannotClaimAt, Stopwatch.GetTimestamp(), 0) == 0)
+                cannotClaimSeen.TrySetResult(true);
+        };
+
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        using var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 150 ms
+        await winner.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
+        await Task.Delay(100);
+        await winner.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout); // the winner holds 0x61 now; both losses are to it
+
+        Func<Task> first = () => loser.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout);
+        await first.Should().ThrowAsync<J1939CannotClaimException>();
+        await Task.Delay(100); // most of the first backoff
+        Func<Task> second = () => loser.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout);
+        await second.Should().ThrowAsync<J1939CannotClaimException>();
+        var secondLossAt = Stopwatch.GetTimestamp();
+
+        await cannotClaimSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        var gap = TimeSpan.FromSeconds((Interlocked.Read(ref cannotClaimAt) - secondLossAt) / (double)Stopwatch.Frequency);
+        gap.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(145),
+            "the first loss's Cannot Claim was cancelled by the second claim, and the second loss waits its own backoff");
+    }
+
+    // Codex on #153: a round waiting its backoff has announced nothing, and answers a Request
+    // for Address Claimed by starting -- one announcement, now -- rather than by an
+    // announcement of its own with the round's to follow.
+    [Fact]
+    public async Task A_Request_During_The_Backoff_Starts_The_Round_With_A_Single_Announcement()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+
+        int candidateClaims = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended + 1) Interlocked.Increment(ref candidateClaims);
+        };
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true); };
+
+        var claim = node.ClaimAddressAsync(contended);
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)(contended + 1));
+        await Task.Delay(300); // past the backoff: a round that still fired would announce again
+        Volatile.Read(ref candidateClaims).Should().Be(1, "the request started the round, whose announcement is the answer, and nothing announced twice");
+    }
+
     // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
     // cancelling the first, whose caller is waiting on it.
     [Fact]
