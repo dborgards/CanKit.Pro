@@ -770,14 +770,19 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     // made but before the frame is handed to the driver -- another sender holding the shared
     // service's transmit lock -- answers something else: it is neither returned nor does it
     // move this request's window out.
-    [Fact]
-    public async Task A_Pending_Answer_From_Before_The_Handoff_Is_Not_This_Requests()
+    // With a 100 ms window the listener is in its short slices when the send returns and the
+    // 0x78 is applied by the anchoring; with a 1000 ms window the listener's collection returns
+    // after the anchoring and applies it itself (Bugbot on #150). Neither may move the window.
+    [Theory]
+    [InlineData(100, 1000)]
+    [InlineData(1000, 2000)]
+    public async Task A_Pending_Answer_From_Before_The_Handoff_Is_Not_This_Requests(int windowMs, int boundMs)
     {
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         using var service = new CanBusService(bus);
         using var functional = UdsFunctionalClient.Create(
             IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(2000));
+            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(windowMs), responsePendingWindow: TimeSpan.FromMilliseconds(3000));
 
         var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x90, 0x02 });
@@ -807,14 +812,14 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var responses = await first;
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse("the 0x78 from before the handoff is not this request's");
 
-        // Nor did it move the window out: a next call goes out after P2, not after P2* = 2 s.
+        // Nor did it move the window out: a next call goes out after P2, not after P2* = 3 s.
         var sw = Stopwatch.StartNew();
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await second;
         sw.Stop();
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the 0x78 from before the handoff did not move the window out");
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(boundMs), "the 0x78 from before the handoff did not move the window out");
     }
 
     // Codex on #150: the windows a client is created with are bounded as a collection window

@@ -38,6 +38,10 @@ public sealed class UdsFunctionalClient : IDisposable
     // their listener does not retire, and whether such a 0x78 was punctual is decided against
     // the window as anchored once the send returns (Codex on #150). Under the same lock.
     private readonly Dictionary<byte, List<long>> _inFlight = new();
+    // Per service, the handoff of its last send: a 0x78 from before it answered something
+    // else, whoever reads it -- the anchoring, or the listener whose collection returns after
+    // the anchoring (Bugbot on #150). Under the same lock; forgotten with the window.
+    private readonly Dictionary<byte, long> _cutoffs = new();
     // One request on the wire at a time, its collection window included: overlapping calls
     // with the same SID would each collect the other's answers (Codex on #150), as the
     // physical client's request lock prevents there.
@@ -255,7 +259,7 @@ public sealed class UdsFunctionalClient : IDisposable
         // Through StartListening again, after the 0x78s above moved the window: a confirmation
         // that outlasted the window has let the listener retire, and the moved-out window
         // needs one (Codex on #150).
-        StartListening(sid, transmitted, inFlight: false);
+        StartListening(sid, transmitted, inFlight: false, cutoff);
         return responses;
     }
 
@@ -323,16 +327,19 @@ public sealed class UdsFunctionalClient : IDisposable
     private void NoteAnchored(byte sid, long from, long cutoff)
     {
         _openWindows.Note(sid, from, _responseWindow);
+        if (cutoff > 0) _cutoffs[sid] = cutoff; else _cutoffs.Remove(sid);
         if (!_inFlight.TryGetValue(sid, out var heard)) return;
         _inFlight.Remove(sid);
         // Each only if it arrived at or after the cutoff -- the handoff to the driver; one
         // from before it answered something else (Codex on #150).
-        foreach (var arrival in heard)
-        {
-            if (arrival >= cutoff)
-                _openWindows.ExtendIfOpenAt(sid, arrival, arrival + Ticks(_responsePendingWindow));
-        }
+        foreach (var arrival in heard.Where(a => a >= cutoff))
+            _openWindows.ExtendIfOpenAt(sid, arrival, arrival + Ticks(_responsePendingWindow));
     }
+
+    // Under the listeners lock. Whether a 0x78 for the service that arrived then is from
+    // before the service's last handoff, and so answers something else.
+    private bool PredatesHandoff(byte sid, long arrival)
+        => _cutoffs.TryGetValue(sid, out var cutoff) && arrival < cutoff;
 
     // Under the listeners lock. Starts a listener for the service's window if the window is
     // open and none is reading it; forgets a window already over -- a collection that outlasted
@@ -416,8 +423,9 @@ public sealed class UdsFunctionalClient : IDisposable
                     lock (_listeners)
                     {
                         if (_inFlight.TryGetValue(pendingSid, out var inFlight)) inFlight.Add(pending.HostArrivalTimestamp);
-                        else _openWindows.ExtendIfOpenAt(pendingSid, pending.HostArrivalTimestamp,
-                            pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
+                        else if (!PredatesHandoff(pendingSid, pending.HostArrivalTimestamp))
+                            _openWindows.ExtendIfOpenAt(pendingSid, pending.HostArrivalTimestamp,
+                                pending.HostArrivalTimestamp + Ticks(_responsePendingWindow));
                     }
                 }
             }
@@ -442,6 +450,7 @@ public sealed class UdsFunctionalClient : IDisposable
         {
             _listeners.Remove(sid);
             _openWindows.Forget(sid);
+            _cutoffs.Remove(sid);
         }
         ears.Dispose();
     }
