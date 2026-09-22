@@ -2126,6 +2126,51 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         byte[] sns;
         lock (dtSns) sns = dtSns.ToArray();
         sns.Should().Equal(new byte[] { 1, 1 }, "the retransmit took effect after the outstanding packet, not after the block");
+
+        // The send is left to the channel's disposal; its outcome is not this test's subject.
+        cts.Cancel();
+        Func<Task> cancelled = () => send;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // Codex on #152: while a block drains, "already sent" reaches only up to the outstanding
+    // packet; a CTS for a later packet of the grant would skip the ones between, and is a
+    // sequence error (table 7, code 7), not a retransmit.
+    [Fact]
+    public async Task A_Cts_For_An_Unsent_Packet_Of_The_Block_Is_A_Sequence_Error_Not_A_Retransmit()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC7u;
+        var payload = RandomPayload(21, seed: 8); // three packets
+        using var sender = J1939TpFactory.Open(service, sourceAddress: subjectSa);
+
+        var aborts = new List<byte[]>();
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            if (J1939Pgn.IsTransportCm(fields.Pgn) && f.Data.Span[0] == J1939TpFrames.ControlAbort)
+                lock (aborts) aborts.Add(f.Data.ToArray());
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        // Packet 3 asked for while DT 1 is outstanding and DT 2 unsent.
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 3, dataPgn: pgn)), isEcho: false);
+        Func<Task> failed = () => send;
+        var ex = await failed.Should().ThrowAsync<J1939TpAbortException>();
+        ex.Which.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
+        bus.DeferredEchoes.ReleaseNext();
+        await Task.Delay(50);
+        lock (aborts) aborts.Should().ContainSingle().Which[1].Should().Be((byte)J1939TpAbortReason.BadSequenceNumber);
     }
 
     // Codex on #152: a 255-packet message wraps the byte NextSn to 0 once every packet is

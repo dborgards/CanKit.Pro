@@ -811,7 +811,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 : session.State == TxStage.SendingDt && session.BlockRemaining > 0
                     ? session.NextSn + session.BlockRemaining
                     : (session.NextSn == 0 ? 1 : session.NextSn);
-            bool retransmit = nextSn > 0 && nextSn < expectedSn;
+            // While a block drains, a packet is "already sent" only up to the one outstanding
+            // (NextSn, unconfirmed); a CTS for a later packet of the grant would skip the ones
+            // between, and is a sequence error, not a retransmit (Codex on #152).
+            bool midBlock = session.State == TxStage.SendingDt && session.BlockRemaining > 0;
+            bool retransmit = nextSn > 0 && (midBlock ? nextSn <= session.NextSn : nextSn < expectedSn);
             if (nextSn != expectedSn && !retransmit)
             {
                 // A CTS for a packet beyond the next, or for packet 0, which no message has,
