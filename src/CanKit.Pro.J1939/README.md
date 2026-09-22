@@ -32,8 +32,11 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
 - **Request for Address Claimed** (SAE J1939-81 §4.2.2): a Request for PGN
   0xEE00 is answered by the node itself — with its Address Claimed while it
   holds or arbitrates an address, with Cannot Claim while it holds none — so
-  a network-management tool scanning the bus sees it. The request still
-  reaches `MessageReceived`.
+  a network-management tool scanning the bus sees it. A Cannot Claim answer
+  waits the §4.4.4.3 backoff below and shares it with the one a lost claim
+  owes, since every Cannot Claim carries the same null source address; a
+  claim still waiting its backoff answers by starting its round. The request
+  still reaches `MessageReceived`.
 - **Request-PGN** (PGN 0xEA00) send and receive (**FR-J1939-005**).
 - **Auto-routing** to J1939-TP for payloads > 8 bytes; direct 29-bit frames
   for payloads ≤ 8 bytes (**FR-J1939-006**).

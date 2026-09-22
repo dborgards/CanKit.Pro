@@ -551,6 +551,48 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref candidateClaims).Should().Be(1, "the request started the round, whose announcement is the answer, and nothing announced twice");
     }
 
+    // Codex on #153: a Cannot Claim carries the null address, so two nodes answering the same
+    // global Request for Address Claimed at the same instant put identical CAN IDs with
+    // different NAMEs on the bus. The answer a losing node owes therefore waits the same
+    // §4.4.4.3 backoff as the Cannot Claim of the loss itself -- and a request arriving inside
+    // that backoff is answered by that one frame, not by an immediate second copy.
+    [Fact]
+    public async Task A_Request_During_The_Cannot_Claim_Backoff_Is_Answered_By_That_One_Frame()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x62;
+
+        int cannotClaims = 0;
+        long firstCannotClaimAt = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn) || fields.SourceAddress != J1939Pgn.NullAddress) return;
+            Interlocked.CompareExchange(ref firstCannotClaimAt, Stopwatch.GetTimestamp(), 0);
+            Interlocked.Increment(ref cannotClaims);
+        };
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        using var loser = J1939Node.Open(busA, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 153 ms
+
+        Func<Task> act = () => loser.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        var lostAt = Stopwatch.GetTimestamp(); // the loss is known; its Cannot Claim is waiting
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        await Task.Delay(500); // past the backoff, with room for a second copy to show up
+        Volatile.Read(ref cannotClaims).Should().Be(1, "the answer already waiting is the answer to the request");
+        var waited = TimeSpan.FromSeconds((Interlocked.Read(ref firstCannotClaimAt) - lostAt) / (double)Stopwatch.Frequency);
+        waited.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(100),
+            "the request did not shortcut the backoff -- a lower bound on the 153 ms a loaded host only lengthens");
+    }
+
     // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
     // cancelling the first, whose caller is waiting on it.
     [Fact]

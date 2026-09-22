@@ -361,12 +361,31 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void ScheduleCannotClaim()
     {
         _cannotClaimBackoff?.Dispose();
-        _cannotClaimBackoff = AfterClaimBackoff(() =>
-        {
-            _cannotClaimBackoff = null;
-            if ((J1939ClaimState)Volatile.Read(ref _claimStateStore) != J1939ClaimState.CannotClaim) return;
-            SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
-        });
+        _cannotClaimBackoff = AfterClaimBackoff(SendCannotClaimIfStillDue);
+    }
+
+    // The answer a node without an address owes a Request for Address Claimed waits the same
+    // backoff, and for a reason the loss path only shares: a Cannot Claim carries the null
+    // address, so two nodes answering one global request at the same instant put identical
+    // CAN IDs with different NAMEs on the bus, which arbitration cannot separate (SAE
+    // J1939-81 §4.4.4.3; Codex on #153). An answer already waiting is the answer -- sending
+    // now would both bypass that delay and make the armed one a second copy.
+    private void AnswerRequestWithCannotClaim()
+    {
+        if (_cannotClaimBackoff is not null) return;
+        _cannotClaimBackoff = AfterClaimBackoff(SendCannotClaimIfStillDue);
+    }
+
+    private void SendCannotClaimIfStillDue()
+    {
+        _cannotClaimBackoff = null;
+        // Claimed: the claim is the newer word and a Cannot Claim would retract it. Claiming:
+        // the round in hand announces, and a claim overtook this one (Codex on #153). Neither
+        // is reachable without the arming path having disposed the handle; this is the second
+        // line. NotClaimed passes, because that is a node that never claimed answering a scan.
+        var state = (J1939ClaimState)Volatile.Read(ref _claimStateStore);
+        if (state is J1939ClaimState.Claimed or J1939ClaimState.Claiming) return;
+        SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
     }
 
     private IDeadline? AfterClaimBackoff(Action onLoop)
@@ -707,7 +726,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 else SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
                 break;
             default:
-                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+                AnswerRequestWithCannotClaim();
                 break;
         }
     }
