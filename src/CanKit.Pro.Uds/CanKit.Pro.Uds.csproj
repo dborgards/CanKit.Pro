@@ -19,4 +19,11 @@
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
 
+  <!-- The tests shorten the dispose lock timeout (#57). -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
 </Project>

@@ -445,6 +445,671 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #57 — the collected UDS findings.
+    // -----------------------------------------------------------------------------------
+
+    // Bit 7 of the session type is suppressPosRspMsgIndication; masking it silently sent a
+    // session the caller did not ask for. Rejected before anything is on the wire.
+    [Theory]
+    [InlineData(0x83)]
+    [InlineData(0x00)]
+    public async Task DiagnosticSessionControl_Rejects_A_Session_Type_Outside_01_To_7F(byte sessionType)
+    {
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x10, req => new byte[] { req[1], 0x00, 0x32, 0x01, 0xF4 }));
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            Func<Task> act = () => client.DiagnosticSessionControlAsync(sessionType, cts.Token);
+            await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+            ecu.RequestsHandled.Should().Be(0, "nothing was sent");
+        }
+    }
+
+    // A raw request with the suppress bit set gets no positive response; waiting P2 for one
+    // ended in a timeout every time. It is sent and returns empty.
+    [Fact]
+    public async Task SendRaw_With_The_Suppress_Bit_Does_Not_Wait_For_A_Response()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req => Array.Empty<byte>()),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var response = await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+            response.Should().BeEmpty();
+
+            // The frame reached the ECU: it counts a suppressed TesterPresent as handled.
+            var deadline = Stopwatch.StartNew();
+            while (ecu.RequestsHandled == 0 && deadline.Elapsed < ShortTimeout) await Task.Delay(5);
+            ecu.RequestsHandled.Should().Be(1);
+        }
+    }
+
+    // Codex on #150: a suppressed send may still draw a negative response, up to P2 after it.
+    // The next request for the same service waits that window out rather than taking the
+    // negative response as its own.
+    [Fact]
+    public async Task A_Late_Negative_Response_To_A_Suppressed_Send_Is_Not_The_Next_Requests()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                {
+                    Thread.Sleep(100);                  // late ...
+                    throw new EcuNegativeResponse(0x12); // ... and negative, to the suppressed one
+                }
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+
+            // Follows at once; the ECU's negative answer to the suppressed send is still coming.
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the negative response belongs to the suppressed send");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
+    // Codex and Bugbot on #150: the windows are per service. A suppressed send for another
+    // service in between must not shorten the first's.
+    [Fact]
+    public async Task Suppressed_Send_Windows_Are_Kept_Per_Service()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e
+                .On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                    {
+                        Thread.Sleep(100);
+                        throw new EcuNegativeResponse(0x12);
+                    }
+                    return new byte[] { 0x00 };
+                })
+                .On(0x11, req => Array.Empty<byte>()),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window opens
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // another service's
+
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the TesterPresent window is still open, whatever came after");
+            ecu.RequestsHandled.Should().Be(3);
+        }
+    }
+
+    // Codex on #150: NRC 0x78 to a suppressed send says the final answer is still coming, up
+    // to P2* later; the window moves out with it.
+    [Fact]
+    public async Task A_Pending_Answer_To_A_Suppressed_Send_Extends_Its_Window_By_P2Star()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                        delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(400));
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+
+            // 0x78 at 50 ms, the negative at 450 ms: past P2, inside P2* from the 0x78.
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the negative answer belongs to the suppressed send");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
+    // Bugbot on #150: a 0x78 already queued when the window is over still moves it out.
+    [Fact]
+    public async Task A_Queued_Pending_Answer_Still_Extends_A_Window_That_Has_Run_Out()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                        delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(500));
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+            await Task.Delay(300); // the 0x78 is queued, the 200 ms window has run out, the negative is at 550 ms
+
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the queued 0x78 moves the window out by P2*");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
+    // Codex on #150: the converse -- a 0x78 queued after the window ran out answers nothing
+    // the window covers, and does not revive it for a full P2*.
+    [Fact]
+    public async Task A_Queued_Pending_Answer_From_After_The_Windows_End_Does_Not_Revive_It()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                        delayBefore: TimeSpan.FromMilliseconds(500), delayAfter: TimeSpan.FromSeconds(3));
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+            await Task.Delay(700); // the window ran out at 200 ms; the 0x78 at 500 ms is queued
+
+            // Revived, the window would reach 2500 ms and this call would wait most of two
+            // seconds; a loaded host only makes the call slower, so the bound is wide.
+            var sw = Stopwatch.StartNew();
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the queued 0x78 from after the window did not revive it");
+        }
+    }
+
+    // Codex on #150: a 0x78 stamped inside a suppressed send's window may still be on its way
+    // through the channel's actor when the window is measured as over; the next request for
+    // the service waits for the channel to settle before it reads the inbox empty.
+    [Fact]
+    public async Task A_Pending_Answer_Still_On_Its_Way_Through_The_Channel_Extends_The_Window()
+    {
+        using var service = new StarvedReaderBusService();
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp(useCanFd: false), leaveOpen: true);
+        var pendingBudget = TimeSpan.FromMilliseconds(600);
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            P2ClientMax = TimeSpan.FromMilliseconds(100),
+            P2StarClientMax = pendingBudget,
+        });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+        // The ECU's 0x78, stamped at the send -- inside the window by construction, not by a
+        // timer -- buffered by the demux; the reader task that would take it to the actor is
+        // starved by construction.
+        long arrival = Stopwatch.GetTimestamp();
+        byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
+        await Task.Delay(150); // the window has run out, as measured
+
+        // The next TesterPresent waits the window out: P2* from the 0x78 if the channel was
+        // settled before the inbox was read empty, else nothing. It is never answered; what
+        // matters is that it did not fail before P2* from the 0x78 had passed -- a lower bound
+        // a loaded host only raises.
+        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await next.Should().ThrowAsync<UdsTimeoutException>();
+        var sinceArrival = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - arrival) / (double)Stopwatch.Frequency);
+        sinceArrival.Should().BeGreaterThanOrEqualTo(pendingBudget,
+            "the 0x78 on its way through the channel moved the window out to P2* from its arrival");
+    }
+
+    // Codex on #150: a suppressed request the channel refuses before transmitting -- here,
+    // longer than a classic-CAN ISO-TP PDU can be -- reaches no ECU, and leaves no window for
+    // the next request to wait out.
+    [Fact]
+    public async Task A_Suppressed_Send_The_Channel_Refuses_Leaves_No_Window()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req => new byte[] { 0x00 }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromSeconds(2), P2StarClientMax = TimeSpan.FromSeconds(2) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var oversized = new byte[4200];
+            oversized[0] = 0x3E;
+            oversized[1] = 0x80;
+            Func<Task> refused = () => client.SendRawAsync(oversized, cts.Token);
+            await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
+
+            // Left with a window, this call would wait P2 = 2 s before sending; a loaded host
+            // only makes the call slower, so the bound is wide.
+            var sw = Stopwatch.StartNew();
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "nothing was transmitted, so nothing is answered");
+        }
+    }
+
+    // Bugbot on #150: a refused request puts the window back to what it was -- an earlier
+    // suppressed send's window still open stays open, and the next request still waits it out.
+    [Fact]
+    public async Task A_Suppressed_Send_The_Channel_Refuses_Leaves_An_Earlier_Window_As_It_Was()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req => new byte[] { 0x00 }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromSeconds(2), P2StarClientMax = TimeSpan.FromSeconds(2) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var sw = Stopwatch.StartNew();
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: a 2 s window, not waited out by the next suppressed send
+            var oversized = new byte[4200];
+            oversized[0] = 0x3E;
+            oversized[1] = 0x80;
+            Func<Task> refused = () => client.SendRawAsync(oversized, cts.Token);
+            await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
+
+            // The unsuppressed TesterPresent waits the first send's window out: at least 2 s
+            // after it, a lower bound a loaded host only raises.
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+            sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(1900),
+                "the refused send left the earlier suppressed send's window as it was");
+        }
+    }
+
+    // Codex on #150: the discard on an aborted request -- here, one the caller cancelled --
+    // settles the channel and routes what it holds before dropping it, as the pre-send
+    // discard does; a 0x78 for a suppressed send still on its way is not dropped unrouted.
+    [Fact]
+    public async Task A_Pending_Answer_Still_On_Its_Way_Is_Routed_By_An_Aborted_Requests_Discard()
+    {
+        using var service = new StarvedReaderBusService();
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp(useCanFd: false), leaveOpen: true);
+        var pendingBudget = TimeSpan.FromMilliseconds(600);
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            P2ClientMax = TimeSpan.FromMilliseconds(100),
+            P2StarClientMax = pendingBudget,
+        });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+
+        // Another service's request, cancelled by its caller at 50 ms; the 0x78 is stamped
+        // right after the request's synchronous start -- after its pre-send discard's stamp,
+        // which would otherwise drop the frame as older, and inside the window by construction
+        // rather than by a timer (macOS CI on #150) -- and delivered while the request waits,
+        // before its abort, whose discard is the one under test. (A host that delays the
+        // delivery past the abort lets the next call's wait-out route it instead: a pass for
+        // the wrong reason, never a failure.)
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var other = client.ReadDataByIdentifierAsync(0xF190, early.Token);
+        long arrival = Stopwatch.GetTimestamp();
+        await Task.Delay(20);
+        byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
+        Func<Task> cancelled = () => other;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        // The next TesterPresent waits P2* from the 0x78 if the abort routed it, else nothing.
+        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await next.Should().ThrowAsync<UdsTimeoutException>();
+        var sinceArrival = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - arrival) / (double)Stopwatch.Frequency);
+        sinceArrival.Should().BeGreaterThanOrEqualTo(pendingBudget,
+            "the aborted request's discard routed the 0x78 to the suppressed send's window");
+    }
+
+    // Codex on #150: a late 0x78 to an earlier request for the service, queued since that
+    // request was cancelled, is not the suppressed send's; the suppressed send discards it
+    // before it goes out, and the next call does not wait P2* on it.
+    [Fact]
+    public async Task A_Stale_Pending_Answer_Queued_Before_A_Suppressed_Send_Does_Not_Extend_Its_Window()
+    {
+        int calls = 0;
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                switch (Interlocked.Increment(ref calls))
+                {
+                    case 1: // the request the caller cancels: its 0x78 at 100 ms is stale by then, its negative never comes in time
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
+                    case 2: // the suppressed send: no answer
+                        throw new EcuSilent();
+                    default:
+                        return new byte[] { 0x00 };
+                }
+            }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(100),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+            Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, early.Token);
+            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+            await Task.Delay(150); // the stale 0x78 (100 ms) is queued
+
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+
+            // Read as this send's, the stale 0x78 would move the window out to 2100 ms and this
+            // call wait most of two seconds; a loaded host only makes it slower.
+            var sw = Stopwatch.StartNew();
+            var answer = await client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+            sw.Stop();
+            answer.Should().Equal(0x7E, 0x00);
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the stale 0x78 was discarded before the suppressed send");
+        }
+    }
+
+    // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
+    [Fact]
+    public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x3E, req =>
+            {
+                if ((req[1] & 0x80) != 0)
+                {
+                    Thread.Sleep(200);
+                    throw new EcuNegativeResponse(0x12);
+                }
+                return new byte[] { 0x00 };
+            }),
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(400) });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+
+            using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+            Func<Task> cancelled = () => client.TesterPresentAsync(suppressPositiveResponse: false, early.Token);
+            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+            // The negative at 200 ms is still coming; the window must still be honoured.
+            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            await act.Should().NotThrowAsync("the remaining window survived the cancelled wait");
+            ecu.RequestsHandled.Should().Be(2);
+        }
+    }
+
+    // Codex on #150: a 0x78 for service B, heard while waiting out service A's window, moves
+    // B's window out; it is not dropped as A's noise.
+    [Fact]
+    public async Task A_Pending_Answer_For_Another_Service_Heard_During_A_Wait_Extends_That_Services_Window()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0) throw new EcuSilent();
+                    return new byte[] { 0x00 };
+                })
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(500));
+                    Thread.Sleep(250); // slow enough that the stale negative (at 550 ms) would be first in line
+                    return new byte[] { 0x01 };
+                }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(400),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, silent
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B: 0x78 at 50 ms, negative at 450 ms
+
+            // A's request waits A's window out and hears B's 0x78 meanwhile.
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            // B's request follows at once: B's window must now reach past 450 ms.
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            reset.Should().Equal(0x51, 0x01);
+        }
+    }
+
+    // Codex on #150: a 0x78 for service A, consumed as a stray while service B's request runs
+    // (or dropped by B's pre-send discard), still moves A's window out.
+    [Fact]
+    public async Task A_Pending_Answer_Consumed_As_Another_Requests_Stray_Still_Extends_Its_Window()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromMilliseconds(650));
+                    Thread.Sleep(400); // A's request, out at 600 ms without the routing, is answered at 1000: the stale negative at 750 is first in line
+                    return new byte[] { 0x01 };
+                })
+                .On(0x22, req =>
+                {
+                    Thread.Sleep(200); // B's request is on the wire while A's 0x78 arrives
+                    return new byte[] { 0xF1, 0x90, 0xAA };
+                }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(600),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: 0x78 at 100 ms, negative at 750 ms
+            await client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, another service, consumes A's 0x78 as a stray
+
+            // A's request follows: its window must reach past 750 ms.
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            reset.Should().Equal(0x51, 0x01);
+        }
+    }
+
+    // Codex on #150: a 0x78 for service A that arrives after A's window has run out answers
+    // nothing the window still covers; routed from B's wait, it must not revive A's window
+    // for a full P2*, or A's next request waits seconds for nothing.
+    [Fact]
+    public async Task A_Pending_Answer_From_After_A_Windows_End_Does_Not_Revive_It()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(500), delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x01 };
+                })
+                .On(0x22, req => throw new EcuResponsePending(pendingCount: 1,
+                    finalResponse: new byte[] { 0xF1, 0x90, 0xAA }, delayBetween: TimeSpan.FromMilliseconds(700))),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: window P2 = 200 ms; its 0x78 comes at 500 ms
+            await client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, waiting in P2* until 700 ms, consumes A's late 0x78 as a stray
+
+            // A's next request: the window ran out at 200 ms, and the 0x78 at 500 did not
+            // reopen it -- revived, it would reach 2500 ms, and this call would wait most of
+            // two seconds. A loaded host only makes the call slower, so the bound is wide.
+            var sw = Stopwatch.StartNew();
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            sw.Stop();
+            reset.Should().Equal(0x51, 0x01);
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the late 0x78 did not revive the window");
+        }
+    }
+
+    // Codex on #150: the same, heard while another service's wait-out runs rather than by a
+    // request's stray branch.
+    [Fact]
+    public async Task A_Pending_Answer_From_After_A_Windows_End_Heard_In_A_Wait_Out_Does_Not_Revive_It()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e
+                .On(0x11, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(1500), delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x01 };
+                })
+                .On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x00 };
+                }),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(200),
+                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
+            });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B, suppressed: window to 200 ms; its 0x78 comes at 1500 ms
+            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, suppressed: its own 0x78 at 100 ms moves its window to 2100 ms
+            await client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token); // A again: waits its window out until 2100 ms, hearing B's late 0x78 at 1500
+
+            // B's next request: revived at 1500 ms, B's window would reach 3500 ms and this
+            // call, at ~2100 ms, would wait most of 1.5 s.
+            var sw = Stopwatch.StartNew();
+            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+            sw.Stop();
+            reset.Should().Equal(0x51, 0x01);
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the late 0x78 heard in the wait-out did not revive the window");
+        }
+    }
+
+    // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
+    [Fact]
+    public async Task BusyRepeatRequest_Is_Repeated_Until_The_Server_Answers()
+    {
+        int calls = 0;
+        var (client, ecu, dispose) = BuildPair(e => e.On(0x22, req =>
+        {
+            if (Interlocked.Increment(ref calls) <= 2) throw new EcuNegativeResponse(0x21);
+            return new byte[] { 0xF1, 0x90, 0xAB };
+        }));
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var data = await client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            data.Should().Equal(0xAB);
+            ecu.RequestsHandled.Should().Be(3, "two busy answers, then the data");
+        }
+    }
+
+    // Codex on #150: a negative repeat count is a configuration mistake, not "disabled".
+    [Fact]
+    public void A_Negative_Busy_Repeat_Count_Is_Rejected_At_Construction()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp());
+        Action act = () => UdsClient.Create(channel, new UdsClientOptions { MaxBusyRepeatRequests = -1 });
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    // Codex on #150: every duration in the options runs a timer, which measures about 49 days
+    // at most; one beyond that would throw when armed, after the request went out.
+    [Theory]
+    [InlineData("P2ClientMax")]
+    [InlineData("P2StarClientMax")]
+    [InlineData("BusyRepeatRequestDelay")]
+    [InlineData("TesterPresentPeriod")]
+    public void A_Duration_Beyond_A_Timers_Reach_Is_Rejected_At_Construction(string option)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp());
+        var fiftyDays = TimeSpan.FromDays(50);
+        var options = option switch
+        {
+            "P2ClientMax" => new UdsClientOptions { P2ClientMax = fiftyDays },
+            "P2StarClientMax" => new UdsClientOptions { P2StarClientMax = fiftyDays },
+            "BusyRepeatRequestDelay" => new UdsClientOptions { BusyRepeatRequestDelay = fiftyDays },
+            _ => new UdsClientOptions { TesterPresentPeriod = fiftyDays },
+        };
+        Action act = () => UdsClient.Create(channel, options);
+        act.Should().Throw<ArgumentException>();
+    }
+
+    // Codex on #150: the With(...) clone carries the busy-repeat settings.
+    [Fact]
+    public void Options_With_Carries_The_Busy_Repeat_Settings()
+    {
+        var options = new UdsClientOptions
+        {
+            MaxBusyRepeatRequests = 7,
+            BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(15),
+        };
+
+        var clone = options.With(p2ClientMax: TimeSpan.FromMilliseconds(50));
+
+        clone.MaxBusyRepeatRequests.Should().Be(7);
+        clone.BusyRepeatRequestDelay.Should().Be(TimeSpan.FromMilliseconds(15));
+        options.With(maxBusyRepeatRequests: 0).MaxBusyRepeatRequests.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task BusyRepeatRequest_Is_Surfaced_Once_The_Repeats_Are_Used_Up()
+    {
+        var (client, ecu, dispose) = BuildPair(
+            e => e.On(0x22, req => throw new EcuNegativeResponse(0x21)),
+            options: new UdsClientOptions { MaxBusyRepeatRequests = 1 });
+
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            var ex = (await act.Should().ThrowAsync<UdsNegativeResponseException>()).Which;
+            ex.Code.Should().Be(0x21);
+            ecu.RequestsHandled.Should().Be(2, "the request and one repeat");
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
     // SecurityAccess must hold the request lock across seed + sendKey so TesterPresent
     // keep-alive cannot interleave and provoke NRC requestSequenceError on real ECUs.
     // -----------------------------------------------------------------------------------

@@ -72,6 +72,20 @@ public sealed class UdsClientOptions
     public bool KeepAliveSuppressPositiveResponse { get; init; } = true;
 
     /// <summary>
+    /// How many times a request is repeated after NRC 0x21 (busyRepeatRequest) before the
+    /// negative response is surfaced. The NRC exists to ask for a repeat (ISO 14229-1 §A.1),
+    /// so the default repeats; zero surfaces the first 0x21 as an
+    /// <see cref="UdsNegativeResponseException"/> (#57). Default 3.
+    /// </summary>
+    public int MaxBusyRepeatRequests { get; init; } = 3;
+
+    /// <summary>
+    /// The pause before a request is repeated after NRC 0x21. Default zero: the server said
+    /// "repeat", not "wait", and its P2 budget starts again with the repeated request.
+    /// </summary>
+    public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that only want to tweak one field of a shared default template.
     /// </summary>
@@ -80,7 +94,9 @@ public sealed class UdsClientOptions
         TimeSpan? p2StarClientMax = null,
         int? maxResponsePendingCount = null,
         TimeSpan? testerPresentPeriod = null,
-        bool? keepAliveSuppressPositiveResponse = null)
+        bool? keepAliveSuppressPositiveResponse = null,
+        int? maxBusyRepeatRequests = null,
+        TimeSpan? busyRepeatRequestDelay = null)
         => new()
         {
             P2ClientMax = p2ClientMax ?? P2ClientMax,
@@ -88,5 +104,7 @@ public sealed class UdsClientOptions
             MaxResponsePendingCount = maxResponsePendingCount ?? MaxResponsePendingCount,
             TesterPresentPeriod = testerPresentPeriod ?? TesterPresentPeriod,
             KeepAliveSuppressPositiveResponse = keepAliveSuppressPositiveResponse ?? KeepAliveSuppressPositiveResponse,
+            MaxBusyRepeatRequests = maxBusyRepeatRequests ?? MaxBusyRepeatRequests,
+            BusyRepeatRequestDelay = busyRepeatRequestDelay ?? BusyRepeatRequestDelay,
         };
 }

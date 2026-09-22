@@ -33,12 +33,14 @@ namespace CanKit.Pro.Uds
         public static readonly System.TimeSpan DefaultP2Star;
         public static readonly System.TimeSpan DefaultTesterPresentPeriod;
         public UdsClientOptions() { }
+        public System.TimeSpan BusyRepeatRequestDelay { get; init; }
         public bool KeepAliveSuppressPositiveResponse { get; init; }
+        public int MaxBusyRepeatRequests { get; init; }
         public int MaxResponsePendingCount { get; init; }
         public System.TimeSpan P2ClientMax { get; init; }
         public System.TimeSpan P2StarClientMax { get; init; }
         public System.TimeSpan TesterPresentPeriod { get; init; }
-        public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default) { }
+        public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default, int? maxBusyRepeatRequests = default, System.TimeSpan? busyRepeatRequestDelay = default) { }
     }
     public readonly struct UdsDownloadResponse
     {
@@ -59,6 +61,23 @@ namespace CanKit.Pro.Uds
         public UdsException(string message) { }
         protected UdsException(CanKit.Core.Exceptions.CanKitErrorCode errorCode, string message) { }
         public UdsException(string message, System.Exception innerException) { }
+    }
+    public sealed class UdsFunctionalClient : System.IDisposable
+    {
+        public CanKit.Pro.IsoTp.IsoTpFunctionalClient Channel { get; }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.Uds.UdsFunctionalResponse>> DiagnosticSessionControlAsync(CanKit.Pro.Uds.UdsSessionType session, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public void Dispose() { }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.Uds.UdsFunctionalResponse>> SendRawAsync(System.ReadOnlyMemory<byte> request, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.Uds.UdsFunctionalResponse>> TesterPresentAsync(bool suppressPositiveResponse = true, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
+        public static CanKit.Pro.Uds.UdsFunctionalClient Create(CanKit.Pro.IsoTp.IsoTpFunctionalClient client, bool ownsClient = false, System.TimeSpan? responseWindow = default, System.TimeSpan? responsePendingWindow = default) { }
+    }
+    public sealed class UdsFunctionalResponse
+    {
+        public UdsFunctionalResponse(uint sourceCanId, byte[] response) { }
+        public bool IsNegative { get; }
+        public byte? NegativeResponseCode { get; }
+        public byte[] Response { get; }
+        public uint SourceCanId { get; }
     }
     public enum UdsNegativeResponseCode : byte
     {

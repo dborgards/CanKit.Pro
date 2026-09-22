@@ -127,6 +127,19 @@ public interface IIsoTpChannel : IDisposable
     IReadOnlyList<IsoTpReceptionInProgress> GetReceptionsInProgress();
 
     /// <summary>
+    /// Completes once every frame the bus had delivered before the call has been taken through
+    /// the channel: a PDU it completed is in the inbox, a reception it began is in
+    /// <see cref="GetReceptionsInProgress"/>. For a decision taken at a deadline — is a
+    /// response there, was there a 0x78 — what the inbox does not hold after this did not
+    /// arrive before the call; without it, a frame stamped in time can still be on its way
+    /// through the channel's actor when the deadline fires (Codex on #150). Called on the
+    /// channel's own actor — from a <c>BackgroundExceptionOccurred</c> handler — it returns at
+    /// once and the frames on their way are handled after the current work item: they queue
+    /// behind frames already in the mailbox, and handling them inline would reorder the two.
+    /// </summary>
+    Task SettleAsync();
+
+    /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
     /// faults enqueued by <c>AbortRx</c> — and returns how many were dropped. Also silently
     /// aborts any in-flight multi-frame reassembly on the actor so leftover consecutive frames
@@ -136,6 +149,17 @@ public interface IIsoTpChannel : IDisposable
     /// request.
     /// </summary>
     int DiscardPendingPdus();
+
+    /// <summary>
+    /// As <see cref="DiscardPendingPdus()"/>, dropping what arrived before
+    /// <paramref name="arrivedBefore"/> (a <see cref="System.Diagnostics.Stopwatch.GetTimestamp"/>
+    /// reading) rather than before now, and keeping what arrived since. For a caller that
+    /// inspects the inbox before discarding — routing an NRC 0x78 to its window — the stamp
+    /// taken before the inspection makes the two one step: everything the discard drops was
+    /// inspected, and a frame arriving between the inspection and the discard is kept for the
+    /// caller's next read instead of vanishing (Codex on #150).
+    /// </summary>
+    int DiscardPendingPdus(long arrivedBefore);
 
     /// <summary>
     /// Enumerates every fully reassembled inbound PDU as it becomes available. The enumeration
@@ -150,7 +174,7 @@ public interface IIsoTpChannel : IDisposable
     /// Raised (on a thread-pool thread) every time a full PDU is reassembled. The same PDU is
     /// enqueued for <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/> before the event
     /// fires, so a handler that synchronously waits on those APIs — or on
-    /// <see cref="DiscardPendingPdus"/> — cannot deadlock the protocol actor. Handlers must be
+    /// <see cref="DiscardPendingPdus()"/> — cannot deadlock the protocol actor. Handlers must be
     /// non-throwing; a throwing handler is caught and surfaced via
     /// <see cref="BackgroundExceptionOccurred"/>.
     /// </summary>

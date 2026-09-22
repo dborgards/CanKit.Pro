@@ -63,6 +63,13 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   answer does not wait for the reader task's scheduling either. A caller waiting on one
   re-checks rather than waiting unboundedly. `DiscardPendingPdus` drains the demux buffer the
   same way before clearing, so a frame buffered at discard time is part of what it drops.
+  `SettleAsync` drains it the same way and completes once the actor has taken everything
+  queued so far, without dropping anything: for a decision taken at a deadline, what the inbox
+  does not hold after it did not arrive before the call — a Single Frame stamped in time can
+  otherwise still be on its way when the deadline fires. `DiscardPendingPdus(long)` drops what
+  arrived before the caller's own stamp rather than before now, so a caller that reads the
+  inbox after taking the stamp and discards after reading has seen everything it drops, and a
+  frame from between the read and the discard is kept.
 - Timings: `IsoTpChannelOptions.NAs` (TX-confirm), `NBs` (peer-FC wait), `NCr` (next CF wait) and
   `WftMax` (max consecutive `Wait` FCs) are configurable; defaults are conservative 1 s / 10.
 - Reception limits: a First Frame announcing more than `MaxReceivePduLength` (default 65 535
@@ -128,6 +135,18 @@ foreach (var r in responses)
   collected in arrival order.
 - `IsoTpFunctionalOptions` configures `IsExtendedCanId`, `UseCanFd`, `UsePadding`, `PaddingByte`,
   and `NAs` (TX-confirm timeout).
+- **When the request went out**: `SendWithTransmitStampAsync` and
+  `SendAndCollectWithTransmitStampAsync` return `IsoTpTransmitStamps` — the instant the frame was
+  handed to the driver and the instant it was transmitted — for a caller that keeps a deadline
+  from the transmission. A response that arrived before the handoff answers something else (the
+  subscription is made before the send, and another sender may hold the service's transmit lock
+  in between) and is left out of the collection.
+- **Listening across collections**: `CollectResponsesAsync` subscribes per call, so a response
+  that arrives between two calls — or between a `SendAsync` and the first call — is missed.
+  `client.Listen()` subscribes once and returns an `IsoTpFunctionalListener` whose
+  `CollectAsync(window)` collects from that standing subscription: obtained before the send,
+  it hears the fastest reply, and what arrives between two collections is buffered for the
+  next. Dispose it to end the subscription.
 
 ## Non-scope (yet)
 

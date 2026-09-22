@@ -344,9 +344,37 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     /// <inheritdoc />
-    public int DiscardPendingPdus()
+    /// <inheritdoc />
+    public Task SettleAsync()
     {
-        // Everything that arrived up to now is pending. The stamp goes first, so a frame the
+        if (Volatile.Read(ref _disposed) != 0) return Task.CompletedTask;
+        // What the demux has buffered goes to the actor now rather than after the reader's
+        // next scheduling; then a no-op posted behind it completes once the actor has taken
+        // everything queued so far. Called from the actor itself, the post would wait for the
+        // loop it is on, and the pumped frames cannot be handled inline either: frames the
+        // reader task posted earlier sit ahead of them in the mailbox, and reassembly does not
+        // survive the reordering (Bugbot on #150). They are handled after the current work
+        // item, which the contract says.
+        PumpSubscription();
+        if (_actor is ProtocolActor { IsOnCurrentActor: true }) return Task.CompletedTask;
+        try
+        {
+            return _actor.PostAsync(() => { });
+        }
+        catch (ObjectDisposedException)
+        {
+            return Task.CompletedTask; // channel tearing down: nothing left on its way
+        }
+    }
+
+    public int DiscardPendingPdus() => DiscardPendingPdus(arrivedBefore: 0);
+
+    /// <inheritdoc />
+    public int DiscardPendingPdus(long arrivedBefore)
+    {
+        // Everything that arrived up to now is pending -- or up to the caller's stamp, which
+        // may be earlier (Codex on #150); the discard stamp never moves back, so a frame
+        // already admitted stays admitted. The stamp goes first, so a frame the
         // pump posts -- or the reader task posts concurrently -- is dropped by the actor if it
         // arrived before it, and answered with no Flow Control that would invite the rest of
         // a transfer the caller has given up on (Bugbot on #143). Whatever the demux has
@@ -358,8 +386,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         long stamp;
         lock (_pumpGate)
         {
-            stamp = Stopwatch.GetTimestamp();
-            Volatile.Write(ref _discardStamp, stamp);
+            stamp = arrivedBefore > 0 ? arrivedBefore : Stopwatch.GetTimestamp();
+            if (stamp > Volatile.Read(ref _discardStamp)) Volatile.Write(ref _discardStamp, stamp);
             PumpSubscription(unstampedArrival: stamp - 1);
         }
 

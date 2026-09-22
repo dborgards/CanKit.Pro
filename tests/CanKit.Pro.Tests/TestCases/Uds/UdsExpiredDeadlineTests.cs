@@ -332,6 +332,209 @@ public class UdsExpiredDeadlineTests
             "a response that arrived before the request's last frame was handed over is an earlier request's");
     }
 
+    /// <summary>
+    /// #57 — <see cref="UdsTimeoutException.Elapsed"/> is the budget of the timer that expired
+    /// on every path. Here the send's own await returns after the budget is spent and nothing
+    /// is queued: the zero-remaining exit, which used to report how late the client noticed.
+    /// </summary>
+    [Fact]
+    public async Task M_A_Timeout_Reports_The_Budget_Not_How_Late_The_Client_Noticed()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            SendObservationDelay = TimeSpan.FromMilliseconds(160),
+        };
+        using var client = NewClient(channel);
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        var ex = (await act.Should().ThrowAsync<UdsTimeoutException>()).Which;
+
+        ex.Elapsed.Should().Be(Budget);
+    }
+
+    /// <summary>
+    /// #57 — Dispose waits for a request in flight to release the lock; when it does not in
+    /// time, the semaphore is left undisposed, so the holder's eventual Release does not throw
+    /// ObjectDisposedException into an operation that was merely slow.
+    /// </summary>
+    [Fact]
+    public async Task N_Dispose_Leaves_The_Lock_To_A_Holder_That_Outlasts_The_Wait()
+    {
+        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.Zero,
+            stampArrivalAtDelivery: true)
+        { Gate = gate };
+        using var client = NewClient(channel); // a second Dispose is idempotent
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(100);
+
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        await Task.Delay(50); // let the request take the lock and block in the receive
+
+        client.Dispose(); // returns after its 100 ms wait, the holder still inside
+
+        gate.SetResult(true);
+        Func<Task> act = () => inFlight;
+        await act.Should().NotThrowAsync<ObjectDisposedException>(
+            "the holder's Release must find its semaphore intact");
+    }
+
+    /// <summary>
+    /// Codex on #150 — a suppressed send cancelled between the driver's acceptance and the
+    /// confirmation is on the bus and may still be answered: its window is noted before the
+    /// send, so the next request for the service still waits it out.
+    /// </summary>
+    [Fact]
+    public async Task O_A_Suppressed_Send_Cancelled_Before_Confirmation_Still_Opens_Its_Window()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            TransmissionTime = TimeSpan.FromSeconds(5), // held until the cancellation, so nothing races it
+            CancellableSend = true,
+            HonorCancellation = true,
+        };
+        using var client = NewClient(channel);
+
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
+        Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        // The next TesterPresent must wait the suppressed send's window (P2 = 80 ms from the
+        // note, taken just before the first send began) before it sends.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        Func<Task> next = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await next.Should().ThrowAsync<Exception>(); // the stub never answers; what matters is when it sent
+
+        long gapTicks;
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCount(2);
+            gapTicks = channel.Sent[1].StartedAt - channel.Sent[0].StartedAt;
+        }
+        // The cancelled send started at ~0 ms and was cancelled at 30 ms; without the window the
+        // second would start right then. 80 ms less a margin for the note preceding the send.
+        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
+            Budget - TimeSpan.FromMilliseconds(5),
+            "the second send waited out the window the cancelled send opened");
+    }
+
+    /// <summary>
+    /// Codex on #150 — the same, with the transmission outlasting the window noted before the
+    /// send: cancelled then, the frame is on the bus with that window already over, and the
+    /// window is noted again from the cancellation -- P2 from the transmission is at most that.
+    /// </summary>
+    [Fact]
+    public async Task R_A_Suppressed_Send_Cancelled_After_Its_Provisional_Window_Still_Opens_One()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            TransmissionTime = TimeSpan.FromSeconds(5), // held until the cancellation, so nothing races it
+            CancellableSend = true,
+            HonorCancellation = true,
+        };
+        using var client = NewClient(channel);
+
+        // Cancelled at 150 ms: past the 80 ms window noted before the send, with the send
+        // still held (macOS CI on #150 fired a 150 ms timer after a 300 ms send had completed).
+        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
+        Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        var cancelledAt = Stopwatch.GetTimestamp();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        Func<Task> next = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await next.Should().ThrowAsync<Exception>(); // the stub never answers; what matters is when it sent
+
+        long gapTicks;
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCount(2);
+            gapTicks = channel.Sent[1].StartedAt - cancelledAt;
+        }
+        // The second send waited P2 from the cancellation, less a margin for the note preceding
+        // the throw; with only the pre-send window, already over, it would go out at once.
+        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
+            Budget - TimeSpan.FromMilliseconds(5),
+            "the cancelled send's window was noted again from the cancellation");
+    }
+
+    /// <summary>
+    /// Bugbot on #150 — the drain that ends a wait-out reads the inbox, and a queued reassembly
+    /// fault throws from that read. It is stale, as it is for the discard that follows, and
+    /// must not fail the request before it is sent.
+    /// </summary>
+    [Fact]
+    public async Task P_A_Stale_Transport_Fault_Queued_Behind_A_Suppressed_Send_Does_Not_Fail_The_Next_Request()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            QueuedFault = true,
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(1),
+            LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(1),
+        };
+        using var client = NewClient(channel);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await client.SendRawAsync(new byte[] { 0x22, 0x80 }, cts.Token); // not a sub-function service: sent and answered
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: opens the window
+
+        // The next TesterPresent waits the window out; the drain at its end meets the fault.
+        Func<Task> act = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await act.Should().NotThrowAsync<IsoTpException>("the queued fault is stale and dropped");
+    }
+
+    /// <summary>
+    /// Bugbot on #150 — a 0x78 for a service with a suppressed send open, answered while the
+    /// next request was being handed to the driver, predates that request's handoff and is
+    /// dropped as a stray; it must still move the suppressed send's window out by P2*.
+    /// </summary>
+    [Fact]
+    public async Task Q_A_Stray_Pending_From_Before_The_Handoff_Still_Moves_Its_Services_Window()
+    {
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromMilliseconds(5),
+            stampArrivalAtDelivery: false)
+        {
+            StrayPendingBeforeHandoffFor = 0x3E,
+            ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(1),
+            LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(1),
+        };
+        // P2* well apart from P2, so which of the two the third send waited is measurable.
+        var pendingBudget = TimeSpan.FromMilliseconds(300);
+        using var client = UdsClient.Create(channel, new UdsClientOptions
+        {
+            P2ClientMax = Budget,
+            P2StarClientMax = pendingBudget,
+        });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: opens the window, P2 from the send
+        await client.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, cts.Token); // its stray is the 0x78, stamped before its handoff
+
+        // The next TesterPresent waits the window out: P2* from the 0x78 if it was routed, else
+        // P2 from the first send -- which the second send followed within a few milliseconds.
+        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        await next.Should().ThrowAsync<UdsTimeoutException>(); // never answered; what matters is when it sent
+
+        long gapTicks;
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCount(3);
+            gapTicks = channel.Sent[2].StartedAt - channel.Sent[1].StartedAt;
+        }
+        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
+            pendingBudget - TimeSpan.FromMilliseconds(5),
+            "the 0x78 heard before the second request's handoff moved the suppressed send's window out by P2*");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
@@ -405,11 +608,30 @@ public class UdsExpiredDeadlineTests
         /// </summary>
         public TimeSpan LastFrameHandoffBeforeTransmit { get; init; }
 
+        /// <summary>When set, a receive blocks here first, ignoring cancellation (#57).</summary>
+        public TaskCompletionSource<bool>? Gate { get; init; }
+
+        /// <summary>Requests sent, in order, with the instant each send began (#150).</summary>
+        public List<(byte[] Request, long StartedAt)> Sent { get; } = new();
+
+        /// <summary>When set, a send observes the token while it waits for its confirmation.</summary>
+        public bool CancellableSend { get; init; }
+
+        /// <summary>
+        /// A <c>7F sid 78</c> handed over first, once a request is out, stamped a millisecond
+        /// before that request's last-frame handoff: answered to an earlier send while this
+        /// one was being handed to the driver (Bugbot on #150).
+        /// </summary>
+        public byte? StrayPendingBeforeHandoffFor { get; init; }
+        private bool _straySent;
+
         public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
+            lock (Sent) Sent.Add((pdu.ToArray(), Stopwatch.GetTimestamp()));
+            _sent = true;
             if (TransmissionTime > TimeSpan.Zero)
-                await Task.Delay(TransmissionTime, CancellationToken.None).ConfigureAwait(false);
+                await Task.Delay(TransmissionTime, CancellableSend ? cancellationToken : CancellationToken.None).ConfigureAwait(false);
 
             // The wire instant. Everything the client is entitled to measure is relative to this
             // and to nothing else; arrival is "now" for the punctual case, inside the budget and
@@ -430,6 +652,24 @@ public class UdsExpiredDeadlineTests
         public async Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(
             CancellationToken cancellationToken = default)
         {
+            if (Gate is not null)
+                await Gate.Task.ConfigureAwait(false);
+
+            if (StrayPendingBeforeHandoffFor is { } straySid && _sent && !_straySent)
+            {
+                _straySent = true;
+                return new IsoTpReceivedPdu(new byte[] { 0x7F, straySid, 0x78 },
+                    _arrivalStamp - Ticks(LastFrameHandoffBeforeTransmit) - Ticks(TimeSpan.FromMilliseconds(1)));
+            }
+
+            // An inbox empties: the one queued response, once delivered, is not delivered
+            // again -- a later read waits, as it would on an empty inbox, until cancelled.
+            if (_delivered)
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+                throw new OperationCanceledException(cancellationToken);
+            }
+
             // Deliberately not observing the token: this models the write winning the race.
             if (RespondPendingFirst && !_pendingSent)
             {
@@ -467,17 +707,40 @@ public class UdsExpiredDeadlineTests
         /// a caller past its deadline gets it handed over without waiting, and its stamp — not
         /// the caller's clock — decides whether it counts.
         /// </summary>
+        private bool _handedOver;
+        private bool _sent;
+
+        /// <summary>A queued reassembly fault, thrown by the first non-blocking take (#150).</summary>
+        public bool QueuedFault { get; init; }
+        private bool _faultThrown;
+
         public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
         {
-            if (RespondPendingFirst && _pendingSent)
+            if (QueuedFault && !_faultThrown)
             {
+                _faultThrown = true;
+                throw new IsoTpTimeoutException(IsoTpTimer.NCr, "a stale reassembly abort, queued");
+            }
+
+            // An inbox empties: the one queued response is handed over once (#150 -- a drain
+            // that reads until the inbox is empty would otherwise never end here), and only
+            // once the request is out -- a response cannot be queued before it.
+            if (!_sent)
+            {
+                pdu = default;
+                return false;
+            }
+            if (!_handedOver && RespondPendingFirst && _pendingSent)
+            {
+                _handedOver = true;
                 pdu = new IsoTpReceivedPdu(Response, FinalArrivalStamp());
                 return true;
             }
 
-            if (HonorCancellation && FirstFrameOffsetFromTransmit is null)
+            if (!_handedOver && HonorCancellation && FirstFrameOffsetFromTransmit is null)
             {
                 // Stamped at the request: punctual, and waiting in the inbox all along.
+                _handedOver = true;
                 pdu = new IsoTpReceivedPdu(Response, _arrivalStamp);
                 return true;
             }
@@ -499,7 +762,11 @@ public class UdsExpiredDeadlineTests
         public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
             => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
 
+        public Task SettleAsync() => Task.CompletedTask; // nothing is ever on its way: the stub is its own actor
+
         public int DiscardPendingPdus() => 0;
+
+        public int DiscardPendingPdus(long arrivedBefore) => 0;
 
         public IAsyncEnumerable<byte[]> ReceiveAllAsync(CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
