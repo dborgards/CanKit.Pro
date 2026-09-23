@@ -892,25 +892,20 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 Interlocked.Increment(ref cannotClaims);
         };
 
-        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor);
-        try
+        Task claim;
+        using (var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor))
         {
             var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(true); };
-            var claim = node.ClaimAddressAsync(0x63);
+            claim = node.ClaimAddressAsync(0x63);
             await lost.Task.AsTaskWithTimeout(ShortTimeout);
             await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        }
 
-            node.Dispose();
-            await clock.AdvanceAsync(backoff);
-            Volatile.Read(ref cannotClaims).Should().Be(0, "a backoff that fires after dispose does not send the Cannot Claim");
-            Func<Task> awaitClaim = () => claim.WithTimeout(ShortTimeout);
-            await awaitClaim.Should().ThrowAsync<J1939CannotClaimException>();
-        }
-        finally
-        {
-            node.Dispose();
-        }
+        await clock.AdvanceAsync(backoff);
+        Volatile.Read(ref cannotClaims).Should().Be(0, "a backoff that fires after dispose does not send the Cannot Claim");
+        Func<Task> awaitClaim = () => claim.WithTimeout(ShortTimeout);
+        await awaitClaim.Should().ThrowAsync<J1939CannotClaimException>();
     }
 
     // The announce's confirmation is a failure: the claim faults and the address is not taken.
