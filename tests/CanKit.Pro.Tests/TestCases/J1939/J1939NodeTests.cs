@@ -962,6 +962,57 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<ObjectDisposedException>();
     }
 
+    // Codex on #153: the loss must not fault on the same actor turn that only started the
+    // Cannot Claim. SendConfirmed here does not return until released, so the handoff has not
+    // happened. A post queued behind that turn sees the claim still incomplete -- completing
+    // it beside the fire-and-forget start would already have faulted it. Releasing forwards
+    // the frame, and only then does the claim fault.
+    [Fact]
+    public async Task A_Lost_Claim_Faults_Only_After_The_Cannot_Claim_Handoff()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldCannotClaim);
+        using var actor = new ProtocolActor();
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor);
+
+        var onBus = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reclaimed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == J1939Pgn.NullAddress) onBus.TrySetResult(true);
+            else if (fields.SourceAddress == 0x11) reclaimed.TrySetResult(true);
+        };
+
+        var claim = node.ClaimAddressAsync(0x63);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        // The turn that started the send has finished: a loss completed beside that start is
+        // already faulted, and one completed from the send's continuation is not.
+        await actor.PostAsync(() => { }).WithTimeout(ShortTimeout);
+        claim.IsCompleted.Should().BeFalse("the loss is not faulted while the Cannot Claim handoff is still pending");
+
+        // A claim started while that handoff is outstanding does not answer the loss either.
+        // Answering it here would let the caller dispose on the exception and suppress the frame.
+        var reclaim = node.ClaimAddressAsync(0x11);
+        await reclaimed.Task.AsTaskWithTimeout(ShortTimeout);
+        claim.IsCompleted.Should().BeFalse("a claim started during the handoff does not fault the loss");
+
+        scripted.ReleaseConfirmed();
+        await onBus.Task.AsTaskWithTimeout(ShortTimeout);
+        Func<Task> act = () => claim.WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        await reclaim.WithTimeout(ShortTimeout);
+    }
+
     // A Cannot Claim is fire-and-forget. A driver that rejects it, or throws, surfaces on the
     // background channel; the claim itself still faults as a loss.
     [Theory]
@@ -2977,6 +3028,7 @@ public sealed class ScriptedClaimBus : ICanBusService
     public enum Script
     {
         HoldFirstClaim,
+        HoldCannotClaim,
         RejectClaims,
         ThrowOnClaims,
         RejectCannotClaim,
@@ -3047,6 +3099,11 @@ public sealed class ScriptedClaimBus : ICanBusService
                             throw new InvalidOperationException("address claim transmit failed");
                     }
                 }
+                if (outcome == ClaimOutcome.HoldThenForward)
+                {
+                    _held.TrySetResult(true);
+                    await _release.Task.ConfigureAwait(false);
+                }
                 if (outcome == ClaimOutcome.Reject) return Rejected();
                 if (outcome == ClaimOutcome.Throw) throw new InvalidOperationException("address claim transmit failed");
             }
@@ -3063,6 +3120,8 @@ public sealed class ScriptedClaimBus : ICanBusService
         {
             case Script.HoldFirstClaim:
                 return Interlocked.Exchange(ref _heldOnce, 1) == 0 ? ClaimOutcome.Hold : ClaimOutcome.Forward;
+            case Script.HoldCannotClaim:
+                return sourceAddress == J1939Pgn.NullAddress ? ClaimOutcome.HoldThenForward : ClaimOutcome.Forward;
             case Script.RejectClaims:
                 return ClaimOutcome.Reject;
             case Script.ThrowOnClaims:
@@ -3076,7 +3135,7 @@ public sealed class ScriptedClaimBus : ICanBusService
         }
     }
 
-    private enum ClaimOutcome { Forward, Hold, Reject, Throw }
+    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw }
 
     private static TxConfirmation Accepted() => new TxConfirmation
     {

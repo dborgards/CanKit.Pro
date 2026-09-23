@@ -309,10 +309,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         // A Cannot Claim still waiting its backoff is overtaken by this claim (Codex on #153).
         // Dropping it settles the loss that scheduled it just as finally as sending it would,
-        // so the caller waiting on that loss is answered here.
+        // so the caller waiting on that loss is answered here. One already handed to the driver
+        // is not: that caller is answered when the handoff finishes, and faulting it here would
+        // let a dispose on the exception suppress the frame.
         _cannotClaimBackoff?.Dispose();
         _cannotClaimBackoff = null;
-        CompleteLostClaim();
+        if (!_cannotClaimHandoffPending)
+            CompleteLostClaim();
 
         // A claim still in arbitration is not silently replaced: the caller who started it
         // is waiting on it, and a second one is a programming error (#58). A re-claim on a
@@ -388,15 +391,32 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // line. NotClaimed passes, because that is a node that never claimed answering a scan.
         var state = (J1939ClaimState)Volatile.Read(ref _claimStateStore);
         if (state is not (J1939ClaimState.Claimed or J1939ClaimState.Claiming))
-            SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+        {
+            // Fault only after SendConfirmed has handed the frame to the driver. Completing
+            // the loss beside the fire-and-forget start lets a caller dispose on the exception
+            // while that handoff is still pending, and the frame is never sent (Codex on #153).
+            _cannotClaimHandoffPending = true;
+            SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress, afterHandoff: () =>
+            {
+                _cannotClaimHandoffPending = false;
+                CompleteLostClaim();
+            });
+            return;
+        }
         CompleteLostClaim();
     }
 
-    // The claim of a loss that owes the bus a Cannot Claim: it faults once that frame has gone
-    // out, not when the loss became known. A caller that disposes the node on the exception --
-    // a `using` scope ending on it -- would otherwise tear the actor down inside the backoff,
-    // and the frame the loss owes would never be sent at all (Codex on #153).
+    // The claim of a loss that owes the bus a Cannot Claim: it faults once that frame has been
+    // handed to the driver, not when the loss became known. A caller that disposes the node on
+    // the exception -- a `using` scope ending on it -- would otherwise tear the actor down
+    // inside the backoff, or inside the send, and the frame the loss owes would never be sent
+    // at all (Codex on #153).
     private PendingClaim? _lostClaim;
+
+    // Set on the actor for the interval between starting the Cannot Claim send and the
+    // handoff continuation. A claim that starts in that interval must not answer the loss:
+    // the frame is already with the driver.
+    private bool _cannotClaimHandoffPending;
 
     private void CompleteLostClaim()
     {
@@ -750,15 +770,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
-    private void SendAddressClaimFrame(byte sourceAddress)
+    private void SendAddressClaimFrame(byte sourceAddress, Action? afterHandoff = null)
     {
         // 8-byte little-endian NAME payload. PGN 0xEE00 is PDU1 with PS = 0xFF (global).
         // Re-announcements / Cannot-Claim remain fire-and-forget; the initial claim path uses
         // TransmitAddressClaimConfirmed so ClaimAddressAsync cannot succeed without TX confirm.
+        // `afterHandoff` runs back on the actor once SendConfirmed has returned, which is after
+        // the driver accepted the frame -- the loss that owes a Cannot Claim faults from there.
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
             destinationAddress: J1939Pgn.GlobalAddress);
-        TransmitFrame(canId, payload);
+        TransmitFrame(canId, payload, afterHandoff);
     }
 
     private byte[] BuildAddressClaimPayload() => _name.ToBytes();
@@ -1030,15 +1052,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // Wire helpers
     // =========================================================================================
 
-    private void TransmitFrame(uint canId, byte[] payload)
+    private void TransmitFrame(uint canId, byte[] payload, Action? afterHandoff = null)
     {
         // Fire-and-forget: address-claim traffic doesn't need a task, but we still want a
         // background exception if the driver rejects it. SendConfirmed is used consistently
         // with the rest of the CanKit.Pro stack. No Task.Run hop in front of it (#58).
-        _ = TransmitFrameAsync(canId, payload);
+        _ = TransmitFrameAsync(canId, payload, afterHandoff);
     }
 
-    private async Task TransmitFrameAsync(uint canId, byte[] payload)
+    private async Task TransmitFrameAsync(uint canId, byte[] payload, Action? afterHandoff)
     {
         try
         {
@@ -1052,6 +1074,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             RaiseBackgroundException(ex);
         }
+
+        if (afterHandoff is null) return;
+        try { _actor.Post(afterHandoff); }
+        catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
     }
 
     // =========================================================================================
