@@ -36,7 +36,9 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   waits the §4.4.4.3 backoff below and shares it with the one a lost claim
   owes, since every Cannot Claim carries the same null source address; a
   claim still waiting its backoff answers by starting its round. The request
-  still reaches `MessageReceived`.
+  still reaches `MessageReceived`. `ClaimAddressAsync` faults only once the
+  Cannot Claim it owes has gone out, so a caller that disposes the node on the
+  exception cannot suppress it.
 - **Request-PGN** (PGN 0xEA00) send and receive (**FR-J1939-005**).
 - **Auto-routing** to J1939-TP for payloads > 8 bytes; direct 29-bit frames
   for payloads ≤ 8 bytes (**FR-J1939-006**).

@@ -308,8 +308,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
 
         // A Cannot Claim still waiting its backoff is overtaken by this claim (Codex on #153).
+        // Dropping it settles the loss that scheduled it just as finally as sending it would,
+        // so the caller waiting on that loss is answered here.
         _cannotClaimBackoff?.Dispose();
         _cannotClaimBackoff = null;
+        CompleteLostClaim();
 
         // A claim still in arbitration is not silently replaced: the caller who started it
         // is waiting on it, and a second one is a programming error (#58). A re-claim on a
@@ -384,8 +387,24 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // is reachable without the arming path having disposed the handle; this is the second
         // line. NotClaimed passes, because that is a node that never claimed answering a scan.
         var state = (J1939ClaimState)Volatile.Read(ref _claimStateStore);
-        if (state is J1939ClaimState.Claimed or J1939ClaimState.Claiming) return;
-        SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+        if (state is not (J1939ClaimState.Claimed or J1939ClaimState.Claiming))
+            SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+        CompleteLostClaim();
+    }
+
+    // The claim of a loss that owes the bus a Cannot Claim: it faults once that frame has gone
+    // out, not when the loss became known. A caller that disposes the node on the exception --
+    // a `using` scope ending on it -- would otherwise tear the actor down inside the backoff,
+    // and the frame the loss owes would never be sent at all (Codex on #153).
+    private PendingClaim? _lostClaim;
+
+    private void CompleteLostClaim()
+    {
+        var lost = _lostClaim;
+        if (lost is null) return;
+        _lostClaim = null;
+        lost.CtRegistration.Dispose();
+        lost.Tcs.TrySetException(new J1939CannotClaimException(lost.PreferredAddress));
     }
 
     private IDeadline? AfterClaimBackoff(Action onLoop)
@@ -644,15 +663,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 }
 
                 _pendingClaim = null;
-                pending.CtRegistration.Dispose();
                 WriteAddress(null);
                 // TP channel goes back to placeholder 0xFE — no directed TP traffic reaches
                 // us while unclaimed.
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
+                // The caller is answered by the backoff, once the Cannot Claim is on the bus.
+                _lostClaim = pending;
                 ScheduleCannotClaim();
-                pending.Tcs.TrySetException(new J1939CannotClaimException(pending.PreferredAddress));
                 return;
             }
 
@@ -1295,6 +1314,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             _actor.Post(() =>
             {
+                // A loss whose Cannot Claim never got its backoff still answers its caller:
+                // the claim failed, and no dispose makes that less true (Codex on #153).
+                CompleteLostClaim();
                 var pending = _pendingClaim;
                 if (pending is not null)
                 {
