@@ -72,11 +72,11 @@ The issue's seam note is half stale. Read the constructors, not the issue text.
 | `J1939NodeImpl` | Optional `ProtocolActor` on the internal constructor. Several claim tests already pass `clock.NewActor()`. `J1939Node.Open` does not expose it; tests construct `J1939NodeImpl`. | Ready for timers the **node** arms (claim backoff, single-frame periodic send). The TP channel the node opens for itself is still the row below. |
 | `BusStateMonitor` | Constructor takes `IProtocolActor`. | Ready. No product change. |
 | `DeadlineScheduler` / `ProtocolActor` | The test constructs the actor. | Ready. |
-| `CanOpenNode` | Still does `new ProtocolActor(...)` itself. The internal constructor takes `ITimeSource` and hands it to that actor. `CanOpenPdoEngineTests.OpenClocked` and the life-guarding tests already pass a `ManualTimeSource`. | Clock is injectable. The actor is not. Pass `ManualTimeSource`; do not wait for an actor parameter that `VirtualClock.NewActor()` would need. |
+| `CanOpenNode` | Still does `new ProtocolActor(...)` itself. The internal constructor takes `ITimeSource` and hands it to that actor. `CanOpenPdoEngineTests.OpenClocked` and the life-guarding tests already pass a `ManualTimeSource`. | `ITimeSource` moves timers the actor has armed. It does not dequeue a received frame. NMT Start waits on the mailbox: `PostToActorAsync` in `CanOpenNode.CommunicationProfile.cs`, or a state/event after `ApplyNmtTransition`. The actor itself is not injectable. |
 | `J1939TpChannel` | `_actor = new ProtocolActor()` with no time source (`J1939TpChannel.cs` constructor). | **Needs the seam first.** Nothing in this layer can move to a virtual clock until then. |
 | `UdsClientImpl`, `UdsFunctionalClient` | `Stopwatch.GetTimestamp()` for P2, P2*, and collection windows. | **Needs a time seam, not an actor.** |
 | ISO-TP functional collection | `CancellationTokenSource.CancelAfter` plus a `Stopwatch` deadline in `IsoTpFunctionalClient.CollectFromSubscriptionAsync`. Not the channel actor. | A channel `VirtualClock` does not move this window. |
-| Raw CAN subscription pump, object-dictionary write gate | No actor timer. | A signal (`ManualResetEvent`, "pump drained"), not a clock. |
+| Raw CAN subscription pump, object-dictionary write gate, `CanBusService` send lock | No actor timer. The ISO-TP handoff test opens both channels with `IsoTpFactory.Open` and sleeps until the second sender is inside the service lock. | A signal (`ManualResetEvent`, "pump drained", "sender has entered the lock"), not a clock. |
 
 Two lessons from #113 apply to every row marked ready, and they are why this list exists:
 
@@ -122,12 +122,15 @@ These are the defects. "Direction" is which way a slow runner pushes the result:
 | `Rx_Classic_Rejects_CanFd_Escape_FirstFrame_Without_Allocating` | 1541 | an illegal FC would have been sent within 100 ms | green |
 | `A_Stale_StMin_Timer_Does_Not_Send_A_ConsecutiveFrame_Of_The_Next_Transfer` | 1688 | after `clock.AdvanceAsync(stMin)`, 100 ms of wall time is enough to see a frame the timer released | green. The clock half is already virtual; the sleep is the wire not proving the arm |
 | `Receiver_With_LocalBlockSize_Emits_FlowControl_After_Each_Full_Block` | 1760 | all three FCs have been counted within 50 ms of receive completing | red |
-| `Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call` | 1980 | sender B has reached the lock within 50 ms. The comment says a shorter wait only weakens the check | green |
 | `Functional_Collect_Discards_Frames_That_Arrived_Before_Send` | 291 | the stale frame has been routed within 50 ms | red |
 | `Functional_Collect_Does_Not_Accept_Frames_After_Window_Expiry` | 450 | the late frame has been considered within 60 ms. Line 442 of the same test is category 3 | green |
 | `Functional_Send_Refuses_A_Window_Beyond_A_Timers_Reach_Before_Transmitting` | 642 | a buggy transmit would have been seen within 50 ms | green |
 
 Hop polls left in category 1 in this layer, so they are not "fixed" into deadlines: `IsoTpChannelIntegrationTests.cs` 942, 1318, 1496, 2510; `IsoTpFunctionalClientTests.cs` 513; `IsoTpStminTimingTests.cs` 168.
+
+### ISO-TP service lock — not an actor clock
+
+`Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call` (line 1980) is category 2, and it is not in the list above. Both channels come from `IsoTpFactory.Open` on one `CanBusService`. The 50 ms sleep exists so sender B reaches that service's send lock before the test releases sender A. No protocol timer is armed, and no injected actor controls the wait. Advancing a virtual clock does not replace it. It needs an observable at the service/lock boundary: B has entered the lock. Direction is green. The test comment already says a shorter wait only weakens the check.
 
 ### J1939 node — actor injectable for node timers
 
@@ -161,28 +164,39 @@ Siblings of the backoff tests in this file already run on `VirtualClock` and cal
 
 `DriveAsync` (488, 493) spaces a scripted peer. That delay is the double, not an assertion, and stays in the helper bucket.
 
-### CANopen — time source injectable, actor still constructed inside the node
+### CANopen NMT Start — mailbox barrier, not a clock
 
-The repeated shape is NMT Start, `Task.Delay(50)` or `Task.Delay(100)`, then a PDO or a state assertion. Nine sites are that shape: dynamic-mapping lines 119, 165, 362 and 411, and integration lines 613, 724, 1205, 1274 and 1305.
+Nine sites wait for a received NMT Start to be dequeued and for `ApplyNmtTransition` to run, then assert Operational or send a PDO. `ITimeSource` and `ManualTimeSource` only move timers the actor has armed. Advancing one does not dequeue the frame, so these are not actor-clock conversions.
+
+The barrier already exists inside the node: `PostToActorAsync` (`CanOpenNode.CommunicationProfile.cs`) posts onto the same actor that runs `ApplyNmtTransition`. A post that runs after the NMT handler is the observable. A state or event raised from the transition is the other shape.
 
 | Test | Lines | Assumes | Direction |
 |---|---|---|---|
-| `Sdo_DynamicTpdoMapping_ReconfiguresPayloadViaSdo` | 119 | both nodes are Operational within 50 ms of Start | red |
+| `Sdo_DynamicTpdoMapping_ReconfiguresPayloadViaSdo` | 119 | both nodes are Operational once Start has been dequeued. The 50 ms stands in for that dequeue | red |
 | `Sdo_DynamicRpdoMapping_ReconfiguresUnpackViaSdo` | 165 | same | red |
 | `Tpdo_ChangeOfState_Emits_On_ApplicationOdWrite` | 362 | same | red |
-| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 411, 413 | Start has applied within 50 ms, and 300 ms is long enough for a wrong echo | red, then green |
+| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 411 | Start has been applied within 50 ms. Line 413, the wrong-echo window, is in the timer table below | red |
+| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 613 | Start has been applied within 50 ms. Line 666, the RPDO drain, is in the timer table below | red |
+| `Nmt_Broadcast_TransitionsAllNodes` | 724 | both slaves are Operational within 100 ms of the broadcast | red |
+| `Tpdo_EventDriven_Emits_MappedOdValues` | 1205 | Start has been applied within 50 ms | red |
+| `Tpdo_DummyMapping_KeepsSubsequentSlotOffsets` | 1274 | same | red |
+| `Tpdo_SyncTriggered_FiresEverySync` | 1305 | same | red |
+
+### CANopen timers — time source injectable, actor still constructed inside the node
+
+The rows below are actor timers or "a frame would have been sent by now." Pass the `ITimeSource` the node already accepts. Do not treat the nine NMT-Start lines above as the same change.
+
+| Test | Lines | Assumes | Direction |
+|---|---|---|---|
+| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 413 | 300 ms is long enough for a wrong echo | green |
 | `Sdo_ServerSupersede_EmitsWireAbort_ForPriorTransfer` | 377 | the segmented session is installed within 50 ms | red |
 | `Sdo_ClientResponseWithShortDlc_IsAcceptedAndCompletes` | 422 | the upload init is on the wire within 30 ms | red |
 | `Sdo_ClientSegmentedUploadResponse_OverMaxTransferBytes_AbortsOutOfMemory` | 540 | same | red |
-| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 613, 666 | Start has applied; 200 ms drains the RPDO pump before the counts are sampled | red |
-| `Nmt_Broadcast_TransitionsAllNodes` | 724 | both slaves are Operational within 100 ms | red |
+| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 666 | 200 ms drains the RPDO pump before the counts are sampled | red |
 | `Nmt_ResetNode_EmitsBootup` | 785 | the initial boot-up has already happened within 50 ms, so it is not the one under test | both |
 | `Nmt_ResetCommunication_EmitsBootup_And_Settles_In_PreOperational` | 810, 821 | initial boot-up consumed; Pre-operational within 50 ms of the reset boot-up | both, then red |
 | `Sdo_Segmented_Download_Wrong_Toggle_Aborts` | 841 | the init-ack has happened within 100 ms | red |
 | `Heartbeat_Consumer_FiresTimeoutWhenPeerGoesSilent` | 903 | 100 ms is past the initial boot-up so the consumer arms cleanly | both |
-| `Tpdo_EventDriven_Emits_MappedOdValues` | 1205 | Start has applied within 50 ms | red |
-| `Tpdo_DummyMapping_KeepsSubsequentSlotOffsets` | 1274 | same | red |
-| `Tpdo_SyncTriggered_FiresEverySync` | 1305 | same | red |
 | `Overlapping_Emcys_Reach_The_Bus_In_The_Order_The_Register_Was_Written` | 932 | 200 ms was long enough for a second EMCY that did not wait to have been transmitted | green |
 | `A_Guarding_Reply_To_A_Poll_Queued_Behind_A_Reset_Stays_Behind_The_Bootup` | 1058 | 100 ms was long enough to see a reply that did not wait | green |
 | `A_Producer_Tick_Due_During_ApplicationReset_Stays_Behind_The_Bootup_And_Restarts_The_Cycle` | 1115, 1124 | after `clock.Advance` and `SettleAsync`, another 100 ms of wall time changes nothing on the wire | green. The clock is already manual; the sleeps are leftover |
@@ -293,11 +307,11 @@ By risk, and only after a failing run of the unmodified test under load. The hop
 
 1. **J1939 node backoff and arbitration sleeps** (`J1939NodeTests` lines 474, 582, 615, 667, 1805). The seam is in use beside them. They are green: CI will not trip them. Bracket the configured backoff from both sides, and arm the timer before advancing. No product change.
 2. **`StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod`**, both halves (the 10.56 s budget and the two-period quiet window). Same seam. This is the budget a 3× stretch can still reach. `StartPeriodicSend_SingleFrame_StopsAfterAddressLoss` (line 3160) is the same schedule.
-3. **ISO-TP category 2 on the injected actor**, negative windows first (1156, 1306, 1541, 1688, 1980), then the "FC is surely processed" sleeps (349, 1391, 1445). Line 1688 already advances a virtual clock and then sleeps for the wire. Line 1391 is the arm-before-advance lesson in a comment.
+3. **ISO-TP category 2 on the injected actor**, negative windows first (1156, 1306, 1541, 1688), then the "FC is surely processed" sleeps (349, 1391, 1445). Line 1688 already advances a virtual clock and then sleeps for the wire. Line 1391 is the arm-before-advance lesson in a comment. Line 1980 is not on this list. `Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call` opens both channels with `IsoTpFactory.Open` and sleeps only so sender B reaches `CanBusService`'s send lock. No protocol timer is armed, and no injected actor controls that wait. It needs an observable from the service/lock boundary.
 4. **`BusStateMonitor` negatives and the deadline / `ProtocolActor` negatives**, including the Rearm bracket. The test already holds the actor. Small, and entirely green.
-5. **CANopen**, passing the `ITimeSource` the node already accepts. The NMT-Start-then-sleep pattern is nine sites in two files; the other node-timing sleeps in `CanOpenNodeIntegrationTests` are the same seam. Do the four object-dictionary gate sleeps separately, with a signal, not a clock. The producer-tick test already has a `ManualTimeSource`; its two wall sleeps are what is left.
+5. **CANopen timers**, passing the `ITimeSource` the node already accepts. That seam moves timers the actor has armed. It does not cover the nine NMT-Start sleeps (dynamic-mapping 119, 165, 362, 411; integration 613, 724, 1205, 1274, 1305). Those wait until the received NMT frame is dequeued and `ApplyNmtTransition` runs. The barrier is the mailbox — the existing internal `PostToActorAsync`, or a state or event after the transition — and it is a separate change from the clock. Do the four object-dictionary gate sleeps separately again, with a signal, not a clock. The producer-tick test already has a `ManualTimeSource`; its two wall sleeps are what is left of that test.
 6. **J1939-TP, after a seam** that lets `J1939TpChannel` take a time source or an actor the way `IsoTpChannel` and `J1939NodeImpl` do. Eight sites. Do not get there by shrinking `BamPacketSpacing` again; that knob has already been used for the two tests that were actually tight. `Send_InFlightAcrossReclaim_FailsWithNoAddressException` waits on a TP session the node opened internally, so it waits on this seam too, or on an observable for "the session has started" — the twenty hops are not that observable.
 7. **UDS and the functional collection window last.** They need a time seam in the client, not an actor. Overlaps the P2 work already in the tree. Do not widen `P2StarClientMax`. The functional-client file is 23 sites of the same "place a frame relative to a window" shape; one seam covers the file.
-8. **Raw CAN subscription**, three green windows, as a "the pump has drained" signal. Not a virtual clock.
+8. **Signals, not clocks.** Raw CAN subscription, three green windows, as "the pump has drained." The ISO-TP handoff at line 1980, as "sender B is inside the service lock." Neither is a virtual clock.
 
 Leave category 1, the helper bucket, and the 375 hang-guards alone. Leave the three tests whose margin #115, #116 and #117 already opened.
