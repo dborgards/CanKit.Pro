@@ -312,10 +312,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // so the caller waiting on that loss is answered here. One already handed to the driver
         // is not: that caller is answered when *its* handoff finishes, and faulting it here
         // would let a dispose on the exception suppress the frame. A later loss may already
-        // have replaced `_lostClaim`; only the claim whose send is in flight is left alone.
+        // have replaced `_lostClaim`; only a claim whose send is already in flight is left
+        // alone. Every such send is remembered, not just the latest: a second loss overwrites
+        // `_lostClaim` and the first caller would otherwise have nothing left to complete it.
         _cannotClaimBackoff?.Dispose();
         _cannotClaimBackoff = null;
-        if (!ReferenceEquals(_lostClaim, _cannotClaimAwaitingHandoff))
+        if (_lostClaim is { } lost && !_cannotClaimsAwaitingHandoff.Contains(lost))
             CompleteLostClaim();
 
         // A claim still in arbitration is not silently replaced: the caller who started it
@@ -408,7 +410,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // claim and leaves the first one waiting forever (Codex and Bugbot on #153).
         var owed = _lostClaim;
         if (owed is not null)
-            _cannotClaimAwaitingHandoff = owed;
+            _cannotClaimsAwaitingHandoff.Add(owed);
         SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress, afterHandoff: () => OnCannotClaimHandoff(owed));
     }
 
@@ -419,16 +421,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // at all (Codex on #153).
     private PendingClaim? _lostClaim;
 
-    // The loss whose Cannot Claim is between the send and the handoff continuation. A claim
-    // that starts in that interval must not answer *this* loss: the frame is already with the
-    // driver. It is not "whichever loss is current" — a second loss can be stored in
-    // `_lostClaim` while this send is still outstanding.
-    private PendingClaim? _cannotClaimAwaitingHandoff;
+    // Every loss whose Cannot Claim is between the send and the handoff continuation, oldest
+    // first. A claim that starts in that interval must not answer these: the frame is already
+    // with the driver. One slot is not enough — a second loss replaces `_lostClaim` and, once
+    // its own send starts, would drop the only field that still pointed at the first caller.
+    private readonly List<PendingClaim> _cannotClaimsAwaitingHandoff = new();
 
     private void OnCannotClaimHandoff(PendingClaim? owed)
     {
-        if (ReferenceEquals(_cannotClaimAwaitingHandoff, owed))
-            _cannotClaimAwaitingHandoff = null;
         if (owed is null) return;
         FaultLostClaim(owed);
     }
@@ -444,8 +444,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         if (ReferenceEquals(_lostClaim, lost))
             _lostClaim = null;
-        if (ReferenceEquals(_cannotClaimAwaitingHandoff, lost))
-            _cannotClaimAwaitingHandoff = null;
+        _cannotClaimsAwaitingHandoff.RemoveAll(waiting => ReferenceEquals(waiting, lost));
         lost.CtRegistration.Dispose();
         lost.Tcs.TrySetException(new J1939CannotClaimException(lost.PreferredAddress));
     }
@@ -1365,7 +1364,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
             {
                 // A loss whose Cannot Claim never got its backoff still answers its caller:
                 // the claim failed, and no dispose makes that less true (Codex on #153).
+                // So does every earlier loss whose send is still in flight: `_lostClaim` only
+                // holds the latest, and tearing the actor down means those handoffs never post.
                 CompleteLostClaim();
+                while (_cannotClaimsAwaitingHandoff.Count > 0)
+                    FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
                 var pending = _pendingClaim;
                 if (pending is not null)
                 {
