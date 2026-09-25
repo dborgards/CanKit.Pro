@@ -8,7 +8,9 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using CanKit.Pro.Uds;
 using FluentAssertions;
@@ -1222,45 +1224,114 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     // -----------------------------------------------------------------------------------
     // After P2 timeout, a late ECU reply must not be consumed as the next request's answer
     // when the next request uses the same service (SID correlation alone is insufficient).
+    //
+    // The reply used to be a Thread.Sleep(250) against an 80 ms P2. That is a bet on the
+    // runner: starve the client past the sleep and both the expired deadline and the response
+    // are waiting, and a client that lets the response win the race returns 0xAA instead of
+    // throwing (#92). The client was the side that was wrong — P2 is the response's arrival
+    // stamp measured from the request's transmit stamp, not whichever of the deadline callback
+    // and the inbox write the scheduler runs first (UdsExpiredDeadlineTests). This test now
+    // forces that ordering on the real channel: the client's actor is held until the response
+    // is on the wire and the transmit-to-arrival gap is already past P2, then released.
     // -----------------------------------------------------------------------------------
     [Fact]
     public async Task TimedOut_Request_Does_Not_Poison_Next_Same_Service_Transaction()
     {
+        var budget = TimeSpan.FromMilliseconds(80);
         int calls = 0;
+        long seenAt = 0;
+        var requestSeen = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseResponse = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var actorHeld = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseActor = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var staleEnqueued = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var (client, _, dispose) = BuildPair(
-            e => e.On(0x22, req =>
-            {
-                int n = Interlocked.Increment(ref calls);
-                if (n == 1)
-                {
-                    // Arrive after the client's P2 budget so the first call times out.
-                    Thread.Sleep(250);
-                    return new byte[] { 0xF1, 0x90, 0xAA }; // stale payload
-                }
-
-                return new byte[] { 0xF1, 0x90, 0xBB }; // fresh payload
-            }),
-            options: new UdsClientOptions
-            {
-                P2ClientMax = TimeSpan.FromMilliseconds(80),
-                P2StarClientMax = TimeSpan.FromMilliseconds(80),
-            });
-
-        using (dispose)
+        var session = NewSession();
+        using var busClient = OpenClassic(session, 0);
+        using var busEcu = OpenClassic(session, 1);
+        using var sniffer = OpenClassic(session, 2);
+        var responseOnWire = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        sniffer.FrameObserved += (_, view) =>
         {
-            client.Channel.DatagramReceived += (_, args) =>
-            {
-                // Positive RDBI response carrying the stale 0xAA data record.
-                if (args.Data.Length >= 4 && args.Data[0] == 0x62 && args.Data[3] == 0xAA)
-                    staleEnqueued.TrySetResult(true);
-            };
+            if (view.CanFrame.ID == 0x7E8)
+                responseOnWire.TrySetResult(true);
+        };
 
-            Func<Task> first = () => client.ReadDataByIdentifierAsync(0xF190,
+        using var clientActor = new ProtocolActor();
+        using var clientService = new CanBusService(busClient);
+        using var clientChannel = new IsoTpChannel(clientService,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8),
+            FastIsoTp(), ownsService: false, clientActor);
+        using var ecuChannel = IsoTpFactory.Open(busEcu,
+            IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0), FastIsoTp());
+        using var ecu = new SimulatedUdsEcu(ecuChannel);
+        ecu.On(0x22, _ =>
+        {
+            int n = Interlocked.Increment(ref calls);
+            if (n == 1)
+            {
+                // The request is already on the wire: this handler runs only after the ECU's
+                // channel has reassembled it. Holding here keeps the answer off the bus until
+                // the test has moved past P2.
+                Volatile.Write(ref seenAt, Stopwatch.GetTimestamp());
+                requestSeen.TrySetResult(true);
+                if (!releaseResponse.Task.Wait(ShortTimeout))
+                    throw new TimeoutException("the test did not release the late response");
+                return new byte[] { 0xF1, 0x90, 0xAA };
+            }
+
+            return new byte[] { 0xF1, 0x90, 0xBB };
+        });
+        ecu.Start();
+
+        using var client = UdsClient.Create(clientChannel, new UdsClientOptions
+        {
+            P2ClientMax = budget,
+            P2StarClientMax = budget,
+        });
+        client.Channel.DatagramReceived += (_, args) =>
+        {
+            if (args.Data.Length >= 4 && args.Data[0] == 0x62 && args.Data[3] == 0xAA)
+                staleEnqueued.TrySetResult(true);
+        };
+
+        try
+        {
+            var first = client.ReadDataByIdentifierAsync(0xF190,
                 new CancellationTokenSource(ShortTimeout).Token);
-            await first.Should().ThrowAsync<UdsTimeoutException>();
+
+            await requestSeen.Task.WaitAsync(ShortTimeout);
+            // The transmit confirmation is actor work. This probe returns only after it has
+            // been applied, so the hold below cannot sit in front of the send itself.
+            await clientActor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+            clientActor.Post(() =>
+            {
+                actorHeld.TrySetResult(true);
+                // The loop is the thing under test: while it is stuck here, a response the
+                // demux has already stamped can only be queued, not observed.
+                releaseActor.Task.GetAwaiter().GetResult();
+            });
+            await actorHeld.Task.WaitAsync(ShortTimeout);
+
+            // seenAt is after the request left the driver, so a gap measured from it is a
+            // lower bound on the gap the client measures from the transmit stamp.
+            while (ElapsedSince(Volatile.Read(ref seenAt)) <= budget)
+                await Task.Delay(1);
+
+            releaseResponse.TrySetResult(true);
+            await responseOnWire.Task.WaitAsync(ShortTimeout);
+            releaseActor.TrySetResult(true);
+
+            Func<Task> act = () => first;
+            await act.Should().ThrowAsync<UdsTimeoutException>(
+                "a response that reached the wire after P2 must not answer the request, "
+                + "even when the actor observes it only once the deadline has already expired");
 
             await staleEnqueued.Task.WaitAsync(ShortTimeout);
 
@@ -1268,6 +1339,18 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 new CancellationTokenSource(ShortTimeout).Token);
             data.Should().Equal(0xBB);
         }
+        finally
+        {
+            releaseResponse.TrySetResult(true);
+            releaseActor.TrySetResult(true);
+        }
+    }
+
+    private static TimeSpan ElapsedSince(long startTimestamp)
+    {
+        var ticks = Stopwatch.GetTimestamp() - startTimestamp;
+        if (ticks <= 0) return TimeSpan.Zero;
+        return TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 
     // -----------------------------------------------------------------------------------
