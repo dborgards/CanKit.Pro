@@ -37,6 +37,7 @@ public sealed class SimulatedUdsEcu : IDisposable
     private int _disposed;
 
     private int _requestsHandled;
+    private int _pendingNrcsSent;
     private byte[]? _lastRequest;
 
     /// <summary>Number of requests the ECU has answered (for assertions).</summary>
@@ -47,6 +48,9 @@ public sealed class SimulatedUdsEcu : IDisposable
     /// (<c>RequestsHandled==0</c> after a successful DiagnosticSessionControl).
     /// </remarks>
     public int RequestsHandled => Volatile.Read(ref _requestsHandled);
+
+    /// <summary>NRC 0x78 frames a pending-then-negative handler has handed to the channel.</summary>
+    public int PendingNrcsSent => Volatile.Read(ref _pendingNrcsSent);
 
     /// <summary>Last request the ECU saw (or <c>null</c>).</summary>
     public byte[]? LastRequest => Volatile.Read(ref _lastRequest);
@@ -168,7 +172,10 @@ public sealed class SimulatedUdsEcu : IDisposable
                                 if (pn.DelayBefore > TimeSpan.Zero)
                                     await Task.Delay(pn.DelayBefore, ct).ConfigureAwait(false);
                                 for (int i = 0; i < pn.PendingCount && !ct.IsCancellationRequested; i++)
+                                {
                                     await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
+                                    Interlocked.Increment(ref _pendingNrcsSent);
+                                }
                                 if (pn.DelayAfter > TimeSpan.Zero)
                                     await Task.Delay(pn.DelayAfter, ct).ConfigureAwait(false);
                                 if (ct.IsCancellationRequested) return;
