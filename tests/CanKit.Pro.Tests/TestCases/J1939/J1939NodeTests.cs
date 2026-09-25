@@ -1087,7 +1087,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
         await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
-        var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
 
         Exception? background = null;
         node.BackgroundExceptionOccurred += (_, ex) => background = ex;
@@ -1099,6 +1099,43 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => claim.WithTimeout(ShortTimeout);
         await act.Should().ThrowAsync<J1939CannotClaimException>();
+        (background is ObjectDisposedException).Should().BeFalse("a disposed actor is not a failed transmit");
+    }
+
+    // Bugbot on #153: once a second loss has started its own Cannot Claim, `_lostClaim` no
+    // longer points at the first. Dispose used to settle only that field, and the first
+    // continuation never runs once the actor is gone. Both callers still have to finish.
+    [Fact]
+    public async Task A_Dispose_During_Overlapping_Cannot_Claim_Handoffs_Settles_Both_Claims()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldCannotClaim);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        Exception? background = null;
+        node.BackgroundExceptionOccurred += (_, ex) => background = ex;
+
+        var first = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(1, ShortTimeout);
+        var second = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(2, ShortTimeout);
+        first.IsCompleted.Should().BeFalse();
+        second.IsCompleted.Should().BeFalse();
+
+        node.Dispose();
+        scripted.ReleaseConfirmed();
+        scripted.ReleaseConfirmed();
+
+        Func<Task> awaitFirst = () => first.WithTimeout(ShortTimeout);
+        Func<Task> awaitSecond = () => second.WithTimeout(ShortTimeout);
+        await awaitFirst.Should().ThrowAsync<J1939CannotClaimException>();
+        await awaitSecond.Should().ThrowAsync<J1939CannotClaimException>();
         (background is ObjectDisposedException).Should().BeFalse("a disposed actor is not a failed transmit");
     }
 
