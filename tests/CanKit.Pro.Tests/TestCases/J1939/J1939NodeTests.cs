@@ -2376,9 +2376,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     /// <summary>
     /// #92 step 2, J1939 half: the same fixed-rate property, on a clock the test drives.
     ///
-    /// The wall-clock version above calibrates a period from a measured send, then allows gaps
+    /// The wall-clock version calibrated a period from a measured send, then allowed gaps
     /// 30 % off the grid — a tolerance picked to survive the slowest runner seen so far, which is
-    /// the shape #92 says gets widened again next time. Here the node schedules against a clock
+    /// the shape #92 says gets widened again next time. It is gone: host latency is not a
+    /// property the schedule promises, so nothing here gates on it. The node schedules against a clock
     /// only this test moves, so "on the grid" is exact.
     ///
     /// <b>The trap this test had to avoid.</b> A virtual clock makes work free, and this test
