@@ -1,9 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
 using CanKit.Pro.Reliability;
-using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
 
@@ -82,79 +82,53 @@ public class DeadlineTests
         using var actor = new ProtocolActor();
         var scheduler = new DeadlineScheduler(actor);
 
-        // The windows are deliberately far apart rather than merely different (#130). They are
-        // also waited out on this thread, not with Task.Delay. Task.Delay completes on the
-        // thread pool, and the .NET Framework pool only injects one or two threads a second once
-        // it is saturated. On the net48 CI leg a Delay(50) can therefore land after the original
-        // 600 ms deadline, and a Delay(850) can still be pending when the rearmed 2000 ms
-        // deadline fires on the actor's dedicated thread. WhenAny then returns the fired task
-        // and the assertion blames the superseded timer for a callback that was the new
-        // deadline, on time. Sleeping and waiting on the callback's event block in the kernel.
-        // They keep the same windows and do not depend on that pool. The generation property is pinned
-        // without a wall clock by Rearm_Supersedes_The_Original_Timer_On_A_Manual_Clock.
+        // #130. Task.Delay completes on the thread pool, and a saturated net48 pool injects
+        // threads only one or two per second. Delay(850) can still be pending when the rearmed
+        // 2000 ms deadline fires on the actor's dedicated thread, so WhenAny reports that fire
+        // and the assertion blames the superseded timer. These waits block the calling thread.
+        // The windows stay 50 / 850 / 2000 ms. The generation guard itself is
+        // Rearm_Leaves_An_Already_Dispatched_Callback_Unable_To_Expire.
         using var fired = new ManualResetEventSlim(false);
         using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired.Set());
 
-        // Re-arm to a much longer window, well before the original 600 ms would elapse.
         Thread.Sleep(TimeSpan.FromMilliseconds(50));
         deadline.Rearm(TimeSpan.FromMilliseconds(2000)).Should().BeTrue("re-arming a still-pending deadline succeeds");
 
-        // The ORIGINAL timer (600 ms from arm) must NOT fire -- Rearm superseded it, and the stale
-        // pre-Rearm timer must be generation-guarded out rather than double-firing. Waiting 850 ms
-        // takes us comfortably past when it would have, and still more than a second short of the
-        // rearmed deadline. Wait is on the event the callback sets, so a stalled thread pool
-        // cannot stretch this window out to the rearmed deadline.
+        // Past the original 600 ms, and still more than a second short of the rearmed deadline.
         fired.Wait(TimeSpan.FromMilliseconds(850)).Should().BeFalse(
             "the original timeout must have been superseded by Rearm");
         deadline.IsExpired.Should().BeFalse();
 
-        // ...but the re-armed timer (2000 ms from Rearm) eventually does fire.
         fired.Wait(Bounded).Should().BeTrue(
             "the re-armed timeout must still fire at its new deadline");
         deadline.IsExpired.Should().BeTrue();
     }
 
     [Fact]
-    public async Task Rearm_Supersedes_The_Original_Timer_On_A_Manual_Clock()
+    public void Rearm_Leaves_An_Already_Dispatched_Callback_Unable_To_Expire()
     {
-        // The wall-clock test above can only see "did a callback happen inside this window".
-        // Which timer produced it is an inference. Here the clock does not move unless the test
-        // says so, so the original due point and the rearmed one are not two guesses about a
-        // loaded runner: the superseded entry is already past due, the replacement is not, and
-        // the callback must stay quiet until the replacement's own due point.
-        var clock = new ManualTimeSource();
-        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null);
+        // Schedule's dispose is best-effort: a callback the loop has already taken off its timer
+        // list still runs. Cancelling the handle is not what stops it — Fire's generation check
+        // is. This actor keeps that callback reachable after Dispose, which is the in-flight case
+        // ProtocolActor.FireDueTimers never enters once TryCancel has won.
+        var actor = new HoldingActor();
         var scheduler = new DeadlineScheduler(actor);
         var fired = 0;
 
-        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => Volatile.Write(ref fired, 1));
-        // The arm is only real once the loop has inserted it. A Rearm that cancels an entry the
-        // loop has not yet seen is a different (and easier) path.
-        await actor.PostAsync(() => 0);
-        await actor.PostAsync(() => 0);
-
-        clock.Advance(TimeSpan.FromMilliseconds(50));
+        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired++);
         deadline.Rearm(TimeSpan.FromMilliseconds(2000)).Should().BeTrue();
-        await actor.PostAsync(() => 0);
-        await actor.PostAsync(() => 0);
 
-        // now = 850 ms. The original deadline was 600 ms and is past due; the rearmed one is
-        // 2000 ms from the rearm at 50 ms, so it is not due until 2050 ms.
-        clock.Advance(TimeSpan.FromMilliseconds(800));
-        await actor.PostAsync(() => 0);
-        await actor.PostAsync(() => 0);
+        var stale = actor.Armed[0];
+        var replacement = actor.Armed[1];
+        stale.WasDisposed.Should().BeTrue("Rearm disposes the handle it supersedes");
+        replacement.WasDisposed.Should().BeFalse();
 
-        Volatile.Read(ref fired).Should().Be(0,
-            "a timer Rearm already superseded must not fire once its original due point has passed");
+        stale.Deliver();
+        fired.Should().Be(0, "a callback captured before Rearm must lose the generation check");
         deadline.IsExpired.Should().BeFalse();
 
-        // now = 2150 ms, past the rearmed due point.
-        clock.Advance(TimeSpan.FromMilliseconds(1300));
-        await actor.PostAsync(() => 0);
-        await actor.PostAsync(() => 0);
-
-        Volatile.Read(ref fired).Should().Be(1,
-            "the rearmed deadline must still fire when its own due point is reached");
+        replacement.Deliver();
+        fired.Should().Be(1, "the callback captured by Rearm is the one that expires the deadline");
         deadline.IsExpired.Should().BeTrue();
     }
 
@@ -250,5 +224,49 @@ public class DeadlineTests
 
         nullCallback.Should().Throw<ArgumentNullException>();
         negativeTimeout.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    /// <summary>
+    /// Records every <see cref="IProtocolActor.Schedule"/> callback and still delivers it after
+    /// the handle is disposed. That is the actor's documented "already in flight" case: disposal
+    /// only stops a callback the loop has not taken yet.
+    /// </summary>
+    private sealed class HoldingActor : IProtocolActor
+    {
+        private readonly List<HeldCallback> _armed = new();
+
+        public IReadOnlyList<HeldCallback> Armed => _armed;
+
+        public IDisposable Schedule(TimeSpan delay, Action callback)
+        {
+            var held = new HeldCallback(callback);
+            _armed.Add(held);
+            return held;
+        }
+
+        public void Post(Action work) => throw new NotSupportedException();
+
+        public Task PostAsync(Action work) => throw new NotSupportedException();
+
+        public Task<T> PostAsync<T>(Func<T> work) => throw new NotSupportedException();
+
+#pragma warning disable CS0067
+        public event EventHandler<Exception>? BackgroundExceptionOccurred;
+#pragma warning restore CS0067
+
+        public void Dispose() { }
+
+        public sealed class HeldCallback : IDisposable
+        {
+            private readonly Action _callback;
+
+            public HeldCallback(Action callback) => _callback = callback;
+
+            public bool WasDisposed { get; private set; }
+
+            public void Dispose() => WasDisposed = true;
+
+            public void Deliver() => _callback();
+        }
     }
 }
