@@ -72,9 +72,9 @@ The issue's seam note is half stale. Read the constructors, not the issue text.
 | `J1939NodeImpl` | Optional `ProtocolActor` on the internal constructor. Several claim tests already pass `clock.NewActor()`. `J1939Node.Open` does not expose it; tests construct `J1939NodeImpl`. | Ready for timers the **node** arms (claim backoff, single-frame periodic send). The TP channel the node opens for itself is still the row below. |
 | `BusStateMonitor` | Constructor takes `IProtocolActor`. | Ready. No product change. |
 | `DeadlineScheduler` / `ProtocolActor` | The test constructs the actor. | Ready. |
-| `CanOpenNode` | Still does `new ProtocolActor(...)` itself. The internal constructor takes `ITimeSource` and hands it to that actor. `CanOpenPdoEngineTests.OpenClocked` and the life-guarding tests already pass a `ManualTimeSource`. | `ITimeSource` moves timers the actor has armed. It does not dequeue a received frame. NMT Start waits on the mailbox: `PostToActorAsync` in `CanOpenNode.CommunicationProfile.cs`, or a state/event after `ApplyNmtTransition`. The actor itself is not injectable. |
+| `CanOpenNode` | Still does `new ProtocolActor(...)` itself. The internal constructor takes `ITimeSource` and hands it to that actor. `CanOpenPdoEngineTests.OpenClocked` and the life-guarding tests already pass a `ManualTimeSource`. | `ITimeSource` moves timers the actor has armed (heartbeat, SYNC, the producer-tick `clock.Advance`). It does not dequeue a frame, install an SDO session, put an upload-init on the wire, or drain the RPDO pump. Those wait on `PostToActorAsync`, a frame observable, or the pump. The actor itself is not injectable. |
 | `J1939TpChannel` | `_actor = new ProtocolActor()` with no time source (`J1939TpChannel.cs` constructor). | **Needs the seam first.** Nothing in this layer can move to a virtual clock until then. |
-| `UdsClientImpl`, `UdsFunctionalClient` | `Stopwatch.GetTimestamp()` for P2, P2*, and collection windows. | **Needs a time seam, not an actor.** |
+| `UdsClientImpl`, `UdsFunctionalClient` | `Stopwatch.GetTimestamp()` for P2, P2*, and collection windows. | **A time seam for those windows, not an actor.** It does not take `_requestLock`, prove a second call is queued, or show that the bus pump stayed quiet. |
 | ISO-TP functional collection | `CancellationTokenSource.CancelAfter` plus a `Stopwatch` deadline in `IsoTpFunctionalClient.CollectFromSubscriptionAsync`. Not the channel actor. | A channel `VirtualClock` does not move this window. |
 | Raw CAN subscription pump, object-dictionary write gate, `CanBusService` send lock | No actor timer. The ISO-TP handoff test opens both channels with `IsoTpFactory.Open` and sleeps until the second sender is inside the service lock. | A signal (`ManualResetEvent`, "pump drained", "sender has entered the lock"), not a clock. |
 
@@ -175,31 +175,31 @@ The barrier already exists inside the node: `PostToActorAsync` (`CanOpenNode.Com
 | `Sdo_DynamicTpdoMapping_ReconfiguresPayloadViaSdo` | 119 | both nodes are Operational once Start has been dequeued. The 50 ms stands in for that dequeue | red |
 | `Sdo_DynamicRpdoMapping_ReconfiguresUnpackViaSdo` | 165 | same | red |
 | `Tpdo_ChangeOfState_Emits_On_ApplicationOdWrite` | 362 | same | red |
-| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 411 | Start has been applied within 50 ms. Line 413, the wrong-echo window, is in the timer table below | red |
-| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 613 | Start has been applied within 50 ms. Line 666, the RPDO drain, is in the timer table below | red |
+| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 411 | Start has been applied within 50 ms. Line 413, the wrong-echo window, is a pump wait in the table below | red |
+| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 613 | Start has been applied within 50 ms. Line 666, the RPDO drain, is a pump wait in the table below | red |
 | `Nmt_Broadcast_TransitionsAllNodes` | 724 | both slaves are Operational within 100 ms of the broadcast | red |
 | `Tpdo_EventDriven_Emits_MappedOdValues` | 1205 | Start has been applied within 50 ms | red |
 | `Tpdo_DummyMapping_KeepsSubsequentSlotOffsets` | 1274 | same | red |
 | `Tpdo_SyncTriggered_FiresEverySync` | 1305 | same | red |
 
-### CANopen timers — time source injectable, actor still constructed inside the node
+### CANopen session, wire, and pump — not a clock
 
-The rows below are actor timers or "a frame would have been sent by now." Pass the `ITimeSource` the node already accepts. Do not treat the nine NMT-Start lines above as the same change.
+None of these sleeps wait on a timer the node armed. Passing `ITimeSource` and advancing it does not install a session, emit an upload-init, consume a boot-up, or drain a pump. `ITimeSource` stays the seam for a timer that is armed (heartbeat, SYNC, the `clock.Advance` already in the producer-tick test). It is not the conversion for this table.
 
 | Test | Lines | Assumes | Direction |
 |---|---|---|---|
-| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 413 | 300 ms is long enough for a wrong echo | green |
-| `Sdo_ServerSupersede_EmitsWireAbort_ForPriorTransfer` | 377 | the segmented session is installed within 50 ms | red |
-| `Sdo_ClientResponseWithShortDlc_IsAcceptedAndCompletes` | 422 | the upload init is on the wire within 30 ms | red |
+| `Sdo_ServerSupersede_EmitsWireAbort_ForPriorTransfer` | 377 | the actor has installed the segmented session after the transmit. Mailbox: `PostToActorAsync`, or a state that says the session exists | red |
+| `Sdo_Segmented_Download_Wrong_Toggle_Aborts` | 841 | the init-ack has been processed. Same mailbox, not a timer | red |
+| `Sdo_ClientResponseWithShortDlc_IsAcceptedAndCompletes` | 422 | the upload-init is on the wire. A frame observable | red |
 | `Sdo_ClientSegmentedUploadResponse_OverMaxTransferBytes_AbortsOutOfMemory` | 540 | same | red |
-| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 666 | 200 ms drains the RPDO pump before the counts are sampled | red |
-| `Nmt_ResetNode_EmitsBootup` | 785 | the initial boot-up has already happened within 50 ms, so it is not the one under test | both |
-| `Nmt_ResetCommunication_EmitsBootup_And_Settles_In_PreOperational` | 810, 821 | initial boot-up consumed; Pre-operational within 50 ms of the reset boot-up | both, then red |
-| `Sdo_Segmented_Download_Wrong_Toggle_Aborts` | 841 | the init-ack has happened within 100 ms | red |
-| `Heartbeat_Consumer_FiresTimeoutWhenPeerGoesSilent` | 903 | 100 ms is past the initial boot-up so the consumer arms cleanly | both |
-| `Overlapping_Emcys_Reach_The_Bus_In_The_Order_The_Register_Was_Written` | 932 | 200 ms was long enough for a second EMCY that did not wait to have been transmitted | green |
-| `A_Guarding_Reply_To_A_Poll_Queued_Behind_A_Reset_Stays_Behind_The_Bootup` | 1058 | 100 ms was long enough to see a reply that did not wait | green |
-| `A_Producer_Tick_Due_During_ApplicationReset_Stays_Behind_The_Bootup_And_Restarts_The_Cycle` | 1115, 1124 | after `clock.Advance` and `SettleAsync`, another 100 ms of wall time changes nothing on the wire | green. The clock is already manual; the sleeps are leftover |
+| `Tpdo_Emission_UnderConcurrentOdWrites_NeverTears` | 666 | the RPDO pump has drained before the counts are sampled. A pump observable | red |
+| `Tpdo_ChangeOfState_DoesNotEcho_On_RpdoUnpack` | 413 | 300 ms is long enough for a wrong echo to have been pumped out. Line 411, the NMT Start, is in the mailbox table above | green |
+| `Nmt_ResetNode_EmitsBootup` | 785 | the initial boot-up has been consumed, so it is not the one under test. Mailbox or the boot-up event | both |
+| `Nmt_ResetCommunication_EmitsBootup_And_Settles_In_PreOperational` | 810, 821 | initial boot-up consumed; Pre-operational once the reset transition has run. Same mailbox shape as NMT Start | both, then red |
+| `Heartbeat_Consumer_FiresTimeoutWhenPeerGoesSilent` | 903 | the initial boot-up has been consumed so the consumer arms cleanly. The timeout itself is the event that follows; this sleep is the boot-up | both |
+| `Overlapping_Emcys_Reach_The_Bus_In_The_Order_The_Register_Was_Written` | 932 | 200 ms was long enough for a second EMCY that did not wait for the first confirmation. The test already holds that confirmation; the sleep is a quiet wire | green |
+| `A_Guarding_Reply_To_A_Poll_Queued_Behind_A_Reset_Stays_Behind_The_Bootup` | 1058 | 100 ms was long enough to see a reply that did not wait. `PostToActorAsync` has already returned; the sleep is the wire | green |
+| `A_Producer_Tick_Due_During_ApplicationReset_Stays_Behind_The_Bootup_And_Restarts_The_Cycle` | 1115, 1124 | after `clock.Advance` and `SettleAsync`, another 100 ms of wall time changes nothing on the wire. The clock half is done. A further advance does not replace these; they are the wire staying quiet | green |
 
 These three are the object-dictionary write gate, not an actor timer. A clock will not order them. They want the other thread to have reached the gate, which is a signal:
 
@@ -220,9 +220,9 @@ These three are the object-dictionary write gate, not an actor timer. A clock wi
 | `Callback_Subscribe_Dispose_From_Inside_Handler_Does_Not_Deliver_Buffered_Frames` | 291 | same, for frames buffered during the callback | green |
 | `Callback_Subscribe_OnError_Takes_Precedence_Over_The_Service_Fault_Event` | 398 | a second, wrong report would have arrived within 100 ms | green |
 
-### UDS — time seam, not an actor
+### UDS — time seam for P2 and the collection window
 
-`UdsClientImpl` and `UdsFunctionalClient` read `Stopwatch` directly. The sleeps below are almost all "this frame lands on one side of P2, P2*, or the functional window." The ECU-side `Task.Delay` in `SimulatedUdsEcu` is the double; the assumption lives in the test that chooses the interval.
+`UdsClientImpl` and `UdsFunctionalClient` read `Stopwatch` directly for P2, P2*, and the functional collection window. The sleeps in the next table place a frame on one side of that window. The ECU-side `Task.Delay` in `SimulatedUdsEcu` is the double; the assumption lives in the test that chooses the interval. Freezing or advancing that clock does not take `_requestLock` and does not drain the bus pump. Those sites are the table after this one.
 
 | Test | Lines | Assumes | Direction |
 |---|---|---|---|
@@ -237,16 +237,22 @@ These three are the object-dictionary write gate, not an actor timer. A clock wi
 | `A_Pending_Answer_Consumed_As_Another_Requests_Stray_Still_Extends_Its_Window` | 949, 954 | 400 ms and 200 ms place two responses on specific sides of a 600 ms P2. The non-suppressed `0x11` handler sleeps 400 ms inside that P2, so the margin before a correct client times out is 200 ms | both. **Measured red** on `macos-latest` for this pull request (run 36102259889, job 107967157821): `UdsTimeoutException`, P2 after 600 ms waiting for service `0x11`, at the `SendRawAsync` on line 970. Ubuntu and Windows on the same commit passed. The diff is this document only, so the failure is not attributable to it. Not fixed here: #114 is a count, and widening P2 would be the tolerance this audit exists to refuse |
 | `SecurityAccess_Holds_Lock_Across_Seed_And_Key` | 1206 | 120 ms covers several 30 ms keep-alive periods while the lock is held | red if fewer periods elapse than the assertion needs; overshoot adds periods |
 | `TimedOut_Request_Does_Not_Poison_Next_Same_Service_Transaction` | 1240 | `Thread.Sleep(250)` is after P2 of 80 ms. Overshoot keeps it after | green for the "after" direction |
-| `Dispose_During_InFlight_Request_Does_Not_Race_RequestLock` | 1576 | the request holds the lock within 50 ms | red |
-| `Dispose_Cancels_Suppress_TesterPresent_Blocked_On_RequestLock` | 1606, 1610 | in the receive within 50 ms, then parked on the lock within 30 ms | red |
-| `N_Dispose_Leaves_The_Lock_To_A_Holder_That_Outlasts_The_Wait` | 374 | the stubbed request holds the lock within 50 ms | red |
-| `DownloadAsync_Holds_Exclusive_Lock_Against_Concurrent_TesterPresent` | 402 | `Thread.Sleep(2)` per block gives a concurrent TesterPresent a chance to interleave. The sleep is the width of the race window | green if 2 ms is not wide enough for the racer |
 
-`UdsFunctionalClientTests` is 23 category-2 sites and no category-1 poll. `Window` in that file is 300 ms. A `Task.Delay(20)` before a positive response has to land inside that window (red if the delay crosses it; the margin is large). A `Task.Delay` of 100–250 ms before a negative response is placing the frame after a shorter window or during the next one.
+### UDS lock, queue, and pump — not the time seam
+
+| Test | Lines | Assumes | Direction |
+|---|---|---|---|
+| `Dispose_During_InFlight_Request_Does_Not_Race_RequestLock` | 1576 | the request holds `_requestLock` within 50 ms | red |
+| `Dispose_Cancels_Suppress_TesterPresent_Blocked_On_RequestLock` | 1606, 1610 | in the receive within 50 ms, then parked on `_requestLock` within 30 ms | red |
+| `N_Dispose_Leaves_The_Lock_To_A_Holder_That_Outlasts_The_Wait` | 374 | the stubbed request holds the lock within 50 ms | red |
+| `DownloadAsync_Holds_Exclusive_Lock_Against_Concurrent_TesterPresent` | 402 | `Thread.Sleep(2)` per block is the width of the race, so a concurrent TesterPresent can interleave if the lock is not held | green if 2 ms is not wide enough for the racer |
+| `A_Call_Queued_Behind_Another_Does_Not_Send_After_Dispose` | 167 | the first call owns the send path and the second is queued behind it. A queue or in-flight observable, not the collection window | red |
+| `An_Invalid_Collection_Window_Transmits_Nothing` | 864 | 50 ms was long enough for the bus pump to have shown a transmit after validation rejected the window | green |
+
+`UdsFunctionalClientTests` is 23 category-2 sites and no category-1 poll. Two of them are the last two rows above. The other 21 place a frame relative to `Window` (300 ms in that file, unless the test sets a shorter one). A `Task.Delay(20)` before a positive response has to land inside that window (red if the delay crosses it; the margin is large). A `Task.Delay` of 100–250 ms before a negative response is placing the frame after a shorter window or during the next one. One client time seam covers those 21. It does not cover line 167 or line 864.
 
 | Test | Lines | What the delays are doing |
 |---|---|---|
-| `A_Call_Queued_Behind_Another_Does_Not_Send_After_Dispose` | 167 | 50 ms: the first call is inside its 300 ms window and the second is queued |
 | `A_Late_Negative_Answer_To_A_Suppressed_Send_Does_Not_Land_In_The_Next_Window` | 244 | 100 ms, then the negative |
 | `A_Late_Negative_Answer_To_A_Previous_Request_Does_Not_Land_In_The_Next_Window` | 276 | 150 ms, then the negative |
 | `A_Cancelled_Collection_Still_Leaves_Its_Window_For_The_Next_Call` | 308 | 150 ms, then the negative |
@@ -258,7 +264,6 @@ These three are the object-dictionary write gate, not an actor timer. A clock wi
 | `A_Cancelled_Wait_Leaves_The_Listener_To_Hear_The_Pending_Answer` | 677, 678 | 50 ms then the pending; 200 ms then the negative |
 | `A_Pending_Answer_In_The_Gap_After_A_Suppressed_Send_Is_Observed` | 718, 719, 730 | 100 ms, 400 ms, and 200 ms of "nobody collecting" |
 | `A_Pending_Answer_From_Before_The_Handoff_Is_Not_This_Requests` | 803, 811 | 50 ms of setup; 20 ms before the positive |
-| `An_Invalid_Collection_Window_Transmits_Nothing` | 864 | 50 ms to have seen a transmit |
 | `A_Listener_Is_Restarted_When_The_Acceptance_Outlasted_The_Window` | 924, 928, 934 | 1100 ms past the window; 150 ms then a negative; 20 ms then a positive |
 | `A_Collection_That_Outlasts_The_Window_Does_Not_Leave_A_Zombie_Listener` | 957 | 150 ms, then the negative |
 
@@ -303,15 +308,15 @@ A per-test `P2ClientMax`, `P2StarClientMax`, T1–T4, or `SdoServerTimeout` is a
 
 ## Conversion order
 
-By risk, and only after a failing run of the unmodified test under load. The hop-count recommendation on this issue was reasoned from the shape and then measured false. Do not repeat that.
+By risk. A green site gets more likely to pass as the runner slows, so a failing load run of the unmodified test is not a prerequisite for converting it. CI will not produce that failure. Require a failing unmodified run for a red or flaky site, where the sleep can time out a correct implementation. The hop-count recommendation on this issue was reasoned from the shape and then measured false; that is the case a load run is for. Do not repeat it.
 
 1. **J1939 node backoff and arbitration sleeps** (`J1939NodeTests` lines 474, 582, 615, 667, 1805). The seam is in use beside them. They are green: CI will not trip them. Bracket the configured backoff from both sides, and arm the timer before advancing. No product change.
 2. **`StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod`**, both halves (the 10.56 s budget and the two-period quiet window). Same seam. This is the budget a 3× stretch can still reach. `StartPeriodicSend_SingleFrame_StopsAfterAddressLoss` (line 3160) is the same schedule.
 3. **ISO-TP category 2 on the injected actor**, negative windows first (1156, 1306, 1541, 1688), then the "FC is surely processed" sleeps (349, 1391, 1445). Line 1688 already advances a virtual clock and then sleeps for the wire. Line 1391 is the arm-before-advance lesson in a comment. Line 1980 is not on this list. `Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call` opens both channels with `IsoTpFactory.Open` and sleeps only so sender B reaches `CanBusService`'s send lock. No protocol timer is armed, and no injected actor controls that wait. It needs an observable from the service/lock boundary.
 4. **`BusStateMonitor` negatives and the deadline / `ProtocolActor` negatives**, including the Rearm bracket. The test already holds the actor. Small, and entirely green.
-5. **CANopen timers**, passing the `ITimeSource` the node already accepts. That seam moves timers the actor has armed. It does not cover the nine NMT-Start sleeps (dynamic-mapping 119, 165, 362, 411; integration 613, 724, 1205, 1274, 1305). Those wait until the received NMT frame is dequeued and `ApplyNmtTransition` runs. The barrier is the mailbox — the existing internal `PostToActorAsync`, or a state or event after the transition — and it is a separate change from the clock. Do the four object-dictionary gate sleeps separately again, with a signal, not a clock. The producer-tick test already has a `ManualTimeSource`; its two wall sleeps are what is left of that test.
+5. **CANopen timers only where a timer is armed.** `ITimeSource` moves heartbeat, SYNC, and the `clock.Advance` the producer-tick test already does. It does not cover the nine NMT-Start sleeps (dynamic-mapping 119, 165, 362, 411; integration 613, 724, 1205, 1274, 1305): those wait until the received frame is dequeued and `ApplyNmtTransition` runs, via `PostToActorAsync` or a state or event after the transition. It also does not cover the session-install and init-ack sleeps (377, 841), the upload-init wire sleeps (422, 540), the RPDO drain (666), the boot-up consumption (785, 810, 821, 903), or the green "nothing else was transmitted" windows (413, 932, 1058, 1115, 1124). Those need a mailbox, a frame, or the pump. The producer-tick sleeps are the wire staying quiet after the clock has already moved. Do the four object-dictionary gate sleeps separately again, with a signal, not a clock.
 6. **J1939-TP, after a seam** that lets `J1939TpChannel` take a time source or an actor the way `IsoTpChannel` and `J1939NodeImpl` do. Eight sites. Do not get there by shrinking `BamPacketSpacing` again; that knob has already been used for the two tests that were actually tight. `Send_InFlightAcrossReclaim_FailsWithNoAddressException` waits on a TP session the node opened internally, so it waits on this seam too, or on an observable for "the session has started" — the twenty hops are not that observable.
-7. **UDS and the functional collection window last.** They need a time seam in the client, not an actor. Overlaps the P2 work already in the tree. Do not widen `P2StarClientMax`. The functional-client file is 23 sites of the same "place a frame relative to a window" shape; one seam covers the file.
-8. **Signals, not clocks.** Raw CAN subscription, three green windows, as "the pump has drained." The ISO-TP handoff at line 1980, as "sender B is inside the service lock." Neither is a virtual clock.
+7. **UDS P2, P2*, and the functional collection window last.** Those need a time seam in the client, not an actor. Overlaps the P2 work already in the tree. Do not widen `P2StarClientMax`. Twenty-one of the functional-client sites place a frame relative to a window; one seam covers that set. It does not cover `A_Call_Queued_Behind_Another_Does_Not_Send_After_Dispose` (line 167), which waits until the second call is queued, or `An_Invalid_Collection_Window_Transmits_Nothing` (line 864), which waits for the bus pump. It also does not cover the `_requestLock` waits (`UdsClientTests` 1576, 1606, 1610; `UdsExpiredDeadlineTests` 374) or the 2 ms race width in `DownloadAsync_Holds_Exclusive_Lock_Against_Concurrent_TesterPresent`. Those need a lock, queue, or pump observable.
+8. **Signals, not clocks.** Raw CAN subscription, three green windows, as "the pump has drained." The ISO-TP handoff at line 1980, as "sender B is inside the service lock." The CANopen and UDS rows named in items 5 and 7 that are a mailbox, a frame, a lock, or a pump. None of these is a virtual clock.
 
 Leave category 1, the helper bucket, and the 375 hang-guards alone. Leave the three tests whose margin #115, #116 and #117 already opened.
