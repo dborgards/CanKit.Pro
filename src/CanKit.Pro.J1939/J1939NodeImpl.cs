@@ -310,11 +310,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // A Cannot Claim still waiting its backoff is overtaken by this claim (Codex on #153).
         // Dropping it settles the loss that scheduled it just as finally as sending it would,
         // so the caller waiting on that loss is answered here. One already handed to the driver
-        // is not: that caller is answered when the handoff finishes, and faulting it here would
-        // let a dispose on the exception suppress the frame.
+        // is not: that caller is answered when *its* handoff finishes, and faulting it here
+        // would let a dispose on the exception suppress the frame. A later loss may already
+        // have replaced `_lostClaim`; only the claim whose send is in flight is left alone.
         _cannotClaimBackoff?.Dispose();
         _cannotClaimBackoff = null;
-        if (!_cannotClaimHandoffPending)
+        if (!ReferenceEquals(_lostClaim, _cannotClaimAwaitingHandoff))
             CompleteLostClaim();
 
         // A claim still in arbitration is not silently replaced: the caller who started it
@@ -366,7 +367,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void ScheduleCannotClaim()
     {
-        _cannotClaimBackoff?.Dispose();
+        // Nothing to dispose. A backoff the new claim overtook was cancelled in BeginClaim,
+        // and an unseating starts from Claimed, which has none armed. The field is null here;
+        // disposing a handle that is never non-null was a branch nothing reached.
         _cannotClaimBackoff = AfterClaimBackoff(SendCannotClaimIfStillDue);
     }
 
@@ -386,24 +389,27 @@ internal sealed class J1939NodeImpl : IJ1939Node
     {
         _cannotClaimBackoff = null;
         // Claimed: the claim is the newer word and a Cannot Claim would retract it. Claiming:
-        // the round in hand announces, and a claim overtook this one (Codex on #153). Neither
-        // is reachable without the arming path having disposed the handle; this is the second
-        // line. NotClaimed passes, because that is a node that never claimed answering a scan.
+        // the round in hand announces, and a claim overtook this one (Codex on #153). The
+        // arming path disposes the handle before either transition; this is the second line
+        // for a callback already in flight. NotClaimed passes, because that is a node that
+        // never claimed answering a scan.
         var state = (J1939ClaimState)Volatile.Read(ref _claimStateStore);
-        if (state is not (J1939ClaimState.Claimed or J1939ClaimState.Claiming))
+        if (state == J1939ClaimState.Claimed || state == J1939ClaimState.Claiming)
         {
-            // Fault only after SendConfirmed has handed the frame to the driver. Completing
-            // the loss beside the fire-and-forget start lets a caller dispose on the exception
-            // while that handoff is still pending, and the frame is never sent (Codex on #153).
-            _cannotClaimHandoffPending = true;
-            SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress, afterHandoff: () =>
-            {
-                _cannotClaimHandoffPending = false;
-                CompleteLostClaim();
-            });
+            CompleteLostClaim();
             return;
         }
-        CompleteLostClaim();
+
+        // Fault only after SendConfirmed has handed the frame to the driver. Completing
+        // the loss beside the fire-and-forget start lets a caller dispose on the exception
+        // while that handoff is still pending, and the frame is never sent (Codex on #153).
+        // The continuation closes over *this* loss. A second loss may replace `_lostClaim`
+        // before SendConfirmed returns; completing whatever is stored then faults the wrong
+        // claim and leaves the first one waiting forever (Codex and Bugbot on #153).
+        var owed = _lostClaim;
+        if (owed is not null)
+            _cannotClaimAwaitingHandoff = owed;
+        SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress, afterHandoff: () => OnCannotClaimHandoff(owed));
     }
 
     // The claim of a loss that owes the bus a Cannot Claim: it faults once that frame has been
@@ -413,16 +419,33 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // at all (Codex on #153).
     private PendingClaim? _lostClaim;
 
-    // Set on the actor for the interval between starting the Cannot Claim send and the
-    // handoff continuation. A claim that starts in that interval must not answer the loss:
-    // the frame is already with the driver.
-    private bool _cannotClaimHandoffPending;
+    // The loss whose Cannot Claim is between the send and the handoff continuation. A claim
+    // that starts in that interval must not answer *this* loss: the frame is already with the
+    // driver. It is not "whichever loss is current" — a second loss can be stored in
+    // `_lostClaim` while this send is still outstanding.
+    private PendingClaim? _cannotClaimAwaitingHandoff;
+
+    private void OnCannotClaimHandoff(PendingClaim? owed)
+    {
+        if (ReferenceEquals(_cannotClaimAwaitingHandoff, owed))
+            _cannotClaimAwaitingHandoff = null;
+        if (owed is null) return;
+        FaultLostClaim(owed);
+    }
 
     private void CompleteLostClaim()
     {
         var lost = _lostClaim;
         if (lost is null) return;
-        _lostClaim = null;
+        FaultLostClaim(lost);
+    }
+
+    private void FaultLostClaim(PendingClaim lost)
+    {
+        if (ReferenceEquals(_lostClaim, lost))
+            _lostClaim = null;
+        if (ReferenceEquals(_cannotClaimAwaitingHandoff, lost))
+            _cannotClaimAwaitingHandoff = null;
         lost.CtRegistration.Dispose();
         lost.Tcs.TrySetException(new J1939CannotClaimException(lost.PreferredAddress));
     }
