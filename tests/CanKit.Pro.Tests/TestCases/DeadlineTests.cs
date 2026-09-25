@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
@@ -76,32 +77,58 @@ public class DeadlineTests
     }
 
     [Fact]
-    public async Task Rearm_Before_Original_Expiry_Extends_The_Deadline()
+    public void Rearm_Before_Original_Expiry_Extends_The_Deadline()
     {
         using var actor = new ProtocolActor();
         var scheduler = new DeadlineScheduler(actor);
-        var fired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // The windows are deliberately far apart rather than merely different: on a loaded CI
-        // runner a 50 ms Task.Delay can overshoot by hundreds of milliseconds, and with a tight
-        // original window that overshoot expires the deadline before Rearm is even called --
-        // failing the test for a scheduling hiccup rather than for the behaviour under test.
-        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired.TrySetResult(true));
+        // #130. Task.Delay completes on the thread pool, and a saturated net48 pool injects
+        // threads only one or two per second. Delay(850) can still be pending when the rearmed
+        // 2000 ms deadline fires on the actor's dedicated thread, so WhenAny reports that fire
+        // and the assertion blames the superseded timer. These waits block the calling thread.
+        // The windows stay 50 / 850 / 2000 ms. The generation guard itself is
+        // Rearm_Leaves_An_Already_Dispatched_Callback_Unable_To_Expire.
+        using var fired = new ManualResetEventSlim(false);
+        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired.Set());
 
-        // Re-arm to a much longer window, well before the original 600 ms would elapse.
-        await Task.Delay(TimeSpan.FromMilliseconds(50));
+        Thread.Sleep(TimeSpan.FromMilliseconds(50));
         deadline.Rearm(TimeSpan.FromMilliseconds(2000)).Should().BeTrue("re-arming a still-pending deadline succeeds");
 
-        // The ORIGINAL timer (600 ms from arm) must NOT fire -- Rearm superseded it, and the stale
-        // pre-Rearm timer must be generation-guarded out rather than double-firing. Waiting 850 ms
-        // takes us comfortably past when it would have.
-        (await Task.WhenAny(fired.Task, Task.Delay(TimeSpan.FromMilliseconds(850)))).Should().NotBe(fired.Task,
+        // Past the original 600 ms, and still more than a second short of the rearmed deadline.
+        fired.Wait(TimeSpan.FromMilliseconds(850)).Should().BeFalse(
             "the original timeout must have been superseded by Rearm");
         deadline.IsExpired.Should().BeFalse();
 
-        // ...but the re-armed timer (2000 ms from Rearm) eventually does fire.
-        (await Task.WhenAny(fired.Task, Task.Delay(Bounded))).Should().Be(fired.Task,
+        fired.Wait(Bounded).Should().BeTrue(
             "the re-armed timeout must still fire at its new deadline");
+        deadline.IsExpired.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Rearm_Leaves_An_Already_Dispatched_Callback_Unable_To_Expire()
+    {
+        // Schedule's dispose is best-effort: a callback the loop has already taken off its timer
+        // list still runs. Cancelling the handle is not what stops it — Fire's generation check
+        // is. This actor keeps that callback reachable after Dispose, which is the in-flight case
+        // ProtocolActor.FireDueTimers never enters once TryCancel has won.
+        var actor = new HoldingActor();
+        var scheduler = new DeadlineScheduler(actor);
+        var fired = 0;
+
+        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired++);
+        deadline.Rearm(TimeSpan.FromMilliseconds(2000)).Should().BeTrue();
+
+        var stale = actor.Armed[0];
+        var replacement = actor.Armed[1];
+        stale.WasDisposed.Should().BeTrue("Rearm disposes the handle it supersedes");
+        replacement.WasDisposed.Should().BeFalse();
+
+        stale.Deliver();
+        fired.Should().Be(0, "a callback captured before Rearm must lose the generation check");
+        deadline.IsExpired.Should().BeFalse();
+
+        replacement.Deliver();
+        fired.Should().Be(1, "the callback captured by Rearm is the one that expires the deadline");
         deadline.IsExpired.Should().BeTrue();
     }
 
@@ -197,5 +224,49 @@ public class DeadlineTests
 
         nullCallback.Should().Throw<ArgumentNullException>();
         negativeTimeout.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    /// <summary>
+    /// Records every <see cref="IProtocolActor.Schedule"/> callback and still delivers it after
+    /// the handle is disposed. That is the actor's documented "already in flight" case: disposal
+    /// only stops a callback the loop has not taken yet.
+    /// </summary>
+    private sealed class HoldingActor : IProtocolActor
+    {
+        private readonly List<HeldCallback> _armed = new();
+
+        public IReadOnlyList<HeldCallback> Armed => _armed;
+
+        public IDisposable Schedule(TimeSpan delay, Action callback)
+        {
+            var held = new HeldCallback(callback);
+            _armed.Add(held);
+            return held;
+        }
+
+        public void Post(Action work) => throw new NotSupportedException();
+
+        public Task PostAsync(Action work) => throw new NotSupportedException();
+
+        public Task<T> PostAsync<T>(Func<T> work) => throw new NotSupportedException();
+
+#pragma warning disable CS0067
+        public event EventHandler<Exception>? BackgroundExceptionOccurred;
+#pragma warning restore CS0067
+
+        public void Dispose() { }
+
+        public sealed class HeldCallback : IDisposable
+        {
+            private readonly Action _callback;
+
+            public HeldCallback(Action callback) => _callback = callback;
+
+            public bool WasDisposed { get; private set; }
+
+            public void Dispose() => WasDisposed = true;
+
+            public void Deliver() => _callback();
+        }
     }
 }
