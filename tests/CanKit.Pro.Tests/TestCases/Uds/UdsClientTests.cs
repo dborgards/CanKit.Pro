@@ -584,29 +584,57 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Queued_Pending_Answer_Still_Extends_A_Window_That_Has_Run_Out()
     {
+        // P2 is long enough that a loaded host still delivers the 0x78 inside it. The test
+        // then waits that P2 out itself, so the client finds the window over and the 0x78
+        // already queued. P2* from that arrival reaches past P2; a fixed 300 ms sleep on a
+        // 200 ms window did not -- the 0x78 was still on its way, the call returned at once,
+        // and the suppressed send had not been counted yet (macOS CI on #153).
+        var p2 = TimeSpan.FromMilliseconds(1500);
+        var p2Star = TimeSpan.FromMilliseconds(2500);
         var (client, ecu, dispose) = BuildPair(
             e => e.On(0x3E, req =>
             {
                 if ((req[1] & 0x80) != 0)
                     throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                        delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(500));
+                        delayBefore: TimeSpan.FromMilliseconds(20), delayAfter: TimeSpan.FromSeconds(20));
                 return new byte[] { 0x00 };
             }),
-            options: new UdsClientOptions
-            {
-                P2ClientMax = TimeSpan.FromMilliseconds(200),
-                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
-            });
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2Star });
 
         using (dispose)
         {
             using var cts = new CancellationTokenSource(ShortTimeout);
             await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
-            await Task.Delay(300); // the 0x78 is queued, the 200 ms window has run out, the negative is at 550 ms
+            // After the send returns the window has already started, so waiting P2 from here
+            // lands past its end.
+            long sentAt = Stopwatch.GetTimestamp();
 
-            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            await act.Should().NotThrowAsync("the queued 0x78 moves the window out by P2*");
-            ecu.RequestsHandled.Should().Be(2);
+            var deadline = DateTime.UtcNow + ShortTimeout;
+            while (ecu.PendingNrcsSent == 0)
+            {
+                if (DateTime.UtcNow > deadline) throw new TimeoutException("the 0x78 was not sent");
+                await Task.Delay(5);
+            }
+            long pendingAt = Stopwatch.GetTimestamp();
+            var sinceSend = TimeSpan.FromSeconds((pendingAt - sentAt) / (double)Stopwatch.Frequency);
+            sinceSend.Should().BeLessThan(p2, "the 0x78 has to arrive while the window is still open");
+
+            var windowEnd = sentAt + (long)(p2.TotalSeconds * Stopwatch.Frequency);
+            while (Stopwatch.GetTimestamp() < windowEnd)
+                await Task.Delay(10);
+
+            long callAt = Stopwatch.GetTimestamp();
+            var sw = Stopwatch.StartNew();
+            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+            sw.Stop();
+
+            // P2* from the 0x78, minus how long we already waited past that arrival. A missed
+            // extension returns in a round trip; this bound sits under the shortest extension
+            // (a 0x78 that arrived as the window opened) and a loaded host only lengthens it.
+            var extensionLeft = p2Star - TimeSpan.FromSeconds((callAt - pendingAt) / (double)Stopwatch.Frequency);
+            sw.Elapsed.Should().BeGreaterThanOrEqualTo(extensionLeft - TimeSpan.FromMilliseconds(200),
+                "the queued 0x78 moved the window out to P2* from its arrival");
+            ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x3E, 0x00 });
         }
     }
 
@@ -755,19 +783,27 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource(ShortTimeout);
         await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
 
-        // Another service's request, cancelled by its caller at 50 ms; the 0x78 is stamped
-        // right after the request's synchronous start -- after its pre-send discard's stamp,
-        // which would otherwise drop the frame as older, and inside the window by construction
-        // rather than by a timer (macOS CI on #150) -- and delivered while the request waits,
-        // before its abort, whose discard is the one under test. (A host that delays the
-        // delivery past the abort lets the next call's wait-out route it instead: a pass for
-        // the wrong reason, never a failure.)
-        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        // Another service's request, cancelled by its caller once the request is on the wire.
+        // The 0x78 is stamped right after the request's synchronous start -- after its pre-send
+        // discard's stamp, which would otherwise drop the frame as older, and inside the window
+        // by construction rather than by a timer (macOS CI on #150) -- and delivered while the
+        // request waits, before its abort, whose discard is the one under test. A 50 ms timer
+        // lost that race on macOS: the host resumed after P2 had already elapsed and the wait
+        // reported a timeout. Cancelling from here, once the send is visible, does not depend
+        // on a timer firing first. (A host that delays the delivery past the abort lets the
+        // next call's wait-out route it instead: a pass for the wrong reason, never a failure.)
+        using var early = new CancellationTokenSource();
         var other = client.ReadDataByIdentifierAsync(0xF190, early.Token);
         long arrival = Stopwatch.GetTimestamp();
-        await Task.Delay(20);
+        var sent = DateTime.UtcNow + ShortTimeout;
+        while (service.Sent.Count < 2)
+        {
+            if (DateTime.UtcNow > sent) throw new TimeoutException("the request was not transmitted");
+            await Task.Delay(5);
+        }
         byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
+        early.Cancel();
         Func<Task> cancelled = () => other;
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 

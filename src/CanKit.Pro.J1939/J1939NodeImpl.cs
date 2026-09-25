@@ -307,12 +307,170 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return;
         }
 
-        // Cancel any previous in-flight claim.
-        _pendingClaim?.Deadline?.Dispose();
-        _pendingClaim?.Tcs.TrySetCanceled();
-        _pendingClaim?.CtRegistration.Dispose();
+        // A Cannot Claim still waiting its backoff is overtaken by this claim (Codex on #153).
+        // Dropping it settles the loss that scheduled it just as finally as sending it would,
+        // so the caller waiting on that loss is answered here. One already handed to the driver
+        // is not: that caller is answered when *its* handoff finishes, and faulting it here
+        // would let a dispose on the exception suppress the frame. A later loss may already
+        // have replaced `_lostClaim`; only a claim whose send is already in flight is left
+        // alone. Every such send is remembered, not just the latest: a second loss overwrites
+        // `_lostClaim` and the first caller would otherwise have nothing left to complete it.
+        _cannotClaimBackoff?.Dispose();
+        _cannotClaimBackoff = null;
+        if (_lostClaim is { } lost && !_cannotClaimsAwaitingHandoff.Contains(lost))
+            CompleteLostClaim();
+
+        // A claim still in arbitration is not silently replaced: the caller who started it
+        // is waiting on it, and a second one is a programming error (#58). A re-claim on a
+        // node that holds an address, or holds none, is what this method is for. A pending
+        // claim whose task has already completed -- cancelled by its caller, whose cancel is
+        // still on its way to this loop -- is over, and is swept here so that awaiting the
+        // cancellation and claiming again is race-free.
+        if (_pendingClaim is { } inFlight)
+        {
+            if (!inFlight.Tcs.Task.IsCompleted)
+            {
+                ctr.Dispose();
+                tcs.TrySetException(new InvalidOperationException(
+                    $"An address claim for SA 0x{inFlight.PreferredAddress:X2} is in arbitration; await it, or cancel it, before claiming again."));
+                return;
+            }
+            _pendingClaim = null;
+            inFlight.Deadline?.Dispose();
+            inFlight.CtRegistration.Dispose();
+        }
 
         BeginClaimRound(preferredAddress, tcs, ctr);
+    }
+
+    // J1939-81 §4.4.4.3: a node that lost arbitration delays its Cannot Claim, and an
+    // arbitrary-address node its next claim, by a pseudo-random 0..153 ms derived from its
+    // NAME -- the low byte of the eight bytes' sum, times 0.6 ms, so 255 slots reach the
+    // 153 ms endpoint (Codex on #153: modulo 255 mapped a sum of 255 to zero) -- so two nodes
+    // colliding on an address do not answer in lockstep for ever (#58). Fixed by the NAME, so
+    // a test can choose it; scheduled on the actor, so the state it acts on is the state it
+    // read.
+    private TimeSpan ClaimBackoff
+    {
+        get
+        {
+            int sum = 0;
+            foreach (var b in _name.ToBytes()) sum += b;
+            return TimeSpan.FromMilliseconds((sum & 0xFF) * 0.6);
+        }
+    }
+
+    // The delayed Cannot Claim of a lost arbitration, tied to the loss that scheduled it: a
+    // new claim cancels it -- its announcement is the newer word on the bus, and a Cannot
+    // Claim after it would retract it -- and a second loss reschedules a full backoff rather
+    // than inheriting the remainder of the first (Codex on #153, twice). The state check is
+    // the second line.
+    private IDeadline? _cannotClaimBackoff;
+
+    private void ScheduleCannotClaim()
+    {
+        // Nothing to dispose. A backoff the new claim overtook was cancelled in BeginClaim,
+        // and an unseating starts from Claimed, which has none armed. The field is null here;
+        // disposing a handle that is never non-null was a branch nothing reached.
+        _cannotClaimBackoff = AfterClaimBackoff(SendCannotClaimIfStillDue);
+    }
+
+    // The answer a node without an address owes a Request for Address Claimed waits the same
+    // backoff, and for a reason the loss path only shares: a Cannot Claim carries the null
+    // address, so two nodes answering one global request at the same instant put identical
+    // CAN IDs with different NAMEs on the bus, which arbitration cannot separate (SAE
+    // J1939-81 §4.4.4.3; Codex on #153). An answer already waiting is the answer -- sending
+    // now would both bypass that delay and make the armed one a second copy.
+    private void AnswerRequestWithCannotClaim()
+    {
+        if (_cannotClaimBackoff is not null) return;
+        _cannotClaimBackoff = AfterClaimBackoff(SendCannotClaimIfStillDue);
+    }
+
+    private void SendCannotClaimIfStillDue()
+    {
+        _cannotClaimBackoff = null;
+        // Claimed: the claim is the newer word and a Cannot Claim would retract it. Claiming:
+        // the round in hand announces, and a claim overtook this one (Codex on #153). The
+        // arming path disposes the handle before either transition; this is the second line
+        // for a callback already in flight. NotClaimed passes, because that is a node that
+        // never claimed answering a scan.
+        var state = (J1939ClaimState)Volatile.Read(ref _claimStateStore);
+        if (state == J1939ClaimState.Claimed || state == J1939ClaimState.Claiming)
+        {
+            CompleteLostClaim();
+            return;
+        }
+
+        // Fault only after SendConfirmed has handed the frame to the driver. Completing
+        // the loss beside the fire-and-forget start lets a caller dispose on the exception
+        // while that handoff is still pending, and the frame is never sent (Codex on #153).
+        // The continuation closes over *this* loss. A second loss may replace `_lostClaim`
+        // before SendConfirmed returns; completing whatever is stored then faults the wrong
+        // claim and leaves the first one waiting forever (Codex and Bugbot on #153).
+        var owed = _lostClaim;
+        if (owed is not null)
+            _cannotClaimsAwaitingHandoff.Add(owed);
+        SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress, afterHandoff: () => OnCannotClaimHandoff(owed));
+    }
+
+    // The claim of a loss that owes the bus a Cannot Claim: it faults once that frame has been
+    // handed to the driver, not when the loss became known. A caller that disposes the node on
+    // the exception -- a `using` scope ending on it -- would otherwise tear the actor down
+    // inside the backoff, or inside the send, and the frame the loss owes would never be sent
+    // at all (Codex on #153).
+    private PendingClaim? _lostClaim;
+
+    // Every loss whose Cannot Claim is between the send and the handoff continuation, oldest
+    // first. A claim that starts in that interval must not answer these: the frame is already
+    // with the driver. One slot is not enough — a second loss replaces `_lostClaim` and, once
+    // its own send starts, would drop the only field that still pointed at the first caller.
+    private readonly List<PendingClaim> _cannotClaimsAwaitingHandoff = new();
+
+    private void OnCannotClaimHandoff(PendingClaim? owed)
+    {
+        if (owed is null) return;
+        FaultLostClaim(owed);
+    }
+
+    private void CompleteLostClaim()
+    {
+        var lost = _lostClaim;
+        if (lost is null) return;
+        FaultLostClaim(lost);
+    }
+
+    private void FaultLostClaim(PendingClaim lost)
+    {
+        if (ReferenceEquals(_lostClaim, lost))
+            _lostClaim = null;
+        _cannotClaimsAwaitingHandoff.RemoveAll(waiting => ReferenceEquals(waiting, lost));
+        lost.CtRegistration.Dispose();
+        lost.Tcs.TrySetException(new J1939CannotClaimException(lost.PreferredAddress));
+    }
+
+    private IDeadline? AfterClaimBackoff(Action onLoop)
+    {
+        var delay = ClaimBackoff;
+        if (delay <= TimeSpan.Zero) { onLoop(); return null; }
+        return _deadlines.Arm(delay, () => { if (_disposed == 0) onLoop(); });
+    }
+
+    // Registers `retry` as the claim in hand and starts its round after the backoff; a Request
+    // for Address Claimed or a contest for the candidate starts it at once (Codex on #153).
+    private void BeginClaimRoundAfterBackoff(PendingClaim retry, byte candidate, byte? scanStart)
+    {
+        _pendingClaim = retry;
+        void Start()
+        {
+            if (!ReferenceEquals(_pendingClaim, retry) || retry.Tcs.Task.IsCompleted) return;
+            retry.StartRound = null;
+            retry.Deadline?.Dispose();
+            retry.Deadline = null;
+            BeginClaimRound(candidate, retry.Tcs, retry.CtRegistration, scanStart);
+        }
+        retry.StartRound = Start;
+        retry.Deadline = AfterClaimBackoff(Start);
     }
 
     // Starts (or restarts, for the arbitrary-address fallback) a single arbitration round for
@@ -523,34 +681,48 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // Arbitrary-address fallback (FR-J1939-004 / SAE J1939-81 §4.5): retry with the
                 // next candidate from the arbitrary address field before giving up with
                 // Cannot-Claim.
-                _pendingClaim = null;
                 pending.Deadline?.Dispose();
+                pending.Deadline = null;
                 var scanStart = pending.ArbitraryScanStart;
                 if (ArbitraryClaimingEnabled
                     && TryGetNextArbitraryCandidate(pending.PreferredAddress, ref scanStart,
                         out var nextCandidate))
                 {
                     // The caller's TCS and its cancellation registration stay alive across
-                    // retries; only the arbitration round is restarted.
-                    BeginClaimRound(nextCandidate, pending.Tcs, pending.CtRegistration, scanStart);
+                    // retries; only the arbitration round is restarted. The pending claim stays
+                    // registered through the backoff, so a second ClaimAddressAsync meanwhile
+                    // meets the in-flight guard, and the delayed round runs only if it is still
+                    // the claim in hand -- not one cancelled or replaced meanwhile (Codex on
+                    // #153). The lost address is no longer announced as ours meanwhile.
+                    WriteAddress(null);
+                    SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
+                    var retry = new PendingClaim(nextCandidate, pending.Tcs, deadline: null, pending.CtRegistration)
+                    {
+                        ArbitraryScanStart = scanStart,
+                    };
+                    BeginClaimRoundAfterBackoff(retry, nextCandidate, scanStart);
                     return;
                 }
 
-                pending.CtRegistration.Dispose();
+                _pendingClaim = null;
                 WriteAddress(null);
                 // TP channel goes back to placeholder 0xFE — no directed TP traffic reaches
                 // us while unclaimed.
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
-                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
-                pending.Tcs.TrySetException(new J1939CannotClaimException(pending.PreferredAddress));
+                // The caller is answered by the backoff, once the Cannot Claim is on the bus.
+                _lostClaim = pending;
+                ScheduleCannotClaim();
                 return;
             }
 
             // Peer's NAME is >= ours: they lose. Re-announce our own claim so they hear it,
-            // then keep waiting on our deadline.
-            SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
+            // then keep waiting on our deadline. A round still waiting its backoff has nothing
+            // to re-announce yet: it starts now, and its announcement is the answer (Codex on
+            // #153).
+            if (pending.BackingOff) pending.StartRound!();
+            else SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
             return;
         }
 
@@ -572,7 +744,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
                     var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
                     _ = tcs.Task.ContinueWith(t => RaiseBackgroundException(t.Exception!.GetBaseException()),
                         CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-                    BeginClaimRound(nextCandidate, tcs, default, scanStart);
+                    // The lost address is the peer's from this instant: invalidated now, so no
+                    // application traffic goes out under it during the backoff; only the next
+                    // round waits. Registered as the claim in hand meanwhile, so a
+                    // ClaimAddressAsync during the backoff meets the in-flight guard, and the
+                    // delayed round runs only if it still is (Codex on #153).
+                    WriteAddress(null);
+                    RebindTransportOnLoop(J1939Pgn.NullAddress);
+                    SetClaimState(J1939ClaimState.Claiming, nextCandidate, contendingSa: null, contendingName: null);
+                    var unseated = new PendingClaim(nextCandidate, tcs, deadline: null, default) { ArbitraryScanStart = scanStart };
+                    BeginClaimRoundAfterBackoff(unseated, nextCandidate, scanStart);
                     return;
                 }
                 // Broadcast Cannot-Claim and transition.
@@ -580,7 +761,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RebindTransportOnLoop(J1939Pgn.NullAddress);
                 SetClaimState(J1939ClaimState.CannotClaim, address: null,
                     contendingSa: peerSa, contendingName: peerName);
-                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+                ScheduleCannotClaim();
             }
             else
             {
@@ -599,24 +780,29 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 break;
             case J1939ClaimState.Claiming when _pendingClaim is { } pending:
                 // Arbitrating: the claim for the preferred address is the answer, and a peer
-                // that hears it contests it now rather than after the window (§4.4.3).
-                SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
+                // that hears it contests it now rather than after the window (§4.4.3). A round
+                // still waiting its backoff has announced nothing; the request is the moment to
+                // -- it starts the round, which announces (Codex on #153).
+                if (pending.BackingOff) pending.StartRound!();
+                else SendAddressClaimFrame(sourceAddress: pending.PreferredAddress);
                 break;
             default:
-                SendAddressClaimFrame(sourceAddress: J1939Pgn.NullAddress);
+                AnswerRequestWithCannotClaim();
                 break;
         }
     }
 
-    private void SendAddressClaimFrame(byte sourceAddress)
+    private void SendAddressClaimFrame(byte sourceAddress, Action? afterHandoff = null)
     {
         // 8-byte little-endian NAME payload. PGN 0xEE00 is PDU1 with PS = 0xFF (global).
         // Re-announcements / Cannot-Claim remain fire-and-forget; the initial claim path uses
         // TransmitAddressClaimConfirmed so ClaimAddressAsync cannot succeed without TX confirm.
+        // `afterHandoff` runs back on the actor once SendConfirmed has returned, which is after
+        // the driver accepted the frame -- the loss that owes a Cannot Claim faults from there.
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
             destinationAddress: J1939Pgn.GlobalAddress);
-        TransmitFrame(canId, payload);
+        TransmitFrame(canId, payload, afterHandoff);
     }
 
     private byte[] BuildAddressClaimPayload() => _name.ToBytes();
@@ -631,31 +817,36 @@ internal sealed class J1939NodeImpl : IJ1939Node
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
             destinationAddress: J1939Pgn.GlobalAddress);
-        byte preferred = sourceAddress;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-                var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
-                if (!confirmation.Confirmed)
-                {
-                    var ex = new J1939NodeException(
-                        $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
-                    try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
-                    catch (ObjectDisposedException) { }
-                    return;
-                }
+        // Called directly rather than through Task.Run: SendConfirmed's synchronous part is
+        // the driver hand-off, and its continuation already runs off this loop; a pool hop
+        // in front of it bought nothing and cost one per claim round -- a full arbitrary-
+        // address scan is 240 of them (#58).
+        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress);
+    }
 
-                try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
-                catch (ObjectDisposedException) { }
-            }
-            catch (Exception ex)
+    private async Task TransmitAddressClaimConfirmedAsync(uint canId, byte[] payload, byte preferred)
+    {
+        try
+        {
+            using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
+            var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+            if (!confirmation.Confirmed)
             {
+                var ex = new J1939NodeException(
+                    $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
                 try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
-                catch (ObjectDisposedException) { }
+                catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
+                return;
             }
-        });
+
+            try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
+            catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
+        }
+        catch (Exception ex)
+        {
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
+            catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
+        }
     }
 
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
@@ -883,26 +1074,32 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // Wire helpers
     // =========================================================================================
 
-    private void TransmitFrame(uint canId, byte[] payload)
+    private void TransmitFrame(uint canId, byte[] payload, Action? afterHandoff = null)
     {
         // Fire-and-forget: address-claim traffic doesn't need a task, but we still want a
         // background exception if the driver rejects it. SendConfirmed is used consistently
-        // with the rest of the CanKit.Pro stack.
-        _ = Task.Run(async () =>
+        // with the rest of the CanKit.Pro stack. No Task.Run hop in front of it (#58).
+        _ = TransmitFrameAsync(canId, payload, afterHandoff);
+    }
+
+    private async Task TransmitFrameAsync(uint canId, byte[] payload, Action? afterHandoff)
+    {
+        try
         {
-            try
-            {
-                using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-                var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
-                if (!confirmation.Confirmed)
-                    RaiseBackgroundException(new J1939NodeException(
-                        $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
-            }
-            catch (Exception ex)
-            {
-                RaiseBackgroundException(ex);
-            }
-        });
+            using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
+            var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+            if (!confirmation.Confirmed)
+                RaiseBackgroundException(new J1939NodeException(
+                    $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
+        }
+        catch (Exception ex)
+        {
+            RaiseBackgroundException(ex);
+        }
+
+        if (afterHandoff is null) return;
+        try { _actor.Post(afterHandoff); }
+        catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
     }
 
     // =========================================================================================
@@ -1165,6 +1362,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             _actor.Post(() =>
             {
+                // A loss whose Cannot Claim never got its backoff still answers its caller:
+                // the claim failed, and no dispose makes that less true (Codex on #153).
+                // So does every earlier loss whose send is still in flight: `_lostClaim` only
+                // holds the latest, and tearing the actor down means those handoffs never post.
+                CompleteLostClaim();
+                while (_cannotClaimsAwaitingHandoff.Count > 0)
+                    FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
                 var pending = _pendingClaim;
                 if (pending is not null)
                 {
@@ -1256,6 +1460,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
         /// null while no fallback round has run yet. Carried across retries via
         /// <c>BeginClaimRound</c>.</summary>
         public byte? ArbitraryScanStart { get; set; }
+        /// <summary>
+        /// The round waits the §4.4.4.3 backoff and has announced nothing yet; <see cref="Deadline"/>
+        /// is the backoff, and <see cref="StartRound"/> starts the round -- now, when a Request for
+        /// Address Claimed or a contest for the candidate makes waiting pointless (Codex on #153).
+        /// </summary>
+        public Action? StartRound { get; set; }
+        public bool BackingOff => StartRound is not null;
     }
 
     /// <summary>

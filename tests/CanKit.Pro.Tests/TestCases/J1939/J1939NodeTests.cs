@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -306,6 +307,1021 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         J1939Pgn.IsAddressClaim(decomposed.Pgn).Should().BeTrue();
     }
 
+    // #58 (SAE J1939-81 §4.4.4.3): a node that lost arbitration sends its Cannot Claim after a
+    // pseudo-random 0..153 ms derived from its NAME -- the low byte of the bytes' sum, times
+    // 0.6 ms -- so two nodes colliding on an address do not answer in lockstep. The loser's
+    // NAME here sums to exactly 255, the 153 ms endpoint that a modulo 255 would have mapped
+    // to zero (Codex on #153); the gap between the winner's re-announcement, which is what the
+    // loser answers, and the Cannot Claim is at least that, a lower bound a loaded host only
+    // raises.
+    [Fact]
+    public async Task CannotClaim_Is_Sent_After_The_Names_Pseudo_Random_Backoff()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2); // spectator
+
+        long reannouncedAt = 0, cannotClaimedAt = 0;
+        var winnerClaimed = new[] { false };
+        var cannotClaimSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == 0x60 && Interlocked.Read(ref reannouncedAt) == 0 && Volatile.Read(ref winnerClaimed[0]))
+                Interlocked.Exchange(ref reannouncedAt, Stopwatch.GetTimestamp());
+            if (fields.SourceAddress == J1939Pgn.NullAddress)
+            {
+                Interlocked.Exchange(ref cannotClaimedAt, Stopwatch.GetTimestamp());
+                cannotClaimSeen.TrySetResult(true);
+            }
+        };
+
+        var loserName = Name(0x00015D); // byte sum 255: the 153 ms endpoint
+        loserName.ToBytes().Sum(b => (int)b).Should().Be(255, "the NAME was chosen for it");
+        var loserBackoff = TimeSpan.FromMilliseconds(153);
+
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
+        using var loser = J1939Node.Open(busB, new J1939NodeOptions(loserName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
+
+        await winner.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
+        Volatile.Write(ref winnerClaimed[0], true);
+        Func<Task> act = () => loser.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        await cannotClaimSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        Interlocked.Read(ref reannouncedAt).Should().NotBe(0, "the winner re-announced its claim, which is what the loser lost to");
+        var gap = TimeSpan.FromSeconds((Interlocked.Read(ref cannotClaimedAt) - Interlocked.Read(ref reannouncedAt)) / (double)Stopwatch.Frequency);
+        gap.Should().BeGreaterThanOrEqualTo(loserBackoff - TimeSpan.FromMilliseconds(5),
+            "the Cannot Claim waited the NAME's backoff after the claim it lost to");
+    }
+
+    // Codex and Bugbot on #153: an arbitrary-address node unseated from a claimed address loses
+    // the address the instant the winning claim is heard; only its next claim waits the
+    // backoff. Measured from the winner's claim frame to the node's Claiming transition: at
+    // once, against a NAME whose backoff is 150 ms -- the reading a node that invalidated only
+    // when the delayed round ran would give -- with 75 ms to either.
+    [Fact]
+    public async Task An_Unseated_Node_Loses_The_Address_At_Once_And_Waits_Only_To_Reclaim()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x40;
+
+        var ownerName = Name(0x000158); // backoff 150 ms
+        ((ownerName.ToBytes().Sum(b => (int)b) & 0xFF) * 0.6).Should().Be(150);
+        using var owner = J1939Node.Open(busA, new J1939NodeOptions(ownerName)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        await owner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+
+        long winnerClaimAt = 0;
+        // What the handler reads is read in the actor's step that made the transition; read
+        // after the await, the address could be the re-claimed one already on a host that
+        // schedules the continuation late (macOS CI on #153).
+        var claiming = new TaskCompletionSource<(long At, byte? Address)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended && Interlocked.Read(ref winnerClaimAt) == 0 && !e.IsEcho)
+                Interlocked.Exchange(ref winnerClaimAt, Stopwatch.GetTimestamp());
+        };
+        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) claiming.TrySetResult((Stopwatch.GetTimestamp(), owner.Address)); };
+
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        var (claimingAt, addressThen) = await claiming.Task.AsTaskWithTimeout(ShortTimeout);
+        addressThen.Should().BeNull("the address is the winner's from the instant its claim was heard");
+        Interlocked.Read(ref winnerClaimAt).Should().NotBe(0);
+        var reaction = TimeSpan.FromSeconds((claimingAt - Interlocked.Read(ref winnerClaimAt)) / (double)Stopwatch.Frequency);
+        reaction.Should().BeLessThan(TimeSpan.FromMilliseconds(75), "the invalidation does not wait the backoff");
+    }
+
+    // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
+    // the in-flight guard -- the claim in hand stays registered through the backoff -- and the
+    // re-claim completes for its caller.
+    [Fact]
+    public async Task A_Claim_During_The_Backoff_Before_A_Reclaim_Faults_And_The_Reclaim_Completes()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true); };
+
+        var first = node.ClaimAddressAsync(contended); // lost to the winner; the scan moves on after the backoff
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        Func<Task> second = () => node.ClaimAddressAsync(0x90).WithTimeout(ShortTimeout);
+        await second.Should().ThrowAsync<InvalidOperationException>();
+
+        await first.WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)(contended + 1));
+    }
+
+    // Codex and Bugbot on #153: a loser that claims again before its delayed Cannot Claim went
+    // out does not have it go out -- the new claim's announcement is the newer word on the bus.
+    [Fact]
+    public async Task A_Delayed_Cannot_Claim_Is_Dropped_Once_A_New_Claim_Has_Started()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2); // spectator
+
+        int cannotClaims = 0;
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
+        };
+
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        using var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 150 ms
+        await winner.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
+
+        var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        loser.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lossSeen.TrySetResult(true); };
+
+        // The claim faults only once its Cannot Claim is on the bus, so the loss is awaited
+        // through the state change here -- the exception would come too late to claim inside
+        // the backoff it is waiting for.
+        var lost = loser.ClaimAddressAsync(0x60);
+        await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        await loser.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout); // within the backoff, and through the new arbitration
+
+        Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
+        await awaitLost.Should().ThrowAsync<J1939CannotClaimException>("dropping the Cannot Claim settles the loss that owed it");
+        await Task.Delay(300); // past the backoff, with room
+        Volatile.Read(ref cannotClaims).Should().Be(0, "the Cannot Claim was overtaken by the new claim");
+        loser.Address.Should().Be(0x61);
+    }
+
+    // Codex on #153: the delayed Cannot Claim belongs to the loss that scheduled it. A second
+    // claim cancels the first's; when the second loses too, its Cannot Claim waits a full
+    // backoff from its own loss rather than the remainder of the first's. Measured on the
+    // clock the node schedules against: a wall-clock gap went negative on net48 when the
+    // host took the first 150 ms to start the second claim, and the first frame was then
+    // scored against the second loss.
+    [Fact]
+    public async Task A_Second_Loss_Waits_Its_Own_Full_Backoff_Before_Cannot_Claim()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2); // spectator
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout);
+
+        int cannotClaims = 0;
+        var cannotClaimSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress
+                && Interlocked.Increment(ref cannotClaims) == 1)
+                cannotClaimSeen.TrySetResult(true);
+        };
+
+        using var loser = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor);
+
+        int losses = 0;
+        var firstLoss = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondLoss = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        loser.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State != J1939ClaimState.CannotClaim) return;
+            if (Interlocked.Increment(ref losses) == 1) firstLoss.TrySetResult(true);
+            else secondLoss.TrySetResult(true);
+        };
+
+        var first = loser.ClaimAddressAsync(0x61);
+        await firstLoss.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        Volatile.Read(ref cannotClaims).Should().Be(0, "the first loss's backoff has not elapsed");
+
+        var second = loser.ClaimAddressAsync(0x61);
+        await secondLoss.Task.AsTaskWithTimeout(ShortTimeout);
+        Func<Task> awaitFirst = () => first.WithTimeout(ShortTimeout);
+        await awaitFirst.Should().ThrowAsync<J1939CannotClaimException>("the second claim drops the first loss's Cannot Claim");
+
+        // A timer left at the remainder of the first backoff would be 50 ms, not 150.
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(149));
+        Volatile.Read(ref cannotClaims).Should().Be(0, "the second loss waits its own full backoff");
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        await cannotClaimSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        Volatile.Read(ref cannotClaims).Should().Be(1);
+        Func<Task> awaitSecond = () => second.WithTimeout(ShortTimeout);
+        await awaitSecond.Should().ThrowAsync<J1939CannotClaimException>();
+    }
+
+    // Codex on #153: a round waiting its backoff has announced nothing, and answers a Request
+    // for Address Claimed by starting -- one announcement, now -- rather than by an
+    // announcement of its own with the round's to follow.
+    [Fact]
+    public async Task A_Request_During_The_Backoff_Starts_The_Round_With_A_Single_Announcement()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+
+        int candidateClaims = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended + 1) Interlocked.Increment(ref candidateClaims);
+        };
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true); };
+
+        var claim = node.ClaimAddressAsync(contended);
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)(contended + 1));
+        await Task.Delay(300); // past the backoff: a round that still fired would announce again
+        Volatile.Read(ref candidateClaims).Should().Be(1, "the request started the round, whose announcement is the answer, and nothing announced twice");
+    }
+
+    // Codex on #153: the Cannot Claim of a loss is delayed, the exception was not, and a caller
+    // that ends a `using` scope on that exception disposed the node inside the backoff -- the
+    // frame the loss owed the bus was then never sent at all. ClaimAddressAsync now faults
+    // once the frame has gone out, so the loser here disposes as soon as it can and the
+    // spectator still sees it.
+    [Fact]
+    public async Task A_Lost_Claim_Faults_Only_Once_Its_Cannot_Claim_Is_On_The_Bus()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2); // spectator: it outlives the loser
+
+        int cannotClaims = 0;
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
+        };
+
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using (var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) })) // backoff 153 ms
+        {
+            Func<Task> act = () => loser.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+            await act.Should().ThrowAsync<J1939CannotClaimException>();
+        } // the using a caller ends on the exception
+
+        await Task.Delay(300); // a backoff that survived the dispose would have fired by now
+        Volatile.Read(ref cannotClaims).Should().Be(1,
+            "the claim faulted only after its Cannot Claim went out, so disposing on the exception cannot suppress it");
+    }
+
+    // Codex on #153: a Cannot Claim carries the null address, so two nodes answering the same
+    // global Request for Address Claimed at the same instant put identical CAN IDs with
+    // different NAMEs on the bus. The answer a losing node owes therefore waits the same
+    // §4.4.4.3 backoff as the Cannot Claim of the loss itself -- and a request arriving inside
+    // that backoff is answered by that one frame, not by an immediate second copy.
+    [Fact]
+    public async Task A_Request_During_The_Cannot_Claim_Backoff_Is_Answered_By_That_One_Frame()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x62;
+
+        int cannotClaims = 0;
+        long firstCannotClaimAt = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn) || fields.SourceAddress != J1939Pgn.NullAddress) return;
+            Interlocked.CompareExchange(ref firstCannotClaimAt, Stopwatch.GetTimestamp(), 0);
+            Interlocked.Increment(ref cannotClaims);
+        };
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        using var loser = J1939Node.Open(busA, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 153 ms
+
+        long lostAt = 0;
+        var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        loser.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State != J1939ClaimState.CannotClaim) return;
+            Interlocked.CompareExchange(ref lostAt, Stopwatch.GetTimestamp(), 0);
+            lossSeen.TrySetResult(true);
+        };
+
+        // The claim's exception arrives with the Cannot Claim itself, so the request has to be
+        // sent from the loss, which is the instant the backoff starts.
+        var lost = loser.ClaimAddressAsync(contended);
+        await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
+        await awaitLost.Should().ThrowAsync<J1939CannotClaimException>();
+        await Task.Delay(500); // past the backoff, with room for a second copy to show up
+        Volatile.Read(ref cannotClaims).Should().Be(1, "the answer already waiting is the answer to the request");
+        var waited = TimeSpan.FromSeconds((Interlocked.Read(ref firstCannotClaimAt) - Interlocked.Read(ref lostAt)) / (double)Stopwatch.Frequency);
+        waited.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(100),
+            "the request did not shortcut the backoff -- a lower bound on the 153 ms a loaded host only lengthens");
+    }
+
+    // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
+    // cancelling the first, whose caller is waiting on it.
+    [Fact]
+    public async Task A_Second_Claim_During_Arbitration_Faults_And_Leaves_The_First_Alone()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(0x000030)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200) });
+
+        var first = node.ClaimAddressAsync(0x70);
+        Func<Task> second = () => node.ClaimAddressAsync(0x71).WithTimeout(ShortTimeout);
+        await second.Should().ThrowAsync<InvalidOperationException>();
+
+        await first.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x70);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
+    // The in-flight guard's other arm: a claim whose caller already cancelled it, whose cancel
+    // has not yet been applied on the loop, is over. Claiming again sweeps it instead of
+    // faulting. Both posts are made from the loop, so the new claim is queued ahead of the
+    // cancel and runs while the cancelled task is already complete and the announce has not
+    // been confirmed -- the pending claim's deadline is still null.
+    [Fact]
+    public async Task A_Cancelled_Claim_Not_Yet_Confirmed_Is_Swept_When_Claiming_Again()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        using var cts = new CancellationTokenSource();
+
+        var first = node.ClaimAddressAsync(0x10, cts.Token);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+
+        var ran = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? second = null;
+        node.MessageReceived += (_, msg) =>
+        {
+            if (msg.Pgn != 0xFEE9u || second is not null) return;
+            second = node.ClaimAddressAsync(0x11); // queued ahead of the cancel
+            cts.Cancel();
+            ran.TrySetResult(true);
+        };
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, 0xFEE9u, sourceAddress: 0x22),
+            new byte[] { 0x11, 0x22 }, isExtendedFrame: true));
+
+        await ran.Task.AsTaskWithTimeout(ShortTimeout);
+        await second!.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x11);
+        Func<Task> awaitFirst = () => first.WithTimeout(ShortTimeout);
+        await awaitFirst.Should().ThrowAsync<OperationCanceledException>();
+        scripted.ReleaseConfirmed();
+    }
+
+    // Same sweep once the cancelled claim is the one waiting out a re-claim backoff, so the
+    // deadline in hand is the backoff timer rather than null.
+    [Fact]
+    public async Task A_Cancelled_Claim_Waiting_Out_Its_Backoff_Is_Swept_When_Claiming_Again()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+        using var cts = new CancellationTokenSource();
+
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ran = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? second = null;
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1)
+                backingOff.TrySetResult(true);
+        };
+        node.MessageReceived += (_, msg) =>
+        {
+            if (msg.Pgn != 0xFEE9u || second is not null) return;
+            second = node.ClaimAddressAsync(0x40);
+            cts.Cancel();
+            ran.TrySetResult(true);
+        };
+
+        var first = node.ClaimAddressAsync(contended, cts.Token);
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        // The Claiming transition is raised before the backoff claim is registered. The frame
+        // is handled on a later turn, which is the first moment the deadline is the backoff.
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, 0xFEE9u, sourceAddress: 0x22),
+            new byte[] { 0x11, 0x22 }, isExtendedFrame: true));
+
+        await ran.Task.AsTaskWithTimeout(ShortTimeout);
+        await second!.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(0x40);
+        Func<Task> awaitFirst = () => first.WithTimeout(ShortTimeout);
+        await awaitFirst.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // A Request for Address Claimed while a round is in arbitration -- announced, not waiting
+    // out a backoff -- is answered by sending that claim again.
+    [Fact]
+    public async Task A_Request_During_Arbitration_Is_Answered_By_Reannouncing_The_Claim()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var timeout = TimeSpan.FromMilliseconds(200);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = timeout }, ownsService: false, actor);
+
+        const byte preferred = 0x40;
+        int claims = 0;
+        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn) || fields.SourceAddress != preferred) return;
+            var n = Interlocked.Increment(ref claims);
+            if (n == 1) first.TrySetResult(true);
+            if (n == 2) second.TrySetResult(true);
+        };
+
+        var claim = node.ClaimAddressAsync(preferred);
+        await first.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, ShortTimeout);
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        await second.Task.AsTaskWithTimeout(ShortTimeout);
+        Volatile.Read(ref claims).Should().Be(2, "the request re-announced the claim already in arbitration");
+
+        await clock.AdvanceAsync(timeout);
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(preferred);
+    }
+
+    // A peer that claims the candidate we are backing off toward, and loses the NAME comparison,
+    // starts that round now. The announcement is on the bus while the backoff timer is still
+    // armed, which a round that waited the backoff out would not have sent yet.
+    [Fact]
+    public async Task A_Weaker_Claim_During_The_Backoff_Starts_The_Round()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+
+        var nodeName = Name(0x000158); // backoff 150 ms
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(nodeName)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true);
+        };
+        var announced = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended + 1
+                && e.CanFrame.Data.Length >= 8
+                && J1939Name.FromBytes(e.CanFrame.Data.ToArray()).Value == nodeName.Value)
+                announced.TrySetResult(true);
+        };
+
+        var claim = node.ClaimAddressAsync(contended);
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+
+        var weaker = Name(0x000400); // numerically higher: loses to nodeName
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.AddressClaimed, sourceAddress: (byte)(contended + 1), destinationAddress: J1939Pgn.GlobalAddress),
+            weaker.ToBytes(), isExtendedFrame: true));
+
+        await announced.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, TimeSpan.FromMilliseconds(80), ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(80));
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)(contended + 1));
+    }
+
+    // Disposing during the backoff leaves the timer armed on an injected actor. When it fires,
+    // the node is already disposed and the Cannot Claim is not sent.
+    [Fact]
+    public async Task A_Backoff_That_Fires_After_Dispose_Sends_No_Cannot_Claim()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+
+        int cannotClaims = 0;
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+                Interlocked.Increment(ref cannotClaims);
+        };
+
+        Task claim;
+        using (var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor))
+        {
+            var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(true); };
+            claim = node.ClaimAddressAsync(0x63);
+            await lost.Task.AsTaskWithTimeout(ShortTimeout);
+            await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+        }
+
+        await clock.AdvanceAsync(backoff);
+        Volatile.Read(ref cannotClaims).Should().Be(0, "a backoff that fires after dispose does not send the Cannot Claim");
+        Func<Task> awaitClaim = () => claim.WithTimeout(ShortTimeout);
+        await awaitClaim.Should().ThrowAsync<J1939CannotClaimException>();
+    }
+
+    // The announce's confirmation is a failure: the claim faults and the address is not taken.
+    [Fact]
+    public async Task A_Rejected_Address_Claim_Transmit_Faults_The_Claim()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.RejectClaims);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        Func<Task> act = () => node.ClaimAddressAsync(0x10).WithTimeout(ShortTimeout);
+        var thrown = await act.Should().ThrowAsync<J1939NodeException>();
+        thrown.Which.Should().NotBeOfType<J1939CannotClaimException>();
+        node.ClaimState.Should().Be(J1939ClaimState.NotClaimed);
+        node.Address.Should().BeNull();
+    }
+
+    // The announce's confirmation throws: the claim faults with that exception wrapped.
+    [Fact]
+    public async Task A_Throwing_Address_Claim_Transmit_Faults_The_Claim()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.ThrowOnClaims);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        Func<Task> act = () => node.ClaimAddressAsync(0x10).WithTimeout(ShortTimeout);
+        var thrown = await act.Should().ThrowAsync<J1939NodeException>();
+        thrown.Which.InnerException.Should().BeOfType<InvalidOperationException>();
+        node.ClaimState.Should().Be(J1939ClaimState.NotClaimed);
+    }
+
+    // The confirmation arrives after the node has been disposed: posting it back finds no loop.
+    [Theory]
+    [InlineData(ScriptedClaimBus.ReleaseKind.Confirmed)]
+    [InlineData(ScriptedClaimBus.ReleaseKind.Rejected)]
+    [InlineData(ScriptedClaimBus.ReleaseKind.Throw)]
+    public async Task A_Claim_Confirmation_That_Arrives_After_Dispose_Is_Dropped(ScriptedClaimBus.ReleaseKind release)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        var claim = node.ClaimAddressAsync(0x10);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        node.Dispose();
+        scripted.Release(release);
+        Func<Task> act = () => claim.WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // Codex on #153: the loss must not fault on the same actor turn that only started the
+    // Cannot Claim. SendConfirmed here does not return until released, so the handoff has not
+    // happened. A post queued behind that turn sees the claim still incomplete -- completing
+    // it beside the fire-and-forget start would already have faulted it. Releasing forwards
+    // the frame, and only then does the claim fault.
+    [Fact]
+    public async Task A_Lost_Claim_Faults_Only_After_The_Cannot_Claim_Handoff()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldCannotClaim);
+        using var actor = new ProtocolActor();
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor);
+
+        var onBus = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reclaimed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == J1939Pgn.NullAddress) onBus.TrySetResult(true);
+            else if (fields.SourceAddress == 0x11) reclaimed.TrySetResult(true);
+        };
+
+        var claim = node.ClaimAddressAsync(0x63);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        // The turn that started the send has finished: a loss completed beside that start is
+        // already faulted, and one completed from the send's continuation is not.
+        await actor.PostAsync(() => { }).WithTimeout(ShortTimeout);
+        claim.IsCompleted.Should().BeFalse("the loss is not faulted while the Cannot Claim handoff is still pending");
+
+        // A claim started while that handoff is outstanding does not answer the loss either.
+        // Answering it here would let the caller dispose on the exception and suppress the frame.
+        var reclaim = node.ClaimAddressAsync(0x11);
+        await reclaimed.Task.AsTaskWithTimeout(ShortTimeout);
+        claim.IsCompleted.Should().BeFalse("a claim started during the handoff does not fault the loss");
+
+        scripted.ReleaseConfirmed();
+        await onBus.Task.AsTaskWithTimeout(ShortTimeout);
+        Func<Task> act = () => claim.WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        await reclaim.WithTimeout(ShortTimeout);
+    }
+
+    // Codex and Bugbot on #153: the handoff continuation must fault the loss that started
+    // that send. Claim B is allowed while A's Cannot Claim is still inside SendConfirmed,
+    // and B can lose — and park its own Cannot Claim — before A's send returns. Releasing
+    // A completes A only; B stays incomplete until its own send is released.
+    [Fact]
+    public async Task A_Second_Loss_During_The_First_Cannot_Claim_Handoff_Faults_Each_Claim_On_Its_Own_Send()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldCannotClaim);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 0
+
+        int cannotClaims = 0;
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+                Interlocked.Increment(ref cannotClaims);
+        };
+
+        var first = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(1, ShortTimeout);
+        first.IsCompleted.Should().BeFalse();
+
+        var second = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(2, ShortTimeout);
+        first.IsCompleted.Should().BeFalse("A's handoff has not finished");
+        second.IsCompleted.Should().BeFalse("B is waiting on its own Cannot Claim, not A's");
+
+        scripted.ReleaseConfirmed();
+        Func<Task> awaitFirst = () => first.WithTimeout(ShortTimeout);
+        await awaitFirst.Should().ThrowAsync<J1939CannotClaimException>();
+        second.IsCompleted.Should().BeFalse("releasing A's send must not fault B");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
+
+        scripted.ReleaseConfirmed();
+        Func<Task> awaitSecond = () => second.WithTimeout(ShortTimeout);
+        await awaitSecond.Should().ThrowAsync<J1939CannotClaimException>();
+        Volatile.Read(ref cannotClaims).Should().Be(2);
+    }
+
+    // The handoff posts back onto the actor. Disposing the node while SendConfirmed is still
+    // parked tears that actor down; the post finds nothing to tell and must not escape the
+    // fire-and-forget send. Dispose itself still settles the waiting claim.
+    [Fact]
+    public async Task A_Cannot_Claim_Handoff_That_Arrives_After_Dispose_Is_Dropped()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldCannotClaim);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        Exception? background = null;
+        node.BackgroundExceptionOccurred += (_, ex) => background = ex;
+
+        var claim = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(1, ShortTimeout);
+        node.Dispose();
+        scripted.ReleaseConfirmed();
+
+        Func<Task> act = () => claim.WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        (background is ObjectDisposedException).Should().BeFalse("a disposed actor is not a failed transmit");
+    }
+
+    // Bugbot on #153: once a second loss has started its own Cannot Claim, `_lostClaim` no
+    // longer points at the first. Dispose used to settle only that field, and the first
+    // continuation never runs once the actor is gone. Both callers still have to finish.
+    [Fact]
+    public async Task A_Dispose_During_Overlapping_Cannot_Claim_Handoffs_Settles_Both_Claims()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldCannotClaim);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        Exception? background = null;
+        node.BackgroundExceptionOccurred += (_, ex) => background = ex;
+
+        var first = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(1, ShortTimeout);
+        var second = node.ClaimAddressAsync(0x63);
+        await scripted.WaitForCannotClaimsAsync(2, ShortTimeout);
+        first.IsCompleted.Should().BeFalse();
+        second.IsCompleted.Should().BeFalse();
+
+        node.Dispose();
+        scripted.ReleaseConfirmed();
+        scripted.ReleaseConfirmed();
+
+        Func<Task> awaitFirst = () => first.WithTimeout(ShortTimeout);
+        Func<Task> awaitSecond = () => second.WithTimeout(ShortTimeout);
+        await awaitFirst.Should().ThrowAsync<J1939CannotClaimException>();
+        await awaitSecond.Should().ThrowAsync<J1939CannotClaimException>();
+        (background is ObjectDisposedException).Should().BeFalse("a disposed actor is not a failed transmit");
+    }
+
+    // The callback is the second line: every transition disposes the backoff before it
+    // leaves CannotClaim, so this runs only when the callback was already due. Moving the
+    // state on the actor, with the deadline still armed, is that interleaving. Neither
+    // Claimed nor Claiming may still put SA 0xFE on the bus; the waiting loss is settled.
+    [Theory]
+    [InlineData(J1939ClaimState.Claimed)]
+    [InlineData(J1939ClaimState.Claiming)]
+    public async Task A_Cannot_Claim_Backoff_That_Fires_After_The_Node_Moved_On_Sends_Nothing(J1939ClaimState movedTo)
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+
+        int cannotClaims = 0;
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+                Interlocked.Increment(ref cannotClaims);
+        };
+
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }, ownsService: false, actor);
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(true); };
+
+        var claim = node.ClaimAddressAsync(0x63);
+        await lost.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+
+        var state = typeof(J1939NodeImpl).GetField("_claimStateStore", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        await actor.PostAsync(() => state.SetValue(node, (int)movedTo));
+        await clock.AdvanceAsync(backoff);
+
+        Volatile.Read(ref cannotClaims).Should().Be(0, "a Cannot Claim after the node moved on would retract the newer claim");
+        Func<Task> awaitClaim = () => claim.WithTimeout(ShortTimeout);
+        await awaitClaim.Should().ThrowAsync<J1939CannotClaimException>();
+    }
+
+    // The delayed round runs only while it is still the claim in hand and its caller has not
+    // already finished. Both exits are the second line for a deadline Dispose lost to: the
+    // timer fires anyway. Each is forced on the actor before the clock moves, so the round
+    // must not announce.
+    [Fact]
+    public async Task A_Backoff_Round_Does_Not_Start_Once_Its_Claim_Is_No_Longer_In_Hand()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+
+        var nodeName = Name(0x000158);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(nodeName)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+
+        int announcements = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended + 1
+                && e.CanFrame.Data.Length >= 8
+                && J1939Name.FromBytes(e.CanFrame.Data.ToArray()).Value == nodeName.Value)
+                Interlocked.Increment(ref announcements);
+        };
+
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true);
+        };
+
+        var claim = node.ClaimAddressAsync(contended);
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+
+        var pendingField = typeof(J1939NodeImpl).GetField("_pendingClaim", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var pending = pendingField.GetValue(node)!;
+        var tcs = (TaskCompletionSource<object?>)pending.GetType().GetProperty("Tcs")!.GetValue(pending)!;
+        await actor.PostAsync(() => pendingField.SetValue(node, null));
+        await clock.AdvanceAsync(backoff);
+        Volatile.Read(ref announcements).Should().Be(0, "the round in hand is no longer the one the backoff was armed for");
+        tcs.TrySetCanceled();
+        Func<Task> awaitClaim = () => claim.WithTimeout(ShortTimeout);
+        await awaitClaim.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task A_Backoff_Round_Does_Not_Start_Once_Its_Caller_Has_Finished()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x81;
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+
+        var nodeName = Name(0x000158);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(nodeName)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+
+        int announcements = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == contended + 1
+                && e.CanFrame.Data.Length >= 8
+                && J1939Name.FromBytes(e.CanFrame.Data.ToArray()).Value == nodeName.Value)
+                Interlocked.Increment(ref announcements);
+        };
+
+        var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true);
+        };
+
+        var claim = node.ClaimAddressAsync(contended);
+        await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+
+        var pending = typeof(J1939NodeImpl).GetField("_pendingClaim", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(node)!;
+        var tcs = (TaskCompletionSource<object?>)pending.GetType().GetProperty("Tcs")!.GetValue(pending)!;
+        await actor.PostAsync(() => tcs.TrySetCanceled());
+        await clock.AdvanceAsync(backoff);
+        Volatile.Read(ref announcements).Should().Be(0, "the caller has already finished; the delayed round must not announce");
+        Func<Task> awaitClaim = () => claim.WithTimeout(ShortTimeout);
+        await awaitClaim.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // A Cannot Claim is fire-and-forget. A driver that rejects it, or throws, surfaces on the
+    // background channel; the claim itself still faults as a loss.
+    [Theory]
+    [InlineData(ScriptedClaimBus.Script.RejectCannotClaim, typeof(J1939NodeException))]
+    [InlineData(ScriptedClaimBus.Script.ThrowOnCannotClaim, typeof(InvalidOperationException))]
+    public async Task A_Failed_Cannot_Claim_Transmit_Surfaces_In_The_Background(ScriptedClaimBus.Script script, Type exceptionType)
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var raw = new CanBusService(busA);
+        using var scripted = new ScriptedClaimBus(raw, script);
+
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(0x00005F)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 0
+
+        var background = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => background.TrySetResult(ex);
+
+        Func<Task> act = () => node.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+        await act.Should().ThrowAsync<J1939CannotClaimException>();
+        var surfaced = await background.Task.AsTaskWithTimeout(ShortTimeout);
+        surfaced.Should().BeOfType(exceptionType);
+    }
+
     // ---------------------------------------------------------------------------------------
     // #34 (SAE J1939-81 §4.2.2): a Request for PGN 0xEE00 is answered by the node itself —
     // with its Address Claimed while it holds an address, with Cannot-Claim (SA 0xFE) while it
@@ -449,7 +1465,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator for the final Cannot-Claim broadcast
 
-        var nodeName = Name(0x0000BB);
+        // A NAME whose §4.4.4.3 backoff is zero (the bytes sum to 256, low byte 0): the scan
+        // pays the backoff before every one of its 240 rounds, and this test's subject is the
+        // exhaustion, not the delay -- with a 56 ms backoff it took 13 s more (#153).
+        var nodeName = Name(0x00005F);
         var peerName = Name(0x000001);
         var opts = new J1939NodeOptions(nodeName)
         {
@@ -1772,13 +2791,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await claimB.WithTimeout(ShortTimeout);
     }
 
-    // #121 across claim rounds: a re-claim replaced while in flight, then completed for a third
+    // #121 across claim rounds: a re-claim cancelled while in flight, then completed for a third
     // address, and the echo of the frame sent under the first address still arrives after all of
     // it. The ledger is not touched by claim rounds at all, so nothing here can forget the frame;
-    // the test pins that the replacement does not either (#119 had a marker that a second round
-    // wiped).
+    // the test pins that the cancellation does not either (#119 had a marker that a second round
+    // wiped). Since #58 a second claim no longer replaces one in flight -- it faults -- so the
+    // first is cancelled by its caller here.
     [Fact]
-    public async Task An_Echo_Sent_Under_The_Vacated_Address_Is_Not_Raised_After_A_Replaced_Reclaim()
+    public async Task An_Echo_Sent_Under_The_Vacated_Address_Is_Not_Raised_After_A_Cancelled_Reclaim()
     {
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
         using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
@@ -1801,12 +2821,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             destinationAddress: J1939Pgn.GlobalAddress));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
 
-        var superseded = node.ClaimAddressAsync(0x22);
+        using var cancel = new CancellationTokenSource();
+        var superseded = node.ClaimAddressAsync(0x22, cancel.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
-        var reclaim = node.ClaimAddressAsync(0x23);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
+        cancel.Cancel();
         Func<Task> awaitSuperseded = () => superseded.WithTimeout(ShortTimeout);
         await awaitSuperseded.Should().ThrowAsync<TaskCanceledException>();
+        var reclaim = node.ClaimAddressAsync(0x23);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
 
         bus.DeferredEchoes.DiscardNext().Should().BeTrue();  // the broadcast's echo, held back
         bus.DeferredEchoes.ReleaseAll();                     // both claims' announcements
@@ -2278,6 +3300,193 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the schedule must resume under the reclaimed SA so downstream ECUs continue " +
             "to observe the PGN under the new (correct) source address");
     }
+}
+
+/// <summary>
+/// Test double over a real <see cref="CanBusService"/>: address-claim transmits can be rejected,
+/// thrown, or parked until the test releases them. Everything else is forwarded.
+/// </summary>
+public sealed class ScriptedClaimBus : ICanBusService
+{
+    public enum Script
+    {
+        HoldFirstClaim,
+        HoldCannotClaim,
+        RejectClaims,
+        ThrowOnClaims,
+        RejectCannotClaim,
+        ThrowOnCannotClaim,
+    }
+
+    public enum ReleaseKind
+    {
+        Confirmed,
+        Rejected,
+        Throw,
+    }
+
+    private readonly ICanBusService _inner;
+    private readonly Script _script;
+    private readonly TaskCompletionSource<bool> _held = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<ReleaseKind> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _cannotHoldGate = new();
+    private readonly List<TaskCompletionSource<bool>> _cannotHolds = new();
+    private int _cannotHoldsEntered;
+    private int _cannotHoldsReleased;
+    private int _heldOnce;
+
+    /// <summary>How many Cannot Claim sends are parked in <see cref="Script.HoldCannotClaim"/>.</summary>
+    public int CannotClaimsWaiting => Volatile.Read(ref _cannotHoldsEntered);
+
+    public ScriptedClaimBus(ICanBusService inner, Script script)
+    {
+        _inner = inner;
+        _script = script;
+    }
+
+    public Task<bool> Held => _held.Task;
+
+    public void Release(ReleaseKind how)
+    {
+        // Each parked Cannot Claim has its own gate. One release used to complete every
+        // waiter, so the first handoff also finished a second loss's send.
+        if (_script == Script.HoldCannotClaim)
+        {
+            ReleaseNextCannotHold();
+            return;
+        }
+        _release.TrySetResult(how);
+    }
+
+    public void ReleaseConfirmed() => Release(ReleaseKind.Confirmed);
+
+    /// <summary>Waits until <paramref name="count"/> Cannot Claim sends are parked.</summary>
+    public async Task WaitForCannotClaimsAsync(int count, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (CannotClaimsWaiting < count)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException(
+                    $"Expected {count} Cannot Claim sends to be waiting; saw {CannotClaimsWaiting}.");
+            await Task.Delay(5).ConfigureAwait(false);
+        }
+    }
+
+    private Task WaitForCannotHoldAsync()
+    {
+        lock (_cannotHoldGate)
+        {
+            int index = _cannotHoldsEntered;
+            while (_cannotHolds.Count <= index)
+                _cannotHolds.Add(new TaskCompletionSource<bool>());
+            var wait = _cannotHolds[index].Task;
+            Volatile.Write(ref _cannotHoldsEntered, index + 1);
+            _held.TrySetResult(true);
+            return wait;
+        }
+    }
+
+    private void ReleaseNextCannotHold()
+    {
+        lock (_cannotHoldGate)
+        {
+            int index = _cannotHoldsReleased++;
+            while (_cannotHolds.Count <= index)
+                _cannotHolds.Add(new TaskCompletionSource<bool>());
+            _cannotHolds[index].TrySetResult(true);
+        }
+    }
+
+    public ICanBus Bus => _inner.Bus;
+    public int SubscriptionCount => _inner.SubscriptionCount;
+
+    public event EventHandler<Exception>? BackgroundExceptionOccurred
+    {
+        add => _inner.BackgroundExceptionOccurred += value;
+        remove => _inner.BackgroundExceptionOccurred -= value;
+    }
+
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+        => _inner.FindOverlappingFilterSubscriptions();
+
+    public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    {
+        if (frame.IsExtendedFrame)
+        {
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn))
+            {
+                var outcome = Outcome(fields.SourceAddress);
+                if (outcome == ClaimOutcome.Hold)
+                {
+                    _held.TrySetResult(true);
+                    switch (await _release.Task.ConfigureAwait(false))
+                    {
+                        case ReleaseKind.Confirmed:
+                            return Accepted();
+                        case ReleaseKind.Rejected:
+                            return Rejected();
+                        default:
+                            throw new InvalidOperationException("address claim transmit failed");
+                    }
+                }
+                if (outcome == ClaimOutcome.HoldThenForward)
+                    await WaitForCannotHoldAsync().ConfigureAwait(false);
+                if (outcome == ClaimOutcome.Reject) return Rejected();
+                if (outcome == ClaimOutcome.Throw) throw new InvalidOperationException("address claim transmit failed");
+            }
+        }
+
+        return await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);
+    }
+
+    public void Dispose() { /* the test owns the inner service */ }
+
+    private ClaimOutcome Outcome(byte sourceAddress)
+    {
+        switch (_script)
+        {
+            case Script.HoldFirstClaim:
+                return Interlocked.Exchange(ref _heldOnce, 1) == 0 ? ClaimOutcome.Hold : ClaimOutcome.Forward;
+            case Script.HoldCannotClaim:
+                return sourceAddress == J1939Pgn.NullAddress ? ClaimOutcome.HoldThenForward : ClaimOutcome.Forward;
+            case Script.RejectClaims:
+                return ClaimOutcome.Reject;
+            case Script.ThrowOnClaims:
+                return ClaimOutcome.Throw;
+            case Script.RejectCannotClaim:
+                return sourceAddress == J1939Pgn.NullAddress ? ClaimOutcome.Reject : ClaimOutcome.Forward;
+            case Script.ThrowOnCannotClaim:
+                return sourceAddress == J1939Pgn.NullAddress ? ClaimOutcome.Throw : ClaimOutcome.Forward;
+            default:
+                return ClaimOutcome.Forward;
+        }
+    }
+
+    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw }
+
+    private static TxConfirmation Accepted() => new TxConfirmation
+    {
+        Confirmed = true,
+        IsApproximated = true,
+        Timestamp = DateTime.UtcNow,
+        FailureReason = TxConfirmFailureReason.None,
+    };
+
+    private static TxConfirmation Rejected() => new TxConfirmation
+    {
+        Confirmed = false,
+        IsApproximated = false,
+        Timestamp = DateTime.UtcNow,
+        FailureReason = TxConfirmFailureReason.Rejected,
+    };
 }
 
 internal static class J1939NodeTestExtensions
