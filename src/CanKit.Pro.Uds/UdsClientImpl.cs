@@ -1308,6 +1308,10 @@ internal sealed class UdsClientImpl : IUdsClient
                 if (_channel.TryReceiveWithArrival(out var queued))
                     return queued;
 
+                // The budget is spent as measured, which on a descheduled host can be true
+                // of a request the caller has already cancelled. Timeout would hide that
+                // cancellation (macOS CI on #153).
+                linkedToken.ThrowIfCancellationRequested();
                 throw new UdsTimeoutException(serviceId, timerKind, budget);
             }
 

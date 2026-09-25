@@ -18,6 +18,13 @@ namespace CanKit.Pro.Addressing
         /// The 29-bit extended CAN ID (flag bits, if any, must already be stripped -- pass
         /// <c>CanFrame.ID</c>/<c>CanFrameView.ID</c> as-is, they are already flag-stripped).
         /// </param>
+        /// <remarks>
+        /// The value alone cannot tell an 11-bit identifier from a 29-bit one -- every 11-bit
+        /// value is also a valid 29-bit one, with priority 0 and PDU Format 0 -- so an 11-bit
+        /// identifier passed here decomposes into fields it never had. The caller knows the
+        /// frame's kind: pass it to <see cref="Decompose(uint, bool)"/>, or skip frames that are
+        /// not extended before calling this (#55).
+        /// </remarks>
         public static J1939Fields Decompose(uint canId)
         {
             CanIdRange.ValidateExtended(canId);
@@ -28,6 +35,23 @@ namespace CanKit.Pro.Addressing
             var pduSpecific = (byte)((canId >> 8) & 0xFF);
             var sourceAddress = (byte)(canId & 0xFF);
             return new J1939Fields(priority, reserved, dataPage, pduFormat, pduSpecific, sourceAddress);
+        }
+
+        /// <summary>
+        /// As <see cref="Decompose(uint)"/>, for a caller that knows the frame's kind: an
+        /// identifier from a frame that is not extended is refused, since J1939 uses 29-bit
+        /// identifiers only and an 11-bit one would decompose into fields it never had (#55).
+        /// </summary>
+        /// <param name="canId">The CAN ID, flag bits stripped.</param>
+        /// <param name="isExtendedFrame">
+        /// Whether the frame carrying it is an extended (29-bit) frame -- <c>CanFrame.IsExtendedFrame</c>.
+        /// </param>
+        /// <exception cref="ArgumentException"><paramref name="isExtendedFrame"/> is <c>false</c>.</exception>
+        public static J1939Fields Decompose(uint canId, bool isExtendedFrame)
+        {
+            if (!isExtendedFrame)
+                throw new ArgumentException("J1939 identifiers are 29-bit: an 11-bit frame's identifier has no J1939 fields.", nameof(isExtendedFrame));
+            return Decompose(canId);
         }
 
         /// <summary>
@@ -69,6 +93,11 @@ namespace CanKit.Pro.Addressing
         /// destination address (defaults to the conventional global/broadcast address 0xFF, which
         /// is simply unused in that case).
         /// </param>
+        /// <exception cref="ArgumentOutOfRangeException">
+        /// <paramref name="pgn"/> does not fit in 18 bits, or is a PDU1 PGN whose low byte is
+        /// not zero -- SAE J1939-21 defines a PDU1 PGN with its PDU Specific byte as 0, so such
+        /// a value is not a PGN, and the byte is not silently discarded (#55).
+        /// </exception>
         public static uint ComposePgn(byte priority, uint pgn, byte sourceAddress, byte destinationAddress = 0xFF)
         {
             if (pgn > 0x3FFFF) throw new ArgumentOutOfRangeException(nameof(pgn), pgn, "PGN must fit in 18 bits (Reserved|DataPage|PF|GE).");
@@ -76,6 +105,9 @@ namespace CanKit.Pro.Addressing
             var reserved = ((pgn >> 17) & 0x1) != 0;
             var dataPage = (byte)((pgn >> 16) & 0x1);
             var pduFormat = (byte)((pgn >> 8) & 0xFF);
+            if (pduFormat < 240 && (pgn & 0xFF) != 0)
+                throw new ArgumentOutOfRangeException(nameof(pgn), pgn,
+                    "A PDU1 PGN (PDU Format < 240) has a PDU Specific byte of 0; the destination address is a separate argument.");
             var pduSpecific = pduFormat < 240 ? destinationAddress : (byte)(pgn & 0xFF);
             return Compose(priority, reserved, dataPage, pduFormat, pduSpecific, sourceAddress);
         }

@@ -58,9 +58,9 @@ public sealed class J1939NodeOptions
     public int ReceiveBufferCapacity { get; init; } = 128;
 
     /// <summary>
-    /// Options forwarded to the shared <see cref="IJ1939TpChannel"/> for multi-frame payloads
-    /// (SRS FR-J1939-006). Defaults to a fresh <see cref="J1939TpOptions"/>. Ignored when the
-    /// caller supplies their own pre-built channel to the factory.
+    /// Options for the <see cref="IJ1939TpChannel"/> the node opens for multi-frame payloads
+    /// (SRS FR-J1939-006). Defaults to a fresh <see cref="J1939TpOptions"/>. The node always
+    /// opens that channel itself; no factory overload takes a pre-built one (#58).
     /// </summary>
     public J1939TpOptions TransportOptions { get; init; } = new J1939TpOptions();
 

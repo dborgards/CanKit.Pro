@@ -233,4 +233,48 @@ public class AddressingTests
         Action act = () => J1939Id.Compose(priority: 8, reserved: false, dataPage: 0, pduFormat: 0, pduSpecific: 0, sourceAddress: 0);
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
+
+    // #55: the value alone cannot tell an 11-bit identifier from a 29-bit one; the overload
+    // that takes the frame's kind refuses one that is not extended.
+    [Fact]
+    public void Decompose_Refuses_An_Identifier_From_A_Frame_That_Is_Not_Extended()
+    {
+        Action act = () => J1939Id.Decompose(0x7DF, isExtendedFrame: false);
+        act.Should().Throw<ArgumentException>().WithParameterName("isExtendedFrame");
+        J1939Id.Decompose(0x18FECA2A, isExtendedFrame: true).SourceAddress.Should().Be(0x2A);
+    }
+
+    // #55: a PDU1 PGN carries its PDU Specific byte as 0 (SAE J1939-21); a value with the byte
+    // set is not a PGN, and is refused rather than having the byte silently discarded.
+    [Fact]
+    public void ComposePgn_Refuses_A_Pdu1_Pgn_With_A_Nonzero_Low_Byte()
+    {
+        Action act = () => J1939Id.ComposePgn(priority: 3, pgn: 0xC80B, sourceAddress: 0x17, destinationAddress: 0x0B);
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("pgn");
+        // The PDU2 low byte is the Group Extension and stays.
+        J1939Id.Decompose(J1939Id.ComposePgn(priority: 6, pgn: 0xFECA, sourceAddress: 0x2A)).Pgn.Should().Be(0xFECAu);
+    }
+
+    // #55: the NAME's wire order is fixed by SAE J1939-81 -- least significant byte first --
+    // whatever the host's; the type owns the conversion.
+    [Fact]
+    public void J1939Name_Serializes_Least_Significant_Byte_First_And_Round_Trips()
+    {
+        var name = J1939Name.Decompose(0xBA6BAB95B5555555UL);
+
+        var bytes = name.ToBytes();
+        bytes.Should().Equal(0x55, 0x55, 0x55, 0xB5, 0x95, 0xAB, 0x6B, 0xBA);
+        J1939Name.FromBytes(bytes).Should().Be(name);
+
+        var buffer = new byte[10];
+        name.WriteTo(buffer, 2);
+        buffer[2].Should().Be(0x55);
+        buffer[9].Should().Be(0xBA);
+        J1939Name.FromBytes(buffer, 2).Should().Be(name);
+
+        Action shortSource = () => J1939Name.FromBytes(new byte[7]);
+        shortSource.Should().Throw<ArgumentOutOfRangeException>();
+        Action shortDestination = () => name.WriteTo(new byte[8], 1);
+        shortDestination.Should().Throw<ArgumentOutOfRangeException>();
+    }
 }
