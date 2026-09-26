@@ -217,7 +217,7 @@ public interface ICanOpenNode : IDisposable
     /// <remarks>
     /// Without a description bound for the server, <see cref="SdoUploadAsync(byte, ushort, byte, Sdo.SdoTransferMode, CancellationToken)"/>
     /// and <see cref="SdoDownloadAsync(byte, ushort, byte, ReadOnlyMemory{byte}, Sdo.SdoTransferMode, CancellationToken)"/>
-    /// transfer only <c>1000h:00</c>, <c>1001h:00</c> and <c>1018h:00</c>/<c>01h</c>
+    /// transfer only <c>1000h:00</c>, <c>1001h:00</c> and <c>1018h:00</c>–<c>04</c>
     /// (<see cref="PeerSdoAccessException.IsAllowedWithoutPeerDescription"/>). Once a description
     /// is bound, those objects are allowed only when the file lists them. A refused transfer
     /// throws <see cref="PeerSdoAccessException"/> before any frame is sent.

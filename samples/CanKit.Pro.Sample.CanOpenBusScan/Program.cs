@@ -227,15 +227,29 @@ namespace CanKit.Sample.CanOpenBusScan
 
             if (peerDescription is null)
             {
-                var vendorId = await ReadObjectAsync(
-                    client,
-                    nodeId,
-                    IdentityIndex,
-                    subindex: 1,
-                    cancellationToken).ConfigureAwait(false);
-                Console.WriteLine(
-                    $"  0x1018:01 {GetIdentitySubindexName(1)} = {FormatResult(vendorId)}");
-                if (identityCount.Success && identityCount.Data!.Length > 0 && identityCount.Data[0] > 1)
+                if (!identityCount.Success || identityCount.Data!.Length == 0)
+                {
+                    return;
+                }
+
+                // 1018h:00–04 are readable with no peer file. Anything the node reports above 04h
+                // still needs a description.
+                var reportedHighest = identityCount.Data[0];
+                var readable = reportedHighest > 4 ? (byte)4 : reportedHighest;
+                for (byte subindex = 1; subindex <= readable; subindex++)
+                {
+                    var value = await ReadObjectAsync(
+                        client,
+                        nodeId,
+                        IdentityIndex,
+                        subindex,
+                        cancellationToken).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"  0x1018:{subindex:X2} {GetIdentitySubindexName(subindex)} = " +
+                        FormatResult(value));
+                }
+
+                if (reportedHighest > 4)
                 {
                     Console.WriteLine(
                         "  Further 0x1018 sub-indices need a peer EDS/DCF (--peer-description).");
@@ -429,8 +443,8 @@ namespace CanKit.Sample.CanOpenBusScan
                 "--client-node is the CANopen node ID used by the scanner. It must be unused " +
                 "on the bus and is excluded from discovery.");
             Console.WriteLine(
-                "Without --peer-description the scan reads 1000h:00 and 1018h only at " +
-                "sub-indices 00h and 01h. Other objects need the peer file.");
+                "Without --peer-description the scan reads 1000h:00 and 1018h:00–04. " +
+                "Other objects need the peer file.");
         }
 
         private readonly struct HeartbeatObservation

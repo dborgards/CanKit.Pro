@@ -234,18 +234,18 @@ await master.SdoUploadAsync(0x11, 0x2000, 0x00);   // only if 2000h:00 is in rem
 `1018h` when the file leaves them out. `UnbindPeerDeviceDescription` drops the binding.
 
 With **no** description bound for the server, only the three CiA 301 mandatory base objects are
-transferred, at the sub-indices this stack implements for them:
+transferred:
 
 | Object | Sub-indices allowed without a peer file |
 | --- | --- |
 | `1000h` Device type | `00h` |
 | `1001h` Error register | `00h` |
-| `1018h` Identity | `00h` and `01h` (vendor-id) |
+| `1018h` Identity | `00h`–`04h` (vendor-id, product code, revision, serial number) |
 
-`1018h:02`–`04` (product code, revision, serial) are not part of that minimum, and neither is
-any optional object, including `1003h`. `PeerSdoAccessException.IsAllowedWithoutPeerDescription`
-is that list. Anything else throws `PeerSdoAccessException` with `PeerDescriptionLoaded` false,
-again before a frame is sent.
+`1018h:05` and above are not part of that exemption, and neither is any optional object,
+including `1003h`. `PeerSdoAccessException.IsAllowedWithoutPeerDescription` is that list.
+Anything else throws `PeerSdoAccessException` with `PeerDescriptionLoaded` false, again before
+a frame is sent.
 
 ## PDO engine
 
@@ -406,7 +406,7 @@ node.HeartbeatTimeout += (s, e) => Console.WriteLine($"missed HB from 0x{e.Produ
 // FR-CO-019: make this the configuration a Reset Communication comes back to.
 node.StoreParameters();
 
-// FR-CO-002: 1000h:00 is one of the three objects readable without a peer file.
+// FR-CO-002: 1000h:00, 1001h:00 and 1018h:00–04 are readable without a peer file.
 var value = await node.SdoUploadAsync(serverNodeId: 0x12, index: 0x1000, subindex: 0x00);
 
 // FR-CO-007: bring the network up as an NMT master (PDOs flow in Operational only).

@@ -208,7 +208,7 @@ var vin = await uds.ReadDataByIdentifierAsync(0xF190);
 
 // CANopen: SDO, PDO mapping, NMT, heartbeat, EMCY, object dictionary.
 using var node = CanOpen.OpenNode(bus, nodeId: 0x01);
-// 1000h:00, 1001h:00 and 1018h:00/01h can be read with no peer file. Every other
+// 1000h:00, 1001h:00 and 1018h:00–04 can be read with no peer file. Every other
 // index needs BindPeerDeviceDescription first.
 var deviceType = await node.SdoUploadAsync(serverNodeId: 0x11, index: 0x1000, subindex: 0x00);
 

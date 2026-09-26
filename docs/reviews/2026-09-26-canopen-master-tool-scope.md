@@ -61,9 +61,10 @@ lesen darf. Ohne diese Datei wird nicht frei alles gelesen, was sich an Indizes 
 Gelesen werden nur Objekte, die in der Gerätebeschreibung stehen.
 
 Der SDO-Client hält das vor dem Senden ein. Ohne geladene Peer-Datei dürfen ausschließlich
-die Pflichtobjekte `1000h:00`, `1001h:00` und `1018h:00`/`01h` übertragen werden.
-`1018h:02h`–`04h` gehören nicht dazu, und optionale Objekte — `1003h` eingeschlossen — auch
-nicht. Liegt eine Datei vor, gilt nur, was sie führt, auch für `1000h`, `1001h` und `1018h`.
+die Pflichtobjekte `1000h:00`, `1001h:00` und die gesamte Identity `1018h` (`00h`–`04h`)
+übertragen werden. Optionale Objekte — `1003h` eingeschlossen — gehören nicht dazu, und
+`1018h` oberhalb von `04h` auch nicht. Liegt eine Datei vor, gilt nur, was sie führt, auch
+für `1000h`, `1001h` und `1018h`.
 
 ### 2. Fremde PDOs
 
@@ -125,7 +126,7 @@ Er wird nicht durch eine Implementierung ersetzt.
    Die eigene Node-ID des Scanners ist davon ausgenommen. Lesen von Objekten, die nicht in einer
    vorliegenden EDS oder DCF stehen, lassen die Entscheidungen nicht zu. Für den SDO-Client ist
    die Ausnahme in Entscheidung 1 benannt: ohne Datei nur `1000h:00`,
-   `1001h:00` und `1018h:00`/`01h`. Was ein Abruf-Scan sonst sendet, steht hier weiter nicht.
+   `1001h:00` und `1018h:00`–`04h`. Was ein Abruf-Scan sonst sendet, steht hier weiter nicht.
 3. **Live-Mapping und das Lese-Tor.** Primärquelle sind `1600h`–`1603h` und `1A00h`–`1A03h`.
    Gültiges Lesen setzt die Datei voraus und erlaubt nur Objekte aus ihr. Dürfen diese Records
    gelesen werden, wenn die Datei sie nicht führt? Gehören `1400h:01` und `1800h:01` (die COB-ID)

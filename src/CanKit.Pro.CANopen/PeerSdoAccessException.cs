@@ -13,12 +13,11 @@ namespace CanKit.Pro.CANopen;
 /// including <c>1000h</c>, <c>1001h</c> and <c>1018h</c> when the file leaves them out.
 /// </para>
 /// <para>
-/// With no description bound, only the CiA 301 mandatory base objects are transferred, at the
-/// sub-indices this stack implements for them (<see cref="IsAllowedWithoutPeerDescription"/>):
-/// <c>1000h:00</c> device type, <c>1001h:00</c> error register, and <c>1018h:00</c> together with
-/// <c>1018h:01</c> (vendor-id). The identity record's product code, revision and serial number
-/// (<c>1018h:02</c>–<c>04</c>) are not part of that minimum, and neither is any optional object
-/// such as <c>1003h</c>.
+/// With no description bound, only the CiA 301 mandatory base objects are transferred
+/// (<see cref="IsAllowedWithoutPeerDescription"/>): <c>1000h:00</c> device type, <c>1001h:00</c>
+/// error register, and the whole identity object <c>1018h:00</c>–<c>04</c> (highest sub-index,
+/// vendor-id, product code, revision, serial number). Anything past <c>1018h:04</c>, and any
+/// optional object such as <c>1003h</c>, stays blocked until a peer file is bound.
 /// </para>
 /// </remarks>
 public sealed class PeerSdoAccessException : InvalidOperationException
@@ -54,15 +53,14 @@ public sealed class PeerSdoAccessException : InvalidOperationException
     /// Whether an SDO to this pair may proceed when no peer EDS or DCF is bound for the server.
     /// </summary>
     /// <remarks>
-    /// The three CiA 301 mandatory objects, and only the sub-indices the node's own mandatory
-    /// identity uses: <c>1000h</c> and <c>1001h</c> are variables (sub-index 0), and <c>1018h</c>
-    /// is sub-index 0 plus the vendor-id at sub-index 1. Sub-indices <c>02h</c>–<c>04h</c> of the
-    /// identity are not included, and neither is <c>1003h</c> or any other index.
+    /// <c>1000h</c> and <c>1001h</c> at sub-index 0, and <c>1018h</c> at sub-indices <c>00h</c>
+    /// through <c>04h</c>. <c>1018h:05</c> and above, <c>1003h</c>, and every other index are
+    /// not included.
     /// </remarks>
     public static bool IsAllowedWithoutPeerDescription(ushort index, byte subindex) => index switch
     {
         0x1000 or 0x1001 => subindex == 0x00,
-        0x1018 => subindex is 0x00 or 0x01,
+        0x1018 => subindex <= 0x04,
         _ => false,
     };
 
@@ -70,7 +68,7 @@ public sealed class PeerSdoAccessException : InvalidOperationException
         => new(serverNodeId, index, subindex, peerDescriptionLoaded: false,
             $"SDO 0x{index:X4}:{subindex:X2} on node 0x{serverNodeId:X2} needs a peer EDS or DCF " +
             "bound with BindPeerDeviceDescription. Without one, only 1000h:00 (device type), " +
-            "1001h:00 (error register) and 1018h:00/01h (identity, vendor-id) may be transferred.");
+            "1001h:00 (error register) and 1018h:00-04 (identity) may be transferred.");
 
     internal static PeerSdoAccessException NotInDescription(byte serverNodeId, ushort index, byte subindex)
         => new(serverNodeId, index, subindex, peerDescriptionLoaded: true,

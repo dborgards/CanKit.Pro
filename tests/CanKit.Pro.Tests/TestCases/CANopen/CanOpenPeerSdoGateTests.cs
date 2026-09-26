@@ -13,7 +13,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 /// <summary>
 /// The SDO client transfers an (index, sub-index) only when a peer EDS/DCF bound for that
-/// server declares it. With nothing bound, only 1000h:00, 1001h:00 and 1018h:00/01h proceed.
+/// server declares it. With nothing bound, only 1000h:00, 1001h:00 and 1018h:00–04 proceed.
 /// A refusal is thrown before any SDO request frame.
 /// </summary>
 public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
@@ -112,8 +112,15 @@ public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
 
         (await master.SdoUploadAsync(0x11, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x00, 0x00, 0x00, 0x00);
         (await master.SdoUploadAsync(0x11, 0x1001, 0x00).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x00);
+        slave.ObjectDictionary.AddU32(0x1018, 0x02, 0x0000_1234, OdAccess.ReadOnly);
+        slave.ObjectDictionary.AddU32(0x1018, 0x03, 0x0001_0000, OdAccess.ReadOnly);
+        slave.ObjectDictionary.AddU32(0x1018, 0x04, 0x0000_002A, OdAccess.ReadOnly);
+
         (await master.SdoUploadAsync(0x11, 0x1018, 0x00).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x01);
         (await master.SdoUploadAsync(0x11, 0x1018, 0x01).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x00, 0x00, 0x00, 0x00);
+        (await master.SdoUploadAsync(0x11, 0x1018, 0x02).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x34, 0x12, 0x00, 0x00);
+        (await master.SdoUploadAsync(0x11, 0x1018, 0x03).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x00, 0x00, 0x01, 0x00);
+        (await master.SdoUploadAsync(0x11, 0x1018, 0x04).WithTimeoutAsync(ShortTimeout)).Should().Equal(0x2A, 0x00, 0x00, 0x00);
 
         var write = await Assert.ThrowsAsync<SdoAbortException>(() =>
             master.SdoDownloadAsync(0x11, 0x1000, 0x00, new byte[] { 0x01, 0x00, 0x00, 0x00 }).WithTimeoutAsync(ShortTimeout));
@@ -123,9 +130,7 @@ public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
 
     [Theory]
     [InlineData(0x1003, 0x00)]
-    [InlineData(0x1018, 0x02)]
-    [InlineData(0x1018, 0x03)]
-    [InlineData(0x1018, 0x04)]
+    [InlineData(0x1018, 0x05)]
     [InlineData(0x1000, 0x01)]
     [InlineData(0x1001, 0x01)]
     public void Without_A_Peer_Description_Optional_And_Non_Mandatory_Subindices_Are_Rejected(int index, int subindex)
@@ -168,9 +173,13 @@ public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
 
         Action upload = () => master.SdoUploadAsync(0x11, 0x1000, 0x00);
         Action identity = () => master.SdoUploadAsync(0x11, 0x1018, 0x01);
+        Action productCode = () => master.SdoUploadAsync(0x11, 0x1018, 0x02);
+        Action serial = () => master.SdoUploadAsync(0x11, 0x1018, 0x04);
 
         upload.Should().Throw<PeerSdoAccessException>().Which.PeerDescriptionLoaded.Should().BeTrue();
         identity.Should().Throw<PeerSdoAccessException>().Which.PeerDescriptionLoaded.Should().BeTrue();
+        productCode.Should().Throw<PeerSdoAccessException>().Which.PeerDescriptionLoaded.Should().BeTrue();
+        serial.Should().Throw<PeerSdoAccessException>().Which.PeerDescriptionLoaded.Should().BeTrue();
         sdoRequests.Should().Be(0);
 
         master.UnbindPeerDeviceDescription(0x11);
@@ -180,13 +189,13 @@ public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public void The_Mandatory_Base_Pairs_Are_Exactly_1000h_1001h_And_1018h_Vendor_Id()
+    public void The_Mandatory_Base_Pairs_Are_1000h_1001h_And_The_Full_Identity()
     {
         PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1000, 0x00).Should().BeTrue();
         PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1001, 0x00).Should().BeTrue();
-        PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1018, 0x00).Should().BeTrue();
-        PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1018, 0x01).Should().BeTrue();
+        for (byte subindex = 0; subindex <= 4; subindex++)
+            PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1018, subindex).Should().BeTrue();
         PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1003, 0x00).Should().BeFalse();
-        PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1018, 0x02).Should().BeFalse();
+        PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1018, 0x05).Should().BeFalse();
     }
 }
