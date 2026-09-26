@@ -28,7 +28,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// timers handed to <c>Task.Run</c> has come back, because the negotiation echo restarts the
 /// timeslot and has to land before the next step consumes it.
 /// </summary>
-public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
+public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan Heartbeat = TimeSpan.FromMilliseconds(2000);
@@ -1223,6 +1223,9 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
         public ActorWitness LowerWitness { get; }
         public ActorWitness HigherWitness { get; }
         public FrameLog Log { get; }
+
+        public void Transmit(uint id, params byte[] data)
+            => _lowerBus.Transmit(CanFrame.Classic(unchecked((int)id), data, isExtendedFrame: false));
 
         public void Deconstruct(out ManualTimeSource clock, out CanOpenNode lower, out CanOpenNode higher,
             out ActorWitness lowerWitness, out ActorWitness higherWitness, out FrameLog log)
