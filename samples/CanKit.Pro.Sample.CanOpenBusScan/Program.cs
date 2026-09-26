@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
+using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
@@ -15,10 +16,10 @@ using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Sample.CanOpenBusScan
 {
-    // Listen-only is the default (#131 decision 3): heartbeats and boot-up during
-    // --heartbeat-ms, and no SDO read of node IDs that stayed silent. --active-scan
-    // opts in to that probe. 1000h and 1018h are allowed there; --peer-description
-    // still limits the reads to objects the EDS or DCF lists.
+    // Listen-only is the default (#131 decision 3). It subscribes to heartbeats and
+    // boot-up and does not open a CANopen node, so it transmits nothing. --active-scan
+    // is what opens --client-node and probes silent node IDs. 1000h and 1018h are
+    // allowed on that path; --peer-description still limits the reads to the file.
     internal static class Program
     {
         private const ushort DeviceTypeIndex = 0x1000;
@@ -55,6 +56,17 @@ namespace CanKit.Sample.CanOpenBusScan
             {
                 using var bus = CanBus.Open(endpoint, cfg =>
                     cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitrate));
+
+                if (!activeScan)
+                {
+                    return await ListenOnlyAsync(
+                        bus,
+                        endpoint,
+                        bitrate,
+                        heartbeatMilliseconds,
+                        cancellation.Token).ConfigureAwait(false);
+                }
+
                 using var client = CanOpen.OpenNode(bus, (byte)clientNodeId, new CanOpenNodeOptions
                 {
                     SdoTimeout = TimeSpan.FromMilliseconds(sdoTimeoutMilliseconds),
@@ -68,19 +80,10 @@ namespace CanKit.Sample.CanOpenBusScan
                         return;
                     }
 
-                    var isHeartbeat = e.State != NmtState.Initializing;
-                    heartbeatObservations.AddOrUpdate(
-                        e.ProducerNodeId,
-                        _ => new HeartbeatObservation(isHeartbeat, e.State),
-                        (_, previous) => new HeartbeatObservation(
-                            previous.HeartbeatSeen || isHeartbeat,
-                            e.State));
+                    RecordObservation(heartbeatObservations, e.ProducerNodeId, e.State);
                 };
 
-                Console.WriteLine(
-                    activeScan
-                        ? $"Active CANopen scan on {endpoint} at {bitrate} bit/s."
-                        : $"Listen-only CANopen discovery on {endpoint} at {bitrate} bit/s.");
+                Console.WriteLine($"Active CANopen scan on {endpoint} at {bitrate} bit/s.");
                 Console.WriteLine(
                     $"Client node 0x{clientNodeId:X2} must be unused and is excluded from discovery.");
                 Console.WriteLine(
@@ -89,56 +92,44 @@ namespace CanKit.Sample.CanOpenBusScan
                 await Task.Delay(heartbeatMilliseconds, cancellation.Token).ConfigureAwait(false);
 
                 var observations = heartbeatObservations.ToDictionary(pair => pair.Key, pair => pair.Value);
-                ProbeResult[] probes;
-                if (!activeScan)
+                var nodesToProbe = Enumerable
+                    .Range(CanOpenCobId.MinNodeId, CanOpenCobId.MaxNodeId)
+                    .Select(value => (byte)value)
+                    .Where(nodeId => nodeId != clientNodeId)
+                    .Where(nodeId => !observations.TryGetValue(nodeId, out var observation)
+                        || !observation.HeartbeatSeen)
+                    .ToArray();
+
+                var nodesForDeviceType = nodesToProbe
+                    .Where(nodeId => ListsSubindexZero(
+                        DescriptionFor(peerDescription, nodeId),
+                        DeviceTypeIndex))
+                    .ToArray();
+                if (nodesForDeviceType.Length == 0)
                 {
                     Console.WriteLine(
-                        "Not probing node IDs that stayed silent. " +
-                        "Pass --active-scan to SDO-read 0x1000 on those IDs; " +
-                        "0x1000 and 0x1018 are allowed on that path.");
-                    probes = Array.Empty<ProbeResult>();
+                        "Not probing via SDO 0x1000: the peer description for those nodes does not list it.");
+                }
+                else if (nodesForDeviceType.Length == nodesToProbe.Length)
+                {
+                    Console.WriteLine(
+                        $"Probing {nodesToProbe.Length} node ID(s) without a heartbeat via SDO 0x1000 ...");
                 }
                 else
                 {
-                    var nodesToProbe = Enumerable
-                        .Range(CanOpenCobId.MinNodeId, CanOpenCobId.MaxNodeId)
-                        .Select(value => (byte)value)
-                        .Where(nodeId => nodeId != clientNodeId)
-                        .Where(nodeId => !observations.TryGetValue(nodeId, out var observation)
-                            || !observation.HeartbeatSeen)
-                        .ToArray();
-
-                    var nodesForDeviceType = nodesToProbe
-                        .Where(nodeId => ListsSubindexZero(
-                            DescriptionFor(peerDescription, nodeId),
-                            DeviceTypeIndex))
-                        .ToArray();
-                    if (nodesForDeviceType.Length == 0)
-                    {
-                        Console.WriteLine(
-                            "Not probing via SDO 0x1000: the peer description for those nodes does not list it.");
-                    }
-                    else if (nodesForDeviceType.Length == nodesToProbe.Length)
-                    {
-                        Console.WriteLine(
-                            $"Probing {nodesToProbe.Length} node ID(s) without a heartbeat via SDO 0x1000 ...");
-                    }
-                    else
-                    {
-                        Console.WriteLine(
-                            $"Probing {nodesForDeviceType.Length} of {nodesToProbe.Length} node ID(s) via SDO 0x1000; " +
-                            "the description bound for the others does not list it.");
-                    }
-
-                    probes = nodesForDeviceType.Length == 0
-                        ? Array.Empty<ProbeResult>()
-                        : await Task.WhenAll(nodesForDeviceType.Select(nodeId =>
-                            ProbeDeviceTypeAsync(
-                                client,
-                                nodeId,
-                                DescriptionFor(peerDescription, nodeId),
-                                cancellation.Token))).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"Probing {nodesForDeviceType.Length} of {nodesToProbe.Length} node ID(s) via SDO 0x1000; " +
+                        "the description bound for the others does not list it.");
                 }
+
+                var probes = nodesForDeviceType.Length == 0
+                    ? Array.Empty<ProbeResult>()
+                    : await Task.WhenAll(nodesForDeviceType.Select(nodeId =>
+                        ProbeDeviceTypeAsync(
+                            client,
+                            nodeId,
+                            DescriptionFor(peerDescription, nodeId),
+                            cancellation.Token))).ConfigureAwait(false);
                 var probesByNode = probes.ToDictionary(probe => probe.NodeId);
                 var finalObservations = heartbeatObservations.ToDictionary(
                     pair => pair.Key,
@@ -165,12 +156,6 @@ namespace CanKit.Sample.CanOpenBusScan
                         out var detectedObservation)
                         ? detectedObservation
                         : null;
-                    if (!activeScan)
-                    {
-                        PrintHeardNode(nodeId, observation);
-                        continue;
-                    }
-
                     probesByNode.TryGetValue(nodeId, out var probe);
                     await PrintDeviceAsync(
                         client,
@@ -210,6 +195,63 @@ namespace CanKit.Sample.CanOpenBusScan
             }
 
             return peerDescription;
+        }
+
+        private static async Task<int> ListenOnlyAsync(
+            ICanBus bus,
+            string endpoint,
+            int bitrate,
+            int heartbeatMilliseconds,
+            CancellationToken cancellationToken)
+        {
+            Console.WriteLine($"Listen-only CANopen discovery on {endpoint} at {bitrate} bit/s.");
+            Console.WriteLine("No CANopen node is opened, so nothing is transmitted.");
+            Console.WriteLine(
+                $"Listening for heartbeats and boot-up for {heartbeatMilliseconds} ms ...");
+
+            var observations = new ConcurrentDictionary<byte, HeartbeatObservation>();
+            using (var observer = CanOpenHeartbeatObserver.Open(bus))
+            {
+                observer.HeartbeatReceived += (_, e) =>
+                    RecordObservation(observations, e.ProducerNodeId, e.State);
+                await Task.Delay(heartbeatMilliseconds, cancellationToken).ConfigureAwait(false);
+            }
+
+            Console.WriteLine(
+                "Not probing node IDs that stayed silent. " +
+                "Pass --active-scan to open a node and SDO-read 0x1000 on those IDs; " +
+                "0x1000 and 0x1018 are allowed on that path.");
+
+            var detectedNodeIds = observations.Keys.OrderBy(nodeId => nodeId).ToArray();
+            Console.WriteLine();
+            if (detectedNodeIds.Length == 0)
+            {
+                Console.WriteLine("No CANopen devices detected.");
+                return 0;
+            }
+
+            foreach (var nodeId in detectedNodeIds)
+            {
+                observations.TryGetValue(nodeId, out var observation);
+                PrintHeardNode(nodeId, observation);
+            }
+
+            Console.WriteLine($"Detected {detectedNodeIds.Length} CANopen device(s). Done.");
+            return 0;
+        }
+
+        private static void RecordObservation(
+            ConcurrentDictionary<byte, HeartbeatObservation> observations,
+            byte nodeId,
+            NmtState state)
+        {
+            var isHeartbeat = state != NmtState.Initializing;
+            observations.AddOrUpdate(
+                nodeId,
+                _ => new HeartbeatObservation(isHeartbeat, state),
+                (_, previous) => new HeartbeatObservation(
+                    previous.HeartbeatSeen || isHeartbeat,
+                    state));
         }
 
         private static bool ListsSubindexZero(CanOpenDeviceDescription? description, ushort index)
@@ -514,16 +556,15 @@ namespace CanKit.Sample.CanOpenBusScan
                 "[--peer-description <eds-or-dcf>] [--active-scan]");
             Console.WriteLine();
             Console.WriteLine(
-                "The default is listen-only (#131 decision 3): heartbeats and boot-up for " +
-                "--heartbeat-ms. Node IDs that stayed silent are not probed.");
+                "The default is listen-only (#131 decision 3): a passive subscription for " +
+                "heartbeats and boot-up during --heartbeat-ms. No CANopen node is opened and " +
+                "nothing is transmitted. Node IDs that stayed silent are not probed.");
             Console.WriteLine(
-                "--active-scan opts in to an SDO probe of node IDs that did not heartbeat. " +
-                "1000h:00 and 1018h:00–04 are allowed on that path without a peer file. " +
-                "With --peer-description, only objects the file lists are read. An EDS is " +
-                "used for every node; a DCF is used only for the node-id it was commissioned for.");
-            Console.WriteLine(
-                "--client-node is the CANopen node ID used by the scanner. It must be unused " +
-                "on the bus and is excluded from discovery.");
+                "--active-scan opens --client-node and SDO-probes node IDs that did not " +
+                "heartbeat. That node ID must be unused on the bus and is excluded from " +
+                "discovery. 1000h:00 and 1018h:00–04 are allowed on that path without a peer " +
+                "file. With --peer-description, only objects the file lists are read. An EDS " +
+                "is used for every node; a DCF is used only for the node-id it was commissioned for.");
         }
 
         private readonly struct HeartbeatObservation
