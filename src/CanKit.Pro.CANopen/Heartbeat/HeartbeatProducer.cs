@@ -89,7 +89,6 @@ internal sealed class HeartbeatProducer : IHeartbeatProducer
 
     private void Schedule()
     {
-        if (_interval <= TimeSpan.Zero) return;
         int generation = _generation;
         _handle = _actor.Schedule(_interval, () =>
         {

@@ -31,7 +31,6 @@ internal sealed partial class CanOpenNode
     private bool _bootBroadcastSent;
     private bool _bootHalted;
     private bool _bootSelfStarted;
-    private int _bootGeneration;
     private IDeadline? _bootDeadline;
 
     // NMT the master sends, in the order it was asked for. Each frame waits for the previous
@@ -48,7 +47,6 @@ internal sealed partial class CanOpenNode
     private void BeginBootUp()
     {
         CancelBootUp();
-        if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
 
         if ((ReadStartup() & NmtSuppressSlaveStartBit) == 0)
         {
@@ -71,18 +69,13 @@ internal sealed partial class CanOpenNode
         _bootDeadline = null;
         uint bootMs = _od.ReadUnsigned(Co.BootTime, 0x00);
         if (bootMs == 0 || !HasMandatorySlave()) return;
-        int generation = _bootGeneration;
-        _bootDeadline = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs), () =>
-        {
-            if (generation != _bootGeneration || _disposed != 0
-                || _flyingMasterRole != FlyingMasterRole.Active) return;
-            OnBootTimeout();
-        });
+        // Cancelling disposes the deadline, and the actor does not run a disposed timer, so this
+        // callback is only the one just armed.
+        _bootDeadline = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs), OnBootTimeout);
     }
 
     private void CancelBootUp()
     {
-        _bootGeneration++;
         _bootDeadline?.Dispose();
         _bootDeadline = null;
         Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
@@ -95,7 +88,7 @@ internal sealed partial class CanOpenNode
     private void NoteSlaveNmtState(byte nodeId, byte state)
     {
         if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
-        if (nodeId == _nodeId || nodeId > CanOpenCobId.MaxNodeId || !IsAssignedSlave(nodeId)) return;
+        if (nodeId == _nodeId || !IsAssignedSlave(nodeId)) return;
 
         // The announcement is kept while a forced Reset Communication is still unconfirmed.
         // Dropping it would leave a mandatory slave unseen, and 1F89h would then reset a node
@@ -136,8 +129,7 @@ internal sealed partial class CanOpenNode
 
     private void TryFinishBoot()
     {
-        if (_coldResetPending) return;
-        if (_flyingMasterRole != FlyingMasterRole.Active || _bootHalted || _disposed != 0) return;
+        if (_bootHalted || _disposed != 0) return;
         if (HasUnseenMandatorySlave()) return;
 
         uint startup = ReadStartup();
@@ -161,7 +153,6 @@ internal sealed partial class CanOpenNode
 
     private void OnBootTimeout()
     {
-        if (_disposed != 0) return;
         if (_coldResetPending)
         {
             // This tick landed in the wait. Arm the same timeout again instead of commanding
@@ -302,32 +293,43 @@ internal sealed partial class CanOpenNode
         var previous = _nmtOrder;
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _nmtOrder = done.Task;
+        // Method groups, not capturing lambdas: a fresh closure would leave the compiler's
+        // delegate cache on the untaken side of a branch.
         previous.ContinueWith(
-            _ =>
-            {
-                SendNmtReporting(payload).ContinueWith(
-                    send =>
-                    {
-                        if (IsNmtCancellation(send))
-                            done.TrySetCanceled();
-                        else if (send.IsFaulted)
-                        {
-                            // Same report as SendControlFrame. Completing with false, rather than
-                            // faulting this task, is what a fire-and-forget SendNmt can observe:
-                            // the exception is no longer sitting on a task nobody awaits.
-                            RaiseBackgroundException(send.Exception!.GetBaseException());
-                            done.TrySetResult(false);
-                        }
-                        else done.TrySetResult(send.Result);
-                    },
-                    CancellationToken.None,
-                    TaskContinuationOptions.None,
-                    TaskScheduler.Default);
-            },
+            SendNextNmt,
+            (payload, done),
             CancellationToken.None,
             TaskContinuationOptions.None,
             TaskScheduler.Default);
         return done.Task;
+    }
+
+    private void SendNextNmt(Task completed, object? state)
+    {
+        _ = completed;
+        var (payload, done) = ((byte[], TaskCompletionSource<bool>))state!;
+        SendNmtReporting(payload).ContinueWith(
+            FinishNmt,
+            done,
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+    }
+
+    private void FinishNmt(Task<bool> send, object? state)
+    {
+        var done = (TaskCompletionSource<bool>)state!;
+        if (IsNmtCancellation(send))
+            done.TrySetCanceled();
+        else if (send.IsFaulted)
+        {
+            // Same report as SendControlFrame. Completing with false, rather than
+            // faulting this task, is what a fire-and-forget SendNmt can observe:
+            // the exception is no longer sitting on a task nobody awaits.
+            RaiseBackgroundException(send.Exception!.GetBaseException());
+            done.TrySetResult(false);
+        }
+        else done.TrySetResult(send.Result);
     }
 
     private static bool IsNmtCancellation(Task send)

@@ -101,6 +101,77 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Weaker_Claim_From_The_Same_Master_Updates_The_Recorded_Priority()
+    {
+        using var pair = OpenPair();
+        var (clock, left, right, leftWitness, rightWitness, _) = pair;
+        var standby = 0;
+        right.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.BecameStandby) standby++;
+        };
+        Tighten(left);
+        Tighten(right);
+        left.StartFlyingMaster(0, Heartbeat);
+        right.StartFlyingMaster(2, Heartbeat);
+        await UntilAsync(clock, leftWitness, rightWitness,
+            () => right.FlyingMasterRole == FlyingMasterRole.Standby, 1200,
+            "priority 2 stands by for priority 0");
+        standby.Should().Be(1);
+        right.ActiveFlyingMasterPriority.Should().Be(0);
+
+        pair.Transmit(CanOpenCobId.FlyingMasterClaim, 1, LeftId);
+        await QuiesceAsync(leftWitness, rightWitness);
+
+        standby.Should().Be(2, "a different priority from the same master is a new standby record");
+        right.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby);
+        right.ActiveFlyingMasterNodeId.Should().Be(LeftId);
+        right.ActiveFlyingMasterPriority.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Rewriting_Startup_While_Standing_By_Leaves_The_Election_Alone()
+    {
+        using var pair = OpenPair();
+        var (clock, left, right, leftWitness, rightWitness, _) = pair;
+        Tighten(left);
+        Tighten(right);
+        left.StartFlyingMaster(0, Heartbeat);
+        right.StartFlyingMaster(2, Heartbeat);
+        await UntilAsync(clock, leftWitness, rightWitness,
+            () => right.FlyingMasterRole == FlyingMasterRole.Standby, 1200,
+            "priority 2 stands by");
+
+        right.ObjectDictionary.WriteUnsigned(Startup, 0x00, MasterBits | SuppressSelfStart);
+        await QuiesceAsync(leftWitness, rightWitness);
+
+        right.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby,
+            "a startup rewrite while enabled does not begin a second election unless this node is inactive or active");
+        right.ActiveFlyingMasterNodeId.Should().Be(LeftId);
+    }
+
+    [Fact]
+    public async Task A_Different_Consumers_Timeout_Does_Not_Reclaim_The_Mastership()
+    {
+        using var pair = OpenPair();
+        var (clock, left, right, leftWitness, rightWitness, _) = pair;
+        Tighten(left);
+        Tighten(right);
+        left.StartFlyingMaster(0, Heartbeat);
+        right.StartFlyingMaster(2, Heartbeat);
+        await UntilAsync(clock, leftWitness, rightWitness,
+            () => right.FlyingMasterRole == FlyingMasterRole.Standby, 1200,
+            "priority 2 stands by");
+
+        right.AddHeartbeatConsumer(0x33, TimeSpan.FromMilliseconds(80));
+        await AdvanceAsync(clock, leftWitness, rightWitness, TimeSpan.FromMilliseconds(120));
+
+        right.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby,
+            "a heartbeat the flying master did not install does not start a warm election");
+        right.ActiveFlyingMasterNodeId.Should().Be(LeftId);
+    }
+
+    [Fact]
     public async Task An_Application_Consumer_For_The_Winner_Is_Left_In_Place()
     {
         using var pair = OpenPair();
@@ -1208,6 +1279,41 @@ public partial class CanOpenFlyingMasterTests
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
             "stop clears the pending reset, so the later confirmation does not apply it");
         resets.Should().Be(applied);
+    }
+
+    [Fact]
+    public async Task A_Rejection_After_Stop_Does_Not_Resume_The_Detect_Cycle()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+
+        Tighten(node);
+        node.ObjectDictionary.WriteUnsigned(Timing, 0x06, 30);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        node.StopFlyingMaster();
+        await QuiesceAsync(witness, null);
+        int triggers = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+
+        gate.RejectOnRelease = true;
+        gate.Release();
+        await QuiesceAsync(witness, null);
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
+            "stop already dropped the reset, so a later rejection does not arm the detect cycle");
+        log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger).Should().Be(triggers);
     }
 
     [Fact]

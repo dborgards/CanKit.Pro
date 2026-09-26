@@ -65,8 +65,9 @@ internal sealed class HeartbeatConsumer : IHeartbeatConsumer
             _watches.Remove(nodeId);
         }
 
-        foreach (var kv in watches.Where(kv => !_watches.ContainsKey(kv.Key)))
+        foreach (var kv in watches)
         {
+            if (_watches.ContainsKey(kv.Key)) continue;
             var producer = kv.Key;
             var watch = new Watch(kv.Value);
             watch.Deadline = _scheduler.Arm(kv.Value, () => OnMissed(producer));

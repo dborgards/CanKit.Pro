@@ -768,13 +768,16 @@ internal sealed partial class CanOpenNode
                     if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
                     if (values.TryGetValue(key, out var stored))
                     {
-                        if (_od.TryGet(index, subindex, out var current) && OdEntryLayout.FixedSize(current.DataType) is var size
-                            && size > 0 && stored.Length != size)
+                        // Snapshot keys are entries that exist. The width check is the only branch.
+                        _od.TryGet(index, subindex, out var current);
+                        int size = OdEntryLayout.FixedSize(current.DataType);
+                        if (size > 0 && stored.Length != size)
                             continue; // re-declared with another width since the snapshot: no power-on value for it
                         _od.WriteRawUnchecked(index, subindex, stored);
                     }
-                    else if (IsManagedCommunicationObject(index) && _od.TryGet(index, subindex, out var entry))
+                    else if (IsManagedCommunicationObject(index))
                     {
+                        _od.TryGet(index, subindex, out var entry);
                         _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
                     }
                 }

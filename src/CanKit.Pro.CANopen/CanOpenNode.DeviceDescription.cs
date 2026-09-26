@@ -280,7 +280,8 @@ internal sealed partial class CanOpenNode
         void Take(byte sub)
         {
             if (!described.TryGetValue(sub, out var entry)) return;
-            if (!_od.TryGet(index, sub, out var current)) return;
+            // 1F90h:01 to :06 are created with the node, so the described sub-index is present.
+            _od.TryGet(index, sub, out var current);
             _od.Declare(index, sub, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
             loaded++;
             ApplyManagedValue(index, sub, current.DataType, entry, findings);
