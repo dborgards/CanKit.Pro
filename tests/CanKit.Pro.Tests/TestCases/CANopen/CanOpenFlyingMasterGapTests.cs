@@ -654,7 +654,7 @@ public partial class CanOpenFlyingMasterTests
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
         var gate = new ColdResetGate(new CanBusService(nodeBus));
-        var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
         var witness = new ActorWitness(node, peer, WitnessForLeft);
 
         Tighten(node);
@@ -672,7 +672,6 @@ public partial class CanOpenFlyingMasterTests
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Detecting,
             "a claim in the cold-reset window must not move the node to standby");
 
-        node.Dispose();
         await Task.Delay(200);
     }
 
