@@ -103,8 +103,9 @@ public class CanOpenHeartbeatObserverTests : IClassFixture<VirtualAdapterFixture
     public void Dispose_Is_Idempotent()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-listen-dispose-{Guid.NewGuid():N}");
-        var observer = CanOpenHeartbeatObserver.Open(bus);
-        observer.Dispose();
+        // `using` as well as the explicit call: the explicit one is the idempotence check,
+        // the `using` makes sure disposal still happens if that call throws.
+        using var observer = CanOpenHeartbeatObserver.Open(bus);
         observer.Dispose();
     }
 
@@ -112,7 +113,9 @@ public class CanOpenHeartbeatObserverTests : IClassFixture<VirtualAdapterFixture
     public void A_Failed_Subscribe_Disposes_The_Service()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-listen-fail-{Guid.NewGuid():N}");
-        var service = new CanBusService(bus);
+        // Same shape: the explicit Dispose is what Attach must observe, and `using` still
+        // runs if that Dispose throws.
+        using var service = new CanBusService(bus);
         service.Dispose();
 
         var act = () => CanOpenHeartbeatObserver.Attach(service);
