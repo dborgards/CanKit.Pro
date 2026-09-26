@@ -247,13 +247,17 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The reset did not leave the adapter. Drop the window without applying it and
     /// without starting the warm election. A forced reset that was abandoned leaves this node
-    /// the active master: the detect cycle starts again, and boot-up is not run a second time.</summary>
+    /// the active master: the detect cycle starts again, slaves that checked in during the hold
+    /// are started, and the network is not reset a second time.</summary>
     private void AbandonColdReset()
     {
         if (!_coldResetPending) return;
         _coldResetPending = false;
         if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
         ArmActiveDetectCycle();
+        // The hold stored heartbeats and did not start those slaves. Do that now, without
+        // Reset Communication: the broadcast never left, so the network is not booted again.
+        ResumeHeldBoot();
     }
 
     private void BeginNegotiation(bool transmitTrigger)

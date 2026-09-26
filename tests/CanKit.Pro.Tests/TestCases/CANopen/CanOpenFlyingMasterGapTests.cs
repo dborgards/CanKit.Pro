@@ -1486,6 +1486,8 @@ public partial class CanOpenFlyingMasterTests
         gate.RejectOnRelease = true;
         gate.Release();
         await QuiesceAsync(witness, null);
+        log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.Start, slave),
+            "the slave that checked in during the hold is started once the send has failed");
         int resets = log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetNode, slave));
 
         await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));

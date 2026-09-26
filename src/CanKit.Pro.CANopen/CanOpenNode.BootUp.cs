@@ -102,6 +102,21 @@ internal sealed partial class CanOpenNode
         TryFinishBoot();
     }
 
+    /// <summary>
+    /// Starts slaves that announced while a forced reset was still unconfirmed. The failed send
+    /// does not reset them; the boot record from the hold is what they are started from.
+    /// </summary>
+    private void ResumeHeldBoot()
+    {
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
+            if (!_slaveSeen[id]) continue;
+            byte state = (byte)_od.ReadUnsigned(Co.RequestNmt, id);
+            ConsiderStart(id, state);
+        }
+        TryFinishBoot();
+    }
+
     private void ConsiderStart(byte nodeId, byte state)
     {
         if (_bootHalted || _slaveStarted[nodeId]) return;
