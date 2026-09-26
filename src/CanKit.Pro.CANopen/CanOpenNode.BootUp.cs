@@ -94,14 +94,17 @@ internal sealed partial class CanOpenNode
 
     private void NoteSlaveNmtState(byte nodeId, byte state)
     {
-        // Held while a forced Reset Communication is still unconfirmed. Clearing the boot record
-        // for that wait would make the next heartbeat start the slave again, behind the reset.
-        if (_coldResetPending) return;
         if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
         if (nodeId == _nodeId || nodeId > CanOpenCobId.MaxNodeId || !IsAssignedSlave(nodeId)) return;
 
+        // The announcement is kept while a forced Reset Communication is still unconfirmed.
+        // Dropping it would leave a mandatory slave unseen, and 1F89h would then reset a node
+        // that already checked in. A start, or finishing boot, still waits: that command must
+        // not go out behind the reset.
         _od.WriteRawUnchecked(Co.RequestNmt, nodeId, new[] { state });
         _slaveSeen[nodeId] = true;
+        if (_coldResetPending) return;
+
         ConsiderStart(nodeId, state);
         TryFinishBoot();
     }

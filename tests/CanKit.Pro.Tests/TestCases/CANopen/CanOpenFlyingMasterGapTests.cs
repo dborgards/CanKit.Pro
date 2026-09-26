@@ -1339,6 +1339,58 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Heartbeat_During_A_Held_Force_Stays_Seen_When_The_Send_Fails()
+    {
+        const byte slave = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+        var timedOut = new System.Collections.Concurrent.ConcurrentQueue<byte>();
+        node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, 40);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        TransmitHeartbeat(peer, slave, (byte)NmtState.PreOperational);
+        await QuiesceAsync(witness, null);
+
+        od.ReadUnsigned(0x1F82, slave).Should().Be((uint)NmtState.PreOperational,
+            "the heartbeat is recorded while Reset Communication is still held");
+        log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, slave),
+            "recording the slave does not start it behind the held reset");
+
+        gate.RejectOnRelease = true;
+        gate.Release();
+        await QuiesceAsync(witness, null);
+        int resets = log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetNode, slave));
+
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+        log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetNode, slave)).Should().Be(resets,
+            "the slave checked in during the hold, so the boot timeout does not reset it");
+        timedOut.Should().BeEmpty();
+        od.ReadUnsigned(0x1F82, slave).Should().Be((uint)NmtState.PreOperational);
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+    }
+
+    [Fact]
     public async Task An_Unconfirmed_Force_Does_Not_Reset_Assigned_Slaves_Again()
     {
         const byte slave = 0x22;
@@ -1469,6 +1521,8 @@ public partial class CanOpenFlyingMasterTests
 
         public bool Cancel { get; set; }
         public bool Reject { get; set; }
+        /// <summary>The held send completes as unconfirmed once <see cref="Release"/> is called.</summary>
+        public bool RejectOnRelease { get; set; }
         public Exception? Fault { get; set; }
         /// <summary>How many broadcast resets pass straight through before one is held or failed.</summary>
         public int PassResets { get; set; }
@@ -1503,6 +1557,8 @@ public partial class CanOpenFlyingMasterTests
                 if (Reject)
                     return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
                 await _release.Task.ConfigureAwait(false);
+                if (RejectOnRelease)
+                    return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
             }
             return await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);
         }
