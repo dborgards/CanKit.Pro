@@ -339,6 +339,12 @@ picks the record up at the last step.
 never appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
 `0x700 + id`.
 
+`HeartbeatTimeout`, `NodeGuardingTimeout` and `EmcyReceived` share the node's event queue
+with heartbeats, SYNC, PDOs and NMT, and keep their place in that order. They are the events
+the queue will not drop when a subscriber falls behind `EventQueueCapacity` (default 64). A
+slow handler can lose a heartbeat or an RPDO; it cannot lose a timeout or an emergency and
+then treat the peer as healthy. `BackgroundExceptionOccurred` is not queued.
+
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after
 `guardTime × lifeTimeFactor` without a reply whose toggle bit alternated. A boot-up from the

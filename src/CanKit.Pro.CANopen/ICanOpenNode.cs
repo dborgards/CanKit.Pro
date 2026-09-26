@@ -76,10 +76,14 @@ public interface ICanOpenNode : IDisposable
     /// producer.</summary>
     event EventHandler<HeartbeatReceivedEventArgs>? HeartbeatReceived;
 
-    /// <summary>Raised when a configured heartbeat consumer detects a missing heartbeat.</summary>
+    /// <summary>Raised when a configured heartbeat consumer detects a missing heartbeat.
+    /// Not discarded when the event queue is over
+    /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
+    /// looking alive.</summary>
     event EventHandler<HeartbeatTimeoutEventArgs>? HeartbeatTimeout;
 
-    /// <summary>Raised when an EMCY frame is received on the bus (FR-CO-011).</summary>
+    /// <summary>Raised when an EMCY frame is received on the bus (FR-CO-011). Not discarded
+    /// when the event queue is over <see cref="CanOpenNodeOptions.EventQueueCapacity"/>.</summary>
     event EventHandler<EmcyReceivedEventArgs>? EmcyReceived;
 
     /// <summary>Raised whenever a SYNC frame is received on the configured SYNC COB-ID
@@ -116,7 +120,9 @@ public interface ICanOpenNode : IDisposable
 
     /// <summary>Raised when a configured node-guarding consumer's life-time
     /// (<c>guardTime × lifeTimeFactor</c>) elapses without seeing an answer to the RTR poll
-    /// (FR-CO-009).</summary>
+    /// (FR-CO-009). Not discarded when the event queue is over
+    /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
+    /// looking alive.</summary>
     event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout;
 
     /// <summary>
