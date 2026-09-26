@@ -609,6 +609,36 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Broadcast_Reset_After_Force_Is_Ignored_Once()
+    {
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        Transmit(rig.Peer, CanOpenCobId.FlyingMasterForce);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
+            "the force reset the active master and started a warm election");
+        od.ReadUnsigned(0x1F89, 0x00).Should().Be(0u);
+
+        od.WriteUnsigned(0x1F89, 0x00, 321);
+        TransmitNmt(rig.Peer, NmtCommand.ResetCommunication, 0);
+        await QuiesceAsync(rig.Witness, null);
+        od.ReadUnsigned(0x1F89, 0x00).Should().Be(321u,
+            "the reset the force just sent is the echo, and it does not reset the node again");
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
+
+        TransmitNmt(rig.Peer, NmtCommand.ResetNode, 0);
+        await QuiesceAsync(rig.Witness, null);
+        od.ReadUnsigned(0x1F89, 0x00).Should().Be(0u,
+            "the echo flag is one shot, so the next broadcast reset applies");
+    }
+
+    [Fact]
     public async Task An_Nmt_Request_Queued_Behind_A_Stop_Is_Not_Sent()
     {
         const byte slave = 0x22;

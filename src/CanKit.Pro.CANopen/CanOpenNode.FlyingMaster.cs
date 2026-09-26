@@ -466,21 +466,24 @@ internal sealed partial class CanOpenNode
         // The cold reset is already committed. A claim in this window must not move us to
         // standby and then have the reset tear down the master we just accepted.
         if (_coldResetPending) return;
+        // Break, rather than return, so a frame that was handled leaves through the end of the
+        // method. Each case used to return on its own, and the closing brace was then a jump
+        // the compiler emitted and nothing ever took.
         switch (cobId)
         {
             case CanOpenCobId.FlyingMasterClaim:
-                if (data.Length < 2) return;
-                OnFlyingMasterClaim(data[0], data[1]);
-                return;
+                if (data.Length >= 2)
+                    OnFlyingMasterClaim(data[0], data[1]);
+                break;
             case CanOpenCobId.FlyingMasterTrigger:
                 OnFlyingMasterTrigger();
-                return;
+                break;
             case CanOpenCobId.FlyingMasterDetect:
                 OnFlyingMasterDetectRequest();
-                return;
+                break;
             case CanOpenCobId.FlyingMasterForce:
                 OnFlyingMasterForce();
-                return;
+                break;
         }
     }
 
