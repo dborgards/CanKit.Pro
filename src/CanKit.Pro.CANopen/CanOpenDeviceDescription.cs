@@ -23,6 +23,9 @@ namespace CanKit.Pro.CANopen;
 /// over the <c>DefaultValue</c> of the EDS it was made from, and its <c>NodeID</c> is the node-id
 /// <see cref="CanOpen.OpenNode(CanKit.Abstractions.API.Can.ICanBus, CanOpenDeviceDescription, CanOpenNodeOptions?)"/>
 /// uses. <c>$NODEID+…</c> expressions are evaluated against the node-id the node is opened with.
+/// The same type is what <see cref="ICanOpenNode.BindPeerDeviceDescription"/> binds for a remote
+/// node: the SDO client then transfers only pairs <see cref="Contains"/> reports. A DCF binds
+/// only to the node-id it was commissioned for; an EDS binds to any node.
 /// </remarks>
 public sealed class CanOpenDeviceDescription
 {
@@ -93,6 +96,21 @@ public sealed class CanOpenDeviceDescription
     {
         var dcf = CanOpenFile.Dcf.ReadStringWithDiagnostics(content ?? throw new ArgumentNullException(nameof(content)));
         return new CanOpenDeviceDescription(null, dcf.Model, dcf.Diagnostics);
+    }
+
+    /// <summary>
+    /// Whether the description declares <paramref name="index"/>:<paramref name="subindex"/>.
+    /// </summary>
+    /// <remarks>
+    /// A variable or domain (no sub-objects) is sub-index 0. A record or array is the sub-indices
+    /// the file actually carries, including those compact storage synthesized. A sub-index the
+    /// file does not list is absent even when the index itself is present.
+    /// </remarks>
+    public bool Contains(ushort index, byte subindex)
+    {
+        if (!Objects.Objects.TryGetValue(index, out var obj)) return false;
+        if (obj.SubObjects.Count == 0) return subindex == 0;
+        return obj.SubObjects.ContainsKey(subindex);
     }
 }
 

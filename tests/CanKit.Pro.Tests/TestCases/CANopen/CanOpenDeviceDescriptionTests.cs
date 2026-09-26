@@ -39,7 +39,10 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
     private static CanOpenDeviceDescription DeviceEds() => CanOpenDeviceDescription.Load(Fixture("device.eds"));
 
     private static Task<byte[]> UploadAsync(ICanOpenNode client, ushort index, byte subindex)
-        => client.SdoUploadAsync(Device, index, subindex).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, Device);
+        return client.SdoUploadAsync(Device, index, subindex).WithTimeoutAsync(ShortTimeout);
+    }
 
     private static async Task<uint> UploadUnsignedAsync(ICanOpenNode client, ushort index, byte subindex)
     {
@@ -50,7 +53,10 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
     }
 
     private static Task DownloadAsync(ICanOpenNode client, ushort index, byte subindex, byte[] data)
-        => client.SdoDownloadAsync(Device, index, subindex, data).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, Device);
+        return client.SdoDownloadAsync(Device, index, subindex, data).WithTimeoutAsync(ShortTimeout);
+    }
 
     private static byte[] U32(uint value) => new[]
     {

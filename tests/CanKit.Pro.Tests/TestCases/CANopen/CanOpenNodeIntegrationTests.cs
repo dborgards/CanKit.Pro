@@ -46,7 +46,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddU32(0x1000, 0x00, 0x00030191u, OdAccess.ReadOnly);
 
@@ -70,6 +72,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 0);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
 
         var mode = (SdoTransferMode)rawMode;
 
@@ -93,7 +96,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddU32(0x2000, 0x00, 0u);
 
@@ -113,7 +118,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddU16(0x2001, 0x00, 0);
 
@@ -133,7 +140,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() =>
             master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2222, subindex: 0x00)
@@ -153,7 +162,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         byte[] vin = Encoding.ASCII.GetBytes("WBADT43452G296403"); // 17 bytes, > 4 → segmented
         slave.ObjectDictionary.AddDomain(0x1008, 0x00, vin, OdAccess.ReadOnly);
@@ -172,7 +183,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // Space for 20 bytes; segmented DL because payload > 4.
         slave.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[20]);
@@ -211,7 +224,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busObserver = Open(session, 2);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // Three OD slots on the server: two segmented-sized domains and one expedited-sized
         // U16. All three must stay individually consistent across the sequence.
@@ -334,7 +349,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busObserver = Open(session, 2);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // Server-side OD: a segmented-sized slot (to be "abandoned") plus an unrelated U16
         // slot the master will supersede it with.
@@ -413,6 +430,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // No slave node on busB — just a raw wire we control so we can craft a short-DLC
         // SDO server response and observe how the master's client reacts.
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
 
         // Master initiates an expedited upload from a phantom server 0x11 at (0x2500, 0x00).
         // We do NOT open a slave; instead we fake the server response on busB.
@@ -445,7 +463,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
         slave.ObjectDictionary.AddDomain(0x2600, 0x00, new byte[8]);
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
@@ -464,7 +484,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // Empty domain (0 bytes). If the server took the expedited branch, the client would
         // observe 4 zero bytes; via the segmented branch it observes an empty payload.
@@ -490,7 +512,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Tight per-node cap so the test doesn't have to move megabytes to trip the limit.
         var opts = new CanOpenNodeOptions().With(maxSdoTransferBytes: 1024);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, opts);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // Domain slot with generous local capacity; we still expect the initiate to be aborted
         // solely because the declared *transfer* length exceeds the option cap.
@@ -520,6 +544,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         var opts = new CanOpenNodeOptions().With(maxSdoTransferBytes: 1024);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01, opts);
+        PeerSdoLaboratory.Bind(master, 0x11);
 
         // Observe the abort the master emits on 0x600+0x11 so we can also assert the wire
         // side of the fix (the master must abort the transfer back to the peer, not silently
@@ -1340,7 +1365,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // Push some OD state and drive a mix of traffic through the master.
         slave.ObjectDictionary.AddU32(0x2000, 0x00, 0xABCDEF01);

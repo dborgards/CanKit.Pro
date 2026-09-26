@@ -205,6 +205,38 @@ public interface ICanOpenNode : IDisposable
         CancellationToken cancellationToken = default);
 
     // -----------------------------------------------------------------------------------------
+    // Peer device description (SDO client gate)
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Binds the EDS or DCF of remote node <paramref name="nodeId"/>. Client SDO transfers to
+    /// that node then proceed only for (index, sub-index) pairs the description declares
+    /// (<see cref="CanOpenDeviceDescription.Contains"/>). Replaces a description already bound
+    /// for the same node-id. The description is read at the start of each transfer.
+    /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="description"/> is a DCF whose commissioned node-id is not
+    /// <paramref name="nodeId"/>. An EDS has no commissioned node-id and may be bound to any node.
+    /// A rejected bind leaves the description already stored for that node in place.
+    /// </exception>
+    /// <remarks>
+    /// Without a description bound for the server, <see cref="SdoUploadAsync(byte, ushort, byte, Sdo.SdoTransferMode, CancellationToken)"/>
+    /// and <see cref="SdoDownloadAsync(byte, ushort, byte, ReadOnlyMemory{byte}, Sdo.SdoTransferMode, CancellationToken)"/>
+    /// transfer only <c>1000h:00</c>, <c>1001h:00</c> and <c>1018h:00</c>–<c>04</c>
+    /// (<see cref="PeerSdoAccessException.IsAllowedWithoutPeerDescription"/>). Once a description
+    /// is bound, those objects are allowed only when the file lists them. A refused transfer
+    /// throws <see cref="PeerSdoAccessException"/> before any frame is sent.
+    /// </remarks>
+    void BindPeerDeviceDescription(byte nodeId, CanOpenDeviceDescription description);
+
+    /// <summary>The description bound for <paramref name="nodeId"/>, or <see langword="null"/>.</summary>
+    CanOpenDeviceDescription? GetPeerDeviceDescription(byte nodeId);
+
+    /// <summary>Drops the description bound for <paramref name="nodeId"/>. No-op when none is bound.
+    /// Afterwards the mandatory-object exemption applies to that node again.</summary>
+    void UnbindPeerDeviceDescription(byte nodeId);
+
+    // -----------------------------------------------------------------------------------------
     // SDO client (FR-CO-002 / FR-CO-003)
     // -----------------------------------------------------------------------------------------
 
@@ -222,7 +254,9 @@ public interface ICanOpenNode : IDisposable
     /// unknown until the server replies — whether that reply is expedited or segmented is the
     /// server's choice and is handled transparently. Pass <see cref="SdoTransferMode.Block"/> to
     /// force block transfer (CiA 301 §7.2.4.3.15).
-    /// (FR-CO-002 / FR-CO-003 / FR-CO-004).</summary>
+    /// (FR-CO-002 / FR-CO-003 / FR-CO-004). Refused locally with
+    /// <see cref="PeerSdoAccessException"/> when the pair is not allowed for
+    /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.</summary>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
         CancellationToken cancellationToken = default);
@@ -242,7 +276,9 @@ public interface ICanOpenNode : IDisposable
     /// (which the options permit) sends a short payload by block transfer rather than expedited.
     /// Pass
     /// <see cref="SdoTransferMode.Block"/> to force block transfer below that threshold; the
-    /// expedited/segmented split itself is dictated by CiA 301 and is not selectable.</summary>
+    /// expedited/segmented split itself is dictated by CiA 301 and is not selectable.
+    /// Refused locally with <see cref="PeerSdoAccessException"/> when the pair is not allowed
+    /// for <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.</summary>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,

@@ -35,6 +35,42 @@ master.RpdoReceived += (_, e) =>
     Console.WriteLine($"RPDO on 0x{e.CobId:X3}: {BitConverter.ToString(e.Payload)} " +
                       $"(OD 0x2100 = 0x{master.ObjectDictionary.ReadUnsigned(0x2100, 0x00):X4})");
 
+// 2000h is not one of the three objects the client may touch without a peer file.
+var peer = CanOpenDeviceDescription.ParseEds("""
+    [FileInfo]
+    FileName=peer.eds
+    FileVersion=1
+    FileRevision=0
+    EDSVersion=4.0
+    Description=quickstart peer
+    CreationTime=10:00AM
+    CreationDate=09-26-2026
+    CreatedBy=CanKit.Pro
+    [DeviceInfo]
+    VendorName=CanKit.Pro
+    VendorNumber=0
+    ProductName=Quickstart slave
+    ProductNumber=0
+    RevisionNumber=0
+    OrderCode=QS
+    BaudRate_500=1
+    SimpleBootUpSlave=1
+    Granularity=8
+    NrOfRXPDO=0
+    NrOfTXPDO=0
+    [ManufacturerObjects]
+    SupportedObjects=1
+    1=0x2000
+    [2000]
+    ParameterName=Process value
+    ObjectType=0x7
+    DataType=0x0006
+    AccessType=rw
+    DefaultValue=0
+    PDOMapping=1
+    """);
+master.BindPeerDeviceDescription(0x11, peer);
+
 // SDO expedited write + read-back of the process value.
 await master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2000, subindex: 0x00, new byte[] { 0x34, 0x12 });
 var raw = await master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2000, subindex: 0x00);

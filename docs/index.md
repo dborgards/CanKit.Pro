@@ -331,7 +331,40 @@ and the other CanKit adapters.
         transmission: TpdoTransmission.EventTimer,
         eventTimerInterval: TimeSpan.FromMilliseconds(100));
 
-    // SDO expedited write and read-back on a peer.
+    // 2000h is not readable until the peer's EDS or DCF is bound.
+    var peer = CanOpenDeviceDescription.ParseEds("""
+        [FileInfo]
+        FileName=peer.eds
+        FileVersion=1
+        FileRevision=0
+        EDSVersion=4.0
+        Description=peer
+        CreationTime=10:00AM
+        CreationDate=09-26-2026
+        CreatedBy=example
+        [DeviceInfo]
+        VendorName=Example
+        VendorNumber=0
+        ProductName=Peer
+        ProductNumber=0
+        RevisionNumber=0
+        OrderCode=P
+        BaudRate_500=1
+        SimpleBootUpSlave=1
+        Granularity=8
+        NrOfRXPDO=0
+        NrOfTXPDO=0
+        [ManufacturerObjects]
+        SupportedObjects=1
+        1=0x2000
+        [2000]
+        ParameterName=Process value
+        ObjectType=0x7
+        DataType=0x0006
+        AccessType=rw
+        DefaultValue=0
+        """);
+    node.BindPeerDeviceDescription(0x11, peer);
     await node.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2000, subindex: 0x00, new byte[] { 0x34, 0x12 });
     byte[] raw = await node.SdoUploadAsync(serverNodeId: 0x11, index: 0x2000, subindex: 0x00);
 
