@@ -714,7 +714,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private void InvokeEventHandler(Action raise)
     {
         try { raise(); }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+        catch (Exception ex) when (
+            ex is not OutOfMemoryException &&
+            ex is not StackOverflowException &&
+            ex is not AccessViolationException &&
+            ex is not AppDomainUnloadedException &&
+            ex is not BadImageFormatException &&
+            ex is not CannotUnloadAppDomainException &&
+            ex is not InvalidProgramException)
+        {
+            RaiseBackgroundException(ex);
+        }
     }
 
     private void EnqueueEvent(Action raise, bool critical = false)
