@@ -60,7 +60,11 @@ Eine EDS oder DCF des fremden Knotens ist Pflicht, bevor das Werkzeug diesen Kno
 lesen darf. Ohne diese Datei wird nicht frei alles gelesen, was sich an Indizes raten lässt.
 Gelesen werden nur Objekte, die in der Gerätebeschreibung stehen.
 
-Das ist heute nicht gebaut. Der Client liest jeden Index, den man ihm gibt.
+Der SDO-Client hält das vor dem Senden ein. Ohne geladene Peer-Datei dürfen ausschließlich
+die Pflichtobjekte `1000h:00`, `1001h:00` und die gesamte Identity `1018h` (`00h`–`04h`)
+übertragen werden. Optionale Objekte — `1003h` eingeschlossen — gehören nicht dazu, und
+`1018h` oberhalb von `04h` auch nicht. Liegt eine Datei vor, gilt nur, was sie führt, auch
+für `1000h`, `1001h` und `1018h`.
 
 ### 2. Fremde PDOs
 
@@ -122,8 +126,9 @@ Er wird nicht durch eine Implementierung ersetzt.
    Boot-up — oder müssen im Fenster beide beobachtet worden sein?
 2. **Abruf-Scan.** Was wird gesendet, wenn die Node-IDs 1..127 auf Abruf aktiv abgefragt werden?
    Die eigene Node-ID des Scanners ist davon ausgenommen. Lesen von Objekten, die nicht in einer
-   vorliegenden EDS oder DCF stehen, lassen die Entscheidungen nicht zu. Ob `1000h` und `1018h`
-   dabei eine Ausnahme sind, steht dort nicht.
+   vorliegenden EDS oder DCF stehen, lassen die Entscheidungen nicht zu. Für den SDO-Client ist
+   die Ausnahme in Entscheidung 1 benannt: ohne Datei nur `1000h:00`,
+   `1001h:00` und `1018h:00`–`04h`. Was ein Abruf-Scan sonst sendet, steht hier weiter nicht.
 3. **Live-Mapping und das Lese-Tor.** Primärquelle sind `1600h`–`1603h` und `1A00h`–`1A03h`.
    Gültiges Lesen setzt die Datei voraus und erlaubt nur Objekte aus ihr. Dürfen diese Records
    gelesen werden, wenn die Datei sie nicht führt? Gehören `1400h:01` und `1800h:01` (die COB-ID)

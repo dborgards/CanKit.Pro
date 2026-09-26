@@ -43,7 +43,9 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddDomain(0x2A00, 0x00, new byte[1024]);
 
@@ -67,7 +69,9 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddDomain(0x2A01, 0x00, new byte[40]);
 
@@ -91,7 +95,9 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // 300-byte OD entry that is not a multiple of 7, so the last-segment "n" trim is
         // exercised (300 mod 7 = 6 unused bytes on the final segment).
@@ -122,7 +128,9 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         // multiple sub-blocks.
         var masterOpts = new CanOpenNodeOptions().With(sdoBlockSize: 4);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01, masterOpts);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         // 100 bytes → ceil(100/7) = 15 segments total → 4 sub-blocks (4+4+4+3).
         var payload = new byte[100];
@@ -148,7 +156,9 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
 
         var masterOpts = new CanOpenNodeOptions().With(sdoBlockCrcSupported: false);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01, masterOpts);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         slave.ObjectDictionary.AddDomain(0x2A02, 0x00, new byte[512]);
         var payload = new byte[512];
@@ -363,6 +373,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         using var rawBus = Open(session, 2);
 
         using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
         var payload = Enumerable.Range(0, 20).Select(i => (byte)(0x30 + i)).ToArray();
         var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
 
@@ -478,6 +489,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
         using var rawBus = Open(session, 2);
 
         using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
         var payload = Enumerable.Range(0, 40).Select(i => (byte)(0x30 + i)).ToArray(); // 6 segments
         var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
 
@@ -593,6 +605,7 @@ public class CanOpenBlockAndGuardingTests : IClassFixture<VirtualAdapterFixture>
 
         var options = new CanOpenNodeOptions().With(sdoBlockMaxRetransmissions: 2);
         using var client = CanOpen.OpenNode(busA, nodeId: 0x01, options);
+        PeerSdoLaboratory.Bind(client, 0x02);
         var payload = Enumerable.Range(0, 20).Select(i => (byte)(0x30 + i)).ToArray();
         var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
 

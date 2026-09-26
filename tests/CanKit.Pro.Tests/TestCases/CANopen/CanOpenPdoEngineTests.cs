@@ -129,14 +129,23 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
 
     private static Task<SdoAbortException> DownloadShouldAbortAsync(ICanOpenNode client, ushort index, byte subindex,
         byte[] value)
-        => Assert.ThrowsAsync<SdoAbortException>(() =>
+    {
+        PeerSdoLaboratory.Bind(client, Device);
+        return Assert.ThrowsAsync<SdoAbortException>(() =>
             client.SdoDownloadAsync(Device, index, subindex, value).WithTimeoutAsync(ShortTimeout));
+    }
 
     private static Task DownloadAsync(ICanOpenNode client, ushort index, byte subindex, byte[] value)
-        => client.SdoDownloadAsync(Device, index, subindex, value).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, Device);
+        return client.SdoDownloadAsync(Device, index, subindex, value).WithTimeoutAsync(ShortTimeout);
+    }
 
     private static Task<byte[]> UploadAsync(ICanOpenNode client, ushort index, byte subindex)
-        => client.SdoUploadAsync(Device, index, subindex).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, Device);
+        return client.SdoUploadAsync(Device, index, subindex).WithTimeoutAsync(ShortTimeout);
+    }
 
     /// <summary>
     /// A raw channel on the virtual bus: records every data frame it observes, per COB-ID, and

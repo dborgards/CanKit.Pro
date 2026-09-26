@@ -150,6 +150,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00);
@@ -180,6 +181,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
@@ -218,6 +220,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var payload = Enumerable.Range(1, 10).Select(i => (byte)(0x10 * i)).ToArray(); // 7 + 3
@@ -261,6 +264,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
@@ -303,6 +307,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var payload = Enumerable.Range(0, 20).Select(i => (byte)(0x30 + i)).ToArray();
@@ -483,6 +488,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         var opts = new CanOpenNodeOptions().With(sdoBlockSize: 5);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01, opts);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
         var payload = Enumerable.Range(0, 35).Select(i => (byte)(0x60 + i)).ToArray(); // 5 segments
 
@@ -536,6 +542,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         var opts = new CanOpenNodeOptions().With(sdoBlockSize: 5);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01, opts);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2100, subindex: 0x00,
@@ -574,7 +581,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, new CanOpenNodeOptions().With(maxSdoTransferBytes: 1024));
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         var exact = Enumerable.Range(0, 1024).Select(i => (byte)(i * 7)).ToArray();
         slave.ObjectDictionary.AddDomain(0x2A10, 0x00, new byte[1024]);
@@ -595,7 +604,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01, new CanOpenNodeOptions().With(maxSdoTransferBytes: 1024));
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         var exact = Enumerable.Range(0, 1024).Select(i => (byte)(i * 11)).ToArray();
         slave.ObjectDictionary.AddDomain(0x2B20, 0x00, exact, OdAccess.ReadOnly);
@@ -662,7 +673,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
+        PeerSdoLaboratory.Bind(slave, 0x11);
         slave.ObjectDictionary.AddU32(0x1000, 0x00, 0x00030191u, OdAccess.ReadOnly);
         using var cts = new CancellationTokenSource(); // outlives the transfer, as an app-lifetime token does
 
@@ -715,6 +728,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01,
             new CanOpenNodeOptions().With(sdoTimeout: TimeSpan.FromMilliseconds(50)));
+        PeerSdoLaboratory.Bind(master, 0x7E);
 
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master
             .SdoUploadAsync(serverNodeId: 0x7E, index: 0x1000, subindex: 0x00)
@@ -773,6 +787,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x05);
@@ -812,6 +827,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var rawBus = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
 
         var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x05);

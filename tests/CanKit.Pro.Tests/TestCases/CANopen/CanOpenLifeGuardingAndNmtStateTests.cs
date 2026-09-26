@@ -168,6 +168,7 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         var clock = new ManualTimeSource();
         using var node = OpenClockedNode(nodeBus, NodeId, clock);
         using var master = CanOpen.OpenNode(masterNodeBus, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, NodeId);
         var witness = new ActorWitness(node, masterBus, clock);
         var events = new AsyncQueue<LifeGuardingEventArgs>();
         node.LifeGuardingEvent += (_, e) => events.Add(e);
@@ -385,8 +386,10 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         using var clientBus = ControllableBus.EchoCapable(NewSession());
 
         using var server = CanOpen.OpenNode(serverBus, NodeId);
+        PeerSdoLaboratory.Bind(server, NodeId);
         using var client = CanOpen.OpenNode(clientBus, nodeId: 0x01,
             new CanOpenNodeOptions().With(sdoTimeout: TimeSpan.FromSeconds(30)));
+        PeerSdoLaboratory.Bind(client, NodeId);
         server.ObjectDictionary.AddDomain(0x2000, 0x00, new byte[16]);
 
         var clientRequests = new AsyncQueue<byte[]>();
@@ -449,10 +452,13 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         using var secondClientBus = Open(session, 3);
 
         using var server = CanOpen.OpenNode(serverBus, NodeId);
+        PeerSdoLaboratory.Bind(server, NodeId);
         // A long client timeout so the unanswered request is still pending when the witness lands.
         using var firstClient = CanOpen.OpenNode(firstClientBus, nodeId: 0x01,
             new CanOpenNodeOptions().With(sdoTimeout: TimeSpan.FromSeconds(30)));
+        PeerSdoLaboratory.Bind(firstClient, NodeId);
         using var secondClient = CanOpen.OpenNode(secondClientBus, nodeId: 0x02);
+        PeerSdoLaboratory.Bind(secondClient, NodeId);
         server.ObjectDictionary.AddU8(0x2000, 0x00, 0);
 
         var nmt = new AsyncQueue<NmtCommand>();

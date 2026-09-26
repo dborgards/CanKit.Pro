@@ -34,6 +34,10 @@ namespace CanKit.Sample.CanOpenBusScan
             var sdoTimeoutMilliseconds = GetIntArg(args, "--sdo-timeout-ms", 500, minimum: 1);
             var clientNodeId = GetIntArg(args, "--client-node", CanOpenCobId.MaxNodeId,
                 CanOpenCobId.MinNodeId, CanOpenCobId.MaxNodeId);
+            var peerDescriptionPath = GetArg(args, "--peer-description");
+            var peerDescription = peerDescriptionPath is null
+                ? null
+                : CanOpenDeviceDescription.Load(peerDescriptionPath);
 
             using var cancellation = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) =>
@@ -84,10 +88,33 @@ namespace CanKit.Sample.CanOpenBusScan
                         || !observation.HeartbeatSeen)
                     .ToArray();
 
-                Console.WriteLine(
-                    $"Probing {nodesToProbe.Length} node ID(s) without a heartbeat via SDO 0x1000 ...");
-                var probes = await Task.WhenAll(nodesToProbe.Select(nodeId =>
-                    ProbeDeviceTypeAsync(client, nodeId, cancellation.Token))).ConfigureAwait(false);
+                var nodesForDeviceType = nodesToProbe
+                    .Where(nodeId => ListsSubindexZero(DescriptionFor(peerDescription, nodeId), DeviceTypeIndex))
+                    .ToArray();
+                if (nodesForDeviceType.Length == 0)
+                {
+                    Console.WriteLine(
+                        "Not probing via SDO 0x1000: the peer description for those nodes does not list it.");
+                }
+                else if (nodesForDeviceType.Length == nodesToProbe.Length)
+                {
+                    Console.WriteLine(
+                        $"Probing {nodesToProbe.Length} node ID(s) without a heartbeat via SDO 0x1000 ...");
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"Probing {nodesForDeviceType.Length} of {nodesToProbe.Length} node ID(s) via SDO 0x1000; " +
+                        "the description bound for the others does not list it.");
+                }
+                var probes = nodesForDeviceType.Length == 0
+                    ? Array.Empty<ProbeResult>()
+                    : await Task.WhenAll(nodesForDeviceType.Select(nodeId =>
+                        ProbeDeviceTypeAsync(
+                            client,
+                            nodeId,
+                            DescriptionFor(peerDescription, nodeId),
+                            cancellation.Token))).ConfigureAwait(false);
                 var probesByNode = probes.ToDictionary(probe => probe.NodeId);
                 var finalObservations = heartbeatObservations.ToDictionary(
                     pair => pair.Key,
@@ -120,6 +147,7 @@ namespace CanKit.Sample.CanOpenBusScan
                         nodeId,
                         observation,
                         probe?.DeviceType,
+                        DescriptionFor(peerDescription, nodeId),
                         cancellation.Token).ConfigureAwait(false);
                 }
 
@@ -138,11 +166,36 @@ namespace CanKit.Sample.CanOpenBusScan
             }
         }
 
+        /// <summary>
+        /// An EDS describes a device type and applies to every node. A DCF is commissioned for
+        /// one node-id and applies only there; other nodes keep the no-file exemption.
+        /// </summary>
+        private static CanOpenDeviceDescription? DescriptionFor(
+            CanOpenDeviceDescription? peerDescription,
+            byte nodeId)
+        {
+            if (peerDescription?.NodeId is { } commissioned && commissioned != nodeId)
+            {
+                return null;
+            }
+
+            return peerDescription;
+        }
+
+        private static bool ListsSubindexZero(CanOpenDeviceDescription? description, ushort index)
+            => description is null || description.Contains(index, 0);
+
         private static async Task<ProbeResult> ProbeDeviceTypeAsync(
             ICanOpenNode client,
             byte nodeId,
+            CanOpenDeviceDescription? peerDescription,
             CancellationToken cancellationToken)
         {
+            if (peerDescription is not null)
+            {
+                client.BindPeerDeviceDescription(nodeId, peerDescription);
+            }
+
             var result = await ReadObjectAsync(
                 client,
                 nodeId,
@@ -161,19 +214,44 @@ namespace CanKit.Sample.CanOpenBusScan
             byte nodeId,
             HeartbeatObservation? heartbeat,
             SdoReadResult? probedDeviceType,
+            CanOpenDeviceDescription? peerDescription,
             CancellationToken cancellationToken)
         {
+            if (peerDescription is not null)
+            {
+                client.BindPeerDeviceDescription(nodeId, peerDescription);
+            }
+
             Console.WriteLine($"Node 0x{nodeId:X2} ({nodeId})");
             Console.WriteLine($"  Heartbeat: {FormatHeartbeat(heartbeat)}");
 
-            var deviceType = probedDeviceType
-                ?? await ReadObjectAsync(
-                    client,
-                    nodeId,
-                    DeviceTypeIndex,
-                    subindex: 0,
-                    cancellationToken).ConfigureAwait(false);
-            Console.WriteLine($"  0x1000:00 Device type = {FormatResult(deviceType)}");
+            if (peerDescription is null || peerDescription.Contains(DeviceTypeIndex, 0))
+            {
+                var deviceType = probedDeviceType
+                    ?? await ReadObjectAsync(
+                        client,
+                        nodeId,
+                        DeviceTypeIndex,
+                        subindex: 0,
+                        cancellationToken).ConfigureAwait(false);
+                Console.WriteLine($"  0x1000:00 Device type = {FormatResult(deviceType)}");
+            }
+
+            await PrintIdentityAsync(client, nodeId, peerDescription, cancellationToken)
+                .ConfigureAwait(false);
+            Console.WriteLine();
+        }
+
+        private static async Task PrintIdentityAsync(
+            ICanOpenNode client,
+            byte nodeId,
+            CanOpenDeviceDescription? peerDescription,
+            CancellationToken cancellationToken)
+        {
+            if (peerDescription is not null && !peerDescription.Contains(IdentityIndex, 0))
+            {
+                return;
+            }
 
             var identityCount = await ReadObjectAsync(
                 client,
@@ -184,15 +262,55 @@ namespace CanKit.Sample.CanOpenBusScan
             Console.WriteLine(
                 $"  0x1018:00 {GetIdentitySubindexName(0)} = {FormatResult(identityCount)}");
 
+            if (peerDescription is null)
+            {
+                if (!identityCount.Success || identityCount.Data!.Length == 0)
+                {
+                    return;
+                }
+
+                // 1018h:00–04 are readable with no peer file. Anything the node reports above 04h
+                // still needs a description.
+                var reportedHighest = identityCount.Data[0];
+                var readable = reportedHighest > 4 ? (byte)4 : reportedHighest;
+                for (byte subindex = 1; subindex <= readable; subindex++)
+                {
+                    var value = await ReadObjectAsync(
+                        client,
+                        nodeId,
+                        IdentityIndex,
+                        subindex,
+                        cancellationToken).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"  0x1018:{subindex:X2} {GetIdentitySubindexName(subindex)} = " +
+                        FormatResult(value));
+                }
+
+                if (reportedHighest > 4)
+                {
+                    Console.WriteLine(
+                        "  Further 0x1018 sub-indices need a peer EDS/DCF (--peer-description).");
+                }
+
+                return;
+            }
+
             if (!identityCount.Success || identityCount.Data!.Length == 0)
             {
-                Console.WriteLine();
                 return;
             }
 
             var highestSubindex = identityCount.Data[0];
             for (byte subindex = 1; subindex <= highestSubindex; subindex++)
             {
+                if (!peerDescription.Contains(IdentityIndex, subindex))
+                {
+                    Console.WriteLine(
+                        $"  0x1018:{subindex:X2} {GetIdentitySubindexName(subindex)} = " +
+                        "<not in the peer description>");
+                    continue;
+                }
+
                 var value = await ReadObjectAsync(
                     client,
                     nodeId,
@@ -208,8 +326,6 @@ namespace CanKit.Sample.CanOpenBusScan
                     break;
                 }
             }
-
-            Console.WriteLine();
         }
 
         private static async Task<SdoReadResult> ReadObjectAsync(
@@ -357,11 +473,16 @@ namespace CanKit.Sample.CanOpenBusScan
         {
             Console.WriteLine(
                 "Usage: CanOpenBusScan [--endpoint <endpoint>] [--bitrate 500000] " +
-                "[--heartbeat-ms 2000] [--sdo-timeout-ms 500] [--client-node 127]");
+                "[--heartbeat-ms 2000] [--sdo-timeout-ms 500] [--client-node 127] " +
+                "[--peer-description <eds-or-dcf>]");
             Console.WriteLine();
             Console.WriteLine(
                 "--client-node is the CANopen node ID used by the scanner. It must be unused " +
                 "on the bus and is excluded from discovery.");
+            Console.WriteLine(
+                "Without --peer-description the scan reads 1000h:00 and 1018h:00–04. " +
+                "Other objects need the peer file. An EDS is used for every node; a DCF is " +
+                "used only for the node-id it was commissioned for.");
         }
 
         private readonly struct HeartbeatObservation

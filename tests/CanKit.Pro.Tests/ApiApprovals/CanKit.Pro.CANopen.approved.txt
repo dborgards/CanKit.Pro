@@ -49,6 +49,7 @@ namespace CanKit.Pro.CANopen
         public byte? NodeId { get; }
         public EdsDcfNet.Models.ObjectDictionary Objects { get; }
         public System.Collections.Generic.IReadOnlyList<EdsDcfNet.Diagnostics.ParseDiagnostic> ParseDiagnostics { get; }
+        public bool Contains(ushort index, byte subindex) { }
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription FromDcf(EdsDcfNet.Models.DeviceConfigurationFile dcf) { }
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription FromEds(EdsDcfNet.Models.ElectronicDataSheet eds) { }
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription Load(string path) { }
@@ -180,8 +181,10 @@ namespace CanKit.Pro.CANopen
         event System.EventHandler<CanKit.Pro.CANopen.RpdoReceivedEventArgs>? RpdoReceived;
         event System.EventHandler<CanKit.Pro.CANopen.SyncReceivedEventArgs>? SyncReceived;
         void AddHeartbeatConsumer(byte producerNodeId, System.TimeSpan timeout);
+        void BindPeerDeviceDescription(byte nodeId, CanKit.Pro.CANopen.CanOpenDeviceDescription description);
         void ConfigureRpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, uint? cobId = default, CanKit.Pro.CANopen.Pdo.RpdoTransmission transmission = 0);
         void ConfigureTpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, CanKit.Pro.CANopen.Pdo.TpdoTransmission transmission = 0, uint? cobId = default, System.TimeSpan? eventTimerInterval = default, System.TimeSpan? inhibitTime = default);
+        CanKit.Pro.CANopen.CanOpenDeviceDescription? GetPeerDeviceDescription(byte nodeId);
         System.Threading.Tasks.Task<CanKit.Pro.CANopen.ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId, System.ReadOnlyMemory<byte> payload, CanKit.Pro.CANopen.CanOpenDeviceDescription peerDescription, CanKit.Pro.CANopen.IForeignPdoSink sink, System.Threading.CancellationToken cancellationToken = default);
         void RemoveHeartbeatConsumer(byte producerNodeId);
         void RestoreDefaultParameters();
@@ -200,6 +203,7 @@ namespace CanKit.Pro.CANopen
         void StopSyncProducer();
         void StoreParameters();
         System.Threading.Tasks.Task TriggerTpdoAsync(int pdoIndex, System.Threading.CancellationToken cancellationToken = default);
+        void UnbindPeerDeviceDescription(byte nodeId);
     }
     public interface IForeignPdoSink
     {
@@ -298,6 +302,15 @@ namespace CanKit.Pro.CANopen
         public bool PdoMappable { get; }
         public int Size { get; }
         public byte[] GetRawValue() { }
+    }
+    public sealed class PeerSdoAccessException : System.InvalidOperationException
+    {
+        public PeerSdoAccessException(byte serverNodeId, ushort index, byte subindex, bool peerDescriptionLoaded, string message) { }
+        public ushort Index { get; }
+        public bool PeerDescriptionLoaded { get; }
+        public byte ServerNodeId { get; }
+        public byte Subindex { get; }
+        public static bool IsAllowedWithoutPeerDescription(ushort index, byte subindex) { }
     }
     public sealed class RpdoReceivedEventArgs : System.EventArgs
     {

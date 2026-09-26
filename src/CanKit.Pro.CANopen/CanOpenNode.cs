@@ -492,6 +492,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(serverNodeId);
         ValidateTransferMode(mode, nameof(mode));
+        EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
@@ -543,6 +544,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 "rejected rather than being silently misencoded as four zero bytes.",
                 nameof(data));
         }
+        EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var payload = data.ToArray();
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
