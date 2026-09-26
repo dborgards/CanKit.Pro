@@ -313,18 +313,18 @@ public interface ICanOpenNode : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Which PDO the COB-ID belongs to is taken from <c>1400h:01</c> / <c>1800h:01</c> in
-    /// <paramref name="peerDescription"/> (<c>$NODEID</c> resolved to <paramref name="peerNodeId"/>).
-    /// A PDO the file marks invalid (bit 31 set) is not a match. Those COB-ID entries are not
-    /// read from the live device.
+    /// Which PDO the COB-ID belongs to is read live from <c>1400h:01</c> / <c>1800h:01</c>. A
+    /// value that comes back is used ahead of <paramref name="peerDescription"/>, including a PDO
+    /// the device marks invalid (bit 31 set) or a CAN-ID the file does not name. The same entry
+    /// in the file (<c>$NODEID</c> resolved to <paramref name="peerNodeId"/>) is used only when
+    /// that upload aborts, times out, or does not return a word.
     /// </para>
     /// <para>
     /// The mapping is the live record <c>1600h</c>–<c>1603h</c> or <c>1A00h</c>–<c>1A03h</c>,
-    /// uploaded over SDO, when the description lists that record and every sub-index the live
-    /// count names. An upload that aborts or times out, a count above eight (MPDO included), or
-    /// a count that names a sub-index the file does not list, makes the live record unavailable
-    /// and the mapping in the file is used instead. A record the file does not list is not
-    /// uploaded, and that PDO is not decoded.
+    /// uploaded over SDO, including a sub-index the description does not list. An upload that
+    /// aborts or times out, or a count that is not a byte-aligned mapping of at most eight
+    /// entries (MPDO included), makes the live record unavailable and the mapping in the file is
+    /// used instead. A record neither the device nor the file can supply is not decoded.
     /// </para>
     /// <para>
     /// The split follows the same length rule as an RPDO this node consumes: fewer bytes than
@@ -335,9 +335,8 @@ public interface ICanOpenNode : IDisposable
     /// <param name="peerNodeId">The node whose PDO this payload is (1..127).</param>
     /// <param name="cobId">The 11-bit COB-ID the payload was observed on.</param>
     /// <param name="payload">The PDO data, 0..8 bytes.</param>
-    /// <param name="peerDescription">EDS or DCF of the peer. Selects the PDO and supplies the
-    /// mapping when the live record cannot be read. Also the list of sub-indexes that may be
-    /// uploaded.</param>
+    /// <param name="peerDescription">EDS or DCF of the peer. Supplies the COB-ID and the mapping
+    /// when the live read of that record fails.</param>
     /// <param name="sink">Where each decoded object is written.</param>
     /// <param name="cancellationToken">Cancels an in-flight mapping upload. Cancellation is not a
     /// failed read: the file is not used in its place.</param>

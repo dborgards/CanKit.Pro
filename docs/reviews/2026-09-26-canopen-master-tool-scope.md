@@ -69,8 +69,10 @@ Primärquelle des Mappings ist das lebende Objektverzeichnis: die Records `1600h
 EDS oder DCF. Beide Wege sind nicht implementiert und sind zu bauen.
 
 Der ausgelieferte SDO-Client kann die Bytes eines Index holen. Eine Beobachtung, die daraus oder
-aus der Datei eine fremde Nutzlast zerlegt, gibt es nicht. Beides ist offene Arbeit, nicht
-Bestand.
+aus der Datei eine fremde Nutzlast zerlegt, gibt es auf dem hier gemessenen Stand nicht.
+
+Nachgetragen (26.09.2026, #163): `ObserveForeignPdoAsync` zerlegt die Nutzlast. Live vor Datei,
+einschließlich der Antwort auf Frage 3.
 
 ### 3. Erkennung der Knoten
 
@@ -126,6 +128,11 @@ Er wird nicht durch eine Implementierung ersetzt.
    Gültiges Lesen setzt die Datei voraus und erlaubt nur Objekte aus ihr. Dürfen diese Records
    gelesen werden, wenn die Datei sie nicht führt? Gehören `1400h:01` und `1800h:01` (die COB-ID)
    zur Primärquelle, oder nur die genannten Mapping-Records?
+
+   Beantwortet (26.09.2026), beides ja, live vor Datei: Mapping-Subindizes dürfen per SDO gelesen
+   werden, auch wenn die Datei sie nicht führt. `1400h:01` und `1800h:01` werden live gelesen,
+   nicht nur aus der Datei. Die Datei bleibt der Rückfall, wenn das Live-Lesen abbricht, die Zeit
+   überschreitet oder kein verwendbares Wort liefert. `ObserveForeignPdoAsync` (#163) folgt dem.
 4. **Flying Master, Umfang.** Welche Ausgabe und welcher Abschnitt von CiA 302 binden die
    Pflicht? Ohne diese Angabe wird kein Ablauf geschrieben.
 5. **Boot-up-Manager.** Die Paket-README nennt ihn im selben Satz wie Flying Master. Die

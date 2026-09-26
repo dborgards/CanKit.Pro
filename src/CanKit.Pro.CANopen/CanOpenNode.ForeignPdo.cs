@@ -17,11 +17,10 @@ namespace CanKit.Pro.CANopen;
 /// written.
 /// </summary>
 /// <remarks>
-/// The live mapping record is read over SDO when the peer description lists every sub-index
-/// that read needs. When that upload aborts, times out, or would touch a sub-index the file
-/// does not list, the mapping in the file is used. A mapping record the file does not list is
-/// not uploaded. The COB-ID is taken from <c>1400h:01</c> / <c>1800h:01</c> in the file and is
-/// not uploaded.
+/// The COB-ID is read live from <c>1400h:01</c> / <c>1800h:01</c>. The mapping is read live from
+/// <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c>, including a sub-index the peer file does
+/// not list. A live value is used ahead of the file. The file is used only when that upload
+/// aborts, times out, or does not come back as a usable value.
 /// </remarks>
 internal sealed partial class CanOpenNode
 {
@@ -43,11 +42,12 @@ internal sealed partial class CanOpenNode
             throw new ArgumentOutOfRangeException(nameof(payload), payload.Length,
                 "A classic CAN PDO payload is at most 8 bytes.");
 
-        var matches = MatchDescribedPdos(peerDescription, peerNodeId, cobId);
+        var matches = await MatchPdosAsync(peerDescription, peerNodeId, cobId, cancellationToken)
+            .ConfigureAwait(false);
         if (matches.Count == 0)
         {
             return new ForeignPdoObserveResult(cobId, Array.Empty<ForeignPdoObservation>(),
-                "no PDO in the peer description uses this COB-ID");
+                "no PDO communication record uses this COB-ID");
         }
 
         var observations = new ForeignPdoObservation[matches.Count];
@@ -73,22 +73,71 @@ internal sealed partial class CanOpenNode
         public ushort MapIndex { get; }
     }
 
-    /// <summary>TPDO 1..4, then RPDO 1..4, whose described COB-ID (bit 31 clear, 11-bit) equals
-    /// <paramref name="cobId"/>. The COB-ID word is not read from the device.</summary>
-    private static List<DescribedPdo> MatchDescribedPdos(CanOpenDeviceDescription description, byte peerNodeId, uint cobId)
+    /// <summary>TPDO 1..4, then RPDO 1..4, whose COB-ID equals <paramref name="cobId"/>. Each
+    /// <c>1800h:01</c> / <c>1400h:01</c> is read from the device first. The file is used for a
+    /// record only when that upload does not yield a value.</summary>
+    private async Task<List<DescribedPdo>> MatchPdosAsync(CanOpenDeviceDescription description, byte peerNodeId,
+        uint cobId, CancellationToken cancellationToken)
     {
         var matches = new List<DescribedPdo>(2);
         for (int n = 1; n <= Co.PdoCount; n++)
         {
-            if (DescribedCobId(description, peerNodeId, (ushort)(Co.TpdoComm + n - 1)) == cobId)
+            var comm = (ushort)(Co.TpdoComm + n - 1);
+            if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, cancellationToken).ConfigureAwait(false))
                 matches.Add(new DescribedPdo(ForeignPdoKind.Tpdo, n, (ushort)(Co.TpdoMap + n - 1)));
         }
         for (int n = 1; n <= Co.PdoCount; n++)
         {
-            if (DescribedCobId(description, peerNodeId, (ushort)(Co.RpdoComm + n - 1)) == cobId)
+            var comm = (ushort)(Co.RpdoComm + n - 1);
+            if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, cancellationToken).ConfigureAwait(false))
                 matches.Add(new DescribedPdo(ForeignPdoKind.Rpdo, n, (ushort)(Co.RpdoMap + n - 1)));
         }
         return matches;
+    }
+
+    /// <summary>True when this communication record's COB-ID is <paramref name="cobId"/>. A live
+    /// word that was read decides, including a PDO marked invalid. The file is asked only when
+    /// the upload itself fails.</summary>
+    private async Task<bool> CommRecordMatchesAsync(CanOpenDeviceDescription description, byte peerNodeId,
+        ushort commIndex, uint cobId, CancellationToken cancellationToken)
+    {
+        var live = await TryReadLiveCobIdAsync(peerNodeId, commIndex, cancellationToken).ConfigureAwait(false);
+        if (live.Read) return live.CanId == cobId;
+        return DescribedCobId(description, peerNodeId, commIndex) == cobId;
+    }
+
+    /// <summary>A live <c>1400h:01</c> / <c>1800h:01</c>. <see cref="Read"/> is false only when the
+    /// upload failed. <see cref="CanId"/> is the 11-bit id, or null when the word was read and is
+    /// not a usable classic COB-ID (invalid, extended, or not a CAN-ID).</summary>
+    private readonly struct LiveCobId
+    {
+        private LiveCobId(bool read, uint? canId)
+        {
+            Read = read;
+            CanId = canId;
+        }
+
+        public bool Read { get; }
+        public uint? CanId { get; }
+
+        public static LiveCobId Failed => new(false, null);
+
+        public static LiveCobId FromWord(uint word) => new(true, UsableCanId(word));
+    }
+
+    private async Task<LiveCobId> TryReadLiveCobIdAsync(byte peerNodeId, ushort commIndex, CancellationToken cancellationToken)
+    {
+        byte[] raw;
+        try
+        {
+            raw = await SdoUploadAsync(peerNodeId, commIndex, 0x01, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (IsLiveReadUnavailable(ex))
+        {
+            return LiveCobId.Failed;
+        }
+        if (raw.Length < 4) return LiveCobId.Failed;
+        return LiveCobId.FromWord(ObjectDictionary.DecodeU32(raw));
     }
 
     /// <summary>The 11-bit CAN-ID of a described PDO communication record, or null when the file
@@ -98,6 +147,13 @@ internal sealed partial class CanOpenNode
         if (!TryDescribedObject(description, commIndex, out var record)) return null;
         if (!TryDescribedValue(record, 0x01, out var text)) return null;
         if (ParseDescribedUnsigned(text, peerNodeId) is not { } word) return null;
+        return UsableCanId(word);
+    }
+
+    /// <summary>Bits 0–10 when the word is a classic CAN-ID with bit 31 clear. Bit 30 (no RTR)
+    /// is ignored. Bit 31, bit 29, or any other bit above the 11-bit id is not a match.</summary>
+    private static uint? UsableCanId(uint word)
+    {
         if ((word & CanOpenCobId.InvalidBit) != 0) return null;
         if ((word & CanOpenCobId.ExtendedFrameBit) != 0) return null;
         const uint controlBits = CanOpenCobId.InvalidBit | CanOpenCobId.NoRtrBit | CanOpenCobId.ExtendedFrameBit;
@@ -109,14 +165,7 @@ internal sealed partial class CanOpenNode
         ReadOnlyMemory<byte> payload, CanOpenDeviceDescription description, DescribedPdo pdo,
         IForeignPdoSink sink, CancellationToken cancellationToken)
     {
-        if (!TryDescribedObject(description, pdo.MapIndex, out var mapObject))
-        {
-            return Failed(pdo,
-                $"mapping record 0x{pdo.MapIndex:X4} is not in the peer description, so it is not read over SDO");
-        }
-
-        var live = await TryReadLiveMappingAsync(peerNodeId, pdo.MapIndex, mapObject, cancellationToken)
-            .ConfigureAwait(false);
+        var live = await TryReadLiveMappingAsync(peerNodeId, pdo.MapIndex, cancellationToken).ConfigureAwait(false);
         PdoMappingEntry[] mapping;
         ForeignPdoMappingOrigin origin;
         if (live is { } liveEntries)
@@ -124,7 +173,7 @@ internal sealed partial class CanOpenNode
             mapping = liveEntries;
             origin = ForeignPdoMappingOrigin.LiveMapping;
         }
-        else if (!TryReadDescribedMapping(mapObject, peerNodeId, out mapping, out var why))
+        else if (!TryDescribedMapping(description, pdo, peerNodeId, out mapping, out var why))
         {
             return Failed(pdo, "the live mapping record could not be read, and the description's mapping could not be used: " + why);
         }
@@ -161,22 +210,20 @@ internal sealed partial class CanOpenNode
         => new(pdo.Kind, pdo.Number, decoded: false, origin: null, signalsWritten: 0, reason);
 
     /// <summary>
-    /// Uploads sub-index 0 and then each mapped entry, but only sub-indexes the description
-    /// lists. Returns null when the live record is unavailable: the upload failed, the count is
-    /// not a byte-aligned mapping of at most 8 entries, or the count names a sub-index the file
-    /// does not list (that sub-index is not uploaded). An empty array is a live count of 0,
-    /// which is a mapping and is not a reason to fall back.
+    /// Uploads sub-index 0 and then each mapped entry, whether or not the description lists them.
+    /// Returns null when the live record is unavailable: the upload failed, or the count is not a
+    /// byte-aligned mapping of at most 8 entries. An empty array is a live count of 0, which is a
+    /// mapping and is not a reason to fall back.
     /// </summary>
     private async Task<PdoMappingEntry[]?> TryReadLiveMappingAsync(byte peerNodeId, ushort mapIndex,
-        CanOpenObject mapObject, CancellationToken cancellationToken)
+        CancellationToken cancellationToken)
     {
-        if (!TryDescribedValue(mapObject, 0x00, out _)) return null;
         byte[] countBytes;
         try
         {
             countBytes = await SdoUploadAsync(peerNodeId, mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex) when (IsLiveMappingUnavailable(ex))
+        catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
             return null;
         }
@@ -188,13 +235,12 @@ internal sealed partial class CanOpenNode
         int total = 0;
         for (byte s = 1; s <= count; s++)
         {
-            if (!TryDescribedValue(mapObject, s, out _)) return null;
             byte[] raw;
             try
             {
                 raw = await SdoUploadAsync(peerNodeId, mapIndex, s, cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception ex) when (IsLiveMappingUnavailable(ex))
+            catch (Exception ex) when (IsLiveReadUnavailable(ex))
             {
                 return null;
             }
@@ -217,8 +263,20 @@ internal sealed partial class CanOpenNode
         return entries;
     }
 
-    private static bool IsLiveMappingUnavailable(Exception ex)
+    private static bool IsLiveReadUnavailable(Exception ex)
         => ex is SdoAbortException or CanOpenTransportException;
+
+    private static bool TryDescribedMapping(CanOpenDeviceDescription description, DescribedPdo pdo, byte peerNodeId,
+        out PdoMappingEntry[] entries, out string reason)
+    {
+        if (!TryDescribedObject(description, pdo.MapIndex, out var mapObject))
+        {
+            entries = Array.Empty<PdoMappingEntry>();
+            reason = $"mapping record 0x{pdo.MapIndex:X4} is not in the peer description";
+            return false;
+        }
+        return TryReadDescribedMapping(mapObject, peerNodeId, out entries, out reason);
+    }
 
     private static bool TryReadDescribedMapping(CanOpenObject mapObject, byte peerNodeId,
         out PdoMappingEntry[] entries, out string reason)

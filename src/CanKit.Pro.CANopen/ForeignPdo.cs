@@ -103,8 +103,8 @@ public sealed class ForeignPdoObservation
     /// <summary>PDO number, 1..4.</summary>
     public int PdoNumber { get; }
 
-    /// <summary>Whether the payload was split. A short payload, a mapping that could not be
-    /// read, and a record the peer file does not list are not decoded, and the sink is not called
+    /// <summary>Whether the payload was split. A short payload, and a mapping that could not be
+    /// read from the device or from the peer file, are not decoded, and the sink is not called
     /// for them.</summary>
     public bool Decoded { get; }
 
@@ -120,10 +120,11 @@ public sealed class ForeignPdoObservation
 }
 
 /// <summary>
-/// The outcome of <c>ObserveForeignPdoAsync</c> for one COB-ID. A COB-ID the peer file does not
-/// assign to a PDO has no <see cref="Observations"/> and a <see cref="Reason"/>. A COB-ID the
-/// file assigns to more than one PDO has one observation per PDO, in transmit-record order
-/// (TPDO 1..4) and then receive-record order (RPDO 1..4).
+/// The outcome of <c>ObserveForeignPdoAsync</c> for one COB-ID. A COB-ID that no live
+/// communication record assigns — and that the peer file does not assign either, when that live
+/// read failed — has no <see cref="Observations"/> and a <see cref="Reason"/>. A COB-ID assigned
+/// to more than one PDO has one observation per PDO, in transmit-record order (TPDO 1..4) and
+/// then receive-record order (RPDO 1..4).
 /// </summary>
 public sealed class ForeignPdoObserveResult
 {
@@ -137,7 +138,8 @@ public sealed class ForeignPdoObserveResult
     /// <summary>The 11-bit COB-ID that was observed.</summary>
     public uint CobId { get; }
 
-    /// <summary>One entry per PDO the peer file assigns to <see cref="CobId"/>. Empty when none do.</summary>
+    /// <summary>One entry per PDO whose COB-ID is <see cref="CobId"/>, live record first and the
+    /// peer file when that read failed. Empty when none match.</summary>
     public IReadOnlyList<ForeignPdoObservation> Observations { get; }
 
     /// <summary>Why nothing was decoded, when <see cref="Observations"/> is empty.</summary>
