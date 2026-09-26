@@ -464,5 +464,7 @@ Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping u
 Flying Master ist seit dem 26.09. keine Auslassung mehr: der Maintainer hat die frühere
 Einstufung als optional zurückgenommen und ihn als Pflicht der Master-Rolle festgelegt
 ([`2026-09-26-canopen-master-tool-scope.md`](2026-09-26-canopen-master-tool-scope.md), #131).
-Der Ablauf steht dort nicht, weil CiA 302 nicht gelesen ist. Bit-granulares Mapping, CiA 304
+Mit #164 ist die Wahl des aktiven Masters unter einer angenommenen CiA-302-2-Bindung umgesetzt;
+welche Ausgabe und welcher Abschnitt binden, ist dort Frage 4 und weiter offen. Der
+Boot-up-Manager ist nicht mit umgesetzt (Frage 5). Bit-granulares Mapping, CiA 304
 und CiA 305 bleiben außerhalb beider Runden.

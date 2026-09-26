@@ -97,6 +97,12 @@ implementiert. Er ist eine geforderte Fähigkeit der Master-Rolle, keine Kür.
 CiA 302 ist in dieser Runde nicht gelesen. Deshalb steht hier kein Zustandsautomat, kein Index
 und keine Zeit. Die Pflicht ist entschieden; der Ablauf nicht.
 
+Nachgetragen mit #164: die Wahl des aktiven Masters ist umgesetzt. Gebunden ist das öffentlich
+beschriebene Verfahren — Objekte `1F80h` und `1F90h`, Dienste `0x071`, `0x072`, `0x073` und
+`0x076` — unter der Annahme CiA 302-2 „NMT flying master“, historisch DSP 302 Abschnitt 5.5.
+Ausgabe und Abschnitt sind nicht an einem Mitgliedstext geprüft. Frage 4 bleibt deshalb offen.
+Der Boot-up-Manager ist nicht Teil dieser Umsetzung (Frage 5).
+
 ### 5. Aufmerksamkeit gegenüber der Geräterunde
 
 Tool und Master sind für die Aufmerksamkeit der Hauptfall. Manche Geräteposten bleiben fachlich
@@ -145,6 +151,11 @@ Er wird nicht durch eine Implementierung ersetzt.
    deshalb nicht auf den Bus.
 4. **Flying Master, Umfang.** Welche Ausgabe und welcher Abschnitt von CiA 302 binden die
    Pflicht? Ohne diese Angabe wird kein Ablauf geschrieben.
+
+   Nachgetragen mit #164: ein Ablauf ist trotzdem gelandet, ausdrücklich als Annahme und nicht
+   als Schließen dieser Frage. Angenommen ist CiA 302-2 (NMT flying master, Objekt `1F90h`),
+   historisch DSP 302 Abschnitt 5.5, nach den öffentlichen Beschreibungen, nicht nach einem
+   Mitgliedstext. Die Ausgabe und der Abschnitt, die binden sollen, sind weiter zu benennen.
 5. **Boot-up-Manager.** Die Paket-README nennt ihn im selben Satz wie Flying Master. Die
    Entscheidung vom 26.09. nennt nur Flying Master. Gehört der Boot-up-Manager zur Pflicht?
 6. **Dauer des Hörfensters.** „Etwa 1–2 Sekunden" ist das Band. Liegt darin ein fester Wert,
