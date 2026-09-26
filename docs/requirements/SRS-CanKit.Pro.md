@@ -84,6 +84,7 @@ Nicht im Scope: Neuimplementierung von L0 (Vendor-Adapter) und der bereits vorha
 - CiA 302: CANopen Additional Application Layer Functions (Netzwerkmanagement, Boot-up)
 - `docs/reviews/2026-07-14-deep-code-review.md` – Ist-Zustands-Review, Quelle der L2-Architekturlücken
 - `docs/reviews/2026-09-15-canopen-scope.md` – Zuschnitt der CANopen-Geräterolle gegen CiA 301; Herkunft der Posten-Nummern in 4.3.2
+- `docs/reviews/2026-09-26-canopen-master-tool-scope.md` – Vorlage für die Master-/Tool-Rolle (#131); noch keine Anforderungen in 4.3.2
 - ISO/IEC/IEEE 29148:2018 – Requirements Engineering
 - IREB CPRE-Lehrplan (Satzschablonen, MoSCoW)
 
@@ -282,7 +283,7 @@ Ist-Zustand (15.09.2026): ausgeliefert als `CanKit.Pro.J1939Tp`.
 
 #### 4.3.2 CANopen (CiA 301)
 
-Ist-Zustand (21.09.2026): ausgeliefert als `CanKit.Pro.CANopen`. Der Zuschnitt der Geräterolle ist am 16.09.2026 entschieden (`docs/reviews/2026-09-15-canopen-scope.md`) und als FR-CO-013..024 umgesetzt; der EDS/DCF-Pfad daraus (Posten 1, 2, 13 und die EDS-Hälfte von 26) folgte mit `EdsDcfNet` 1.13.0 als FR-CO-025..028 (#132). Die Master-/Tool-Rolle erhält eine eigene Runde (#131). Die Posten-Nummern in der Spalte Quelle verweisen auf die Tabelle „Die Posten“ jenes Dokuments. „Architekturentscheidung“ steht dort, wo CiA 301 das Verhalten nicht verlangt — Übertragungsarten und Inhibit Time sind Architektur, nicht Norm; wo die Norm nur die Ablehnung, die Semantik oder einen Abort-Code beisteuert, sagt die Zelle das.
+Ist-Zustand (21.09.2026): ausgeliefert als `CanKit.Pro.CANopen`. Der Zuschnitt der Geräterolle ist am 16.09.2026 entschieden (`docs/reviews/2026-09-15-canopen-scope.md`) und als FR-CO-013..024 umgesetzt; der EDS/DCF-Pfad daraus (Posten 1, 2, 13 und die EDS-Hälfte von 26) folgte mit `EdsDcfNet` 1.13.0 als FR-CO-025..028 (#132). Die Master-/Tool-Rolle liegt als Entscheidungsvorlage in `docs/reviews/2026-09-26-canopen-master-tool-scope.md` (#131); die dort offenen Punkte sind nicht entschieden, und dieser Abschnitt enthält daraus keine Anforderungen. Die Posten-Nummern in der Spalte Quelle verweisen auf die Tabelle „Die Posten“ in `docs/reviews/2026-09-15-canopen-scope.md`. „Architekturentscheidung“ steht dort, wo CiA 301 das Verhalten nicht verlangt — Übertragungsarten und Inhibit Time sind Architektur, nicht Norm; wo die Norm nur die Ablehnung, die Semantik oder einen Abort-Code beisteuert, sagt die Zelle das.
 
 | ID | Anforderung | Priorität | Verifikation | Quelle |
 |---|---|---|---|---|
@@ -417,6 +418,6 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 1. Konkrete Zielwerte für Jitter/Durchsatz (NFR-001) sind projektspezifisch festzulegen (aktuell als Platzhalter markiert) – abhängig von Zielanwendungen (Diagnose vs. Steuerungs-Echtzeit).
 2. *Erledigt (15.09.2026).* Alle in 4.2.2/4.3.2/4.3.3 spezifizierten Pakete existieren und werden auf nuget.org veröffentlicht; die Ist-Zustands-Zeilen und die Traceability-Matrix sind entsprechend nachgeführt.
 3. *Erledigt (15.09.2026).* `docs/architecture/arc42-CanKit.Pro.md` liegt vor; die *geplant*-Markierungen in Abschnitt 8 sind aufgelöst.
-4. **Teilweise erledigt (21.09.2026): der Zuschnitt gegen die Normen.** Für CANopen ist die Geräterolle entschieden (`docs/reviews/2026-09-15-canopen-scope.md`, 16.09.2026) und in 4.3.2 als FR-CO-013..028 übersetzt; die Master-/Tool-Rolle folgt als eigene Runde (#131). Offen bleiben ISO 14229-1 und die übrigen Runden aus `docs/reviews/2026-09-15-norm-gap.md`.
+4. **Teilweise erledigt (21.09.2026): der Zuschnitt gegen die Normen.** Für CANopen ist die Geräterolle entschieden (`docs/reviews/2026-09-15-canopen-scope.md`, 16.09.2026) und in 4.3.2 als FR-CO-013..028 übersetzt; die Master-/Tool-Rolle liegt als Entscheidungsvorlage in `docs/reviews/2026-09-26-canopen-master-tool-scope.md` (#131) und ist nicht entschieden. Offen bleiben ISO 14229-1 und die übrigen Runden aus `docs/reviews/2026-09-15-norm-gap.md`.
 5. **Offen: HIL.** Abschnitt 7 verlangt HIL-Stichproben für L4 vor der Produktivfreigabe. Sie sind nie gelaufen. Bis darüber entschieden ist, ist der Virtual-Loopback-Test das tatsächliche Gate — und dieser Vorbehalt ist der Unterschied zwischen dem, was hier steht, und dem, was geprüft wird.
 6. *Erledigt (21.09.2026).* Der EDS/DCF-Pfad des CANopen-Zuschnitts — Posten 1, 2, 13 und die EDS-Hälfte von Posten 26 des Scope-Dokuments 2026-09-15 — ist mit `EdsDcfNet` 1.13.0 gebaut und in 4.3.2 als FR-CO-025..028 spezifiziert (#132). Die Anforderungen wurden mit dem Pfad geschrieben, nicht vorher, damit `eng/verify-requirements-traceability.py` nie eine `Must`-Zeile ohne Umsetzung sah.

@@ -306,7 +306,10 @@ darüber** (Codex auf #129). Die Abschnitte oben prüfen den Normtext gegen den 
 dort ausdrücklich **mit beiden Hälften** geführt — die Client-Seite (`CanOpenNode.cs:1564`,
 Upload-Initiate-Antwort) gehört zur Master-Rolle und ist trotzdem hier belegt und begründet.
 Sie fällt damit **nicht** in die zweite Runde zurück; was dort neu zu entscheiden ist, steht in
-#131. Nur der **Zuschnitt** unten ist geräteseitig, nicht jede Aussage dieses Dokuments.
+#131. Die Runde liegt als Vorlage in
+[`2026-09-26-canopen-master-tool-scope.md`](2026-09-26-canopen-master-tool-scope.md) und nimmt die
+Posten dieser Datei nicht zurück. Nur der **Zuschnitt** unten ist geräteseitig, nicht jede Aussage
+dieses Dokuments.
 
 Der Zuschnitt ist keine Liste von Einzelfällen mehr, sondern folgt aus einer Architekturentscheidung
 des Maintainers:
@@ -457,4 +460,7 @@ falsch, weil nichts mehr offen ist.
 ### Was offen bleibt
 
 Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und die
-CiA-302/304/305-Themen aus der GAP-Analyse. Die stehen in anderen Dokumenten.
+CiA-302/304/305-Themen aus der GAP-Analyse. Flying Master, der Teil davon, den #131 neu aufmacht,
+ist in [`2026-09-26-canopen-master-tool-scope.md`](2026-09-26-canopen-master-tool-scope.md) als
+Empfehlung behandelt und nicht entschieden. Bit-granulares Mapping, CiA 304 und CiA 305 bleiben
+außerhalb beider Runden.
