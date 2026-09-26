@@ -9,6 +9,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Emcy;
+using CanKit.Pro.CANopen.Heartbeat;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
@@ -33,8 +34,8 @@ namespace CanKit.Pro.CANopen;
 /// <see cref="ISubscription.Frames"/>.
 /// </para>
 /// <para>
-/// All state (NMT slave state machine, SDO client/server sessions, heartbeat consumer table,
-/// PDO tables, timer handles) lives inside the actor and is only touched from posted callbacks;
+/// All state (NMT slave state machine, SDO client/server sessions, the heartbeat producer and
+/// consumer modules, PDO tables, timer handles) lives inside the actor and is only touched from posted callbacks;
 /// public methods marshal work in via <see cref="IProtocolActor.PostAsync{T}"/>. This is the
 /// same threading model that the J1939-TP / IsoTp / UDS clients rely on.
 /// </para>
@@ -92,12 +93,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // guardTime deadline (RTR poll) and life-time deadline (timeout).
     private readonly Dictionary<byte, NodeGuardingConsumer> _nodeGuardingConsumers = new();
 
-    // Heartbeat producer.
-    private IDisposable? _heartbeatProducerHandle;
-    private TimeSpan _heartbeatProducerInterval;
-
-    // Heartbeat consumers: node-id → (configured timeout, live deadline).
-    private readonly Dictionary<byte, HeartbeatConsumer> _heartbeatConsumers = new();
+    // Heartbeat. Two modules that do not know about each other: the producer sends, the
+    // consumer watches. The flying master composes them; it does not keep a timer of its own.
+    private readonly IHeartbeatProducer _heartbeatProducer;
+    private readonly IHeartbeatConsumer _heartbeatConsumer;
 
     // SYNC producer.
     private IDisposable? _syncProducerHandle;
@@ -177,6 +176,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             timeSource, shutdownTimeout: null);
         _actor.BackgroundExceptionOccurred += (_, ex) => RaiseBackgroundException(ex);
         _deadlines = new DeadlineScheduler(_actor);
+        _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0,
+            () => { _ = EmitHeartbeat((byte)_state); });
+        _heartbeatConsumer = new HeartbeatConsumer(_deadlines);
+        _heartbeatConsumer.TimedOut += (producer, timeout) => RaiseHeartbeatTimeout(producer, timeout);
+        AttachFlyingMasterHeartbeatWatch();
 
         // The communication-profile objects at their CiA 301 defaults, plus the OD hooks that
         // validate writes to them and carry accepted values into the runtime
@@ -234,7 +238,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (frame.IsExtendedFrame) return false;
                 uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
-                return id == CanOpenCobId.NmtCommand || (id >= 0x080 && id <= 0x77F);
+                // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
+                // reserves and this subscription otherwise skips.
+                return id == CanOpenCobId.NmtCommand
+                    || id is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
+                        or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce
+                    || (id >= 0x080 && id <= 0x77F);
             }, includeEcho: true);
         }
         catch
@@ -283,50 +292,73 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
     /// <inheritdoc />
     public void AddHeartbeatConsumer(byte producerNodeId, TimeSpan timeout)
+        => AddHeartbeatConsumer(producerNodeId, timeout, releaseInstalledWatch: true);
+
+    private void AddHeartbeatConsumer(byte producerNodeId, TimeSpan timeout, bool releaseInstalledWatch)
     {
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(producerNodeId);
         if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
         ushort ms = ToMilliseconds16(timeout, nameof(timeout), allowZero: false);
 
-        // 1016h consumer heartbeat time (CiA 301 §7.5.2.19): reuse the sub-index already
-        // monitoring this producer, else the first unused one, else grow the array. One
-        // transaction on the dictionary, so two callers cannot both grow into the same sub-index
-        // and a direct write of 1016h on another thread waits for the find-or-grow to finish.
-        _od.Transaction(() =>
+        // The dictionary write and, when the application is taking the watch over, the ownership
+        // clear are one actor job. A stop queued around this call then either removes the old
+        // consumer before the new value is stored, or sees the watch already given up and leaves
+        // the new value alone. Two jobs let stop land between them and delete what was just claimed.
+        RunOnActorAndWait(() =>
         {
-            byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
-            int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
-            if (slot < 0)
+            // 1016h consumer heartbeat time (CiA 301 §7.5.2.19): reuse the sub-index already
+            // monitoring this producer, else the first unused one, else grow the array. One
+            // transaction on the dictionary, so two callers cannot both grow into the same sub-index
+            // and a direct write of 1016h on another thread waits for the find-or-grow to finish.
+            // The write is a method group: it runs on this actor before the next job, and a
+            // capturing lambda would leave a compiler branch that nothing takes.
+            _heartbeatSlotProducer = producerNodeId;
+            _heartbeatSlotMilliseconds = ms;
+            _od.Transaction(WriteHeartbeatConsumerSlot);
+            if (releaseInstalledWatch && _flyingMasterInstalledWatch == producerNodeId)
+                _flyingMasterInstalledWatch = null;
+        });
+    }
+
+    private byte _heartbeatSlotProducer;
+    private ushort _heartbeatSlotMilliseconds;
+
+    private void WriteHeartbeatConsumerSlot()
+    {
+        byte producerNodeId = _heartbeatSlotProducer;
+        ushort ms = _heartbeatSlotMilliseconds;
+        byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
+        int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
+        if (slot < 0)
+        {
+            for (int s = 1; s <= count; s++)
             {
-                for (int s = 1; s <= count; s++)
+                if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v) && (ushort)(v & 0xFFFF) == 0)
                 {
-                    if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v) && (ushort)(v & 0xFFFF) == 0)
-                    {
-                        slot = s;
-                        break;
-                    }
+                    slot = s;
+                    break;
                 }
             }
-            if (slot < 0)
-            {
-                if (count >= 0x7F)
-                    throw new InvalidOperationException("1016h holds at most 127 consumer heartbeat times (CiA 301 §7.5.2.19).");
-                slot = count + 1;
-                // The sub-index may already exist: an NMT reset restores sub-index 00h to the
-                // stored count and zeroes the entries the array had grown by since, but keeps
-                // them, so growing again reuses such an entry rather than re-declaring it.
-                if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
-                    _od.Declare(Co.ConsumerHeartbeat, (byte)slot, OdDataType.Unsigned32, OdAccess.ReadWrite, new byte[4], pdoMappable: false);
-                // The entry first, while the slot is still outside the count — what a hidden slot
-                // held is being replaced, not brought back — then the count, which is validated
-                // against the entry it will show (Codex on #133).
-                _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
-                _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
-                return;
-            }
+        }
+        if (slot < 0)
+        {
+            if (count >= 0x7F)
+                throw new InvalidOperationException("1016h holds at most 127 consumer heartbeat times (CiA 301 §7.5.2.19).");
+            slot = count + 1;
+            // The sub-index may already exist: an NMT reset restores sub-index 00h to the
+            // stored count and zeroes the entries the array had grown by since, but keeps
+            // them, so growing again reuses such an entry rather than re-declaring it.
+            if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
+                _od.Declare(Co.ConsumerHeartbeat, (byte)slot, OdDataType.Unsigned32, OdAccess.ReadWrite, new byte[4], pdoMappable: false);
+            // The entry first, while the slot is still outside the count — what a hidden slot
+            // held is being replaced, not brought back — then the count, which is validated
+            // against the entry it will show (Codex on #133).
             _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
-        });
+            _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
+            return;
+        }
+        _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
     }
 
     /// <inheritdoc />
@@ -578,15 +610,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             _actor.Post(() =>
             {
-                _heartbeatProducerHandle?.Dispose();
-                _heartbeatProducerHandle = null;
+                _heartbeatProducer.Dispose();
+                _heartbeatConsumer.Dispose();
                 _syncProducerHandle?.Dispose();
                 _syncProducerHandle = null;
-                foreach (var kv in _heartbeatConsumers) kv.Value.Deadline?.Dispose();
-                _heartbeatConsumers.Clear();
                 DisposePdoRuntime();
                 _lifeGuardingDeadline?.Dispose();
                 _lifeGuardingDeadline = null;
+                CancelFlyingMasterDeadline();
+                CancelBootUp();
 
                 _sdoServer?.Deadline?.Dispose();
                 _sdoServer = null;
@@ -720,6 +752,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 HandleNmtCommand(data);
                 return;
             }
+            // Flying-master services are broadcasts with no node-id in the CAN-ID. A claim names
+            // its sender in the payload, which is how a node ignores the echo of its own claim.
+            if (cobId is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
+                or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce)
+            {
+                if (!isRtr) HandleFlyingMasterFrame(cobId, data);
+                return;
+            }
             // SYNC on the COB-ID configured in 1005h (0x080 unless a device description or a
             // master moved it).
             if (cobId == _syncCobId && !isRtr)
@@ -793,7 +833,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // states: an explicitly configured consumer outranks a guess about the sender.
                 if (producer == _nodeId
                     && !_nodeGuardingConsumers.ContainsKey(producer)
-                    && !_heartbeatConsumers.ContainsKey(producer))
+                    && !_heartbeatConsumer.IsWatching(producer))
                     return;
                 // Consumer role (FR-CO-009): if we have a node-guarding consumer registered
                 // for this producer, treat the incoming data frame as a node-guarding reply
@@ -804,6 +844,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (_nodeGuardingConsumers.ContainsKey(producer))
                 {
                     HandleNodeGuardingResponse(producer, data);
+                    // Heartbeats and boot-up use this COB-ID too. Returning here used to hide
+                    // them from the standby watch of the active master and from boot-up, so the
+                    // watch expired while the master was still producing and an assigned slave
+                    // stayed unseen.
+                    if (data.Length >= 1)
+                    {
+                        byte guardedState = (byte)(data[0] & 0x7F);
+                        NoteSlaveNmtState(producer, guardedState);
+                        _heartbeatConsumer.NoteReceived(producer);
+                    }
                     return;
                 }
                 HandleHeartbeat(cobId, data);
@@ -865,6 +915,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // shared bus (Bugbot 3600812708).
         bool forUs = target == 0 || target == _nodeId;
         if (!forUs) return;
+        if (ShouldIgnoreOwnNmt(cmd, target)) return;
+        // The cold broadcast is this node's own reset. Counting it here means the send
+        // completion does not apply that reset a second time.
+        if (target == 0 && cmd == NmtCommand.ResetCommunication && _coldResetPending)
+            _coldResetPending = false;
         RaiseNmtCommandReceived(cmd, target);
 
         // The transitions themselves live in CanOpenNode.CommunicationProfile.cs, next to the
@@ -887,6 +942,32 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 PerformNmtReset(communicationOnly: true);
                 break;
         }
+    }
+
+    /// <summary>
+    /// The active flying master does not obey NMT addressed to its own node-id, and it does not
+    /// reset or stop itself because a broadcast it sent came back. A broadcast Start still
+    /// applies: that is how a simultaneous start is specified, and self-start is also applied
+    /// locally when bit 2 of <c>1F80h</c> allows it.
+    /// </summary>
+    private bool ShouldIgnoreOwnNmt(NmtCommand cmd, byte target)
+    {
+        // Active, and the short confirm that stays active while the timeslot runs again.
+        bool holding = _flyingMasterRole == FlyingMasterRole.Active || _confirmingActiveMaster;
+        if (target == _nodeId && holding)
+            return true;
+
+        bool reset = cmd is NmtCommand.ResetNode or NmtCommand.ResetCommunication;
+        if (target == 0 && reset && _ignoreBroadcastResetEcho)
+        {
+            _ignoreBroadcastResetEcho = false;
+            return true;
+        }
+
+        if (target != 0 || !holding)
+            return false;
+
+        return reset || cmd == NmtCommand.Stop;
     }
 
     // =========================================================================================
@@ -946,45 +1027,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             _ => NmtState.Initializing,
         };
         RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
-        if (_heartbeatConsumers.TryGetValue(producer, out var consumer))
-        {
-            // Rearm the deadline — best-effort. On failure, allocate a fresh one to preserve
-            // the semantic "if we do not see another heartbeat within timeout, fire".
-            var deadline = consumer.Deadline;
-            if (deadline is null || deadline.IsExpired || deadline.IsCancelled || !deadline.Rearm(consumer.Timeout))
-            {
-                deadline?.Dispose();
-                consumer.Deadline = _deadlines.Arm(consumer.Timeout, () => OnHeartbeatMissed(producer));
-            }
-        }
-    }
-
-    private void OnHeartbeatMissed(byte producerNodeId)
-    {
-        if (!_heartbeatConsumers.TryGetValue(producerNodeId, out var consumer)) return;
-        // Rearm so subsequent misses still fire; consumer explicitly re-registered on every
-        // heartbeat receipt above, but if the heartbeat is completely absent we keep firing.
-        consumer.Deadline?.Dispose();
-        consumer.Deadline = _deadlines.Arm(consumer.Timeout, () => OnHeartbeatMissed(producerNodeId));
-        RaiseHeartbeatTimeout(producerNodeId, consumer.Timeout);
-    }
-
-    private void ScheduleHeartbeatProducerTick()
-    {
-        if (_heartbeatProducerInterval <= TimeSpan.Zero) return;
-        _heartbeatProducerHandle = _actor.Schedule(_heartbeatProducerInterval, () =>
-        {
-            try
-            {
-                if (_disposed != 0) return;
-                _ = EmitHeartbeat((byte)_state);
-            }
-            finally
-            {
-                if (_disposed == 0 && _heartbeatProducerInterval > TimeSpan.Zero)
-                    ScheduleHeartbeatProducerTick();
-            }
-        });
+        NoteSlaveNmtState(producer, stateByte);
+        _heartbeatConsumer.NoteReceived(producer);
     }
 
     // =========================================================================================
@@ -2021,19 +2065,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         /// </summary>
         public bool InSegmentPhase { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
-        public IDeadline? Deadline { get; set; }
-    }
-
-    private sealed class HeartbeatConsumer
-    {
-        public HeartbeatConsumer(byte producerNodeId, TimeSpan timeout)
-        {
-            ProducerNodeId = producerNodeId;
-            Timeout = timeout;
-        }
-
-        public byte ProducerNodeId { get; }
-        public TimeSpan Timeout { get; }
         public IDeadline? Deadline { get; set; }
     }
 }

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Description>CANopen (CiA 301) node implementation for CanKit.Pro. Provides an in-process ICanOpenNode with a local Object Dictionary (FR-CO-001), SDO expedited/segmented/block transfers (FR-CO-002/003/004), static TPDO/RPDO mapping with event/timer/SYNC triggers (FR-CO-005/006), an NMT master with heartbeat producer/consumer (FR-CO-007/008), node-guarding consumer/producer (FR-CO-009), SYNC producer/consumer (FR-CO-010) and EMCY encode/decode (FR-CO-011), all composed on the L2 ICanBusService demux (FR-CO-012); the object dictionary carries the communication profile and drives the node (FR-CO-013..024) and can be loaded from a CiA 306 EDS/DCF device description, with every degradation corrected and reported (FR-CO-025..028).</Description>
+    <Description>CANopen (CiA 301) node implementation for CanKit.Pro. Provides an in-process ICanOpenNode with a local Object Dictionary (FR-CO-001), SDO expedited/segmented/block transfers (FR-CO-002/003/004), static TPDO/RPDO mapping with event/timer/SYNC triggers (FR-CO-005/006), an NMT master with heartbeat producer/consumer (FR-CO-007/008), node-guarding consumer/producer (FR-CO-009), SYNC producer/consumer (FR-CO-010) and EMCY encode/decode (FR-CO-011), all composed on the L2 ICanBusService demux (FR-CO-012); the object dictionary carries the communication profile and drives the node (FR-CO-013..024) and can be loaded from a CiA 306 EDS/DCF device description, with every degradation corrected and reported (FR-CO-025..028). An NMT flying master (CiA 302-2 version 4.1.0) elects the active master and then boots the slaves assigned in 1F81h.</Description>
     <PackageTags>$(PackageTags);CANopen;CiA 301;EDS;DCF</PackageTags>
   </PropertyGroup>
 

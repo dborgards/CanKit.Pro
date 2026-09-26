@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
@@ -57,6 +56,11 @@ internal sealed partial class CanOpenNode
         public const ushort ProducerHeartbeat = 0x1017;
         public const ushort Identity = 0x1018;
         public const ushort SdoServer = 0x1200;
+        public const ushort NmtStartup = 0x1F80;
+        public const ushort SlaveAssignment = 0x1F81;
+        public const ushort RequestNmt = 0x1F82;
+        public const ushort BootTime = 0x1F89;
+        public const ushort FlyingMasterTiming = 0x1F90;
         public const ushort RpdoComm = 0x1400;
         public const ushort RpdoMap = 0x1600;
         public const ushort TpdoComm = 0x1800;
@@ -137,6 +141,32 @@ internal sealed partial class CanOpenNode
         _od.AddU32(Co.ConsumerHeartbeat, 0x01, 0, rw, nm);
         _od.AddU16(Co.ProducerHeartbeat, 0x00, 0, rw, nm);
 
+        // Flying master and boot-up (CiA 302-2 v4.1.0). Inactive until bits 0 and 5 of 1F80h
+        // are set. 1F90h is milliseconds: timeout, negotiation delay, priority level, priority
+        // time slot, device time slot, multiple-master detect cycle. The defaults separate the
+        // three priority levels (1500 > 127 × 10). The detect cycle carries the node-id so two
+        // masters do not poll in lockstep. 1F81h is the network list (one entry per node-id),
+        // 1F82h the tracked NMT state and the request that sends a command, 1F89h the boot
+        // timeout (0 = none). 1F81h's guard time and life time are stored and not acted on:
+        // heartbeat is the keep-alive this node runs, and node guarding is not started from
+        // those bytes. The suppress bits of 1F80h follow the node's profile: a device leaves
+        // self-start and slave-start allowed, a tool suppresses both.
+        _od.AddU32(Co.NmtStartup, 0x00, DefaultNmtStartup(), rw, nm);
+        _od.AddU8(Co.SlaveAssignment, 0x00, CanOpenCobId.MaxNodeId, ro, nm);
+        for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
+            _od.AddU32(Co.SlaveAssignment, node, 0, rw, nm);
+        _od.AddU8(Co.RequestNmt, 0x00, 0x80, ro, nm);
+        for (byte node = 1; node <= 0x80; node++)
+            _od.AddU8(Co.RequestNmt, node, 0, rw, nm);
+        _od.AddU32(Co.BootTime, 0x00, 0, rw, nm);
+        _od.AddU8(Co.FlyingMasterTiming, 0x00, 0x06, ro, nm);
+        _od.AddU16(Co.FlyingMasterTiming, 0x01, 100, rw, nm);
+        _od.AddU16(Co.FlyingMasterTiming, 0x02, 500, rw, nm);
+        _od.AddU16(Co.FlyingMasterTiming, 0x03, 2, rw, nm);
+        _od.AddU16(Co.FlyingMasterTiming, 0x04, 1500, rw, nm);
+        _od.AddU16(Co.FlyingMasterTiming, 0x05, 10, rw, nm);
+        _od.AddU16(Co.FlyingMasterTiming, 0x06, (ushort)(4000 + 10 * _nodeId), rw, nm);
+
         // §7.5.2.33: the default SDO server, all const — the node serves 600h/580h + node-id
         // and nothing else, and the record says so.
         _od.AddU8(Co.SdoServer, 0x00, 0x02, ro, nm);
@@ -187,7 +217,8 @@ internal sealed partial class CanOpenNode
     {
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
-            or Co.ProducerHeartbeat or Co.SdoServer => true,
+            or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
+            or Co.RequestNmt or Co.BootTime or Co.FlyingMasterTiming => true,
         >= Co.RpdoComm and < Co.RpdoComm + Co.PdoCount => true,
         >= Co.RpdoMap and < Co.RpdoMap + Co.PdoCount => true,
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
@@ -230,6 +261,14 @@ internal sealed partial class CanOpenNode
             case Co.ConsumerHeartbeat:
                 if (subindex == 0) return ValidateConsumerHeartbeatCountWrite(value[0]);
                 return ValidateConsumerHeartbeatWrite(subindex, value);
+            case Co.FlyingMasterTiming:
+                return ValidateFlyingMasterTimingWrite(subindex, value);
+            case Co.SlaveAssignment:
+                return ValidateSlaveAssignmentWrite(subindex, value);
+            case Co.RequestNmt:
+                return ValidateRequestNmtWrite(subindex, value);
+            case Co.BootTime:
+                return ValidateBootTimeWrite(subindex, value);
             case Co.StoreParameters:
                 return subindex == 1 ? HandleStoreCommand(value) : OdWriteDecision.Accept;
             case Co.RestoreDefaults:
@@ -505,6 +544,18 @@ internal sealed partial class CanOpenNode
             case Co.ProducerHeartbeat:
                 ApplyHeartbeatProducerConfiguration();
                 return;
+            case Co.NmtStartup:
+                ApplyFlyingMasterStartup();
+                return;
+            case Co.SlaveAssignment:
+                // A live edit is the network list the active master boots now. It is not a
+                // power-on value: StartFlyingMaster and StoreParameters are what record one,
+                // and a reset must come back to that rather than to whatever was written since.
+                if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
+                return;
+            case Co.BootTime:
+                if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
+                return;
             case Co.GuardTime:
             case Co.LifeTimeFactor:
                 ApplyLifeGuardingConfiguration();
@@ -547,24 +598,17 @@ internal sealed partial class CanOpenNode
         _emcyValid = (word & CanOpenCobId.InvalidBit) == 0;
     }
 
-    // §7.5.2.20: "The value 0 shall disable the producer heartbeat."
+    // §7.5.2.20: "The value 0 shall disable the producer heartbeat." The producer module follows
+    // the object; it does not read the dictionary itself.
     private void ApplyHeartbeatProducerConfiguration()
     {
         var ms = (ushort)_od.ReadUnsigned(Co.ProducerHeartbeat, 0x00);
         var interval = ms == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(ms);
-        if (interval == _heartbeatProducerInterval && (interval == TimeSpan.Zero || _heartbeatProducerHandle is not null))
-            return;
-        _heartbeatProducerHandle?.Dispose();
-        _heartbeatProducerHandle = null;
-        _heartbeatProducerInterval = interval;
-        if (interval > TimeSpan.Zero)
-        {
-            // §7.2.8.3.2.2: with 1017h ≠ 0 the heartbeat protocol is used, so guarding ends here
-            // — a node life time still running from the last poll, and an event that occurred,
-            // would otherwise outlive the switch and report a master that was told to stop polling.
+        // §7.2.8.3.2.2: with 1017h ≠ 0 the heartbeat protocol is used, so guarding ends here
+        // — a node life time still running from the last poll, and an event that occurred,
+        // would otherwise outlive the switch and report a master that was told to stop polling.
+        if (_heartbeatProducer.Apply(interval))
             ResetLifeGuardingState();
-            ScheduleHeartbeatProducerTick();
-        }
     }
 
     // §7.5.2.19: every sub-index with a node-id in 1..127 and a non-zero time is a consumer.
@@ -581,22 +625,7 @@ internal sealed partial class CanOpenNode
             desired[nodeId] = TimeSpan.FromMilliseconds(ms);
         }
 
-        var stale = _heartbeatConsumers
-            .Where(kv => !desired.TryGetValue(kv.Key, out var timeout) || timeout != kv.Value.Timeout)
-            .Select(kv => kv.Key)
-            .ToList();
-        foreach (var nodeId in stale)
-        {
-            _heartbeatConsumers[nodeId].Deadline?.Dispose();
-            _heartbeatConsumers.Remove(nodeId);
-        }
-        foreach (var kv in desired.Where(kv => !_heartbeatConsumers.ContainsKey(kv.Key)))
-        {
-            var producer = kv.Key;
-            var consumer = new HeartbeatConsumer(producer, kv.Value);
-            consumer.Deadline = _deadlines.Arm(kv.Value, () => OnHeartbeatMissed(producer));
-            _heartbeatConsumers[producer] = consumer;
-        }
+        _heartbeatConsumer.Replace(desired);
     }
 
     // =========================================================================================
@@ -632,7 +661,7 @@ internal sealed partial class CanOpenNode
         // and goes out only while that protocol is in use (1017h ≠ 0). With the producer off the
         // node is in the configuration node guarding runs in, and an unsolicited data frame on
         // 0x700 + id is indistinguishable from a toggle-0 guarding reply (#43).
-        if (_heartbeatProducerInterval > TimeSpan.Zero)
+        if (_heartbeatProducer.Interval > TimeSpan.Zero)
             _ = EmitHeartbeat((byte)_state);
     }
 
@@ -650,6 +679,9 @@ internal sealed partial class CanOpenNode
         // sub-state reset communication is passed."
         _nodeGuardingProducerToggle = false;
         ResetLifeGuardingState();
+        // Before the dictionary is restored: a flying master that was mid-election must not keep
+        // that deadline, and the restart the restored 1F80h performs is a warm boot.
+        SuspendFlyingMasterForReset();
         if (_state == NmtState.Operational) OnLeaveOperational();
         _state = NmtState.Initializing;
 
@@ -672,13 +704,9 @@ internal sealed partial class CanOpenNode
         // hook ran, so a tick that became due meanwhile would otherwise fire right behind this.
         // Re-armed before the frames are ordered, for the same reason the guarding reply arms
         // its life time first (#141): a frame on the wire implies the timer behind it is set.
-        if (_heartbeatProducerInterval > TimeSpan.Zero)
-        {
-            _heartbeatProducerHandle?.Dispose();
-            ScheduleHeartbeatProducerTick();
-        }
+        _heartbeatProducer.RestartCycle();
         _ = EmitHeartbeat(0x00);
-        if (_heartbeatProducerInterval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
+        if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
     }
 
     private void AbortServerSessions(SdoAbortCode code)
@@ -724,27 +752,42 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void RestoreValues(Dictionary<uint, byte[]> values, bool communicationOnly)
     {
-        _od.Transaction(() =>
+        // 1F80h sorts before 1F90h. Applying the startup bit as soon as 1F80h is written would
+        // arm the election from the live timing, and the restored 1F90h would arrive too late
+        // to move that deadline. Hold the startup until every restored value is in the dictionary.
+        _suppressFlyingMasterStartup = true;
+        try
         {
-            foreach (var key in _od.SnapshotKeys())
+            _od.Transaction(() =>
             {
-                var index = (ushort)(key >> 8);
-                var subindex = (byte)(key & 0xFF);
-                if (!IsRestorableObject(index)) continue;
-                if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
-                if (values.TryGetValue(key, out var stored))
+                foreach (var key in _od.SnapshotKeys())
                 {
-                    if (_od.TryGet(index, subindex, out var current) && OdEntryLayout.FixedSize(current.DataType) is var size
-                        && size > 0 && stored.Length != size)
-                        continue; // re-declared with another width since the snapshot: no power-on value for it
-                    _od.WriteRawUnchecked(index, subindex, stored);
+                    var index = (ushort)(key >> 8);
+                    var subindex = (byte)(key & 0xFF);
+                    if (!IsRestorableObject(index)) continue;
+                    if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
+                    if (values.TryGetValue(key, out var stored))
+                    {
+                        // Snapshot keys are entries that exist. The width check is the only branch.
+                        _od.TryGet(index, subindex, out var current);
+                        int size = OdEntryLayout.FixedSize(current.DataType);
+                        if (size > 0 && stored.Length != size)
+                            continue; // re-declared with another width since the snapshot: no power-on value for it
+                        _od.WriteRawUnchecked(index, subindex, stored);
+                    }
+                    else if (IsManagedCommunicationObject(index))
+                    {
+                        _od.TryGet(index, subindex, out var entry);
+                        _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
+                    }
                 }
-                else if (IsManagedCommunicationObject(index) && _od.TryGet(index, subindex, out var entry))
-                {
-                    _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
-                }
-            }
-        });
+            });
+        }
+        finally
+        {
+            _suppressFlyingMasterStartup = false;
+        }
+        ApplyFlyingMasterStartup();
     }
 
     /// <inheritdoc />

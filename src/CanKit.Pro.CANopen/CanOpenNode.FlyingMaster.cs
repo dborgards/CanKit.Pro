@@ -1,0 +1,637 @@
+using System;
+using System.Threading.Tasks;
+using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.Reliability;
+
+namespace CanKit.Pro.CANopen;
+
+/// <summary>
+/// NMT flying master, bound to CiA 302-2 version 4.1.0 (historically DSP 302 clause 5.5).
+/// Objects <c>1F80h</c> and <c>1F90h</c>, and the services on CAN-IDs <c>0x071</c>, <c>0x072</c>,
+/// <c>0x073</c> and <c>0x076</c>. Once this node is the active master, <see cref="BeginBootUp"/>
+/// takes the network list in <c>1F81h</c>.
+/// </summary>
+internal sealed partial class CanOpenNode
+{
+    // 1F80h. Bit 0 marks an NMT-master-capable device, bit 5 selects the flying-master process.
+    // Both are required. The other bits are the boot-up manager's, with the polarity of the
+    // open implementation that cites CiA 302-2 v4.1.0: a set bit 2 or bit 3 suppresses the
+    // corresponding start, a clear bit allows it.
+    private const uint NmtMasterBit = 0x0000_0001;
+    private const uint NmtStartAllNodesBit = 0x0000_0002;
+    private const uint NmtSuppressSelfStartBit = 0x0000_0004;
+    private const uint NmtSuppressSlaveStartBit = 0x0000_0008;
+    private const uint NmtResetAllOnErrorBit = 0x0000_0010;
+    private const uint FlyingMasterBit = 0x0000_0020;
+    private const uint NmtStopAllOnErrorBit = 0x0000_0040;
+
+    // 1F81h, one UNSIGNED32 per node-id. Bit 0 assigns the slave, bit 2 lets the master boot
+    // it, bit 3 marks it mandatory, bit 4 is keep-alive (Reset Communication is not sent).
+    // The guard time and life time in the upper bytes are stored with the entry. Heartbeat is
+    // the keep-alive this node uses; node guarding is not started from those bytes.
+    private const uint SlaveAssignedBit = 0x0000_0001;
+    private const uint SlaveBootBit = 0x0000_0004;
+    private const uint SlaveMandatoryBit = 0x0000_0008;
+    private const uint SlaveKeepAliveBit = 0x0000_0010;
+
+    private const byte TimingTimeout = 0x01;
+    private const byte TimingDelay = 0x02;
+    private const byte TimingPriority = 0x03;
+    private const byte TimingPrioritySlot = 0x04;
+    private const byte TimingDeviceSlot = 0x05;
+    private const byte TimingDetectCycle = 0x06;
+
+    private FlyingMasterRole _flyingMasterRole = FlyingMasterRole.Inactive;
+    private bool _flyingMasterFromPowerOn = true;
+    private bool _suppressFlyingMasterStartup;
+    private bool _confirmingActiveMaster;
+    private bool _coldResetPending;
+    private bool _ignoreBroadcastResetEcho;
+    private byte? _activeFlyingMasterNodeId;
+    private ushort? _activeFlyingMasterPriority;
+    private TimeSpan? _flyingMasterHeartbeatTimeout;
+    private byte? _flyingMasterInstalledWatch;
+    private IDeadline? _flyingMasterDeadline;
+
+    /// <inheritdoc />
+    public FlyingMasterRole FlyingMasterRole
+    {
+        get
+        {
+            if (_actor.IsOnCurrentActor) return _flyingMasterRole;
+            return _actor.PostAsync(() => _flyingMasterRole).GetAwaiter().GetResult();
+        }
+    }
+
+    /// <inheritdoc />
+    public byte? ActiveFlyingMasterNodeId
+    {
+        get
+        {
+            if (_actor.IsOnCurrentActor) return _activeFlyingMasterNodeId;
+            return _actor.PostAsync(() => _activeFlyingMasterNodeId).GetAwaiter().GetResult();
+        }
+    }
+
+    /// <inheritdoc />
+    public ushort? ActiveFlyingMasterPriority
+    {
+        get
+        {
+            if (_actor.IsOnCurrentActor) return _activeFlyingMasterPriority;
+            return _actor.PostAsync(() => _activeFlyingMasterPriority).GetAwaiter().GetResult();
+        }
+    }
+
+    /// <inheritdoc />
+    public event EventHandler<FlyingMasterChangedEventArgs>? FlyingMasterChanged;
+
+    /// <inheritdoc />
+    public void StartFlyingMaster(ushort priorityLevel, TimeSpan activeMasterHeartbeatTimeout)
+    {
+        ThrowIfDisposed();
+        if (priorityLevel > 2)
+            throw new ArgumentOutOfRangeException(nameof(priorityLevel), priorityLevel,
+                "Flying-master priority level is 0, 1 or 2; 0 is the highest.");
+        ushort heartbeatMs = ToMilliseconds16(activeMasterHeartbeatTimeout, nameof(activeMasterHeartbeatTimeout), allowZero: false);
+        RunOnActorAndWait(() =>
+        {
+            if (!TimingSeparatesPriorities())
+                throw new ArgumentException(
+                    "1F90h:04 (priority time slot) must be greater than 127 times 1F90h:05 (device time slot), so a better priority level always waits less than a worse one.");
+            _flyingMasterHeartbeatTimeout = TimeSpan.FromMilliseconds(heartbeatMs);
+            // A fresh start is a cold boot of the election: the first detection that finds no
+            // master broadcasts Reset Communication, which is why the configuration is recorded
+            // as a power-on value before that reset can restore the dictionary.
+            _flyingMasterFromPowerOn = true;
+            StopFlyingMasterCore();
+            _od.WriteUnsigned(Co.FlyingMasterTiming, TimingPriority, priorityLevel);
+            uint startup = _od.ReadUnsigned(Co.NmtStartup, 0x00);
+            _od.WriteUnsigned(Co.NmtStartup, 0x00, startup | NmtMasterBit | FlyingMasterBit);
+            RememberFlyingMasterPowerOn();
+        });
+    }
+
+    /// <inheritdoc />
+    public void StopFlyingMaster()
+    {
+        if (_disposed != 0) return;
+        RunOnActorAndWait(() =>
+        {
+            StopFlyingMasterCore();
+            uint startup = _od.ReadUnsigned(Co.NmtStartup, 0x00);
+            _od.WriteUnsigned(Co.NmtStartup, 0x00, startup & ~(NmtMasterBit | FlyingMasterBit));
+            // Stopping records the disabled startup only. A live network list, boot timeout or
+            // timing value is not a power-on value unless StartFlyingMaster or StoreParameters
+            // already took it.
+            RememberStartupPowerOn();
+        });
+    }
+
+    private bool FlyingMasterEnabled
+    {
+        get
+        {
+            uint startup = _od.ReadUnsigned(Co.NmtStartup, 0x00);
+            return (startup & NmtMasterBit) != 0 && (startup & FlyingMasterBit) != 0;
+        }
+    }
+
+    /// <summary>
+    /// Bits 2 and 3 of <c>1F80h</c> at creation. A device leaves them clear; a tool sets them.
+    /// The check is the profile this node was opened with, not a fixed constant.
+    /// </summary>
+    private uint DefaultNmtStartup() => _options.Profile == CanOpenNodeProfile.Tool
+        ? NmtSuppressSelfStartBit | NmtSuppressSlaveStartBit
+        : 0u;
+
+    private void ApplyFlyingMasterStartup()
+    {
+        if (_suppressFlyingMasterStartup || _disposed != 0) return;
+        if (FlyingMasterEnabled)
+        {
+            if (_flyingMasterRole == FlyingMasterRole.Inactive)
+                BeginFlyingMaster();
+            else if (_flyingMasterRole == FlyingMasterRole.Active)
+                BeginBootUp();
+            return;
+        }
+        if (_flyingMasterRole != FlyingMasterRole.Inactive)
+            StopFlyingMasterCore();
+    }
+
+    /// <summary>Drops the in-flight election so an NMT reset can restore <c>1F80h</c> and start
+    /// a warm one. A reset is the warm boot of the procedure: it does not broadcast another
+    /// Reset Communication of its own.</summary>
+    private void SuspendFlyingMasterForReset()
+    {
+        if (_flyingMasterRole == FlyingMasterRole.Inactive && _flyingMasterDeadline is null)
+        {
+            _flyingMasterFromPowerOn = false;
+            return;
+        }
+        StopFlyingMasterCore();
+        _flyingMasterFromPowerOn = false;
+    }
+
+    private void BeginFlyingMaster()
+    {
+        CancelFlyingMasterDeadline();
+        _confirmingActiveMaster = false;
+        _flyingMasterRole = FlyingMasterRole.Delaying;
+        _activeFlyingMasterNodeId = null;
+        _activeFlyingMasterPriority = null;
+        ArmFlyingMaster(TimeSpan.FromMilliseconds(ReadTiming(TimingDelay)), OnFlyingMasterDelayElapsed);
+    }
+
+    private void OnFlyingMasterDelayElapsed()
+    {
+        // The reset echo this delay was waiting out has had its chance. A later broadcast reset
+        // is someone else's command and applies normally.
+        _ignoreBroadcastResetEcho = false;
+        _flyingMasterRole = FlyingMasterRole.Detecting;
+        _ = SendControlFrame(CanOpenCobId.FlyingMasterDetect, Array.Empty<byte>());
+        ArmFlyingMaster(TimeSpan.FromMilliseconds(ReadTiming(TimingTimeout)), OnFlyingMasterDetectionTimeout);
+    }
+
+    private void OnFlyingMasterDetectionTimeout()
+    {
+        if (_flyingMasterFromPowerOn)
+        {
+            // Cold boot and nobody is master: Reset Communication takes every flying master
+            // through a warm boot together, so the timeslot race is not racing PDO traffic or
+            // staggered startup. The warm election starts only after that frame was confirmed.
+            // The echo applies the reset when it comes back; if the bus does not echo, the
+            // confirmed send applies the same reset once. A rejected, thrown or unconfirmed
+            // send leaves the network as it is and does not start the election.
+            _flyingMasterFromPowerOn = false;
+            _coldResetPending = true;
+            var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
+            _ = sent.ContinueWith(
+                PostColdResetOutcome,
+                System.Threading.CancellationToken.None,
+                System.Threading.Tasks.TaskContinuationOptions.None,
+                System.Threading.Tasks.TaskScheduler.Default);
+            return;
+        }
+        BeginNegotiation(transmitTrigger: true);
+    }
+
+    private void PostColdResetOutcome(Task<bool> send) => PostResetOutcome(send, forced: false);
+
+    private void PostForcedResetOutcome(Task<bool> send) => PostResetOutcome(send, forced: true);
+
+    private void PostResetOutcome(Task<bool> send, bool forced)
+    {
+        try
+        {
+            if (send.Status == TaskStatus.RanToCompletion && send.Result)
+                _actor.Post(forced ? CompleteForcedReset : CompleteColdReset);
+            else
+                _actor.Post(AbandonColdReset);
+        }
+        catch (ObjectDisposedException) { /* node already gone */ }
+    }
+
+    /// <summary>The cold Reset Communication is on the wire. Apply it here when the echo has
+    /// not already done so, and do not start the warm election before that.</summary>
+    private void CompleteColdReset()
+    {
+        // Dispose sets the flag on the caller thread and only then posts cleanup. A send
+        // continuation already on the mailbox must not reset the node in that window.
+        if (_disposed != 0) return;
+        if (!_coldResetPending) return;
+        _coldResetPending = false;
+        PerformNmtReset(communicationOnly: true);
+        // The echo of the frame we just sent must not reset this node again.
+        _ignoreBroadcastResetEcho = true;
+    }
+
+    /// <summary>The reset did not leave the adapter. Drop the window without applying it and
+    /// without starting the warm election. A forced reset that was abandoned leaves this node
+    /// the active master: the detect cycle starts again, slaves that checked in during the hold
+    /// are started, and the network is not reset a second time.</summary>
+    private void AbandonColdReset()
+    {
+        if (_disposed != 0) return;
+        if (!_coldResetPending) return;
+        _coldResetPending = false;
+        if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
+        ArmActiveDetectCycle();
+        // The hold stored heartbeats and did not start those slaves. Do that now, without
+        // Reset Communication: the broadcast never left, so the network is not booted again.
+        ResumeHeldBoot();
+    }
+
+    private void BeginNegotiation(bool transmitTrigger)
+    {
+        _flyingMasterFromPowerOn = false;
+        _flyingMasterRole = FlyingMasterRole.Negotiating;
+        if (transmitTrigger)
+            _ = SendControlFrame(CanOpenCobId.FlyingMasterTrigger, Array.Empty<byte>());
+        ArmNegotiationWait();
+    }
+
+    private void ArmNegotiationWait()
+    {
+        if (!TimingSeparatesPriorities())
+        {
+            StopFlyingMasterCore();
+            RaiseFlyingMaster(FlyingMasterSignal.ConfigurationError, null, null);
+            return;
+        }
+        ArmFlyingMaster(NegotiationWait(), OnFlyingMasterNegotiationElapsed);
+    }
+
+    private void OnFlyingMasterNegotiationElapsed()
+    {
+        if (_disposed != 0) return;
+        if (_confirmingActiveMaster)
+        {
+            // Still the active master: claim again and keep the boot-up that is already running.
+            _confirmingActiveMaster = false;
+            TransmitClaim();
+            int cycle = ReadTiming(TimingDetectCycle);
+            if (cycle > 0)
+                ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
+            return;
+        }
+        TransmitClaim();
+        BecomeActive();
+    }
+
+    private void OnFlyingMasterTrigger()
+    {
+        if (!FlyingMasterEnabled || _coldResetPending) return;
+        // A confirmation stays Active, so boot-up and the NMT self-ignore keep working. The echo
+        // of the trigger only restarts the timeslot.
+        if (_confirmingActiveMaster)
+        {
+            ArmNegotiationWait();
+            return;
+        }
+        // A trigger we did not send, and our own echo, both start or restart the wait. Restarting
+        // on the echo measures the wait from the moment the trigger is on the bus.
+        if (_flyingMasterRole == FlyingMasterRole.Negotiating)
+            ArmNegotiationWait();
+        else
+            BeginNegotiation(transmitTrigger: false);
+    }
+
+    private void OnFlyingMasterClaim(ushort priority, byte nodeId)
+    {
+        if (nodeId == _nodeId || nodeId is < CanOpenCobId.MinNodeId or > CanOpenCobId.MaxNodeId) return;
+        if (_flyingMasterRole is FlyingMasterRole.Inactive or FlyingMasterRole.Delaying) return;
+
+        ushort ours = OurPriority();
+        if (priority <= ours)
+        {
+            // Better, or equal. An equal claim does not depose a master that is simply active.
+            // During the detect-cycle timeslot it is a race: the claim that is already on the
+            // bus won, including one from an equal priority with a lower node-id.
+            if (_flyingMasterRole == FlyingMasterRole.Active && priority == ours && !_confirmingActiveMaster)
+                return;
+            EnterStandby(priority, nodeId);
+            return;
+        }
+
+        if (_flyingMasterRole == FlyingMasterRole.Detecting)
+        {
+            _ = SendControlFrame(CanOpenCobId.FlyingMasterForce, Array.Empty<byte>());
+            _flyingMasterFromPowerOn = false;
+            BeginFlyingMaster();
+            RaiseFlyingMaster(FlyingMasterSignal.ForcedRenegotiation, nodeId, priority);
+            return;
+        }
+
+        _ = SendControlFrame(CanOpenCobId.FlyingMasterForce, Array.Empty<byte>());
+        _flyingMasterFromPowerOn = false;
+        BeginFlyingMaster();
+        RaiseFlyingMaster(FlyingMasterSignal.ConfigurationError, nodeId, priority);
+    }
+
+    private void OnFlyingMasterForce()
+    {
+        if (!FlyingMasterEnabled || _flyingMasterRole == FlyingMasterRole.Inactive) return;
+        _flyingMasterFromPowerOn = false;
+        if (_flyingMasterRole == FlyingMasterRole.Active)
+        {
+            // The active master restarts the network, but not before Reset Communication is
+            // confirmed. Applying the reset here used to arm the warm-election delay while the
+            // broadcast was only queued, so a short delay could elect again before the other
+            // candidates were reset. The detect cycle stops for the wait: it can still send
+            // 0x072 and claim while the reset has not left, and peers then elect and ignore that
+            // reset. Boot-up is left in place and only held, so a heartbeat cannot start a slave
+            // again and a failed send does not boot the network a second time. While Active, the
+            // echo is ignored; the flag after the local reset covers the echo that arrives once
+            // this node has left Active.
+            CancelFlyingMasterDeadline();
+            _confirmingActiveMaster = false;
+            _coldResetPending = true;
+            var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
+            _ = sent.ContinueWith(
+                PostForcedResetOutcome,
+                System.Threading.CancellationToken.None,
+                System.Threading.Tasks.TaskContinuationOptions.None,
+                System.Threading.Tasks.TaskScheduler.Default);
+            return;
+        }
+        BeginFlyingMaster();
+    }
+
+    /// <summary>The forced Reset Communication is on the wire. Reset locally now, and do not
+    /// start the warm election before that.</summary>
+    private void CompleteForcedReset()
+    {
+        if (_disposed != 0) return;
+        if (!_coldResetPending) return;
+        _coldResetPending = false;
+        PerformNmtReset(communicationOnly: true);
+        _ignoreBroadcastResetEcho = true;
+    }
+
+    private void OnFlyingMasterDetectRequest()
+    {
+        if (_flyingMasterRole != FlyingMasterRole.Active) return;
+        TransmitClaim();
+    }
+
+    private void OnFlyingMasterDetectCycle()
+    {
+        // Stay Active. Leaving for Negotiating would drop a slave heartbeat and a boot deadline
+        // that only run in that role, and NMT aimed at this node would apply again.
+        _confirmingActiveMaster = true;
+        _ = SendControlFrame(CanOpenCobId.FlyingMasterTrigger, Array.Empty<byte>());
+        ArmNegotiationWait();
+    }
+
+    private void TransmitClaim()
+    {
+        _ = SendControlFrame(CanOpenCobId.FlyingMasterClaim, new[] { (byte)OurPriority(), _nodeId });
+    }
+
+    private void BecomeActive()
+    {
+        CancelFlyingMasterDeadline();
+        _flyingMasterFromPowerOn = false;
+        _flyingMasterRole = FlyingMasterRole.Active;
+        _activeFlyingMasterNodeId = _nodeId;
+        _activeFlyingMasterPriority = OurPriority();
+        ReleaseInstalledWatch();
+        EnsureHeartbeatProducer();
+        RaiseFlyingMaster(FlyingMasterSignal.BecameActive, null, null);
+        ArmActiveDetectCycle();
+        BeginBootUp();
+    }
+
+    private void ArmActiveDetectCycle()
+    {
+        int cycle = ReadTiming(TimingDetectCycle);
+        if (cycle > 0)
+            ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
+    }
+
+    private void EnterStandby(ushort priority, byte nodeId)
+    {
+        CancelBootUp();
+        CancelFlyingMasterDeadline();
+        _confirmingActiveMaster = false;
+        _flyingMasterFromPowerOn = false;
+        // Value comparisons, not nullable ones: a null active master is only the state before
+        // the first standby, and that call already leaves through the role test.
+        byte currentId = _activeFlyingMasterNodeId.GetValueOrDefault();
+        ushort currentPriority = _activeFlyingMasterPriority.GetValueOrDefault();
+        bool changed = _flyingMasterRole != FlyingMasterRole.Standby
+            || currentId != nodeId
+            || currentPriority != priority;
+        _flyingMasterRole = FlyingMasterRole.Standby;
+        _activeFlyingMasterNodeId = nodeId;
+        _activeFlyingMasterPriority = priority;
+        WatchActiveMaster(nodeId);
+        if (changed) RaiseFlyingMaster(FlyingMasterSignal.BecameStandby, nodeId, priority);
+    }
+
+    /// <summary>
+    /// Subscribes the flying master to the consumer module. A missed heartbeat from the master
+    /// this node is standing by for starts a warm election. The producer module is not involved.
+    /// </summary>
+    private void AttachFlyingMasterHeartbeatWatch()
+    {
+        _heartbeatConsumer.TimedOut += (producer, _) => NoteFlyingMasterHeartbeatLost(producer);
+    }
+
+    private void NoteFlyingMasterHeartbeatLost(byte producerNodeId)
+    {
+        if (_flyingMasterRole != FlyingMasterRole.Standby) return;
+        if (_activeFlyingMasterNodeId.GetValueOrDefault() != producerNodeId) return;
+        byte lost = producerNodeId;
+        ushort? priority = _activeFlyingMasterPriority;
+        _flyingMasterFromPowerOn = false;
+        BeginFlyingMaster();
+        RaiseFlyingMaster(FlyingMasterSignal.ActiveMasterLost, lost, priority);
+    }
+
+    // The active master does not own a heartbeat timer. Writing 1017h starts the producer
+    // module, and only when the application had not already set one.
+    private void EnsureHeartbeatProducer()
+    {
+        if (_flyingMasterHeartbeatTimeout is not { } timeout) return;
+        if (_od.ReadUnsigned(Co.ProducerHeartbeat, 0x00) != 0) return;
+        int half = Math.Max(1, (int)timeout.TotalMilliseconds / 2);
+        _od.WriteUnsigned(Co.ProducerHeartbeat, 0x00, (ushort)half);
+    }
+
+    // Standby watches the winner through the consumer module. An application consumer for that
+    // node is left in place; its timeout is the same signal.
+    private void WatchActiveMaster(byte nodeId)
+    {
+        if (_flyingMasterHeartbeatTimeout is not { } timeout) return;
+        if (_flyingMasterInstalledWatch == nodeId) return;
+        ReleaseInstalledWatch();
+        if (_heartbeatConsumer.IsWatching(nodeId)) return;
+        // The public add clears ownership when the application writes this node. This call is
+        // the flying master itself, so the watch stays owned until the application replaces it.
+        AddHeartbeatConsumer(nodeId, timeout, releaseInstalledWatch: false);
+        _flyingMasterInstalledWatch = nodeId;
+    }
+
+    private void ReleaseInstalledWatch()
+    {
+        if (_flyingMasterInstalledWatch is not byte nodeId) return;
+        _flyingMasterInstalledWatch = null;
+        RemoveHeartbeatConsumer(nodeId);
+    }
+
+    private void StopFlyingMasterCore()
+    {
+        CancelBootUp();
+        CancelFlyingMasterDeadline();
+        _confirmingActiveMaster = false;
+        _coldResetPending = false;
+        _ignoreBroadcastResetEcho = false;
+        _flyingMasterRole = FlyingMasterRole.Inactive;
+        _activeFlyingMasterNodeId = null;
+        _activeFlyingMasterPriority = null;
+        ReleaseInstalledWatch();
+    }
+
+    private void HandleFlyingMasterFrame(uint cobId, byte[] data)
+    {
+        // The cold reset is already committed. A claim in this window must not move us to
+        // standby and then have the reset tear down the master we just accepted.
+        if (_coldResetPending) return;
+        // The caller only hands over the four flying-master COB-IDs. The last one is the else,
+        // so the chain has no default the compiler would emit and nothing would take.
+        if (cobId == CanOpenCobId.FlyingMasterClaim)
+        {
+            if (data.Length >= 2)
+                OnFlyingMasterClaim(data[0], data[1]);
+        }
+        else if (cobId == CanOpenCobId.FlyingMasterTrigger)
+            OnFlyingMasterTrigger();
+        else if (cobId == CanOpenCobId.FlyingMasterDetect)
+            OnFlyingMasterDetectRequest();
+        else
+            OnFlyingMasterForce();
+    }
+
+    private void ArmFlyingMaster(TimeSpan due, Action onDue)
+    {
+        _flyingMasterDeadline?.Dispose();
+        _flyingMasterDeadline = _deadlines.Arm(due, onDue);
+    }
+
+    private void CancelFlyingMasterDeadline()
+    {
+        _flyingMasterDeadline?.Dispose();
+        _flyingMasterDeadline = null;
+    }
+
+    private ushort OurPriority() => (ushort)ReadTiming(TimingPriority);
+
+    private int ReadTiming(byte subindex) => (int)_od.ReadUnsigned(Co.FlyingMasterTiming, subindex);
+
+    private TimeSpan NegotiationWait()
+    {
+        // Both factors are UNSIGNED16, so the product does not go negative.
+        long ms = (long)ReadTiming(TimingPriority) * ReadTiming(TimingPrioritySlot)
+            + (long)_nodeId * ReadTiming(TimingDeviceSlot);
+        return TimeSpan.FromMilliseconds(ms);
+    }
+
+    /// <summary>
+    /// The priority slot has to be longer than every node-id slot of the next-worse level, so
+    /// level 0 always finishes before level 1 whatever the node-ids are.
+    /// </summary>
+    private bool TimingSeparatesPriorities()
+    {
+        int deviceSlot = ReadTiming(TimingDeviceSlot);
+        int prioritySlot = ReadTiming(TimingPrioritySlot);
+        return deviceSlot > 0 && prioritySlot > 127 * deviceSlot;
+    }
+
+    private void RememberFlyingMasterPowerOn()
+    {
+        DetachPowerOnFromFactory();
+        RememberOne(Co.NmtStartup, 0x00);
+        for (byte sub = 0; sub <= TimingDetectCycle; sub++)
+            RememberOne(Co.FlyingMasterTiming, sub);
+        // The cold Reset Communication would otherwise drop the network list and the boot
+        // timeout, and the master that just won would start nobody.
+        RememberOne(Co.BootTime, 0x00);
+        for (byte sub = 0; sub <= CanOpenCobId.MaxNodeId; sub++)
+            RememberOne(Co.SlaveAssignment, sub);
+    }
+
+    /// <summary>Records the disabled <c>1F80h</c> so a later reset does not rejoin. Does not
+    /// copy <c>1F81h</c>, <c>1F89h</c> or <c>1F90h</c>.</summary>
+    private void RememberStartupPowerOn()
+    {
+        DetachPowerOnFromFactory();
+        RememberOne(Co.NmtStartup, 0x00);
+    }
+
+    /// <summary>The factory snapshot and the power-on snapshot start as one dictionary. Copying
+    /// before the first edit keeps "load" (1011h) able to return to flying master off.</summary>
+    private void DetachPowerOnFromFactory()
+    {
+        if (!ReferenceEquals(_powerOnValues, _factoryDefaults)) return;
+        var copy = new System.Collections.Generic.Dictionary<uint, byte[]>(_factoryDefaults.Count);
+        foreach (var kv in _factoryDefaults)
+            copy[kv.Key] = (byte[])kv.Value.Clone();
+        _powerOnValues = copy;
+    }
+
+    private void RememberOne(ushort index, byte subindex)
+    {
+        var raw = _od.ReadRaw(index, subindex);
+        _powerOnValues[((uint)index << 8) | subindex] = (byte[])raw.Clone();
+    }
+
+    private void RaiseFlyingMaster(FlyingMasterSignal signal, byte? otherNodeId, ushort? otherPriority)
+    {
+        var args = new FlyingMasterChangedEventArgs(signal, _flyingMasterRole, otherNodeId, otherPriority);
+        // The event pump already reports a subscriber exception. A second catch here is the
+        // generic handler CodeQL flags, and it does not change where the exception goes.
+        EnqueueEvent(() => FlyingMasterChanged?.Invoke(this, args));
+    }
+
+    private OdWriteDecision ValidateFlyingMasterTimingWrite(byte subindex, byte[] value)
+    {
+        if (subindex == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
+        if (subindex > TimingDetectCycle) return OdWriteDecision.Reject(SdoAbortCode.SubIndexDoesNotExist);
+        if (value.Length != 2) return OdWriteDecision.Accept;
+        ushort proposed = (ushort)(value[0] | (value[1] << 8));
+        if (subindex == TimingPriority && proposed > 2)
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        if (subindex == TimingDeviceSlot && proposed == 0)
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        int deviceSlot = subindex == TimingDeviceSlot ? proposed : ReadTiming(TimingDeviceSlot);
+        int prioritySlot = subindex == TimingPrioritySlot ? proposed : ReadTiming(TimingPrioritySlot);
+        if ((subindex == TimingDeviceSlot || subindex == TimingPrioritySlot)
+            && (deviceSlot <= 0 || prioritySlot <= 127 * deviceSlot))
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+        return OdWriteDecision.Accept;
+    }
+}

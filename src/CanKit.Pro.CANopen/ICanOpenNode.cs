@@ -19,9 +19,11 @@ namespace CanKit.Pro.CANopen;
 /// One instance represents one CANopen node identity (1..127) on one physical bus, and serves
 /// both roles a CANopen application takes: a <b>device</b> (its own object dictionary, PDOs it
 /// produces and consumes, configured by a master over SDO) and a <b>tool or master</b> (the
-/// SDO client, the NMT master, heartbeat and node-guarding consumers, the SYNC producer). Two or
-/// more nodes may share the same underlying <see cref="CanKit.Pro.RawCan.ICanBusService"/> so
-/// a process-hosted master and one or more simulated slaves can coexist on a virtual bus.
+/// SDO client, the NMT master, heartbeat and node-guarding consumers, the SYNC producer).
+/// <see cref="CanOpenNodeOptions.Profile"/> says which of the two this instance is; the default
+/// of <c>1F80h</c> follows that profile. Two or more nodes may share the same underlying
+/// <see cref="CanKit.Pro.RawCan.ICanBusService"/> so a process-hosted master and one or more
+/// simulated slaves can coexist on a virtual bus.
 /// </para>
 /// <para>
 /// The object dictionary is the single source of truth for the node's communication
@@ -92,9 +94,11 @@ public interface ICanOpenNode : IDisposable
     event EventHandler<RpdoReceivedEventArgs>? RpdoReceived;
 
     /// <summary>Raised for every NMT master command whose target matches this node (or the
-    /// broadcast target 0). Delivered on the node's event queue, after the node has acted on the
-    /// command — for a reset, possibly after the boot-up is on the bus; to restore application
-    /// objects before that, use <see cref="ApplicationReset"/>.</summary>
+    /// broadcast target 0) and which the node applies. Delivered on the node's event queue, after
+    /// the node has acted on the command — for a reset, possibly after the boot-up is on the bus;
+    /// to restore application objects before that, use <see cref="ApplicationReset"/>. While this
+    /// node is the active flying master it ignores a command addressed to its own node-id, and it
+    /// does not apply a broadcast reset or stop to itself.</summary>
     event EventHandler<NmtCommandReceivedEventArgs>? NmtCommandReceived;
 
     /// <summary>
@@ -144,6 +148,53 @@ public interface ICanOpenNode : IDisposable
     /// </summary>
     Task SendNmtCommandAsync(NmtCommand command, byte targetNodeId,
         CancellationToken cancellationToken = default);
+
+    // -----------------------------------------------------------------------------------------
+    // Flying master and boot-up (CiA 302-2 version 4.1.0 — see the package README)
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>Role in the flying-master election. <see cref="Nmt.FlyingMasterRole.Inactive"/>
+    /// until <see cref="StartFlyingMaster"/> or until bits 0 and 5 of <c>1F80h</c> are set.</summary>
+    FlyingMasterRole FlyingMasterRole { get; }
+
+    /// <summary>Node-id of the active NMT master, once one is known: this node's own id when
+    /// <see cref="FlyingMasterRole"/> is <see cref="Nmt.FlyingMasterRole.Active"/>.</summary>
+    byte? ActiveFlyingMasterNodeId { get; }
+
+    /// <summary>Priority level (0 highest, 2 lowest) of <see cref="ActiveFlyingMasterNodeId"/>.</summary>
+    ushort? ActiveFlyingMasterPriority { get; }
+
+    /// <summary>Raised when this node becomes the active master, yields, forces a new election,
+    /// loses the active master, sees an inconsistent claim, or times out a mandatory slave.</summary>
+    event EventHandler<FlyingMasterChangedEventArgs>? FlyingMasterChanged;
+
+    /// <summary>
+    /// Joins the NMT flying-master election at <paramref name="priorityLevel"/> (0 highest, 2
+    /// lowest). Writes that level to <c>1F90h:03</c> and sets bits 0 and 5 of <c>1F80h</c>.
+    /// The first election after this call is a cold boot: if no master answers, the node
+    /// broadcasts NMT Reset Communication and runs the election again as a warm boot. That
+    /// reset restores power-on values, so this method records <c>1F80h</c>, <c>1F81h</c>,
+    /// <c>1F89h</c> and <c>1F90h</c> as power-on values before it starts; call
+    /// <see cref="StoreParameters"/> first if the rest of the configuration must survive the same
+    /// reset. After the node becomes the active master it boots the slaves assigned in
+    /// <c>1F81h</c> (see the package README).
+    /// </summary>
+    /// <param name="priorityLevel">0, 1 or 2. Lower wins. Equal priority does not depose an
+    /// active master; in a timeslot race the lower node-id waits less and claims first.</param>
+    /// <param name="activeMasterHeartbeatTimeout">While this node stands by, a heartbeat consumer
+    /// (<c>1016h</c>) for the active master is installed at this timeout unless one already
+    /// exists. A timeout starts a new election. When this node becomes the active master and
+    /// <c>1017h</c> is 0, the producer is started at half this timeout so peers can see the loss.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="priorityLevel"/> is above 2,
+    /// or <paramref name="activeMasterHeartbeatTimeout"/> is outside 1..65535 ms.</exception>
+    /// <exception cref="ArgumentException"><c>1F90h:04</c> is not greater than 127 times
+    /// <c>1F90h:05</c>, so the timeslots would not keep a better priority ahead of a worse one.</exception>
+    void StartFlyingMaster(ushort priorityLevel, TimeSpan activeMasterHeartbeatTimeout);
+
+    /// <summary>Leaves the election: clears bits 0 and 5 of <c>1F80h</c> and drops a heartbeat
+    /// consumer this node installed for the active master. Recorded as the power-on value of
+    /// <c>1F80h</c>, so a later reset does not rejoin.</summary>
+    void StopFlyingMaster();
 
     // -----------------------------------------------------------------------------------------
     // Heartbeat producer / consumer (FR-CO-008)

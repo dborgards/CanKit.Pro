@@ -136,6 +136,13 @@ public sealed class CanOpenNodeOptions
     /// </summary>
     public bool WritableCommunicationParameters { get; init; }
 
+    /// <summary>
+    /// Device or tool. Read when <c>1F80h</c> is created: <see cref="CanOpenNodeProfile.Device"/>
+    /// leaves the self-start and slave-start suppress bits clear, <see cref="CanOpenNodeProfile.Tool"/>
+    /// sets both. The profile does not change for the life of the node. Defaults to device.
+    /// </summary>
+    public CanOpenNodeProfile Profile { get; init; } = CanOpenNodeProfile.Device;
+
     /// <summary>Returns a copy of this options record with the provided overrides.</summary>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -149,7 +156,8 @@ public sealed class CanOpenNodeOptions
         int? sdoBlockMaxRetransmissions = null,
         bool? respondToNodeGuardingRtr = null,
         bool? enableChangeOfStateTpdo = null,
-        bool? writableCommunicationParameters = null)
+        bool? writableCommunicationParameters = null,
+        CanOpenNodeProfile? profile = null)
     {
         return new CanOpenNodeOptions
         {
@@ -165,6 +173,7 @@ public sealed class CanOpenNodeOptions
             RespondToNodeGuardingRtr = respondToNodeGuardingRtr ?? RespondToNodeGuardingRtr,
             EnableChangeOfStateTpdo = enableChangeOfStateTpdo ?? EnableChangeOfStateTpdo,
             WritableCommunicationParameters = writableCommunicationParameters ?? WritableCommunicationParameters,
+            Profile = profile ?? Profile,
         };
     }
 
