@@ -727,6 +727,81 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().StartWith("This node aborted");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // #38 — CiA 301 separates e (expedited) from s (size indicated). 0x20 is a segmented
+    // download whose bytes 4..7 are reserved, not data; 0x40 is a segmented upload response
+    // whose length arrives with the segments. Before the fix the server committed four bytes
+    // out of a 0x20 initiate and aborted the segments, and the client ignored 0x40.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public void Sdo_Server_Treats_Download_Initiate_0x20_As_Segmented_Not_Expedited()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        var original = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        // ccs=1, e=0, s=0. Bytes 4..7 are reserved; an expedited reading takes them as the value.
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { 0x20, 0x00, 0x21, 0x00, 0x11, 0x22, 0x33, 0x44 });
+        var initAck = tap.Next(ShortTimeout);
+        initAck[0].Should().Be(SdoFrames.ScsDownloadInitAck, "a segmented download is acknowledged, not aborted");
+        SdoFrames.ReadIndex(initAck).Should().Be(((ushort)0x2100, (byte)0x00));
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original,
+            "nothing is committed at the initiate: the four reserved bytes are not an expedited payload");
+
+        var payload = Enumerable.Range(0, 10).Select(i => (byte)(0xA0 + i)).ToArray();
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.CcsDownloadSegmentBase, toggle: false, lastSegment: false, payload.AsSpan(0, 7)));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase,
+            "the segment is part of the transfer, not a protocol error against an expedited write");
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.CcsDownloadSegmentBase, toggle: true, lastSegment: true, payload.AsSpan(7)));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
+
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload,
+            "the value is the segments, in order, and not the reserved bytes of the 0x20 initiate");
+    }
+
+    [Fact]
+    public async Task Sdo_Client_Treats_Upload_Response_0x40_As_Segmented_Not_Ignored()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x05);
+        var init = tap.Next(ShortTimeout);
+        init[0].Should().Be(SdoFrames.CcsUploadInit);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x05));
+
+        // scs=2, e=0, s=0. Bytes 4..7 would be a 2 GiB length if the size bit were ignored,
+        // and four data bytes if the frame were read as expedited.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x40, 0x01, 0x20, 0x05, 0xFF, 0xFF, 0xFF, 0x7F });
+
+        var segReq = tap.Next(ShortTimeout);
+        segReq[0].Should().Be(SdoFrames.CcsUploadSegmentBase,
+            "0x40 opens the segment phase. An expedited reading completes with no further frame, " +
+            "and taking the reserved bytes as a size aborts the transfer as too large");
+        upload.IsCompleted.Should().BeFalse("the value has not arrived yet");
+
+        var payload = Enumerable.Range(0, 10).Select(i => (byte)(0x50 + i)).ToArray();
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: false, payload.AsSpan(0, 7)));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.CcsUploadSegmentBase | SdoFrames.ToggleBit));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: true, lastSegment: true, payload.AsSpan(7)));
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(payload, "the client assembles the segments; the reserved bytes of 0x40 are not the value");
+    }
+
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
     // peer deterministically from its own thread (no in-handler transmits).
     private sealed class FrameTap : IDisposable
