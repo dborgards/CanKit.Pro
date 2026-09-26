@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -1343,6 +1344,61 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Queued_Reset_Or_Claim_Does_Not_Run_After_Dispose()
+    {
+        const byte slave = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, LeftId, clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+
+        node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        node.ObjectDictionary.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        TransmitHeartbeat(peer, slave, 0x7F);
+        await QuiesceAsync(witness, null);
+        int starts = log.Snapshot().Count(f => IsNmt(f, NmtCommand.Start, slave));
+        int claims = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim);
+        starts.Should().BeGreaterThan(0);
+        int resets = 0;
+        node.ApplicationReset += (_, _) => resets++;
+
+        // Dispose flips the flag and only afterwards posts cleanup. A completion already
+        // sitting on the mailbox is the window these four callbacks still run in.
+        bool stillPending = false;
+        await node.PostToActorAsync(() =>
+        {
+            DisposedField.SetValue(node, 1);
+            foreach (var name in new[] { "AbandonColdReset", "CompleteForcedReset", "CompleteColdReset" })
+            {
+                ColdResetPendingField.SetValue(node, true);
+                InvokeActor(node, name);
+            }
+            stillPending = (bool)ColdResetPendingField.GetValue(node)!;
+            InvokeActor(node, "OnFlyingMasterNegotiationElapsed");
+            DisposedField.SetValue(node, 0);
+            ColdResetPendingField.SetValue(node, false);
+        });
+        await QuiesceAsync(witness, null);
+
+        stillPending.Should().BeTrue("dispose already won, so the reset stays unapplied");
+        resets.Should().Be(0, "a completion that lost the race does not reset the node");
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+        log.Snapshot().Count(f => IsNmt(f, NmtCommand.Start, slave)).Should().Be(starts,
+            "slaves remembered during the hold are not started after dispose");
+        log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim).Should().Be(claims,
+            "a negotiation that was already queued does not claim after dispose");
+    }
+
+    [Fact]
     public async Task An_Unconfirmed_Force_Reset_Does_Not_Restart_The_Election()
     {
         var session = NewSession();
@@ -1616,6 +1672,16 @@ public partial class CanOpenFlyingMasterTests
         (taken & 0xFFFF).Should().Be(1500u,
             "stop was queued behind the takeover, so it cannot delete the consumer just claimed");
     }
+
+    private static readonly FieldInfo DisposedField = typeof(CanOpenNode).GetField(
+        "_disposed", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    private static readonly FieldInfo ColdResetPendingField = typeof(CanOpenNode).GetField(
+        "_coldResetPending", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+    private static void InvokeActor(CanOpenNode node, string name) =>
+        typeof(CanOpenNode).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(node, null);
 
     /// <summary>Holds the cold Reset Communication so a test can use the window before it completes,
     /// or cancels that one send.</summary>

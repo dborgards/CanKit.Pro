@@ -238,6 +238,9 @@ internal sealed partial class CanOpenNode
     /// not already done so, and do not start the warm election before that.</summary>
     private void CompleteColdReset()
     {
+        // Dispose sets the flag on the caller thread and only then posts cleanup. A send
+        // continuation already on the mailbox must not reset the node in that window.
+        if (_disposed != 0) return;
         if (!_coldResetPending) return;
         _coldResetPending = false;
         PerformNmtReset(communicationOnly: true);
@@ -251,6 +254,7 @@ internal sealed partial class CanOpenNode
     /// are started, and the network is not reset a second time.</summary>
     private void AbandonColdReset()
     {
+        if (_disposed != 0) return;
         if (!_coldResetPending) return;
         _coldResetPending = false;
         if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
@@ -282,6 +286,7 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterNegotiationElapsed()
     {
+        if (_disposed != 0) return;
         if (_confirmingActiveMaster)
         {
             // Still the active master: claim again and keep the boot-up that is already running.
@@ -379,6 +384,7 @@ internal sealed partial class CanOpenNode
     /// start the warm election before that.</summary>
     private void CompleteForcedReset()
     {
+        if (_disposed != 0) return;
         if (!_coldResetPending) return;
         _coldResetPending = false;
         PerformNmtReset(communicationOnly: true);
