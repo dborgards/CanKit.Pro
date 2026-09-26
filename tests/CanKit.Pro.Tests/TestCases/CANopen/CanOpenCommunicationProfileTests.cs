@@ -66,13 +66,19 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
     }
 
     private static Task<byte[]> UploadAsync(ICanOpenNode client, byte server, ushort index, byte subindex)
-        => client.SdoUploadAsync(server, index, subindex).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, server);
+        return client.SdoUploadAsync(server, index, subindex).WithTimeoutAsync(ShortTimeout);
+    }
 
     private static async Task<uint> UploadUnsignedAsync(ICanOpenNode client, byte server, ushort index, byte subindex)
         => LittleEndian(await UploadAsync(client, server, index, subindex));
 
     private static Task DownloadAsync(ICanOpenNode client, byte server, ushort index, byte subindex, byte[] data)
-        => client.SdoDownloadAsync(server, index, subindex, data).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, server);
+        return client.SdoDownloadAsync(server, index, subindex, data).WithTimeoutAsync(ShortTimeout);
+    }
 
     private static async Task ExpectAbortAsync(Func<Task> transfer, SdoAbortCode code)
     {

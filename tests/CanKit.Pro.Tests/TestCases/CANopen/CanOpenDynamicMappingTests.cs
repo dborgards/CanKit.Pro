@@ -46,7 +46,10 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
     // 0b of sub-index 01h of the according TPDO communication parameter." A mapping alone does
     // not make a PDO exist.
     private static Task CreatePdoAsync(ICanOpenNode client, byte serverNodeId, ushort commIndex, uint cobId)
-        => client.SdoDownloadAsync(serverNodeId, commIndex, 0x01, U32Bytes(cobId)).WithTimeoutAsync(ShortTimeout);
+    {
+        PeerSdoLaboratory.Bind(client, serverNodeId);
+        return client.SdoDownloadAsync(serverNodeId, commIndex, 0x01, U32Bytes(cobId)).WithTimeoutAsync(ShortTimeout);
+    }
 
     private static byte[] MappingEntryBytes(ushort index, byte subindex, byte bitLength)
     {
@@ -61,6 +64,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
     private static async Task WriteMappingAsync(ICanOpenNode client, byte serverNodeId, ushort mapIndex,
         params byte[][] entries)
     {
+        PeerSdoLaboratory.Bind(client, serverNodeId);
         await client.SdoDownloadAsync(serverNodeId, mapIndex, 0x00, new byte[] { 0x00 })
             .WithTimeoutAsync(ShortTimeout);
         for (var i = 0; i < entries.Length; i++)
@@ -83,7 +87,9 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var producer = CanOpen.OpenNode(busA, nodeId: 0x11, MasterConfigurable);
+        PeerSdoLaboratory.Bind(producer, 0x11);
         using var consumer = CanOpen.OpenNode(busB, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(consumer, 0x11);
 
         producer.ObjectDictionary.AddU16(0x2000, 0x00, 0xBEEF);
         producer.ObjectDictionary.AddU16(0x2000, 0x01, 0xDEAD);
@@ -181,7 +187,9 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, MasterConfigurable);
+        PeerSdoLaboratory.Bind(slave, 0x11);
         slave.ObjectDictionary.AddU16(0x2000, 0x00, 0);
         // An active mapping (sub0 != 0): the node's records start with the mapping disabled, so
         // the application configures one first -- the same 1A00h record a master would write.
@@ -203,7 +211,9 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, MasterConfigurable);
+        PeerSdoLaboratory.Bind(slave, 0x11);
 
         await master.SdoDownloadAsync(0x11, 0x1A00, 0x00, new byte[] { 0x00 })
             .WithTimeoutAsync(ShortTimeout);
@@ -222,7 +232,9 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11, MasterConfigurable);
+        PeerSdoLaboratory.Bind(slave, 0x11);
         slave.ObjectDictionary.AddU32(0x2000, 0x00, 0);
         slave.ObjectDictionary.AddU32(0x2000, 0x01, 0);
         slave.ObjectDictionary.AddU16(0x2001, 0x00, 0);

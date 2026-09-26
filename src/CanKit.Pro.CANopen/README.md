@@ -217,6 +217,36 @@ dictionary) and `DeviceInfo`, and `ParseDiagnostics` lists what the parser repai
 a lenient file. A tool that configures a *foreign* device from its DCF is the master-role round
 (#131), not this loader, which shapes the node it is given to.
 
+## SDO client and a peer's device description
+
+`SdoUploadAsync` and `SdoDownloadAsync` do not accept an arbitrary index. Before any frame is
+sent they check a peer EDS or DCF bound for that server:
+
+```csharp
+var peer = CanOpenDeviceDescription.Load("remote.eds");
+master.BindPeerDeviceDescription(nodeId: 0x11, peer);
+
+await master.SdoUploadAsync(0x11, 0x2000, 0x00);   // only if 2000h:00 is in remote.eds
+```
+
+`CanOpenDeviceDescription.Contains` is that check. A pair the file does not declare throws
+`PeerSdoAccessException` (`PeerDescriptionLoaded` is true), including `1000h`, `1001h` and
+`1018h` when the file leaves them out. `UnbindPeerDeviceDescription` drops the binding.
+
+With **no** description bound for the server, only the three CiA 301 mandatory base objects are
+transferred, at the sub-indices this stack implements for them:
+
+| Object | Sub-indices allowed without a peer file |
+| --- | --- |
+| `1000h` Device type | `00h` |
+| `1001h` Error register | `00h` |
+| `1018h` Identity | `00h` and `01h` (vendor-id) |
+
+`1018h:02`–`04` (product code, revision, serial) are not part of that minimum, and neither is
+any optional object, including `1003h`. `PeerSdoAccessException.IsAllowedWithoutPeerDescription`
+is that list. Anything else throws `PeerSdoAccessException` with `PeerDescriptionLoaded` false,
+again before a frame is sent.
+
 ## PDO engine
 
 Every TPDO and RPDO is rebuilt from its communication and mapping records whenever one of them
@@ -376,7 +406,7 @@ node.HeartbeatTimeout += (s, e) => Console.WriteLine($"missed HB from 0x{e.Produ
 // FR-CO-019: make this the configuration a Reset Communication comes back to.
 node.StoreParameters();
 
-// FR-CO-002: SDO expedited read from another node on the same bus.
+// FR-CO-002: 1000h:00 is one of the three objects readable without a peer file.
 var value = await node.SdoUploadAsync(serverNodeId: 0x12, index: 0x1000, subindex: 0x00);
 
 // FR-CO-007: bring the network up as an NMT master (PDOs flow in Operational only).
