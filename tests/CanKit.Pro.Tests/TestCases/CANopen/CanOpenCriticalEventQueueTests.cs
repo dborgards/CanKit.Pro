@@ -162,13 +162,9 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
     {
         using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-disposed"));
         var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true);
-        try
+        using (node)
         {
             Settle(node);
-        }
-        finally
-        {
-            node.Dispose();
         }
 
         var ran = 0;
