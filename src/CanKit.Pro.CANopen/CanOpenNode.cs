@@ -1285,9 +1285,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         int incoming = session.Offset + payload.Length;
         if (!session.SizeIndicated)
         {
-            // No declared length (#38): grow with the segments, and stop at the same cap a
-            // sized initiate is held to. A segment is refused once it would pass the cap, not
-            // copied and then trimmed.
+            // No declared length (#38): the buffer is capacity and Offset is the logical
+            // length. Capacity doubles so a transfer near the cap does not recopy every
+            // preceding byte on each segment, and it never exceeds the same cap a sized
+            // initiate is held to. A segment past that cap is refused before any allocation,
+            // not copied and then trimmed.
             if (incoming > _options.MaxSdoTransferBytes)
             {
                 SendSdoServerAbort(session.Index, session.Subindex, SdoAbortCode.OutOfMemory);
@@ -1296,7 +1298,24 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             if (incoming > session.Buffer.Length)
             {
-                var grown = new byte[incoming];
+                int max = _options.MaxSdoTransferBytes;
+                int capacity = session.Buffer.Length == 0 ? 8 : session.Buffer.Length;
+                while (capacity < incoming)
+                {
+                    // Doubling past the cap would allocate more than we are willing to keep.
+                    // Clamp and stop; incoming is already known to fit in max.
+                    if (capacity > max / 2)
+                    {
+                        capacity = max;
+                        break;
+                    }
+                    capacity *= 2;
+                }
+                if (capacity > max)
+                {
+                    capacity = max;
+                }
+                var grown = new byte[capacity];
                 Buffer.BlockCopy(session.Buffer, 0, grown, 0, session.Offset);
                 session.Buffer = grown;
             }
