@@ -273,10 +273,9 @@ internal sealed partial class CanOpenNode
         => _ = EnqueueNmt(command, target);
 
     /// <summary>Queues one NMT frame behind the previous one. The task completes with
-    /// <see langword="true"/> only when the adapter confirmed the send. Cancellation and any
-    /// exception that is not an adapter send failure fault the task. An unconfirmed send, or a
-    /// send that threw <see cref="CanKitException"/> or <see cref="ObjectDisposedException"/>,
-    /// completes with <see langword="false"/>.</summary>
+    /// <see langword="true"/> only when the adapter confirmed the send. Cancellation faults
+    /// the task. Every other failure is reported through <c>BackgroundExceptionOccurred</c>
+    /// and completes with <see langword="false"/>, including an unconfirmed send.</summary>
     private Task<bool> EnqueueNmt(NmtCommand command, byte target)
     {
         var payload = new[] { (byte)command, target };
@@ -289,8 +288,16 @@ internal sealed partial class CanOpenNode
                 SendNmtReporting(payload).ContinueWith(
                     send =>
                     {
-                        if (send.IsCanceled) done.TrySetCanceled();
-                        else if (send.IsFaulted) done.TrySetException(send.Exception!.InnerExceptions);
+                        if (IsNmtCancellation(send))
+                            done.TrySetCanceled();
+                        else if (send.IsFaulted)
+                        {
+                            // Same report as SendControlFrame. Completing with false, rather than
+                            // faulting this task, is what a fire-and-forget SendNmt can observe:
+                            // the exception is no longer sitting on a task nobody awaits.
+                            RaiseBackgroundException(send.Exception!.GetBaseException());
+                            done.TrySetResult(false);
+                        }
                         else done.TrySetResult(send.Result);
                     },
                     CancellationToken.None,
@@ -303,15 +310,22 @@ internal sealed partial class CanOpenNode
         return done.Task;
     }
 
+    private static bool IsNmtCancellation(Task send)
+    {
+        if (send.IsCanceled) return true;
+        if (!send.IsFaulted || send.Exception is null) return false;
+        foreach (var ex in send.Exception.InnerExceptions)
+            if (ex is not OperationCanceledException) return false;
+        return true;
+    }
+
     /// <summary>
-    /// Sends one NMT frame and reports the adapter's confirmation. An unconfirmed send (timeout,
-    /// bus-off, rejection) is a result, not a throw. <c>SendConfirmed</c> throws
-    /// <see cref="ObjectDisposedException"/> once the service is disposed, and it rethrows the bus:
-    /// the virtual adapter throws <see cref="ObjectDisposedException"/>, device adapters throw
-    /// <see cref="CanKitException"/> (<see cref="CanBusException"/> and the device exceptions).
-    /// Those are reported and come back as <see langword="false"/>. Anything else, including
-    /// <see cref="InvalidOperationException"/>, is not a send failure of this stack and still
-    /// fails the task. Cancellation does too.
+    /// Sends one NMT frame. An unconfirmed send (timeout, bus-off, rejection) is reported here
+    /// and comes back as <see langword="false"/>. A throw other than cancellation leaves this
+    /// task faulted; <see cref="EnqueueNmt"/> reports it and still completes with false.
+    /// <c>SendConfirmed</c> throws <see cref="ObjectDisposedException"/> for a disposed service
+    /// and rethrows the bus (<see cref="CanKitException"/> from a device adapter, and whatever
+    /// else the driver raised, including <see cref="InvalidOperationException"/>).
     /// </summary>
     private Task<bool> SendNmtReporting(byte[] payload)
     {
@@ -329,16 +343,6 @@ internal sealed partial class CanOpenNode
             catch (OperationCanceledException)
             {
                 throw;
-            }
-            catch (CanKitException ex)
-            {
-                RaiseBackgroundException(ex);
-                return false;
-            }
-            catch (ObjectDisposedException ex)
-            {
-                RaiseBackgroundException(ex);
-                return false;
             }
         });
     }

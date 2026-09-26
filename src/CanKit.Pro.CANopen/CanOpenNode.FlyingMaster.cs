@@ -348,15 +348,40 @@ internal sealed partial class CanOpenNode
         _flyingMasterFromPowerOn = false;
         if (_flyingMasterRole == FlyingMasterRole.Active)
         {
-            // The active master is who restarts the network. Apply the reset here. The echo of
-            // the broadcast must not apply it a second time. The flag is set after the reset,
-            // because the reset itself clears election state.
-            PerformNmtReset(communicationOnly: true);
-            _ignoreBroadcastResetEcho = true;
-            SendNmt(NmtCommand.ResetCommunication, 0);
+            // The active master restarts the network, but not before Reset Communication is
+            // confirmed. Applying the reset here used to arm the warm-election delay while the
+            // broadcast was only queued, so a short delay could elect again before the other
+            // candidates were reset. While Active, the echo is ignored; the flag after the
+            // local reset covers the echo that arrives once this node has left Active.
+            _coldResetPending = true;
+            var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
+            _ = sent.ContinueWith(send =>
+            {
+                try
+                {
+                    if (send.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && send.Result)
+                        _actor.Post(CompleteForcedReset);
+                    else
+                        _actor.Post(AbandonColdReset);
+                }
+                catch (ObjectDisposedException) { /* node already gone */ }
+            }, System.Threading.CancellationToken.None,
+                System.Threading.Tasks.TaskContinuationOptions.None,
+                System.Threading.Tasks.TaskScheduler.Default);
             return;
         }
         BeginFlyingMaster();
+    }
+
+    /// <summary>The forced Reset Communication is on the wire. Reset locally now, and do not
+    /// start the warm election before that.</summary>
+    private void CompleteForcedReset()
+    {
+        if (!_coldResetPending || _disposed != 0) return;
+        _coldResetPending = false;
+        if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
+        PerformNmtReset(communicationOnly: true);
+        _ignoreBroadcastResetEcho = true;
     }
 
     private void OnFlyingMasterDetectRequest()
@@ -454,7 +479,9 @@ internal sealed partial class CanOpenNode
         if (_flyingMasterInstalledWatch == nodeId) return;
         ReleaseInstalledWatch();
         if (_heartbeatConsumer.IsWatching(nodeId)) return;
-        AddHeartbeatConsumer(nodeId, timeout);
+        // The public add clears ownership when the application writes this node. This call is
+        // the flying master itself, so the watch stays owned until the application replaces it.
+        AddHeartbeatConsumer(nodeId, timeout, releaseInstalledWatch: false);
         _flyingMasterInstalledWatch = nodeId;
     }
 

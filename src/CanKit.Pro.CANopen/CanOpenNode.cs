@@ -292,6 +292,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
     /// <inheritdoc />
     public void AddHeartbeatConsumer(byte producerNodeId, TimeSpan timeout)
+        => AddHeartbeatConsumer(producerNodeId, timeout, releaseInstalledWatch: true);
+
+    private void AddHeartbeatConsumer(byte producerNodeId, TimeSpan timeout, bool releaseInstalledWatch)
     {
         ThrowIfDisposed();
         CanOpenCobId.ValidateNodeId(producerNodeId);
@@ -336,6 +339,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
         });
+        // The application now owns this consumer. Stop and yield must not delete it.
+        if (releaseInstalledWatch)
+        {
+            _actor.Post(() =>
+            {
+                if (_flyingMasterInstalledWatch == producerNodeId)
+                    _flyingMasterInstalledWatch = null;
+            });
+        }
     }
 
     /// <inheritdoc />

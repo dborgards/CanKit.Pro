@@ -707,8 +707,11 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
-    public Task A_Cancelled_Cold_Reset_Send_Does_Not_Start_The_Election()
-        => ColdResetSendDoesNotElect(gate => gate.Cancel = true);
+    public async Task A_Cancelled_Cold_Reset_Send_Does_Not_Start_The_Election()
+    {
+        var background = await ColdResetSendDoesNotElect(gate => gate.Cancel = true);
+        background.Should().BeNull("cancellation is not a background transport failure");
+    }
 
     [Fact]
     public Task An_Unconfirmed_Cold_Reset_Send_Does_Not_Start_The_Election()
@@ -731,11 +734,11 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
-    public async Task An_Unrelated_Cold_Reset_Throw_Is_Not_Reported_As_A_Transport_Failure()
+    public async Task Any_Non_Cancellation_Throw_On_The_Cold_Reset_Is_Reported()
     {
         var background = await ColdResetSendDoesNotElect(
-            gate => gate.Fault = new InvalidOperationException("not an adapter send failure"));
-        background.Should().BeNull();
+            gate => gate.Fault = new InvalidOperationException("driver failed the reset"));
+        background.Should().BeOfType<InvalidOperationException>();
     }
 
     private async Task<Exception?> ColdResetSendDoesNotElect(Action<ColdResetGate> arrange)
@@ -1041,6 +1044,87 @@ public partial class CanOpenFlyingMasterTests
         PDOMapping=0
         """;
 
+    [Fact]
+    public async Task A_Force_Does_Not_Restart_The_Election_Before_The_Reset_Is_Confirmed()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the cold reset was confirmed and the node won");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
+            "the warm election waits until Reset Communication is confirmed");
+
+        gate.Release();
+        await QuiesceAsync(witness, null);
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
+            "the confirmed reset applies locally and starts the warm election");
+    }
+
+    [Fact]
+    public async Task An_Unconfirmed_Force_Reset_Does_Not_Restart_The_Election()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1, Reject = true };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        await QuiesceAsync(witness, null);
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
+            "a forced reset that was not confirmed does not reset this node or start the delay");
+    }
+
+    [Fact]
+    public async Task An_Application_Takeover_Of_The_Installed_Watch_Survives_Stop()
+    {
+        using var pair = OpenPair();
+        var (clock, winner, standby, winnerWitness, standbyWitness, _) = pair;
+        var timeout = TimeSpan.FromMilliseconds(80);
+        Tighten(winner);
+        Tighten(standby);
+        winner.StartFlyingMaster(0, timeout);
+        standby.StartFlyingMaster(2, timeout);
+        await UntilAsync(clock, winnerWitness, standbyWitness,
+            () => standby.FlyingMasterRole == FlyingMasterRole.Standby, 1200,
+            "priority 2 is watching the winner");
+
+        standby.AddHeartbeatConsumer(LeftId, TimeSpan.FromMilliseconds(1500));
+        await QuiesceAsync(winnerWitness, standbyWitness);
+        uint taken = standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01);
+        ((taken >> 16) & 0xFF).Should().Be(LeftId);
+        (taken & 0xFFFF).Should().Be(1500u);
+
+        standby.StopFlyingMaster();
+        await QuiesceAsync(winnerWitness, standbyWitness);
+        standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01).Should().Be(taken,
+            "the application replaced the installed watch, so stop does not delete it");
+    }
+
     /// <summary>Holds the cold Reset Communication so a test can use the window before it completes,
     /// or cancels that one send.</summary>
     private sealed class ColdResetGate : ICanBusService
@@ -1054,7 +1138,11 @@ public partial class CanOpenFlyingMasterTests
         public bool Cancel { get; set; }
         public bool Reject { get; set; }
         public Exception? Fault { get; set; }
+        /// <summary>How many broadcast resets pass straight through before one is held or failed.</summary>
+        public int PassResets { get; set; }
         public Task Entered => _entered.Task;
+        public void Release() => _release.TrySetResult(true);
+        private int _resetsSeen;
 
         public ICanBus Bus => _inner.Bus;
         public int SubscriptionCount => _inner.SubscriptionCount;
@@ -1075,7 +1163,7 @@ public partial class CanOpenFlyingMasterTests
 
         public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
-            if (IsBroadcastReset(frame))
+            if (IsBroadcastReset(frame) && ++_resetsSeen > PassResets)
             {
                 _entered.TrySetResult(true);
                 if (Cancel) throw new OperationCanceledException();
