@@ -146,6 +146,34 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
+    [Fact]
+    public void Constructor_Stops_The_Event_Pump_When_Subscribe_Fails()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-ctor"));
+        var service = new CanBusService(bus);
+        service.Dispose();
+
+        var act = () => new CanOpenNode(service, NodeId, new CanOpenNodeOptions(), ownsService: false);
+        act.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public void Event_Submitted_After_Dispose_Is_Not_Delivered()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-disposed"));
+        var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true);
+        Settle(node);
+        node.Dispose();
+
+        var ran = 0;
+        var submitted = node.SubmittedEventCount;
+        node.SubmitEventForTests(() => ran++);
+
+        ran.Should().Be(0);
+        node.SubmittedEventCount.Should().Be(submitted);
+        node.QueuedEventCount.Should().Be(0);
+    }
+
     private static void RaiseSync(ControllableBus bus)
         => bus.RaiseObserved(
             CanFrame.Classic(unchecked((int)CanOpenCobId.Sync), ReadOnlyMemory<byte>.Empty),
