@@ -146,7 +146,7 @@ public interface ICanOpenNode : IDisposable
         CancellationToken cancellationToken = default);
 
     // -----------------------------------------------------------------------------------------
-    // Flying master (CiA 302-2, assumed binding — see the package README)
+    // Flying master and boot-up (CiA 302-2 version 4.1.0 — see the package README)
     // -----------------------------------------------------------------------------------------
 
     /// <summary>Role in the flying-master election. <see cref="Nmt.FlyingMasterRole.Inactive"/>
@@ -161,7 +161,7 @@ public interface ICanOpenNode : IDisposable
     ushort? ActiveFlyingMasterPriority { get; }
 
     /// <summary>Raised when this node becomes the active master, yields, forces a new election,
-    /// loses the active master, or sees an inconsistent claim.</summary>
+    /// loses the active master, sees an inconsistent claim, or times out a mandatory slave.</summary>
     event EventHandler<FlyingMasterChangedEventArgs>? FlyingMasterChanged;
 
     /// <summary>
@@ -169,9 +169,11 @@ public interface ICanOpenNode : IDisposable
     /// lowest). Writes that level to <c>1F90h:03</c> and sets bits 0 and 5 of <c>1F80h</c>.
     /// The first election after this call is a cold boot: if no master answers, the node
     /// broadcasts NMT Reset Communication and runs the election again as a warm boot. That
-    /// reset restores power-on values, so this method records <c>1F80h</c> and <c>1F90h</c> as
-    /// power-on values before it starts; call <see cref="StoreParameters"/> first if the rest of
-    /// the configuration must survive the same reset.
+    /// reset restores power-on values, so this method records <c>1F80h</c>, <c>1F81h</c>,
+    /// <c>1F89h</c> and <c>1F90h</c> as power-on values before it starts; call
+    /// <see cref="StoreParameters"/> first if the rest of the configuration must survive the same
+    /// reset. After the node becomes the active master it boots the slaves assigned in
+    /// <c>1F81h</c> (see the package README).
     /// </summary>
     /// <param name="priorityLevel">0, 1 or 2. Lower wins. Equal priority does not depose an
     /// active master; in a timeslot race the lower node-id waits less and claims first.</param>

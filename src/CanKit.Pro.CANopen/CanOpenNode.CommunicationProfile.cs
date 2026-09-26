@@ -58,6 +58,9 @@ internal sealed partial class CanOpenNode
         public const ushort Identity = 0x1018;
         public const ushort SdoServer = 0x1200;
         public const ushort NmtStartup = 0x1F80;
+        public const ushort SlaveAssignment = 0x1F81;
+        public const ushort RequestNmt = 0x1F82;
+        public const ushort BootTime = 0x1F89;
         public const ushort FlyingMasterTiming = 0x1F90;
         public const ushort RpdoComm = 0x1400;
         public const ushort RpdoMap = 0x1600;
@@ -139,12 +142,21 @@ internal sealed partial class CanOpenNode
         _od.AddU32(Co.ConsumerHeartbeat, 0x01, 0, rw, nm);
         _od.AddU16(Co.ProducerHeartbeat, 0x00, 0, rw, nm);
 
-        // Flying master (CiA 302-2, assumed binding). Inactive until bits 0 and 5 of 1F80h are
-        // set. 1F90h is milliseconds: timeout, negotiation delay, priority level, priority time
-        // slot, device time slot, multiple-master detect cycle. The defaults separate the three
-        // priority levels (1500 > 127 × 10). The detect cycle carries the node-id so two masters
-        // do not poll in lockstep.
+        // Flying master and boot-up (CiA 302-2 v4.1.0). Inactive until bits 0 and 5 of 1F80h
+        // are set. 1F90h is milliseconds: timeout, negotiation delay, priority level, priority
+        // time slot, device time slot, multiple-master detect cycle. The defaults separate the
+        // three priority levels (1500 > 127 × 10). The detect cycle carries the node-id so two
+        // masters do not poll in lockstep. 1F81h is the network list (one entry per node-id),
+        // 1F82h the tracked NMT state and the request that sends a command, 1F89h the boot
+        // timeout (0 = none).
         _od.AddU32(Co.NmtStartup, 0x00, 0, rw, nm);
+        _od.AddU8(Co.SlaveAssignment, 0x00, CanOpenCobId.MaxNodeId, ro, nm);
+        for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
+            _od.AddU32(Co.SlaveAssignment, node, 0, rw, nm);
+        _od.AddU8(Co.RequestNmt, 0x00, 0x80, ro, nm);
+        for (byte node = 1; node <= 0x80; node++)
+            _od.AddU8(Co.RequestNmt, node, 0, rw, nm);
+        _od.AddU32(Co.BootTime, 0x00, 0, rw, nm);
         _od.AddU8(Co.FlyingMasterTiming, 0x00, 0x06, ro, nm);
         _od.AddU16(Co.FlyingMasterTiming, 0x01, 100, rw, nm);
         _od.AddU16(Co.FlyingMasterTiming, 0x02, 500, rw, nm);
@@ -203,7 +215,8 @@ internal sealed partial class CanOpenNode
     {
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
-            or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.FlyingMasterTiming => true,
+            or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
+            or Co.RequestNmt or Co.BootTime or Co.FlyingMasterTiming => true,
         >= Co.RpdoComm and < Co.RpdoComm + Co.PdoCount => true,
         >= Co.RpdoMap and < Co.RpdoMap + Co.PdoCount => true,
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
@@ -248,6 +261,12 @@ internal sealed partial class CanOpenNode
                 return ValidateConsumerHeartbeatWrite(subindex, value);
             case Co.FlyingMasterTiming:
                 return ValidateFlyingMasterTimingWrite(subindex, value);
+            case Co.SlaveAssignment:
+                return ValidateSlaveAssignmentWrite(subindex, value);
+            case Co.RequestNmt:
+                return ValidateRequestNmtWrite(subindex, value);
+            case Co.BootTime:
+                return ValidateBootTimeWrite(subindex, value);
             case Co.StoreParameters:
                 return subindex == 1 ? HandleStoreCommand(value) : OdWriteDecision.Accept;
             case Co.RestoreDefaults:
@@ -525,6 +544,14 @@ internal sealed partial class CanOpenNode
                 return;
             case Co.NmtStartup:
                 ApplyFlyingMasterStartup();
+                return;
+            case Co.SlaveAssignment:
+                if (FlyingMasterEnabled) RememberOne(index, subindex);
+                if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
+                return;
+            case Co.BootTime:
+                if (FlyingMasterEnabled) RememberOne(index, 0x00);
+                if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
                 return;
             case Co.GuardTime:
             case Co.LifeTimeFactor:

@@ -6,20 +6,31 @@ using CanKit.Pro.Reliability;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// NMT flying master. The procedure implemented here is the one public vendor descriptions and
-/// the open CANopen literature agree on for CiA 302-2 (historically DSP 302 clause 5.5): objects
-/// <c>1F80h</c> and <c>1F90h</c>, and the services on CAN-IDs <c>0x071</c>, <c>0x072</c>,
-/// <c>0x073</c> and <c>0x076</c>. The edition and the clause number are an assumption; the
-/// package README says so. The boot-up manager (slave assignment, ordered startup) is not part
-/// of this partial.
+/// NMT flying master, bound to CiA 302-2 version 4.1.0 (historically DSP 302 clause 5.5).
+/// Objects <c>1F80h</c> and <c>1F90h</c>, and the services on CAN-IDs <c>0x071</c>, <c>0x072</c>,
+/// <c>0x073</c> and <c>0x076</c>. Once this node is the active master, <see cref="BeginBootUp"/>
+/// takes the network list in <c>1F81h</c>.
 /// </summary>
 internal sealed partial class CanOpenNode
 {
-    // 1F80h, as the public object descriptions use it: bit 0 marks an NMT-master-capable device,
-    // bit 5 selects the flying-master process. Both are required. Other bits are stored and
-    // ignored — they belong to autostart and to the boot-up manager, which this node does not run.
+    // 1F80h. Bit 0 marks an NMT-master-capable device, bit 5 selects the flying-master process.
+    // Both are required. The other bits are the boot-up manager's, with the polarity of the
+    // open implementation that cites CiA 302-2 v4.1.0: a set bit 2 or bit 3 suppresses the
+    // corresponding start, a clear bit allows it.
     private const uint NmtMasterBit = 0x0000_0001;
+    private const uint NmtStartAllNodesBit = 0x0000_0002;
+    private const uint NmtSuppressSelfStartBit = 0x0000_0004;
+    private const uint NmtSuppressSlaveStartBit = 0x0000_0008;
+    private const uint NmtResetAllOnErrorBit = 0x0000_0010;
     private const uint FlyingMasterBit = 0x0000_0020;
+    private const uint NmtStopAllOnErrorBit = 0x0000_0040;
+
+    // 1F81h, one UNSIGNED32 per node-id. Bit 0 assigns the slave, bit 2 lets the master boot
+    // it, bit 3 marks it mandatory, bit 4 is keep-alive (Reset Communication is not sent).
+    private const uint SlaveAssignedBit = 0x0000_0001;
+    private const uint SlaveBootBit = 0x0000_0004;
+    private const uint SlaveMandatoryBit = 0x0000_0008;
+    private const uint SlaveKeepAliveBit = 0x0000_0010;
 
     private const byte TimingTimeout = 0x01;
     private const byte TimingDelay = 0x02;
@@ -126,6 +137,8 @@ internal sealed partial class CanOpenNode
         {
             if (_flyingMasterRole == FlyingMasterRole.Inactive)
                 BeginFlyingMaster();
+            else if (_flyingMasterRole == FlyingMasterRole.Active)
+                BeginBootUp();
             return;
         }
         if (_flyingMasterRole != FlyingMasterRole.Inactive)
@@ -137,7 +150,7 @@ internal sealed partial class CanOpenNode
     /// Reset Communication of its own.</summary>
     private void SuspendFlyingMasterForReset()
     {
-        if (_flyingMasterRole == FlyingMasterRole.Inactive && _flyingMasterDeadline is null) 
+        if (_flyingMasterRole == FlyingMasterRole.Inactive && _flyingMasterDeadline is null)
         {
             _flyingMasterFromPowerOn = false;
             return;
@@ -300,10 +313,12 @@ internal sealed partial class CanOpenNode
         int cycle = ReadTiming(TimingDetectCycle);
         if (cycle > 0)
             ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
+        BeginBootUp();
     }
 
     private void EnterStandby(ushort priority, byte nodeId)
     {
+        CancelBootUp();
         CancelFlyingMasterDeadline();
         _flyingMasterFromPowerOn = false;
         bool changed = _flyingMasterRole != FlyingMasterRole.Standby
@@ -356,6 +371,7 @@ internal sealed partial class CanOpenNode
 
     private void StopFlyingMasterCore()
     {
+        CancelBootUp();
         CancelFlyingMasterDeadline();
         _flyingMasterRole = FlyingMasterRole.Inactive;
         _activeFlyingMasterNodeId = null;
@@ -440,6 +456,11 @@ internal sealed partial class CanOpenNode
         RememberOne(Co.NmtStartup, 0x00);
         for (byte sub = 0; sub <= TimingDetectCycle; sub++)
             RememberOne(Co.FlyingMasterTiming, sub);
+        // The cold Reset Communication would otherwise drop the network list and the boot
+        // timeout, and the master that just won would start nobody.
+        RememberOne(Co.BootTime, 0x00);
+        for (byte sub = 0; sub <= CanOpenCobId.MaxNodeId; sub++)
+            RememberOne(Co.SlaveAssignment, sub);
     }
 
     private void RememberOne(ushort index, byte subindex)

@@ -960,6 +960,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             _ => NmtState.Initializing,
         };
         RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
+        NoteSlaveNmtState(producer, stateByte);
         if (_heartbeatConsumers.TryGetValue(producer, out var consumer))
         {
             // Rearm the deadline — best-effort. On failure, allocate a fresh one to preserve

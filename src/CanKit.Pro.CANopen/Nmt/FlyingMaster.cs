@@ -54,4 +54,9 @@ public enum FlyingMasterSignal
     /// <summary>A node of worse priority claimed the mastership, which the published procedure
     /// treats as a network configuration error. A new election was requested.</summary>
     ConfigurationError,
+
+    /// <summary>A mandatory slave (<c>1F81h</c> bit 0 and bit 3) was not seen before <c>1F89h</c>
+    /// elapsed. <see cref="CanKit.Pro.CANopen.FlyingMasterChangedEventArgs.OtherNodeId"/> is that
+    /// slave. The network is not started past this point.</summary>
+    SlaveBootTimeout,
 }

@@ -376,6 +376,7 @@ namespace CanKit.Pro.CANopen.Nmt
         ForcedRenegotiation = 2,
         ActiveMasterLost = 3,
         ConfigurationError = 4,
+        SlaveBootTimeout = 5,
     }
     public enum NmtCommand : byte
     {

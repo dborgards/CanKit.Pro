@@ -1,0 +1,261 @@
+using System;
+using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.Reliability;
+
+namespace CanKit.Pro.CANopen;
+
+/// <summary>
+/// Boot-up of the network list once this node is the active NMT master (CiA 302-2 version 4.1.0).
+/// The reading of <c>1F80h</c>, <c>1F81h</c>, <c>1F82h</c> and <c>1F89h</c> follows the open
+/// implementation that cites that edition. Configuration of a slave (identity <c>1F84h</c> to
+/// <c>1F88h</c>, concise DCF) is not part of it; the package README says what is left open.
+/// </summary>
+internal sealed partial class CanOpenNode
+{
+    // 1F82h is written with the NMT state byte, not with the command specifier.
+    private const byte RequestStopped = 0x04;
+    private const byte RequestOperational = 0x05;
+    private const byte RequestResetNode = 0x06;
+    private const byte RequestResetCommunication = 0x07;
+    private const byte RequestPreOperational = 0x7F;
+    private const byte RequestAllNodes = 0x80;
+
+    private readonly bool[] _slaveSeen = new bool[CanOpenCobId.MaxNodeId + 1];
+    private readonly bool[] _slaveStarted = new bool[CanOpenCobId.MaxNodeId + 1];
+    private bool _bootBroadcastSent;
+    private bool _bootHalted;
+    private bool _bootSelfStarted;
+    private int _bootGeneration;
+    private IDeadline? _bootDeadline;
+
+    /// <summary>
+    /// Takes the network list. Runs only while this node is the active master, and again when
+    /// <c>1F80h</c>, <c>1F81h</c> or <c>1F89h</c> change in that role. A slave that is not
+    /// keep-alive is reset individually: a broadcast Reset Communication would reset this node
+    /// as well, because it applies its own NMT echo.
+    /// </summary>
+    private void BeginBootUp()
+    {
+        CancelBootUp();
+        if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
+
+        if ((ReadStartup() & NmtSuppressSlaveStartBit) == 0)
+        {
+            for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+            {
+                if (!IsAssignedSlave(id) || KeepsAlive(id)) continue;
+                SendNmt(NmtCommand.ResetCommunication, id);
+            }
+        }
+
+        int bootMs = (int)_od.ReadUnsigned(Co.BootTime, 0x00);
+        if (bootMs > 0 && HasMandatorySlave())
+        {
+            int generation = _bootGeneration;
+            _bootDeadline = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs), () =>
+            {
+                if (generation != _bootGeneration || _flyingMasterRole != FlyingMasterRole.Active) return;
+                OnBootTimeout();
+            });
+        }
+        TryFinishBoot();
+    }
+
+    private void CancelBootUp()
+    {
+        _bootGeneration++;
+        _bootDeadline?.Dispose();
+        _bootDeadline = null;
+        Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
+        Array.Clear(_slaveStarted, 0, _slaveStarted.Length);
+        _bootBroadcastSent = false;
+        _bootHalted = false;
+        _bootSelfStarted = false;
+    }
+
+    private void NoteSlaveNmtState(byte nodeId, byte state)
+    {
+        if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
+        if (nodeId == _nodeId || nodeId > CanOpenCobId.MaxNodeId || !IsAssignedSlave(nodeId)) return;
+
+        _od.WriteRawUnchecked(Co.RequestNmt, nodeId, new[] { state });
+        _slaveSeen[nodeId] = true;
+        ConsiderStart(nodeId, state);
+        TryFinishBoot();
+    }
+
+    private void ConsiderStart(byte nodeId, byte state)
+    {
+        if (_bootHalted || _slaveStarted[nodeId]) return;
+        uint startup = ReadStartup();
+        if ((startup & NmtSuppressSlaveStartBit) != 0) return;
+        if ((Assignment(nodeId) & (SlaveAssignedBit | SlaveBootBit)) != (SlaveAssignedBit | SlaveBootBit)) return;
+
+        // Already operational: nothing to send. Boot-up, pre-operational and stopped are the
+        // states from which the master starts the slave.
+        if (state == RequestOperational)
+        {
+            _slaveStarted[nodeId] = true;
+            return;
+        }
+        if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
+
+        // Bit 1 waits for one broadcast, and only when this node may enter Operational too:
+        // a broadcast Start would otherwise start this node through its own NMT echo.
+        bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
+        if (simultaneous && !_bootBroadcastSent) return;
+
+        _slaveStarted[nodeId] = true;
+        SendNmt(NmtCommand.Start, nodeId);
+    }
+
+    private void TryFinishBoot()
+    {
+        if (_flyingMasterRole != FlyingMasterRole.Active || _bootHalted || _disposed != 0) return;
+        if (HasUnseenMandatorySlave()) return;
+
+        uint startup = ReadStartup();
+        bool mayStartSlaves = (startup & NmtSuppressSlaveStartBit) == 0;
+        bool simultaneous = mayStartSlaves
+            && (startup & NmtStartAllNodesBit) != 0
+            && (startup & NmtSuppressSelfStartBit) == 0;
+        if (simultaneous && !_bootBroadcastSent && HasBootableSlave())
+        {
+            _bootBroadcastSent = true;
+            SendNmt(NmtCommand.Start, 0);
+        }
+
+        if ((startup & NmtSuppressSelfStartBit) == 0 && !_bootSelfStarted)
+        {
+            _bootSelfStarted = true;
+            if (_state != NmtState.Operational)
+                ApplyNmtTransition(NmtState.Operational);
+        }
+    }
+
+    private void OnBootTimeout()
+    {
+        if (!HasUnseenMandatorySlave())
+        {
+            TryFinishBoot();
+            return;
+        }
+
+        _bootHalted = true;
+        uint startup = ReadStartup();
+        bool stopAll = (startup & NmtStopAllOnErrorBit) != 0;
+        bool resetAll = !stopAll && (startup & NmtResetAllOnErrorBit) != 0;
+        if (stopAll || resetAll)
+        {
+            var command = stopAll ? NmtCommand.Stop : NmtCommand.ResetNode;
+            for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+            {
+                if (!IsAssignedSlave(id)) continue;
+                SendNmt(command, id);
+            }
+        }
+
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
+            if (!IsMandatory(id) || _slaveSeen[id]) continue;
+            if (!stopAll && !resetAll)
+                SendNmt(NmtCommand.ResetNode, id);
+            RaiseFlyingMaster(FlyingMasterSignal.SlaveBootTimeout, id, null);
+        }
+    }
+
+    private OdWriteDecision ValidateSlaveAssignmentWrite(byte subindex, byte[] value)
+    {
+        if (subindex == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
+        if (subindex > CanOpenCobId.MaxNodeId) return OdWriteDecision.Reject(SdoAbortCode.SubIndexDoesNotExist);
+        if (value.Length != 4) return OdWriteDecision.Accept;
+        return OdWriteDecision.Accept;
+    }
+
+    private OdWriteDecision ValidateBootTimeWrite(byte subindex, byte[] value)
+    {
+        if (subindex != 0) return OdWriteDecision.Reject(SdoAbortCode.SubIndexDoesNotExist);
+        if (value.Length != 4) return OdWriteDecision.Accept;
+        return OdWriteDecision.Accept;
+    }
+
+    /// <summary>
+    /// A write to <c>1F82h</c> requests an NMT service and does not replace the tracked state.
+    /// The values are the state bytes: 4 stopped, 5 operational, 6 reset node, 7 reset
+    /// communication, 127 pre-operational. Sub-index <c>80h</c> addresses every node.
+    /// </summary>
+    private OdWriteDecision ValidateRequestNmtWrite(byte subindex, byte[] value)
+    {
+        if (subindex == 0) return OdWriteDecision.Reject(SdoAbortCode.AttemptWriteReadOnly);
+        if (subindex > RequestAllNodes) return OdWriteDecision.Reject(SdoAbortCode.SubIndexDoesNotExist);
+        if (value.Length != 1) return OdWriteDecision.Accept;
+        if (_flyingMasterRole != FlyingMasterRole.Active)
+            return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferredDeviceState);
+
+        byte target = subindex == RequestAllNodes ? (byte)0 : subindex;
+        if (target != 0 && (target == _nodeId || !IsAssignedSlave(target)))
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+
+        NmtCommand? command = value[0] switch
+        {
+            RequestStopped => NmtCommand.Stop,
+            RequestOperational => NmtCommand.Start,
+            RequestResetNode => NmtCommand.ResetNode,
+            RequestResetCommunication => NmtCommand.ResetCommunication,
+            RequestPreOperational => NmtCommand.EnterPreOperational,
+            _ => null,
+        };
+        if (command is not { } nmt)
+            return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+
+        RunOnActor(() =>
+        {
+            if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
+            SendNmt(nmt, target);
+        });
+        return OdWriteDecision.Handled;
+    }
+
+    private uint ReadStartup() => _od.ReadUnsigned(Co.NmtStartup, 0x00);
+
+    private uint Assignment(byte nodeId) => _od.ReadUnsigned(Co.SlaveAssignment, nodeId);
+
+    private bool IsAssignedSlave(byte nodeId)
+        => nodeId != _nodeId
+           && nodeId is >= CanOpenCobId.MinNodeId and <= CanOpenCobId.MaxNodeId
+           && (Assignment(nodeId) & SlaveAssignedBit) != 0;
+
+    private bool KeepsAlive(byte nodeId) => (Assignment(nodeId) & SlaveKeepAliveBit) != 0;
+
+    private bool IsMandatory(byte nodeId)
+        => IsAssignedSlave(nodeId) && (Assignment(nodeId) & SlaveMandatoryBit) != 0;
+
+    private bool HasMandatorySlave()
+    {
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+            if (IsMandatory(id)) return true;
+        return false;
+    }
+
+    private bool HasUnseenMandatorySlave()
+    {
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+            if (IsMandatory(id) && !_slaveSeen[id]) return true;
+        return false;
+    }
+
+    private bool HasBootableSlave()
+    {
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
+            if (!IsAssignedSlave(id)) continue;
+            if ((Assignment(id) & (SlaveAssignedBit | SlaveBootBit)) == (SlaveAssignedBit | SlaveBootBit))
+                return true;
+        }
+        return false;
+    }
+
+    private void SendNmt(NmtCommand command, byte target)
+        => _ = SendControlFrame(CanOpenCobId.NmtCommand, new[] { (byte)command, target });
+}
