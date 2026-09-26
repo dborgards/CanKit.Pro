@@ -727,6 +727,390 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().StartWith("This node aborted");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // #38 — CiA 301 separates e (expedited) from s (size indicated). 0x20 is a segmented
+    // download whose bytes 4..7 are reserved, not data; 0x40 is a segmented upload response
+    // whose length arrives with the segments. Before the fix the server committed four bytes
+    // out of a 0x20 initiate and aborted the segments, and the client ignored 0x40.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public void Sdo_Server_Treats_Download_Initiate_0x20_As_Segmented_Not_Expedited()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        var original = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        // ccs=1, e=0, s=0. Bytes 4..7 are reserved; an expedited reading takes them as the value.
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), new byte[] { 0x20, 0x00, 0x21, 0x00, 0x11, 0x22, 0x33, 0x44 });
+        var initAck = tap.Next(ShortTimeout);
+        initAck[0].Should().Be(SdoFrames.ScsDownloadInitAck, "a segmented download is acknowledged, not aborted");
+        SdoFrames.ReadIndex(initAck).Should().Be(((ushort)0x2100, (byte)0x00));
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original,
+            "nothing is committed at the initiate: the four reserved bytes are not an expedited payload");
+
+        var payload = Enumerable.Range(0, 10).Select(i => (byte)(0xA0 + i)).ToArray();
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.CcsDownloadSegmentBase, toggle: false, lastSegment: false, payload.AsSpan(0, 7)));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase,
+            "the segment is part of the transfer, not a protocol error against an expedited write");
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.CcsDownloadSegmentBase, toggle: true, lastSegment: true, payload.AsSpan(7)));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
+
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload,
+            "the value is the segments, in order, and not the reserved bytes of the 0x20 initiate");
+    }
+
+    [Fact]
+    public async Task Sdo_Client_Treats_Upload_Response_0x40_As_Segmented_Not_Ignored()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x05);
+        var init = tap.Next(ShortTimeout);
+        init[0].Should().Be(SdoFrames.CcsUploadInit);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x05));
+
+        // scs=2, e=0, s=0. Bytes 4..7 would be a 2 GiB length if the size bit were ignored,
+        // and four data bytes if the frame were read as expedited.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x40, 0x01, 0x20, 0x05, 0xFF, 0xFF, 0xFF, 0x7F });
+
+        var segReq = tap.Next(ShortTimeout);
+        segReq[0].Should().Be(SdoFrames.CcsUploadSegmentBase,
+            "0x40 opens the segment phase. An expedited reading completes with no further frame, " +
+            "and taking the reserved bytes as a size aborts the transfer as too large");
+        upload.IsCompleted.Should().BeFalse("the value has not arrived yet");
+
+        var payload = Enumerable.Range(0, 10).Select(i => (byte)(0x50 + i)).ToArray();
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: false, payload.AsSpan(0, 7)));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.CcsUploadSegmentBase | SdoFrames.ToggleBit));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: true, lastSegment: true, payload.AsSpan(7)));
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(payload, "the client assembles the segments; the reserved bytes of 0x40 are not the value");
+    }
+
+    // A frame that names the object this upload is waiting on, but is not an upload initiate
+    // response, is not this phase. The value that arrives afterwards is the discriminator: a
+    // download ack must neither complete the upload nor abort it.
+    [Fact]
+    public async Task Sdo_Client_Ignores_A_Download_Ack_That_Names_The_Upload_It_Is_Waiting_On()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x05);
+        var init = tap.Next(ShortTimeout);
+        init[0].Should().Be(SdoFrames.CcsUploadInit);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x05));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x05, 0, 0, 0, 0 });
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x43, 0x01, 0x20, 0x05, 0x11, 0x22, 0x33, 0x44 });
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 },
+            "the download ack is not an upload response, so the expedited value that follows is the result");
+    }
+
+    // Size-less server growth (#38, review on the exact-size realloc). The buffer starts empty
+    // and the first allocation is 8 bytes, then capacity doubles until the next double would
+    // pass MaxSdoTransferBytes, where it clamps to that cap. Offset stays the logical length,
+    // so slack past it is not part of the value. Segment sizes below are chosen so one transfer
+    // takes each of those steps: 7 bytes lands in the seed, 14 doubles 8→16, 21 clamps 16→24
+    // (16 is already past half of 24, so doubling would allocate 32), and the last 3 fit.
+    [Fact]
+    public void Sdo_Server_Sizeless_Download_Doubles_Then_Clamps_To_The_Cap()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 24));
+        var original = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        SendSizelessDownloadInit(rawBus, 0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+
+        var payload = Enumerable.Range(0, 24).Select(i => (byte)i).ToArray();
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: false, payload.AsSpan(0, 7));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+        SendDownloadSegment(rawBus, 0x02, toggle: true, last: false, payload.AsSpan(7, 7));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: false, payload.AsSpan(14, 7));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+        SendDownloadSegment(rawBus, 0x02, toggle: true, last: true, payload.AsSpan(21, 3));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
+
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload,
+            "the value is the 24 segment bytes; capacity left above Offset is not written");
+    }
+
+    [Fact]
+    public void Sdo_Server_Sizeless_Download_Aborts_OutOfMemory_Before_Passing_The_Cap()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 24));
+        var original = new byte[] { 0xEE, 0xEE, 0xEE, 0xEE };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        SendSizelessDownloadInit(rawBus, 0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        var chunk = new byte[] { 1, 2, 3, 4, 5, 6, 7 };
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: false, chunk);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+        SendDownloadSegment(rawBus, 0x02, toggle: true, last: false, chunk);
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: false, chunk);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+
+        // 21 accepted bytes plus another 7 would be 28, past the cap of 24. The segment is
+        // refused before it is copied, and the session does not stay open to be finished later.
+        SendDownloadSegment(rawBus, 0x02, toggle: true, last: false, chunk);
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.OutOfMemory);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 0x01, 0x02, 0x03 });
+        var stray = tap.Next(ShortTimeout);
+        stray[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(stray).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid,
+            "the over-cap segment closed the transfer; a later segment is not a continuation");
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+    }
+
+    // A cap below the 8-byte seed must clamp the first allocation rather than allocate the seed
+    // and then trim. Four bytes in one last segment is the whole transfer.
+    [Fact]
+    public void Sdo_Server_Sizeless_Download_Clamps_The_First_Allocation_Below_The_Growth_Seed()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 4));
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[] { 0x00 });
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        SendSizelessDownloadInit(rawBus, 0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        var payload = new byte[] { 0x10, 0x20, 0x30, 0x40 };
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, payload);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
+    }
+
+    // With no size in the initiate, a fixed-width object can be checked only when the last
+    // segment says how long the value is. A domain (no fixed width) is the other side of that
+    // check and is covered by the transfers above.
+    [Fact]
+    public void Sdo_Server_Sizeless_Download_Accepts_A_Fixed_Width_Object_At_Its_Exact_Length()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddU16(0x2100, 0x00, 0xBEEF);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        SendSizelessDownloadInit(rawBus, 0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 0x34, 0x12 });
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+        server.ObjectDictionary.ReadUnsigned(0x2100, 0x00).Should().Be(0x1234u);
+    }
+
+    [Fact]
+    public void Sdo_Server_Sizeless_Download_Aborts_When_A_Fixed_Width_Object_Comes_Out_Short()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddU16(0x2100, 0x00, 0xBEEF);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        SendSizelessDownloadInit(rawBus, 0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 0x34 });
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooLow);
+        server.ObjectDictionary.ReadUnsigned(0x2100, 0x00).Should().Be(0xBEEFu);
+    }
+
+    [Fact]
+    public void Sdo_Server_Sizeless_Download_Aborts_When_A_Fixed_Width_Object_Comes_Out_Long()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        server.ObjectDictionary.AddU8(0x2100, 0x00, 0x5A);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        SendSizelessDownloadInit(rawBus, 0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 0x01, 0x02 });
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        server.ObjectDictionary.ReadUnsigned(0x2100, 0x00).Should().Be(0x5Au);
+    }
+
+    // A sized initiate still allocates exactly the declared length. Too few bytes at the last
+    // segment, or a segment that runs past that buffer, are the two length aborts on that path.
+    [Fact]
+    public void Sdo_Server_Sized_Download_Aborts_LengthTooLow_When_The_Last_Segment_Is_Short()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        var original = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 10));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 1, 2, 3, 4, 5, 6, 7 });
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooLow);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+    }
+
+    [Fact]
+    public void Sdo_Server_Sized_Download_Aborts_LengthTooHigh_When_A_Segment_Overruns_The_Buffer()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        var original = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 4));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: false, new byte[] { 1, 2, 3, 4, 5, 6, 7 });
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+    }
+
+    // The declared length of a sized initiate is checked against a fixed-width object before
+    // any segment. UNSIGNED64 is eight bytes, so a matching initiate is segmented rather than
+    // expedited, and a length on either side of eight aborts at the initiate.
+    [Fact]
+    public void Sdo_Server_Sized_Download_Of_A_Fixed_Width_Object_Requires_The_Declared_Length()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02);
+        var original = new byte[8];
+        server.ObjectDictionary.AddRaw(0x2100, 0x00, OdDataType.Unsigned64, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 1));
+        var tooLow = tap.Next(ShortTimeout);
+        tooLow[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(tooLow).Should().Be((uint)SdoAbortCode.LengthTooLow);
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 9));
+        var tooHigh = tap.Next(ShortTimeout);
+        tooHigh[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(tooHigh).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+
+        var payload = Enumerable.Range(0, 8).Select(i => (byte)(0x80 + i)).ToArray();
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 8));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadInitAck);
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: false, payload.AsSpan(0, 7));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.ScsDownloadSegmentBase);
+        SendDownloadSegment(rawBus, 0x02, toggle: true, last: true, payload.AsSpan(7, 1));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
+    }
+
+    // The declared length is capped before the buffer is allocated. A 0x21 whose size field is
+    // past MaxSdoTransferBytes aborts with OutOfMemory and installs no session.
+    [Fact]
+    public void Sdo_Server_Sized_Download_Aborts_OutOfMemory_When_The_Declared_Length_Exceeds_The_Cap()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 16));
+        var original = new byte[] { 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 17));
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.OutOfMemory);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 0x01 });
+        var stray = tap.Next(ShortTimeout);
+        stray[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(stray).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid,
+            "the over-cap initiate was refused before a session existed");
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+    }
+
+    private static void SendSizelessDownloadInit(ICanBus rawBus, byte nodeId, ushort index, byte subindex)
+        => Send(rawBus, CanOpenCobId.SdoRx(nodeId), new byte[]
+        {
+            0x20,
+            (byte)(index & 0xFF), (byte)((index >> 8) & 0xFF), subindex,
+            0x11, 0x22, 0x33, 0x44,
+        });
+
+    private static byte[] SizedDownloadInit(ushort index, byte subindex, uint length) => new byte[]
+    {
+        0x21,
+        (byte)(index & 0xFF), (byte)((index >> 8) & 0xFF), subindex,
+        (byte)length, (byte)(length >> 8), (byte)(length >> 16), (byte)(length >> 24),
+    };
+
+    private static void SendDownloadSegment(ICanBus rawBus, byte nodeId, bool toggle, bool last, ReadOnlySpan<byte> payload)
+        => Send(rawBus, CanOpenCobId.SdoRx(nodeId), SdoFrames.BuildSegment(
+            SdoFrames.CcsDownloadSegmentBase, toggle, last, payload));
+
     // Raw-frame tap: queues every frame on a given COB-ID so the test body can drive a fake
     // peer deterministically from its own thread (no in-handler transmits).
     private sealed class FrameTap : IDisposable
