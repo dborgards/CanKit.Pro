@@ -654,6 +654,32 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task An_Equal_Claim_During_The_Detect_Cycle_Yields_To_The_Lower_Node_Id()
+    {
+        using var rig = OpenMaster();
+        Tighten(rig.Node);
+        rig.Node.ObjectDictionary.WriteUnsigned(Timing, 0x06, 30);
+        rig.Node.StartFlyingMaster(1, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        int triggers = rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger) > triggers,
+            80, "the detect cycle has started its timeslot");
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterClaim),
+            new byte[] { 1, 0x05 }, isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby,
+            "the detect cycle is a race, so an equal claim already on the bus wins");
+        rig.Node.ActiveFlyingMasterNodeId.Should().Be(0x05);
+    }
+
+    [Fact]
     public async Task A_Live_Slave_Edit_Is_Not_Restored_As_The_Power_On_Assignment()
     {
         const byte slave = 0x22;

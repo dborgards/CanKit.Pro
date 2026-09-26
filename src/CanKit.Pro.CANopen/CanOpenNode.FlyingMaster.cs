@@ -300,9 +300,11 @@ internal sealed partial class CanOpenNode
         ushort ours = OurPriority();
         if (priority <= ours)
         {
-            // Better, or equal. An equal claim does not depose the master that already holds the
-            // role; during the race the claim that arrived first wins, which is this one.
-            if (_flyingMasterRole == FlyingMasterRole.Active && priority == ours) return;
+            // Better, or equal. An equal claim does not depose a master that is simply active.
+            // During the detect-cycle timeslot it is a race: the claim that is already on the
+            // bus won, including one from an equal priority with a lower node-id.
+            if (_flyingMasterRole == FlyingMasterRole.Active && priority == ours && !_confirmingActiveMaster)
+                return;
             EnterStandby(priority, nodeId);
             return;
         }
