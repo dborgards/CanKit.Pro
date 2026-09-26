@@ -13,12 +13,14 @@ namespace CanKit.Pro.IsoTp
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         event System.EventHandler<CanKit.Pro.IsoTp.IsoTpDatagramReceivedEventArgs>? DatagramReceived;
         int DiscardPendingPdus();
+        int DiscardPendingPdus(long arrivedBefore);
         System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpReceptionInProgress> GetReceptionsInProgress();
         System.Collections.Generic.IAsyncEnumerable<byte[]> ReceiveAllAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]> ReceiveAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpReceivedPdu> ReceiveWithArrivalAsync(System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpTransmitStamps> SendWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task SettleAsync();
         bool TryReceiveWithArrival(out CanKit.Pro.IsoTp.IsoTpReceivedPdu pdu);
     }
     public static class IsoTp
@@ -117,8 +119,21 @@ namespace CanKit.Pro.IsoTp
         public CanKit.Pro.IsoTp.IsoTpFunctionalOptions Options { get; }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> CollectResponsesAsync(System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
         public void Dispose() { }
+        public CanKit.Pro.IsoTp.IsoTpFunctionalListener Listen() { }
         public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> SendAndCollectAsync(System.ReadOnlyMemory<byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpFunctionalCollection> SendAndCollectWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
         public System.Threading.Tasks.Task SendAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.IsoTp.IsoTpTransmitStamps> SendWithTransmitStampAsync(System.ReadOnlyMemory<byte> pdu, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public readonly struct IsoTpFunctionalCollection
+    {
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse> Responses { get; }
+        public CanKit.Pro.IsoTp.IsoTpTransmitStamps TransmitStamps { get; }
+    }
+    public sealed class IsoTpFunctionalListener : System.IDisposable
+    {
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.IsoTp.IsoTpFunctionalResponse>> CollectAsync(System.TimeSpan window, System.Threading.CancellationToken cancellationToken = default) { }
+        public void Dispose() { }
     }
     public sealed class IsoTpFunctionalOptions
     {
@@ -133,6 +148,7 @@ namespace CanKit.Pro.IsoTp
     public sealed class IsoTpFunctionalResponse
     {
         public byte[] Data { get; }
+        public long HostArrivalTimestamp { get; }
         public uint SourceCanId { get; }
     }
     public sealed class IsoTpOverflowException : CanKit.Pro.IsoTp.IsoTpException

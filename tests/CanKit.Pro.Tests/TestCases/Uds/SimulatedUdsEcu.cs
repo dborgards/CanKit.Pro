@@ -37,6 +37,7 @@ public sealed class SimulatedUdsEcu : IDisposable
     private int _disposed;
 
     private int _requestsHandled;
+    private int _pendingNrcsSent;
     private byte[]? _lastRequest;
 
     /// <summary>Number of requests the ECU has answered (for assertions).</summary>
@@ -47,6 +48,9 @@ public sealed class SimulatedUdsEcu : IDisposable
     /// (<c>RequestsHandled==0</c> after a successful DiagnosticSessionControl).
     /// </remarks>
     public int RequestsHandled => Volatile.Read(ref _requestsHandled);
+
+    /// <summary>NRC 0x78 frames a pending-then-negative handler has handed to the channel.</summary>
+    public int PendingNrcsSent => Volatile.Read(ref _pendingNrcsSent);
 
     /// <summary>Last request the ECU saw (or <c>null</c>).</summary>
     public byte[]? LastRequest => Volatile.Read(ref _lastRequest);
@@ -156,6 +160,34 @@ public sealed class SimulatedUdsEcu : IDisposable
                         if (body.Length > 0) Buffer.BlockCopy(body, 0, response, 1, body.Length);
                         await SendAndCountAsync(response, ct).ConfigureAwait(false);
                     }
+                    catch (EcuResponsePendingThenNegative pendingNegative)
+                    {
+                        // Off the loop: the ECU keeps serving other requests while this one's
+                        // 0x78 and final negative go out on their own schedule (#150).
+                        var pn = pendingNegative;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                if (pn.DelayBefore > TimeSpan.Zero)
+                                    await Task.Delay(pn.DelayBefore, ct).ConfigureAwait(false);
+                                for (int i = 0; i < pn.PendingCount && !ct.IsCancellationRequested; i++)
+                                {
+                                    await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
+                                    Interlocked.Increment(ref _pendingNrcsSent);
+                                }
+                                if (pn.DelayAfter > TimeSpan.Zero)
+                                    await Task.Delay(pn.DelayAfter, ct).ConfigureAwait(false);
+                                if (ct.IsCancellationRequested) return;
+                                await SendAndCountAsync(new byte[] { 0x7F, sid, pn.Nrc }, ct)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                // the ECU was disposed mid-sequence
+                            }
+                        }, ct);
+                    }
                     catch (EcuResponsePendingThenSilent pendingSilent)
                     {
                         for (int i = 0; i < pendingSilent.PendingCount && !ct.IsCancellationRequested; i++)
@@ -245,6 +277,31 @@ public sealed class EcuResponsePending : Exception
 
 /// <summary>Sentinel thrown by an ECU handler to force N × NRC 0x78 and then go completely
 /// silent — the client's restarted P2* timer must expire (FR-UDS-008).</summary>
+/// <summary>Send N × NRC 0x78, then a negative response: the final answer is negative (#150).</summary>
+public sealed class EcuResponsePendingThenNegative : Exception
+{
+    /// <summary>How many NRC 0x78 frames to send.</summary>
+    public int PendingCount { get; }
+
+    /// <summary>The final negative response code.</summary>
+    public byte Nrc { get; }
+
+    /// <summary>Delay before the first 0x78.</summary>
+    public TimeSpan DelayBefore { get; }
+
+    /// <summary>Delay between the last 0x78 and the negative response.</summary>
+    public TimeSpan DelayAfter { get; }
+
+    /// <summary>Creates the sentinel.</summary>
+    public EcuResponsePendingThenNegative(int pendingCount, byte nrc, TimeSpan? delayBefore = null, TimeSpan? delayAfter = null)
+    {
+        PendingCount = pendingCount;
+        Nrc = nrc;
+        DelayBefore = delayBefore ?? TimeSpan.Zero;
+        DelayAfter = delayAfter ?? TimeSpan.Zero;
+    }
+}
+
 public sealed class EcuResponsePendingThenSilent : Exception
 {
     /// <summary>How many NRC 0x78 frames to send before going silent.</summary>

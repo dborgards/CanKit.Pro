@@ -43,6 +43,30 @@ next-version: 0.1.0
 # tool looks.
 
 branches:
+  # GitHub's merge queue builds `gh-readonly-queue/main/pr-<n>-<sha>`, a merge of the queued
+  # pull requests onto `main`. Nothing else here matches that name, so GitVersion 6.8.2 used to
+  # fall through to the preset's `unknown` branch and still exit 0 — the version job's
+  # unversioned fallback never ran. FullSemVer was then
+  # `1.2.4-gh-readonly-queue-main-pr-<n>-<sha>.1+<commits>`: the whole ref as the prerelease,
+  # plus build metadata. `dotnet pack -p:Version=` keeps the `+<commits>` in the nuspec and
+  # drops it from the package filename. `main` and `pull-request` are named without metadata
+  # (`1.2.4-ci.<n>`, `1.2.4-pr.<n>`). This branch does the same for a queue entry:
+  # `1.2.4-queue.<n>`.
+  #
+  # `[/-]` is there so the regex matches whichever spelling 6.8.2 compares against: the raw ref,
+  # slashes included, or the escaped one with those slashes already turned into hyphens.
+  # eng/verify-merge-queue-version.sh builds a two-pull-request queue ref and checks the result.
+  merge-queue:
+    mode: ContinuousDelivery
+    label: queue
+    increment: Patch
+    prevent-increment:
+      of-merged-branch: true
+    track-merge-target: false
+    track-merge-message: true
+    regex: '^gh-readonly-queue[/-]main[/-]'
+    source-branches:
+      - main
   main:
     # `label: ci` rather than '': a CI build of main is not a release, and a bare `1.2.4+12` in an
     # artifact list reads exactly like one. With the label it is `1.2.4-ci.12` and says so, which

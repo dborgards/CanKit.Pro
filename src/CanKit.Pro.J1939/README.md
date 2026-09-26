@@ -23,12 +23,22 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   0xEE00 from SA = 0xFE) when the field is exhausted. Governed by
   `J1939NodeOptions.EnableArbitraryAddressClaiming` (default: derived from
   the NAME's Arbitrary Address Capable bit). A move after a successful claim
-  is announced through `AddressClaimChanged`; nobody awaits it.
+  is announced through `AddressClaimChanged`; nobody awaits it. The Cannot
+  Claim, and the next claim after losing, go out after the pseudo-random
+  0..153 ms backoff of SAE J1939-81 §4.4.4.3 (the low byte of the NAME's bytes
+  summed, times 0.6 ms), so two nodes colliding on an address do not answer in
+  lockstep; and a second `ClaimAddressAsync` while one is in arbitration faults
+  with `InvalidOperationException` rather than silently cancelling the first (#58).
 - **Request for Address Claimed** (SAE J1939-81 §4.2.2): a Request for PGN
   0xEE00 is answered by the node itself — with its Address Claimed while it
   holds or arbitrates an address, with Cannot Claim while it holds none — so
-  a network-management tool scanning the bus sees it. The request still
-  reaches `MessageReceived`.
+  a network-management tool scanning the bus sees it. A Cannot Claim answer
+  waits the §4.4.4.3 backoff below and shares it with the one a lost claim
+  owes, since every Cannot Claim carries the same null source address; a
+  claim still waiting its backoff answers by starting its round. The request
+  still reaches `MessageReceived`. `ClaimAddressAsync` faults only once the
+  Cannot Claim it owes has gone out, so a caller that disposes the node on the
+  exception cannot suppress it.
 - **Request-PGN** (PGN 0xEA00) send and receive (**FR-J1939-005**).
 - **Auto-routing** to J1939-TP for payloads > 8 bytes; direct 29-bit frames
   for payloads ≤ 8 bytes (**FR-J1939-006**).

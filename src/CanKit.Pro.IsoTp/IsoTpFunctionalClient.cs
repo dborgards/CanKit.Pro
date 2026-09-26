@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -55,6 +57,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
     // Shared dummy parsing endpoint for Normal addressing (no AE byte) — used in TryParsePci.
     private static readonly IsoTpEndpoint NormalParseEndpoint = IsoTpEndpoint.Normal(0, 0);
+
+    // CancellationTokenSource.CancelAfter's bound.
+    private static readonly TimeSpan MaxWindow = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     private int _disposed;
 
@@ -120,10 +125,30 @@ public sealed class IsoTpFunctionalClient : IDisposable
         ReadOnlyMemory<byte> pdu,
         TimeSpan window,
         CancellationToken cancellationToken = default)
+        => (await SendAndCollectWithTransmitStampAsync(pdu, window, cancellationToken).ConfigureAwait(false)).Responses;
+
+    /// <summary>
+    /// As <see cref="SendAndCollectAsync"/>, also returning when the request was handed to the
+    /// driver and when it was transmitted (<see cref="IsoTpTransmitStamps"/>, zero where the
+    /// driver reports neither). A response that arrived before the handoff answers something
+    /// else -- the subscription is made before the send, and a frame from between the two is
+    /// not this request's -- and is left out (Codex on #150); a caller keeping its own deadline
+    /// from a response, such as UDS P2* from an NRC 0x78, anchors it no earlier than the
+    /// handoff for the same reason.
+    /// </summary>
+    public async Task<IsoTpFunctionalCollection> SendAndCollectWithTransmitStampAsync(
+        ReadOnlyMemory<byte> pdu,
+        TimeSpan window,
+        CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         if (pdu.Length == 0)
             throw new ArgumentException("ISO-TP PDU must be non-empty.", nameof(pdu));
+        // A window the collector's timer would refuse is refused here, before the frame goes
+        // out: the send is not undone by the argument error that would follow it (Codex on #150).
+        if (window < TimeSpan.Zero || window > MaxWindow)
+            throw new ArgumentOutOfRangeException(nameof(window), window,
+                "The collection window must be between zero and what a timer can measure (about 49 days).");
 
         // Drain-before-send: subscribe, synchronously discard whatever is already buffered
         // (background chatter, a previous request's late reply, an unrelated broadcast, …),
@@ -144,9 +169,13 @@ public sealed class IsoTpFunctionalClient : IDisposable
         using var sub = _service.Subscribe(_responseFilter, includeEcho: true);
         DrainBuffered(sub);
 
-        await SendSingleFrameAsync(pdu, cancellationToken).ConfigureAwait(false);
+        var stamps = await SendSingleFrameAsync(pdu, cancellationToken).ConfigureAwait(false);
 
-        return await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
+        var collected = await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
+        long cutoff = stamps.LastFrameHandoffTimestamp;
+        if (cutoff > 0 && collected.Any(r => r.HostArrivalTimestamp < cutoff))
+            collected = collected.Where(r => r.HostArrivalTimestamp >= cutoff).ToList().AsReadOnly();
+        return new IsoTpFunctionalCollection(collected, stamps);
     }
 
     /// <summary>
@@ -164,6 +193,14 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// </exception>
     /// <exception cref="IsoTpException">TX-confirm failed.</exception>
     public Task SendAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
+        => SendWithTransmitStampAsync(pdu, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="SendAsync"/>, returning when the frame was handed to the driver and when
+    /// it was transmitted (<see cref="IsoTpTransmitStamps"/>, zero where the driver reports
+    /// neither), for a caller that keeps a deadline from the transmission (Codex on #150).
+    /// </summary>
+    public Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         if (pdu.Length == 0)
@@ -193,6 +230,19 @@ public sealed class IsoTpFunctionalClient : IDisposable
         return await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Subscribes to the response range now and returns a listener that keeps the subscription
+    /// across collections. Obtained before a <see cref="SendAsync"/>, it closes the gap between
+    /// send and subscribe that <see cref="CollectResponsesAsync"/> leaves, and a response that
+    /// arrives between two of its collections is buffered for the next one.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The client was disposed.</exception>
+    public IsoTpFunctionalListener Listen()
+    {
+        ThrowIfDisposed();
+        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true));
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -209,7 +259,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// Sends <paramref name="pdu"/> as a functional Single Frame and awaits the CAN driver's
     /// TX confirmation.
     /// </summary>
-    private async Task SendSingleFrameAsync(ReadOnlyMemory<byte> pdu, CancellationToken ct)
+    private async Task<IsoTpTransmitStamps> SendSingleFrameAsync(ReadOnlyMemory<byte> pdu, CancellationToken ct)
     {
         int sfMax = IsoTpFrameCodec.SingleFrameMaxDataLength(_options.UseCanFd,
             _txEndpoint.UsesAddressExtension);
@@ -249,6 +299,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
                     new IsoTpException("Functional Single Frame TX confirmation failed with unknown reason."),
             };
         }
+        return new IsoTpTransmitStamps(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
     }
 
     private static async Task<IReadOnlyList<IsoTpFunctionalResponse>> CollectFromSubscriptionAsync(
@@ -257,6 +308,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
         var responses = new List<IsoTpFunctionalResponse>();
 
         // Combine the caller's token with a deadline token so the window bounds the collection.
+        // The window's end is also held as an arrival stamp: the timer's callback and this
+        // method's continuations are scheduling, and a frame that arrived after the deadline
+        // but before they ran is not the window's (Codex on #150).
+        long deadline = Stopwatch.GetTimestamp() + (long)(window.TotalSeconds * Stopwatch.Frequency);
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         windowCts.CancelAfter(window);
         var windowToken = windowCts.Token;
@@ -265,8 +320,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
         {
             await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frameEvent.Frame, out var response))
-                    responses.Add(response!);
+                if (TryParseFunctionalResponse(frameEvent, out var response) && response!.HostArrivalTimestamp <= deadline)
+                    responses.Add(response);
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -285,8 +340,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
             sub.Dispose();
             while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frameEvent.Frame, out var response))
-                    responses.Add(response!);
+                if (TryParseFunctionalResponse(frameEvent, out var response) && response!.HostArrivalTimestamp <= deadline)
+                    responses.Add(response);
             }
         }
 
@@ -303,9 +358,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
         while (sub.TryRead(out _)) { }
     }
 
-    private static bool TryParseFunctionalResponse(CanFrameView frame,
+    internal static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
         out IsoTpFunctionalResponse? response)
     {
+        var frame = frameEvent.Frame;
         var payload = frame.Data.ToArray();
         bool isCanFd = frame.FrameKind == CanFrameType.CanFd;
 
@@ -333,7 +389,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
-        response = new IsoTpFunctionalResponse((uint)frame.ID, pdu);
+        // Stamped by the demux at arrival; "now" only for an event built without a stamp.
+        var arrival = frameEvent.HostArrivalTimestamp > 0 ? frameEvent.HostArrivalTimestamp : Stopwatch.GetTimestamp();
+        response = new IsoTpFunctionalResponse((uint)frame.ID, pdu, arrival);
         return true;
     }
 

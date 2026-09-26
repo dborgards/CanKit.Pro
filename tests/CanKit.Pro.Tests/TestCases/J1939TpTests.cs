@@ -61,7 +61,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
 
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var sender = J1939TpFactory.Open(service, sourceAddress: 0x10, options: opts);
         using var receiver = J1939TpFactory.Open(service, sourceAddress: 0x20, options: opts);
 
@@ -78,8 +78,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         datagram.Payload.Should().Equal(payload);
     }
 
-    // Regression for #23: a TP channel must never receive its own broadcast, even on an adapter
-    // whose echoes are not flagged.
+    // Regression for #23, now in both echo worlds (#94). A TP channel must never receive its own
+    // broadcast.
     //
     // #23 gave subscriptions a real IsEcho bit and withheld echoes by default, and the
     // source-address self-check in J1939TpChannel.RunReaderAsync was deleted as redundant. It is
@@ -89,30 +89,56 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // the check, SendBamAsync consumed its own globally addressed BAM and DT frames and
     // republished the outbound payload as an inbound datagram.
     //
-    // Deliberately the real Virtual adapter and not ControllableBus: the whole point is the
-    // behaviour of an adapter that does not flag its echo, so substituting a double that does
-    // would test the opposite of what this pins.
-    [Fact]
-    public async Task Bam_Sender_On_An_Unflagged_Echo_Bus_Does_Not_Receive_Its_Own_Broadcast()
+    // The original pin, Bam_Sender_On_An_Unflagged_Echo_Bus_Does_Not_Receive_Its_Own_Broadcast,
+    // reached only the unflagged world — the one where the gate is a no-op and the source-address
+    // check is the only defence. On a flagging bus the same check is what a later edit would be
+    // tempted to delete again, so the world is a parameter. The peer broadcast is the barrier:
+    // its frames are injected after ours, a single subscription delivers in that order, and the
+    // datagram that comes back has to be the peer's.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task Bam_Sender_Does_Not_Receive_Its_Own_Broadcast(EchoWorld world)
     {
-        var session = NewSession();
-        using var bus = VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo);
+        using var echo = EchoWorldFixture.Create(world, NewSession());
 
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
-        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x11, options: opts);
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(echo.Bus, sourceAddress: 0x11, options: opts);
 
-        var payload = RandomPayload(100, seed: 23);
+        var ownPayload = RandomPayload(100, seed: 23);
+        var peerPayload = RandomPayload(9, seed: 24);
 
-        // Start listening before sending: if the channel does route its own echo, the datagram
-        // shows up here rather than being missed by a late subscriber.
-        var selfReceive = sender.ReceiveAsync();
-        await sender.SendBamAsync(0xFECAu, payload).WithTimeout(ShortTimeout);
+        // Start listening before sending: if the channel does route its own echo, that datagram
+        // is the one that comes back, ahead of the peer's.
+        var received = sender.ReceiveAsync();
+        await sender.SendBamAsync(0xFECAu, ownPayload).WithTimeout(ShortTimeout);
+        InjectBam(echo, sourceAddress: 0x22, pgn: 0xFECBu, peerPayload);
 
-        var settled = await Task.WhenAny(selfReceive, Task.Delay(TimeSpan.FromMilliseconds(500)));
-        settled.Should().NotBeSameAs(
-            selfReceive,
+        var datagram = await received.AsTaskWithTimeout(ShortTimeout);
+        datagram.SourceAddress.Should().Be(
+            0x22,
             "a TP channel must not reassemble its own broadcast; the echo gate cannot drop what "
-            + "the Virtual adapter never flagged, so the source-address check has to catch it");
+            + "an unflagged adapter never marked, so the source-address check has to catch it "
+            + "in both worlds");
+        datagram.Pgn.Should().Be(0xFECBu);
+        datagram.Payload.Should().Equal(peerPayload);
+    }
+
+    // A complete BAM from somebody else: TP.CM(BAM) then TP.DT 1..N, the same bytes the sender
+    // would have put on the wire. Nine bytes is the shortest payload the transport will carry.
+    private static void InjectBam(EchoWorldFixture echo, byte sourceAddress, uint pgn, byte[] payload)
+    {
+        int packets = J1939TpFrames.TotalPackets(payload.Length);
+        var cmId = unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, sourceAddress));
+        echo.InjectPeerFrame(CanFrame.Classic(cmId,
+            J1939TpFrames.BuildBam(payload.Length, packets, pgn), isExtendedFrame: true));
+
+        var dtId = unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, sourceAddress));
+        for (int i = 0; i < packets; i++)
+        {
+            echo.InjectPeerFrame(CanFrame.Classic(dtId,
+                J1939TpFrames.BuildDt((byte)(i + 1), payload, i * J1939TpFrames.DtDataBytes),
+                isExtendedFrame: true));
+        }
     }
 
     // FR-TP-030 + FR-TP-032 + FR-TP-033: TP.BAM sender broadcasts a 100-byte PDU; the receiver
@@ -125,7 +151,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         // Shorten Th so the test runs in <1s while still exercising the timer.
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
 
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x11, options: opts);
         using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x22, options: opts);
@@ -187,7 +213,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var payload = RandomPayload(112, seed: 99);
         var receiveTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
 
-        await sender.SendCmAsync(0xEF10, destinationAddress: 0x04, payload).WithTimeout(ShortTimeout);
+        await sender.SendCmAsync(0xFF10, destinationAddress: 0x04, payload).WithTimeout(ShortTimeout);
         var datagram = await receiveTask;
         datagram.Payload.Should().Equal(payload);
     }
@@ -209,7 +235,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // pacing the test cannot avoid -- inside a 5 s ShortTimeout. That leaves roughly 107 ms
         // of slack per scheduled hop, and the gaps are actor Schedule callbacks, so a loaded
         // runner eats it. At 5 ms the same 28 gaps cost 140 ms and the margin is ~35x.
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x10, options: opts);
         using var receiverB = J1939TpFactory.Open(busB, sourceAddress: 0xB0, options: opts);
         using var receiverC = J1939TpFactory.Open(busC, sourceAddress: 0xC0, options: opts);
@@ -219,8 +245,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var payloadCmC = RandomPayload(250, seed: 3);
 
         var pgnBam = 0xFEF0u;
-        var pgnCmB = 0xEE10u;
-        var pgnCmC = 0xEE20u;
+        var pgnCmB = 0xFE10u;
+        var pgnCmC = 0xFE20u;
 
         // Collect BAM on both receivers, CM only on its target.
         var collectB = CollectAsync(receiverB, count: 2, ShortTimeout);
@@ -269,13 +295,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x30, options: opts);
 
-        var send = sender.SendCmAsync(0xEE30, destinationAddress: 0x99,
+        var send = sender.SendCmAsync(0xFE30, destinationAddress: 0x99,
             RandomPayload(50, seed: 5));
 
         Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
         var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
         ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
-        ex.Pgn.Should().Be(0xEE30u);
+        ex.Pgn.Should().Be(0xFE30u);
     }
 
     // FR-TP-030 lower-bound check: a 9-byte payload (the smallest legal J1939-TP payload;
@@ -287,7 +313,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x40, options: opts);
         using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x41, options: opts);
 
@@ -317,7 +343,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // parking, and the same load costs 1-3 s (#114).
         //
         // Paced BAM is covered by the other BAM tests in this file, which is why it can go here.
-        var opts = new J1939TpOptions().With(th: TimeSpan.Zero);
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.Zero);
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x50, options: opts);
         using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x51, options: opts);
 
@@ -344,8 +370,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x22;
         const byte peerSa = 0x11;
-        const uint activePgn = 0xABCDu;
-        const uint intruderPgn = 0x9876u;
+        const uint activePgn = 0xFBCDu;
+        const uint intruderPgn = 0xF876u;
 
         // 14-byte payload = exactly 2 TP.DT frames -> minimal, deterministic size.
         var payload = RandomPayload(14, seed: 314);
@@ -469,8 +495,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte receiverSa = 0x22;
         const byte peerASa = 0x11;
         const byte peerBSa = 0x33;
-        const uint pgnA = 0xEE10u;
-        const uint pgnB = 0xEE20u;
+        const uint pgnA = 0xFE10u;
+        const uint pgnB = 0xFE20u;
 
         var payloadA = RandomPayload(14, seed: 1);
         var payloadB = RandomPayload(14, seed: 2);
@@ -519,7 +545,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         using var inner = new CanBusService(busA);
         using var rejecting = new RejectTpCmBusService(inner);
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var sender = J1939TpFactory.Open(rejecting, sourceAddress: 0x51, options: opts, leaveOpen: true);
 
         var dtSeen = 0;
@@ -568,7 +594,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
-        Func<Task> act = async () => await sender.SendCmAsync(0xEE61, destinationAddress: 0x62,
+        Func<Task> act = async () => await sender.SendCmAsync(0xFE61, destinationAddress: 0x62,
             RandomPayload(50, seed: 61), cts.Token);
         await act.Should().ThrowAsync<OperationCanceledException>();
 
@@ -587,7 +613,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x71;
         const byte peerSa = 0x72;
-        const uint pgn = 0xEE71u;
+        const uint pgn = 0xFE71u;
 
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
 
@@ -655,7 +681,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x82;
         const byte peerSa = 0x83;
-        const uint pgn = 0xEE82u;
+        const uint pgn = 0xFE82u;
 
         var opts = new J1939TpOptions().With(
             t2: TimeSpan.FromMilliseconds(80),
@@ -711,7 +737,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x84;
         const byte peerSa = 0x85;
-        const uint pgn = 0xEE84u;
+        const uint pgn = 0xFE84u;
         var payload = RandomPayload(14, seed: 99);
 
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa);
@@ -760,7 +786,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         bgEx.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
 
         // Channel remains usable for a subsequent BAM after the abort (fault consumed once).
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var senderBus = Open(session, 2);
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0x11, options: opts);
         var okPayload = RandomPayload(14, seed: 123);
@@ -777,7 +803,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public void ReadDataPgn_MasksReservedBitsInByte7()
     {
-        const uint pgn = 0x12345u; // fits in 18 bits
+        const uint pgn = 0x1F345u; // fits in 18 bits
         var rts = J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn);
         rts[7] |= 0xFC; // set reserved upper 6 bits (would yield > MaxValue if unmasked)
 
@@ -795,7 +821,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x88;
         const byte peerSa = 0x89;
-        const uint pgn = 0xEE88u;
+        const uint pgn = 0xFE88u;
 
         var opts = new J1939TpOptions().With(
             t2: TimeSpan.FromMilliseconds(80),
@@ -886,7 +912,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x8D;
         const byte peerSa = 0x8E;
-        const uint pgn = 0xEE8Du;
+        const uint pgn = 0xFE8Du;
         var payload = RandomPayload(50, seed: 0x8D);
 
         // Long T3 so a missed abort would hang well past ShortTimeout.
@@ -929,7 +955,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x91;
         const byte peerSa = 0x92;
-        const uint pgn = 0xEE91u;
+        const uint pgn = 0xFE91u;
         var payload = RandomPayload(14, seed: 91);
 
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
@@ -976,7 +1002,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x93;
         const byte peerSa = 0x94;
-        const uint pgn = 0xEE93u;
+        const uint pgn = 0xFE93u;
         var payload = RandomPayload(14, seed: 93); // 2 packets
 
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
@@ -1136,7 +1162,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x92;
         const byte peerSa = 0x93;
-        const uint pgn = 0xEE92u;
+        const uint pgn = 0xFE92u;
 
         var opts = new J1939TpOptions().With(
             t1: TimeSpan.FromMilliseconds(120),
@@ -1192,7 +1218,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x01;
         const byte peerSa = 0x02;
-        const uint pgn = 0xEF01u;
+        const uint pgn = 0xFF01u;
 
         // T3 is the originator's timer after the last packet of a block as well as after the
         // RTS (§5.10.2.4, #31); T2 is the receiver's and plays no part on this side.
@@ -1241,7 +1267,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x03;
         const byte peerSa = 0x04;
-        const uint pgn = 0xEF03u;
+        const uint pgn = 0xFF03u;
 
         var opts = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5),
@@ -1288,7 +1314,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte senderSa = 0x05;
         const byte peerSa = 0x06;
-        const uint pgn = 0xEF05u;
+        const uint pgn = 0xFF05u;
 
         var opts = new J1939TpOptions().With(
             t2: TimeSpan.FromSeconds(5),
@@ -1343,7 +1369,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x96;
         const byte peerSa = 0x97;
-        const uint pgn = 0xEE96u;
+        const uint pgn = 0xFE96u;
 
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa); // cap 16 by default
 
@@ -1406,8 +1432,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         const byte receiverSa = 0x22;
         const byte peerSa = 0x11;
-        const uint globalPgn = 0xABCDu;
-        const uint directedPgn = 0x9876u;
+        const uint globalPgn = 0xFBCDu;
+        const uint directedPgn = 0xF876u;
 
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa,
             options: new J1939TpOptions().With(t2: TimeSpan.FromSeconds(5)));
@@ -1541,7 +1567,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var firstPayload = RandomPayload(21, seed: 321);  // 3 TP.DT
         var secondPayload = RandomPayload(35, seed: 322); // 5 TP.DT
 
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x20, options: opts);
 
@@ -1588,7 +1614,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var receiverBus = Open(session, 1);
 
         const byte senderSa = 0x10;
-        var opts = new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5));
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x20, options: opts);
 
@@ -1625,7 +1651,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0x10,
-            options: new J1939TpOptions().With(th: TimeSpan.FromMilliseconds(5)));
+            options: new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5)));
 
         var first = sender.SendBamAsync(0xFEC1u, RandomPayload(35, seed: 1));
         var waiting = sender.SendBamAsync(0xFEC2u, RandomPayload(21, seed: 2));
@@ -1657,9 +1683,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         frame[1].Should().Be(code);
     }
 
-    // A CTS asking for a packet already sent is a retransmit request; this stack does not
-    // retransmit, so the limit is reached at once (table 7, code 5). Before #33 it went out
-    // as 5 by coincidence of a different meaning ("unexpected CTS sequence number").
+    // A CTS asking for a packet already sent is a retransmit request; with
+    // MaxRetransmitRequests = 0 this stack serves none, so the limit is reached at once
+    // (table 7, code 5). Before #33 it went out as 5 by coincidence of a different meaning
+    // ("unexpected CTS sequence number"); since #58 the default serves two, covered by
+    // A_Retransmit_Request_Is_Served_Until_The_Limit.
     [Fact]
     public async Task Cm_Sender_CtsForAPacketAlreadySent_AbortsWithRetransmitLimit()
     {
@@ -1672,7 +1700,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xFEA1u;
         var payload = RandomPayload(21, seed: 161); // 3 packets
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa,
+            options: new J1939TpOptions().With(maxRetransmitRequests: 0));
 
         var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var firstDtSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1891,6 +1920,402 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         return new WeakReference(send);
     }
 
+    // ---------------------------------------------------------------------------------------
+    // #58: the four transport findings from the repository review.
+    // ---------------------------------------------------------------------------------------
+
+    // A raw peer on its own bus, observing every TP.CM the subject emits and able to answer.
+    private sealed class RawPeer : IDisposable
+    {
+        private readonly List<byte[]> _cm = new();
+        private readonly List<byte[]> _dt = new();
+        private readonly SemaphoreSlim _ready = new(0);
+        public ICanBus Bus { get; }
+        public byte SubjectSa { get; }
+
+        public RawPeer(ICanBus bus, byte subjectSa)
+        {
+            Bus = bus;
+            SubjectSa = subjectSa;
+            bus.FrameObserved += (_, e) =>
+            {
+                var frame = e.CanFrame;
+                if (!frame.IsExtendedFrame) return;
+                var fields = J1939Id.Decompose((uint)frame.ID);
+                if (fields.SourceAddress != subjectSa) return;
+                var data = frame.Data.ToArray();
+                lock (_cm)
+                {
+                    if (J1939Pgn.IsTransportCm(fields.Pgn)) _cm.Add(data);
+                    else if (fields.Pgn == J1939Pgn.TpDt) _dt.Add(data);
+                }
+                _ready.Release();
+            };
+        }
+
+        public int DtCount { get { lock (_cm) return _dt.Count; } }
+
+        public async Task<byte[]> WaitForCmAsync(Func<byte[], bool> predicate, TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            while (true)
+            {
+                lock (_cm)
+                {
+                    foreach (var d in _cm) if (predicate(d)) return d;
+                }
+                await _ready.WaitAsync(cts.Token).ConfigureAwait(false);
+            }
+        }
+
+        public async Task WaitForDtCountAsync(int count, TimeSpan timeout)
+        {
+            using var cts = new CancellationTokenSource(timeout);
+            while (DtCount < count) await _ready.WaitAsync(cts.Token).ConfigureAwait(false);
+        }
+
+        public void SendCm(byte peerSa, byte[] payload)
+            => Bus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, SubjectSa), payload, isExtendedFrame: true));
+
+        public void SendDt(byte peerSa, byte[] payload)
+            => Bus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, SubjectSa), payload, isExtendedFrame: true));
+
+        public void Dispose() => _ready.Dispose();
+    }
+
+    // #58: a peer that writes the destination address into the low byte of a PDU1 PGN in its
+    // TP.CM names the same group; its CTS must still reach the originator's session.
+    [Fact]
+    public async Task A_Cts_With_The_Destination_In_The_Pgns_Low_Byte_Reaches_The_Session()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xC800u; // PDU1: PF 0xC8, PS 0
+        var payload = RandomPayload(14, seed: 58);
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+
+        // The CTS's PGN field carries our address in the low byte: 0xF810 rather than 0xC800.
+        var ctsFrame = J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 1, dataPgn: pgn | subjectSa);
+        peer.SendCm(peerSa, ctsFrame);
+        await peer.WaitForDtCountAsync(2, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(14, 2, pgn | subjectSa));
+        await send.WaitAsync(ShortTimeout);
+    }
+
+    // #58: a PDU1 PGN with its low byte set is not a PGN -- the destination is the address
+    // argument -- and is refused before anything goes out, as J1939Id.ComposePgn refuses it
+    // (#55); the session is keyed on what the peer names in its CTS.
+    [Fact]
+    public async Task A_Pdu1_Pgn_With_A_Low_Byte_Is_Refused_Before_Anything_Goes_Out()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x10);
+        int transmitted = 0;
+        bus.FrameObserved += (_, e) => { if (e.CanFrame.IsExtendedFrame) Interlocked.Increment(ref transmitted); };
+
+        Func<Task> cm = () => sender.SendCmAsync(0xEE8Du, 0x20, RandomPayload(14, seed: 1));
+        await cm.Should().ThrowAsync<ArgumentOutOfRangeException>().WithParameterName("pgn");
+        Func<Task> bam = () => sender.SendBamAsync(0xEE8Du, RandomPayload(14, seed: 1));
+        await bam.Should().ThrowAsync<ArgumentOutOfRangeException>().WithParameterName("pgn");
+        await Task.Delay(50);
+        transmitted.Should().Be(0, "nothing was transmitted");
+    }
+
+    // #58: an RTS that allows no packet per CTS can never be served -- every CTS would be a
+    // hold -- and is not "no limit"; no session is opened, and the next well-formed RTS from
+    // the same peer is served.
+    [Fact]
+    public async Task An_Rts_Allowing_No_Packet_Per_Cts_Opens_No_Session()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x22, peerSa = 0x11;
+        const uint pgn = 0xFBCDu;
+        using var receiver = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0, dataPgn: pgn));
+        Func<Task> none = () => peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlCts, TimeSpan.FromMilliseconds(300));
+        await none.Should().ThrowAsync<OperationCanceledException>("no CTS answers an RTS that permits none");
+
+        // Served, because no session lingers for the malformed one.
+        peer.SendCm(peerSa, J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn));
+        var ctsFrame = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlCts, ShortTimeout);
+        ctsFrame[1].Should().BeGreaterThan(0);
+    }
+
+    // #58: a CTS for a packet already sent asks for it again and is served, up to
+    // MaxRetransmitRequests times; the next one reaches table 7's limit (reason 5).
+    [Fact]
+    public async Task A_Retransmit_Request_Is_Served_Until_The_Limit()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFECAu;
+        var payload = RandomPayload(21, seed: 5); // three packets
+        var opts = new J1939TpOptions().With(maxRetransmitRequests: 1);
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa, options: opts);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        // Packet 2 again: served -- one more DT, with SN 2.
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+
+        // And again: the limit of one is reached, reason 5.
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn));
+        var abort = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlAbort, ShortTimeout);
+        abort[1].Should().Be((byte)J1939TpAbortReason.MaximumRetransmitRequestsReached);
+        Func<Task> failed = () => send;
+        await failed.Should().ThrowAsync<J1939TpAbortException>();
+    }
+
+    // Bugbot on #152: a receiver that asked for one packet again and then has the whole
+    // message sends EndOfMsgAck, not another CTS; the originator, every packet sent at least
+    // once, completes on it.
+    [Fact]
+    public async Task An_End_Of_Message_After_A_Partial_Retransmit_Completes_The_Send()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC5u;
+        var payload = RandomPayload(21, seed: 6); // three packets
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn)); // packet 2 again
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(21, 3, pgn));
+        await send.WaitAsync(ShortTimeout);
+    }
+
+    // Codex on #152: a retransmit request that arrives while a block is still draining takes
+    // effect as soon as the outstanding DT is confirmed -- the receiver is missing a packet,
+    // and every later one it gets meanwhile is out of sequence to it -- not after the block.
+    [Fact]
+    public async Task A_Retransmit_Request_Mid_Block_Takes_Effect_After_The_Outstanding_Packet()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC6u;
+        var payload = RandomPayload(21, seed: 7); // three packets
+        using var sender = J1939TpFactory.Open(service, sourceAddress: subjectSa);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            if (fields.Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        // Packet 1 asked for again while DT 1 is still outstanding.
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await Task.Delay(50); // the CTS is on the actor before the confirmation is released
+        bus.DeferredEchoes.ReleaseNext();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the next DT
+
+        byte[] sns;
+        lock (dtSns) sns = dtSns.ToArray();
+        sns.Should().Equal(new byte[] { 1, 1 }, "the retransmit took effect after the outstanding packet, not after the block");
+
+        // The send is left to the channel's disposal; its outcome is not this test's subject.
+        cts.Cancel();
+        Func<Task> cancelled = () => send;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // Codex on #152: while a block drains, "already sent" reaches only up to the outstanding
+    // packet; a CTS for a later packet of the grant would skip the ones between, and is a
+    // sequence error (table 7, code 7), not a retransmit.
+    [Fact]
+    public async Task A_Cts_For_An_Unsent_Packet_Of_The_Block_Is_A_Sequence_Error_Not_A_Retransmit()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC7u;
+        var payload = RandomPayload(21, seed: 8); // three packets
+        using var sender = J1939TpFactory.Open(service, sourceAddress: subjectSa);
+
+        var aborts = new List<byte[]>();
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            if (J1939Pgn.IsTransportCm(fields.Pgn) && f.Data.Span[0] == J1939TpFrames.ControlAbort)
+                lock (aborts) aborts.Add(f.Data.ToArray());
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        // Packet 3 asked for while DT 1 is outstanding and DT 2 unsent.
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 3, dataPgn: pgn)), isEcho: false);
+        Func<Task> failed = () => send;
+        var ex = await failed.Should().ThrowAsync<J1939TpAbortException>();
+        ex.Which.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
+        bus.DeferredEchoes.ReleaseNext();
+        await Task.Delay(50);
+        lock (aborts) aborts.Should().ContainSingle().Which[1].Should().Be((byte)J1939TpAbortReason.BadSequenceNumber);
+    }
+
+    // Codex on #152: after a partial retransmit the cursor is below the highest packet sent,
+    // and a request for a packet between the two is a retransmit -- served, and counted.
+    [Fact]
+    public async Task A_Retransmit_Request_Above_The_Cursor_But_Below_The_Highest_Sent_Is_Served()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC8u;
+        var payload = RandomPayload(21, seed: 9); // three packets
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)); // packet 1 again: cursor 2
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 3, dataPgn: pgn)); // packet 3 again: above the cursor, sent before
+        await peer.WaitForDtCountAsync(5, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(21, 3, pgn));
+        await send.WaitAsync(ShortTimeout);
+    }
+
+    // Codex on #152: and a request for the packet at the cursor after a partial retransmit is
+    // a retransmit too -- not the next block -- and counts against the limit.
+    [Fact]
+    public async Task A_Retransmit_Request_At_The_Cursor_After_A_Partial_Retransmit_Counts()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 10); // three packets
+        var opts = new J1939TpOptions().With(maxRetransmitRequests: 1);
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa, options: opts);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(3, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)); // the one retransmit allowed
+        await peer.WaitForDtCountAsync(4, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn)); // at the cursor, sent before: the second
+        var abort = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlAbort, ShortTimeout);
+        abort[1].Should().Be((byte)J1939TpAbortReason.MaximumRetransmitRequestsReached);
+        Func<Task> failed = () => send;
+        await failed.Should().ThrowAsync<J1939TpAbortException>();
+    }
+
+    // Codex on #152: a 255-packet message wraps the byte NextSn to 0 once every packet is
+    // sent; a retransmit request for its last packet must still read as one, and be served.
+    [Fact]
+    public async Task A_Retransmit_Request_For_The_Last_Of_255_Packets_Is_Served()
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC0u;
+        var payload = RandomPayload(J1939TpFrames.MaxTpPayloadLength, seed: 255); // 255 packets
+        using var sender = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa);
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var send = sender.SendCmAsync(pgn, peerSa, payload, cts.Token);
+        await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlRts, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 255, nextPacketSn: 1, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(255, ShortTimeout);
+
+        peer.SendCm(peerSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 255, dataPgn: pgn));
+        await peer.WaitForDtCountAsync(256, ShortTimeout);
+        peer.SendCm(peerSa, J1939TpFrames.BuildEomAck(J1939TpFrames.MaxTpPayloadLength, 255, pgn));
+        await send.WaitAsync(ShortTimeout);
+    }
+
+    // #58: the datagram is in the inbox before DatagramReceived is raised, and the event is
+    // raised off the actor -- so a handler that waits on ReceiveAsync gets the datagram
+    // rather than deadlocking the channel, as an ISO-TP handler does.
+    [Fact]
+    public async Task DatagramReceived_Finds_The_Datagram_Already_Receivable()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var receiverBus = Open(session, 1);
+        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0x30, options: opts);
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x31, options: opts);
+        var payload = RandomPayload(14, seed: 9);
+
+        var fromHandler = new TaskCompletionSource<J1939TpDatagram>(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, d) =>
+        {
+            try
+            {
+                // A synchronous wait on the channel from inside its own event.
+                using var wait = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                fromHandler.TrySetResult(receiver.ReceiveAsync(wait.Token).GetAwaiter().GetResult());
+            }
+            catch (OperationCanceledException ex)
+            {
+                fromHandler.TrySetException(ex); // the wait timed out: the datagram was not receivable
+            }
+        };
+
+        await sender.SendBamAsync(0xFECAu, payload).WaitAsync(ShortTimeout);
+        var datagram = await fromHandler.Task.WaitAsync(ShortTimeout);
+        datagram.Payload.Should().Equal(payload);
+    }
 }
 
 /// <summary>

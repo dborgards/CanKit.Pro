@@ -85,7 +85,10 @@ public sealed class UdsTimeoutException : UdsException
     /// <summary>Service that was awaiting a response.</summary>
     public UdsServiceId RequestedService { get; }
 
-    /// <summary>Elapsed budget when the timer expired.</summary>
+    /// <summary>
+    /// The budget of the timer that expired (the configured P2 or P2*), on every path. Not a
+    /// measurement: how late the client noticed says nothing about the server (#57).
+    /// </summary>
     public TimeSpan Elapsed { get; }
 
     /// <summary>Creates a P2 or P2* timeout exception.</summary>

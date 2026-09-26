@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,9 +11,6 @@ using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
-// Alias the CanKit.Pro.IsoTp namespace root to avoid clashing with this test namespace's
-// trailing "IsoTp" segment (same reason as in IsoTpChannelIntegrationTests).
-using IsoTpFactory = CanKit.Pro.IsoTp.IsoTp;
 
 namespace CanKit.Pro.Tests.TestCases.IsoTp;
 
@@ -26,9 +22,10 @@ namespace CanKit.Pro.Tests.TestCases.IsoTp;
 /// The pacing assertion used to be a soft wall-clock bound -- "observed spacing roughly reaches
 /// the advertised STmin" -- which is a claim about the runner as much as about the code, and #92
 /// records it going red on macOS for that reason. It now runs on a clock the test drives, so the
-/// property asserted is the one the code implements and there is no tolerance to widen. What a
-/// real runner does to effective spacing is a separate question, and #92 step 3 is where it is
-/// decided what of that is still worth observing non-gating.
+/// property asserted is the one the code implements and there is no tolerance to widen. Effective
+/// spacing on a real runner is not a property the sender promises (the ISO-TP README says it is
+/// STmin plus scheduling latency, with no hard real-time guarantee), so nothing in this class
+/// gates on it.
 /// </summary>
 public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
 {
@@ -61,10 +58,10 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
     /// <summary>
     /// #92 step 2, the same property with the clock in the test's hands.
     ///
-    /// The wall-clock version above asserts that observed CF spacing roughly reaches the
+    /// The wall-clock version asserted that observed CF spacing roughly reaches the
     /// advertised STmin, which is a claim about the runner as much as about the code — the ISO-TP
     /// README concedes that effective spacing is "STmin + OS scheduling latency … with no hard
-    /// real-time guarantee under load", and #92 records this test going red on macOS for exactly
+    /// real-time guarantee under load", and #92 records that test going red on macOS for exactly
     /// that. Here the sender's actor measures its timers against a clock nobody but this test
     /// moves, so the property becomes the one the code implements: <b>each consecutive frame is
     /// released once STmin of that clock has elapsed, and not before</b>. Each interval is
@@ -169,28 +166,33 @@ public class IsoTpStminTimingTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    /// <summary>
+    /// With STmin = 0 the transfer must finish without the test advancing the clock. A sender
+    /// that armed a pacing interval would sit on it, and the 2 s wall-clock bound this used to
+    /// use is the same kind of claim #92 is about: it fails when the runner is slow and passes
+    /// when a short injected delay still fits under the bound.
+    /// </summary>
     [Fact]
     public async Task Stmin_Zero_Keeps_MultiFrame_Transfer_Unpaced()
     {
-        // Regression guard for the opposite direction: with STmin = 0 the transfer must
-        // complete promptly (the existing round-trip tests cover correctness; this pins
-        // down that the new pacing path does not inject artificial delays).
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
+        using var clock = new VirtualClock();
+        using var serviceA = new CanBusService(busA);
+        using var serviceB = new CanBusService(busB);
 
-        using var sender = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastOptions());
-        using var receiver = IsoTpFactory.Open(busB, IsoTpEndpoint.Normal(0x7E8, 0x7E0), FastOptions());
+        using var sender = new IsoTpChannel(serviceA, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            FastOptions(), ownsService: false, clock.NewActor());
+        using var receiver = new IsoTpChannel(serviceB, IsoTpEndpoint.Normal(0x7E8, 0x7E0),
+            FastOptions(), ownsService: false, clock.NewActor());
 
         var pdu = Enumerable.Range(0, 60).Select(i => (byte)(i & 0xFF)).ToArray();
         var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
-        var sw = Stopwatch.StartNew();
-        await sender.SendAsync(pdu);
-        var got = await recvTask;
-        sw.Stop();
+        var sendTask = sender.SendAsync(pdu);
 
-        got.Should().Equal(pdu);
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(2),
-            "with STmin = 0 no pacing delay may be injected (8 CFs over an in-memory bus)");
+        // No Advance. Mailbox work still runs; a timer does not.
+        await sendTask.WaitAsync(ShortTimeout);
+        (await recvTask.WaitAsync(ShortTimeout)).Should().Equal(pdu);
     }
 }

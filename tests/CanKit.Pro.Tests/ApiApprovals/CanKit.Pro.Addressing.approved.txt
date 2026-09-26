@@ -26,6 +26,7 @@ namespace CanKit.Pro.Addressing
         public static uint Compose(byte priority, bool reserved, byte dataPage, byte pduFormat, byte pduSpecific, byte sourceAddress) { }
         public static uint ComposePgn(byte priority, uint pgn, byte sourceAddress, byte destinationAddress = 255) { }
         public static CanKit.Pro.Addressing.J1939Fields Decompose(uint canId) { }
+        public static CanKit.Pro.Addressing.J1939Fields Decompose(uint canId, bool isExtendedFrame) { }
     }
     public readonly struct J1939Name : System.IComparable<CanKit.Pro.Addressing.J1939Name>, System.IEquatable<CanKit.Pro.Addressing.J1939Name>
     {
@@ -54,10 +55,13 @@ namespace CanKit.Pro.Addressing
         public override int GetHashCode() { }
         public bool HasHigherClaimPriorityThan(CanKit.Pro.Addressing.J1939Name other) { }
         public bool HasLowerClaimPriorityThan(CanKit.Pro.Addressing.J1939Name other) { }
+        public byte[] ToBytes() { }
         public override string ToString() { }
+        public void WriteTo(byte[] destination, int offset = 0) { }
         public static int CompareClaimPriority(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
         public static ulong Compose(uint identityNumber, ushort manufacturerCode, byte ecuInstance, byte functionInstance, byte function, bool reserved, byte vehicleSystem, byte vehicleSystemInstance, byte industryGroup, bool arbitraryAddressCapable) { }
         public static CanKit.Pro.Addressing.J1939Name Decompose(ulong value) { }
+        public static CanKit.Pro.Addressing.J1939Name FromBytes(byte[] source, int offset = 0) { }
         public static bool operator !=(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
         public static bool operator <(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }
         public static bool operator <=(CanKit.Pro.Addressing.J1939Name left, CanKit.Pro.Addressing.J1939Name right) { }

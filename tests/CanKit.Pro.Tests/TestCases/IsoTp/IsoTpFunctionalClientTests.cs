@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -541,5 +542,122 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var recvTask = physicalChannel.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
         await peer.SendAsync(new byte[] { 0x11, 0x22 }).WaitAsync(ShortTimeout);
         (await recvTask).Should().Equal(0x11, 0x22);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // Listen(): one subscription across collections (#150). A response that arrives between
+    // two collections -- here, before the first one begins -- is buffered for the next, where
+    // CollectResponsesAsync, subscribing per call, would not have seen it.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    [Fact]
+    public async Task Functional_Listener_Keeps_What_Arrives_Between_Collections()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0); // tester bus
+        using var busB = OpenClassic(session, 1); // ECU bus
+
+        const uint FunctionalTxId = 0x7DF;
+        const uint EcuResponseId = 0x7E8;
+
+        byte[] pdu = { 0x62, 0xF1, 0x90, 0x01 };
+        var frame = CanFrame.Classic(
+            unchecked((int)EcuResponseId),
+            IsoTpFrameCodec.BuildSingleFrame(IsoTpEndpoint.Normal(EcuResponseId, 0), pdu, isCanFd: false, padding: true));
+        using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, 0x7E8, 0x7EF, FastOptions());
+
+        // Delivered to the subscription, and confirmed as delivered, before any collection.
+        TaskCompletionSource<bool> delivered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)EcuResponseId)) delivered.TrySetResult(true); };
+        using var listener = client.Listen();
+        busB.Transmit(frame);
+        await delivered.Task.WaitAsync(ShortTimeout);
+
+        // A zero window reads the buffer without waiting (and without a timer, which a starved
+        // thread pool serves late -- #150).
+        var responses = await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout);
+        responses.Should().ContainSingle().Which.Data.Should().Equal(pdu);
+
+        // Not returned twice: the next collection starts from an empty buffer.
+        (await listener.CollectAsync(TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout)).Should().BeEmpty();
+        (await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout)).Should().BeEmpty();
+
+        // A negative window reads the buffer the same: what is buffered arrived before the
+        // call, whatever the window says about the past (Codex on #150).
+        delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.Transmit(frame);
+        await delivered.Task.WaitAsync(ShortTimeout);
+        (await listener.CollectAsync(TimeSpan.FromSeconds(-1)).WaitAsync(ShortTimeout))
+            .Should().ContainSingle("a window in the past does not carry a buffered response to the next collection");
+
+        // A window beyond a timer's reach is refused, and what is buffered survives the
+        // refusal (Codex on #150). What an expired collection carried over survives it by
+        // construction -- the check precedes the take -- since no test fills the carry-over
+        // deterministically: it is the instant between the timer and the drain.
+        delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.Transmit(frame);
+        await delivered.Task.WaitAsync(ShortTimeout);
+        Func<Task> oversized = () => listener.CollectAsync(TimeSpan.FromDays(50));
+        await oversized.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        (await listener.CollectAsync(TimeSpan.Zero).WaitAsync(ShortTimeout))
+            .Should().ContainSingle("the refused collection took nothing");
+    }
+
+    // Bugbot on #150: a subscription completed underneath -- the service disposed -- ends the
+    // collection in progress with what it has, and the next collection throws rather than
+    // return empty at once, which a loop collecting until a deadline would spin on.
+    [Fact]
+    public async Task Functional_Listener_Reports_A_Service_Disposed_Underneath_On_The_Next_Collection()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA); // disposed below; the using covers a throw before that (CodeQL)
+        using var client = IsoTpFactory.OpenFunctional(service, 0x7DF, 0x7E8, 0x7EF, FastOptions(), leaveOpen: true);
+
+        using var listener = client.Listen();
+        var collecting = listener.CollectAsync(ShortTimeout);
+        service.Dispose();
+        (await collecting.WaitAsync(ShortTimeout)).Should().BeEmpty("the subscription ended with nothing buffered");
+
+        var sw = Stopwatch.StartNew();
+        Func<Task> next = () => listener.CollectAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
+        sw.Elapsed.Should().BeLessThan(ShortTimeout, "it throws instead of waiting the window");
+    }
+
+    // Codex on #150: a window the collector's timer would refuse is refused before the frame
+    // goes out, not by the timer after it.
+    [Fact]
+    public async Task Functional_Send_Refuses_A_Window_Beyond_A_Timers_Reach_Before_Transmitting()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        int seen = 0;
+        busB.FrameObserved += (_, e) => { if (e.CanFrame.ID == 0x7DF) Interlocked.Increment(ref seen); };
+        using var client = IsoTpFactory.OpenFunctional(busA, 0x7DF, 0x7E8, 0x7EF, FastOptions());
+
+        Func<Task> act = () => client.SendAndCollectAsync(new byte[] { 0x3E, 0x00 }, TimeSpan.MaxValue);
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        await Task.Delay(50);
+        seen.Should().Be(0, "nothing was transmitted");
+    }
+
+    [Fact]
+    public async Task Functional_Listener_Disposal_Ends_A_Collection_In_Progress()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1); // joined so the hub forwards frames, but silent
+        using var client = IsoTpFactory.OpenFunctional(busA, 0x7DF, 0x7E8, 0x7EF, FastOptions());
+
+        using var listener = client.Listen(); // disposed below; the using covers a throw before that (CodeQL)
+        var collecting = listener.CollectAsync(ShortTimeout);
+        listener.Dispose();
+        // Disposal completes the subscription; a collection in progress ends with it.
+        (await collecting.WaitAsync(ShortTimeout)).Should().BeEmpty();
+
+        Func<Task> act = () => listener.CollectAsync(TimeSpan.FromMilliseconds(10));
+        await act.Should().ThrowAsync<ObjectDisposedException>();
     }
 }

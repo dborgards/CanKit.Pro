@@ -58,15 +58,16 @@ namespace CanKit.Pro.J1939Tp
     public sealed class J1939TpOptions
     {
         public J1939TpOptions() { }
+        public System.TimeSpan BamPacketSpacing { get; init; }
         public byte MaxPacketsPerCts { get; init; }
+        public int MaxRetransmitRequests { get; init; }
         public byte Priority { get; init; }
         public int ReceiveBufferCapacity { get; init; }
         public System.TimeSpan T1 { get; init; }
         public System.TimeSpan T2 { get; init; }
         public System.TimeSpan T3 { get; init; }
         public System.TimeSpan T4 { get; init; }
-        public System.TimeSpan Th { get; init; }
-        public CanKit.Pro.J1939Tp.J1939TpOptions With(System.TimeSpan? t1 = default, System.TimeSpan? t2 = default, System.TimeSpan? t3 = default, System.TimeSpan? t4 = default, System.TimeSpan? th = default, byte? priority = default, byte? maxPacketsPerCts = default, int? receiveBufferCapacity = default) { }
+        public CanKit.Pro.J1939Tp.J1939TpOptions With(System.TimeSpan? t1 = default, System.TimeSpan? t2 = default, System.TimeSpan? t3 = default, System.TimeSpan? t4 = default, System.TimeSpan? bamPacketSpacing = default, byte? priority = default, byte? maxPacketsPerCts = default, int? receiveBufferCapacity = default, int? maxRetransmitRequests = default) { }
     }
     public sealed class J1939TpSendRejectedException : CanKit.Pro.J1939Tp.J1939TpException
     {

@@ -25,7 +25,7 @@ namespace CanKit.Pro.Uds;
 /// </para>
 /// <para>
 /// Before each send (and on abort paths) the client calls
-/// <see cref="IIsoTpChannel.DiscardPendingPdus"/> so a late ECU reply from a cancelled or
+/// <see cref="IIsoTpChannel.DiscardPendingPdus(long)"/> so a late ECU reply from a cancelled or
 /// timed-out wait cannot be consumed as the answer to a later request. SID correlation during
 /// the wait loop remains as a second line of defense for stray frames that arrive while a
 /// request is still outstanding.
@@ -37,6 +37,15 @@ internal sealed class UdsClientImpl : IUdsClient
     private const byte PositiveResponseOffset = 0x40;
     private const byte NrcResponsePending = 0x78;
     private const byte SuppressPositiveResponseBit = 0x80;
+    private const byte NrcBusyRepeatRequest = 0x21;
+
+    /// <summary>How long Dispose waits for a request in flight to release the lock.</summary>
+    internal TimeSpan DisposeLockTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    // A suppressed send draws no positive response but may still draw a negative one, up to P2
+    // after it went out. A following request for the same service would take that negative
+    // response as its own; it waits until the window is over instead (Codex on #150).
+    private readonly SuppressedResponseWindows _suppressedWindows = new();
 
     private readonly IIsoTpChannel _channel;
     private readonly bool _ownsChannel;
@@ -54,15 +63,26 @@ internal sealed class UdsClientImpl : IUdsClient
         _options = options;
         _ownsChannel = ownsChannel;
 
-        if (options.P2ClientMax <= TimeSpan.Zero)
-            throw new ArgumentException("P2ClientMax must be positive.", nameof(options));
-        if (options.P2StarClientMax <= TimeSpan.Zero)
-            throw new ArgumentException("P2StarClientMax must be positive.", nameof(options));
+        // Every duration here runs a timer, and a timer measures about 49 days at most: one
+        // beyond that would throw when it is armed, after the request went out (Codex on #150).
+        if (options.P2ClientMax <= TimeSpan.Zero || options.P2ClientMax > MaxTimerSpan)
+            throw new ArgumentException("P2ClientMax must be positive and within a timer's reach (about 49 days).", nameof(options));
+        if (options.P2StarClientMax <= TimeSpan.Zero || options.P2StarClientMax > MaxTimerSpan)
+            throw new ArgumentException("P2StarClientMax must be positive and within a timer's reach (about 49 days).", nameof(options));
+        if (options.MaxBusyRepeatRequests < 0)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                "MaxBusyRepeatRequests must be >= 0 (0 disables the repeat).");
+        if (options.BusyRepeatRequestDelay < TimeSpan.Zero || options.BusyRepeatRequestDelay > MaxTimerSpan)
+            throw new ArgumentOutOfRangeException(nameof(options),
+                "BusyRepeatRequestDelay must not be negative, and must be within a timer's reach (about 49 days).");
         if (options.MaxResponsePendingCount < 0)
             throw new ArgumentException("MaxResponsePendingCount must be non-negative.", nameof(options));
-        if (options.TesterPresentPeriod <= TimeSpan.Zero)
-            throw new ArgumentException("TesterPresentPeriod must be positive.", nameof(options));
+        if (options.TesterPresentPeriod <= TimeSpan.Zero || options.TesterPresentPeriod > MaxTimerSpan)
+            throw new ArgumentException("TesterPresentPeriod must be positive and within a timer's reach (about 49 days).", nameof(options));
     }
+
+    // The longest span Task.Delay and CancellationTokenSource.CancelAfter accept.
+    private static readonly TimeSpan MaxTimerSpan = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     public IIsoTpChannel Channel => _channel;
     public UdsClientOptions Options => _options;
@@ -79,7 +99,13 @@ internal sealed class UdsClientImpl : IUdsClient
     public async Task<byte[]> DiagnosticSessionControlAsync(byte sessionType,
         CancellationToken cancellationToken = default)
     {
-        byte sub = (byte)(sessionType & 0x7F);
+        // The sub-function byte's bit 7 is suppressPosRspMsgIndication, not part of the session
+        // type; a caller passing 0x83 meant something this method does not do (it waits for
+        // the response), and masking it to 0x03 hid that (#57). 0x00 is ISOSAEReserved.
+        if (sessionType == 0 || (sessionType & SuppressPositiveResponseBit) != 0)
+            throw new ArgumentOutOfRangeException(nameof(sessionType), sessionType,
+                "Session type must be 0x01..0x7F; bit 7 is suppressPosRspMsgIndication and is not accepted here.");
+        byte sub = sessionType;
         var request = new byte[] { (byte)UdsServiceId.DiagnosticSessionControl, sub };
         var response = await ExecuteAsync(UdsServiceId.DiagnosticSessionControl, request,
             cancellationToken).ConfigureAwait(false);
@@ -347,24 +373,7 @@ internal sealed class UdsClientImpl : IUdsClient
 
         if (suppressPositiveResponse)
         {
-            // Fire-and-forget: acquire the request lock so we don't interleave with a real
-            // request, send the frame, then release. No response is expected. Link the
-            // lifetime token so Dispose() cancels a WaitAsync/Send still in progress
-            // (Bugbot 3596586770) — same contract as ExecuteAsync / SecurityAccessAsync.
-            ThrowIfDisposed();
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken, _lifetimeCts.Token);
-            var linkedToken = linked.Token;
-
-            await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
-            try
-            {
-                await _channel.SendAsync(request, linkedToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                _requestLock.Release();
-            }
+            await SendWithoutResponseAsync(request, cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -402,8 +411,189 @@ internal sealed class UdsClientImpl : IUdsClient
         var sid = (UdsServiceId)request.Span[0];
         var copy = new byte[request.Length];
         request.Span.CopyTo(copy);
+
+        // A request with suppressPosRspMsgIndication set gets no positive response; waiting P2
+        // for one ended in a timeout every time (#57). Sent the way a suppressed TesterPresent
+        // is, and an empty response returned. A negative response the server may still send is
+        // not waited for either -- the next request's discard drops it.
+        if (copy.Length >= 2 && HasSubFunction(sid) && (copy[1] & SuppressPositiveResponseBit) != 0)
+        {
+            await SendWithoutResponseAsync(copy, cancellationToken).ConfigureAwait(false);
+            return Array.Empty<byte>();
+        }
+
         return await ExecuteAsync(sid, copy, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Fire-and-forget under the request lock: the frame goes out without interleaving a real
+    /// request, and no response is waited for. The lifetime token is linked so Dispose()
+    /// cancels a wait or send still in progress (Bugbot 3596586770), as ExecuteAsync does.
+    /// </summary>
+    private async Task SendWithoutResponseAsync(byte[] request, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken, _lifetimeCts.Token);
+        var linkedToken = linked.Token;
+
+        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        try
+        {
+            // The stale-reply discard the answered path runs before its send, here too: a late
+            // 0x78 to an earlier request for this service, queued since that request's abort,
+            // would otherwise be read by the next call's wait-out as inside this send's window
+            // -- it predates the send, which the window's end alone does not say -- and move
+            // the window out by P2* for nothing (Codex on #150). A 0x78 for a service with a
+            // window still open is routed to it by the discard, as always.
+            await DiscardStalePdusAsync().ConfigureAwait(false);
+            // Noted before the send as well: cancelled between the driver's acceptance and the
+            // confirmation, the frame is on the bus and may still be answered (Codex on #150).
+            // Moved out to the transmit stamp afterwards.
+            bool hadWindow = _suppressedWindows.TryGetDeadline(request[0], out var previousUntil);
+            _suppressedWindows.Note(request[0], Stopwatch.GetTimestamp(), _options.P2ClientMax);
+            IsoTpTransmitStamps stamps;
+            try
+            {
+                stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (RefusedBeforeTransmission(ex))
+            {
+                // Nothing reached the bus: the window noted for it is put back (Codex on #150).
+                _suppressedWindows.Restore(request[0], hadWindow, previousUntil);
+                throw;
+            }
+            catch
+            {
+                // A send that leaves by exception -- cancelled, or a transport fault -- may
+                // have put the frame on the bus after the provisional window ran out; its P2
+                // from the transmission is at most P2 from now (Codex on #150).
+                _suppressedWindows.Note(request[0], Stopwatch.GetTimestamp(), _options.P2ClientMax);
+                throw;
+            }
+            var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
+            _suppressedWindows.Note(request[0], sent, _options.P2ClientMax);
+        }
+        finally
+        {
+            _requestLock.Release();
+        }
+    }
+
+    // The channel refuses a request before transmitting it with an argument error -- an
+    // empty or oversized PDU -- or because it is disposed; a cancellation or a transport fault
+    // comes after the frame may be out.
+    private static bool RefusedBeforeTransmission(Exception ex)
+        => ex is ArgumentException or InvalidOperationException or ObjectDisposedException;
+
+    // Under the request lock. A request for a service with a suppressed send still open waits
+    // out that send's P2, reading what arrives: it is the suppressed send's and is dropped --
+    // except NRC 0x78, which says the peer's final answer is still coming and moves the window
+    // out by P2* (Codex on #150). So a late negative response to the suppressed send cannot
+    // be taken for this request's.
+    private async Task WaitOutSuppressedResponseWindowAsync(UdsServiceId serviceId, CancellationToken linkedToken)
+    {
+        byte sid = (byte)serviceId;
+        if (!_suppressedWindows.TryGetDeadline(sid, out var until)) return;
+        bool waitedOut = false;
+        try
+        {
+            while (true)
+            {
+                var remaining = SuppressedResponseWindows.Remaining(until);
+                if (remaining <= TimeSpan.Zero)
+                {
+                    // The window is over as measured now -- but a 0x78 may be queued already,
+                    // and it moves the window out (Bugbot on #150). Only an empty inbox ends
+                    // it, and only once the channel has settled: a 0x78 stamped inside the
+                    // window may still be on its way through its actor (Codex on #150).
+                    await SettleAsync().ConfigureAwait(false);
+                    if (DrainExtends(sid, ref until)) continue;
+                    break;
+                }
+                using var slice = new CancellationTokenSource(remaining);
+                using var combined = CancellationTokenSource.CreateLinkedTokenSource(linkedToken, slice.Token);
+                IsoTpReceivedPdu pdu;
+                try
+                {
+                    pdu = await _channel.ReceiveWithArrivalAsync(combined.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (slice.IsCancellationRequested && !linkedToken.IsCancellationRequested)
+                {
+                    await SettleAsync().ConfigureAwait(false);
+                    if (DrainExtends(sid, ref until)) continue;
+                    break;
+                }
+                catch (IsoTpException)
+                {
+                    // A queued transport fault -- an aborted reassembly from before -- is stale
+                    // here, as it is in the discard that follows (Bugbot on #150).
+                    continue;
+                }
+                ExtendOnPending(sid, pdu, ref until);
+            }
+            waitedOut = true;
+        }
+        finally
+        {
+            // A cancelled wait keeps what remains of the window, extensions included, for the
+            // next request (Bugbot on #150).
+            if (waitedOut) _suppressedWindows.Forget(sid);
+            else _suppressedWindows.Extend(sid, until);
+        }
+    }
+
+    // Reads whatever is queued; true when a 0x78 among it moved this service's window out.
+    private bool DrainExtends(byte sid, ref long until)
+    {
+        bool extended = false;
+        while (true)
+        {
+            IsoTpReceivedPdu queued;
+            try
+            {
+                if (!_channel.TryReceiveWithArrival(out queued)) break;
+            }
+            catch (IsoTpException)
+            {
+                continue; // a stale transport fault, dropped as the discard would (Bugbot on #150)
+            }
+            extended |= ExtendOnPending(sid, queued, ref until);
+        }
+        return extended;
+    }
+
+    // A 0x78 heard while waiting out one service's window may be for another service whose
+    // window is open too; it moves that service's window out in the table, and this
+    // service's locally (Codex on #150). True when this service's moved.
+    private bool ExtendOnPending(byte sid, in IsoTpReceivedPdu pdu, ref long until)
+    {
+        var data = pdu.Pdu;
+        if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending)
+            return false;
+        var extendedUntil = pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency);
+        if (data[1] != sid)
+        {
+            // Another service's: only a window still open when the 0x78 arrived (Codex on #150).
+            _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp, extendedUntil);
+            return false;
+        }
+        // This service's: likewise only if the window was still open when it arrived -- a
+        // 0x78 queued after P2 ran out answers nothing the window covers (Codex on #150).
+        if (pdu.FirstFrameArrivalTimestamp > until || extendedUntil <= until) return false;
+        until = extendedUntil;
+        return true;
+    }
+
+    // The services whose second byte is a sub-function parameter, and so carry the
+    // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column). Not 0x2A:
+    // its transmissionMode is a plain parameter (Codex on #150).
+    private static bool HasSubFunction(UdsServiceId sid) => (byte)sid switch
+    {
+        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2C or 0x31 or 0x3E
+            or 0x83 or 0x85 or 0x86 or 0x87 => true,
+        _ => false,
+    };
 
     // ---------------------------------------------------------------------------------------
     // Upload / Download (SRS FR-UDS-012, ISO 14229-1 §14).
@@ -782,10 +972,33 @@ internal sealed class UdsClientImpl : IUdsClient
     private async Task<byte[]> ExecuteCoreAsync(UdsServiceId serviceId, byte[] request,
         CancellationToken linkedToken)
     {
+        // NRC 0x21 (busyRepeatRequest) asks for exactly that: the request is repeated, up to
+        // MaxBusyRepeatRequests times, each with a fresh P2 (#57). Anything else the exchange
+        // produces -- data, another NRC, a timeout -- passes through.
+        for (int repeats = 0; ; repeats++)
+        {
+            try
+            {
+                return await ExchangeOnceAsync(serviceId, request, linkedToken).ConfigureAwait(false);
+            }
+            catch (UdsNegativeResponseException ex)
+                when (ex.Code == NrcBusyRepeatRequest && repeats < _options.MaxBusyRepeatRequests)
+            {
+                if (_options.BusyRepeatRequestDelay > TimeSpan.Zero)
+                    await Task.Delay(_options.BusyRepeatRequestDelay, linkedToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task<byte[]> ExchangeOnceAsync(UdsServiceId serviceId, byte[] request,
+        CancellationToken linkedToken)
+    {
+        await WaitOutSuppressedResponseWindowAsync(serviceId, linkedToken).ConfigureAwait(false);
+
         // Drop any late reply left over from a previous aborted/timed-out wait before we put a
         // new request on the wire. SID correlation alone is insufficient when the next request
         // uses the same service (the stale positive response SID would match).
-        DiscardStalePdus();
+        await DiscardStalePdusAsync().ConfigureAwait(false);
 
         // The stamp the channel took as the request's last frame went to the bus -- not a reading
         // taken here. P2 starts when the request was transmitted, and this continuation resumes
@@ -859,8 +1072,14 @@ internal sealed class UdsClientImpl : IUdsClient
                 // at all -- it began before the request was handed to the channel, so it answers
                 // an earlier one (Codex on #143). ElapsedSince clamps a negative interval to
                 // zero, which would read as "punctual"; it is a stray, and the wait goes on.
+                // A stray that is a 0x78 for a suppressed send still open -- answered while
+                // this request was being handed over -- still moves that send's window out
+                // (Bugbot on #150); the branch below does the same for a later one.
                 if (received.FirstFrameArrivalTimestamp < notBefore)
+                {
+                    RouteStrayPending(received);
                     continue;
+                }
                 var arrival = ElapsedSince(budgetStart, received.FirstFrameArrivalTimestamp);
                 if (arrival > timeout)
                     throw new UdsTimeoutException(serviceId, timerKind, timeout);
@@ -881,7 +1100,10 @@ internal sealed class UdsClientImpl : IUdsClient
                     if (echoed != serviceId)
                     {
                         // Stray NRC for a different SID — treat as background noise and keep
-                        // waiting inside the same budget.
+                        // waiting inside the same budget. Unless it is a 0x78 for a service
+                        // with a suppressed send still open: that send's final answer is still
+                        // coming, and its window moves out (Codex on #150).
+                        RouteStrayPending(received);
                         continue;
                     }
 
@@ -925,7 +1147,9 @@ internal sealed class UdsClientImpl : IUdsClient
         {
             // Best-effort: if a PDU is already sitting in the inbox when we abort (e.g. cancel
             // raced with arrival), drop it under the lock so it cannot poison the next caller.
-            DiscardStalePdus();
+            // As the pre-send discard: settled and read first, so a 0x78 for a suppressed send
+            // among it is routed to that send's window rather than dropped (Codex on #150).
+            await DiscardStalePdusAsync().ConfigureAwait(false);
             throw;
         }
     }
@@ -939,16 +1163,69 @@ internal sealed class UdsClientImpl : IUdsClient
         return true;
     }
 
-    private void DiscardStalePdus()
+    // The pre-send discard: what is on its way through the channel is settled first, so a 0x78
+    // among it is routed to its service's window rather than dropped unseen (Codex on #150).
+    private async Task DiscardStalePdusAsync()
+    {
+        long arrivedBefore = Stopwatch.GetTimestamp();
+        await SettleAsync().ConfigureAwait(false);
+        DiscardStalePdus(arrivedBefore);
+    }
+
+    private async Task SettleAsync()
     {
         try
         {
-            _channel.DiscardPendingPdus();
+            await _channel.SettleAsync().ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // channel gone: nothing on its way
+        }
+    }
+
+    // Drops what arrived before the stamp, after reading it: the stamp is taken before the
+    // read, so everything the discard drops was read, and a 0x78 arriving between the read
+    // and the discard is kept for the request's own receive loop, which routes a stray
+    // (Codex on #150).
+    private void DiscardStalePdus(long arrivedBefore)
+    {
+        try
+        {
+            // Read before the bulk discard: a queued 0x78 for a service with a suppressed send
+            // still open moves that window out rather than vanishing (Codex on #150). A queued
+            // transport fault is stale here and dropped like the rest.
+            while (true)
+            {
+                IsoTpReceivedPdu queued;
+                try
+                {
+                    if (!_channel.TryReceiveWithArrival(out queued)) break;
+                }
+                catch (IsoTpException)
+                {
+                    continue;
+                }
+                RouteStrayPending(queued);
+            }
+            _channel.DiscardPendingPdus(arrivedBefore);
         }
         catch (ObjectDisposedException)
         {
             // Channel is going away; nothing left to drain.
         }
+    }
+
+    // A 0x78 not for the request in hand, for a service with a suppressed send still open:
+    // that send's window moves out by P2* from the 0x78's arrival.
+    private void RouteStrayPending(in IsoTpReceivedPdu pdu)
+    {
+        var data = pdu.Pdu;
+        if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending) return;
+        // Only a window still open when the 0x78 arrived: one that had run out is not revived
+        // for a full P2* by a late frame (Codex on #150).
+        _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp,
+            pdu.FirstFrameArrivalTimestamp + (long)(_options.P2StarClientMax.TotalSeconds * Stopwatch.Frequency));
     }
 
     /// <summary>
@@ -977,7 +1254,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // caller judge its stamp; only an empty inbox means nothing arrived in time
             // (Bugbot on #112).
             return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
-                notBefore, elapsedInBudget, linkedToken).ConfigureAwait(false);
+                notBefore, linkedToken).ConfigureAwait(false);
         }
 
         using var timeoutCts = new CancellationTokenSource(remaining);
@@ -995,7 +1272,7 @@ internal sealed class UdsClientImpl : IUdsClient
             // PDU was enqueued just before it fired. Same rule as the zero-remaining exit: look
             // before declaring a timeout.
             return await TakeQueuedOrInProgressAsync(serviceId, timerKind, budget, budgetStart,
-                notBefore, budget, linkedToken).ConfigureAwait(false);
+                notBefore, linkedToken).ConfigureAwait(false);
         }
     }
 
@@ -1014,10 +1291,14 @@ internal sealed class UdsClientImpl : IUdsClient
     /// </summary>
     private async Task<IsoTpReceivedPdu> TakeQueuedOrInProgressAsync(UdsServiceId serviceId,
         UdsTimeoutTimer timerKind, TimeSpan budget, long budgetStart, long notBefore,
-        TimeSpan elapsedReported, CancellationToken linkedToken)
+        CancellationToken linkedToken)
     {
         while (true)
         {
+            // Settled first: a Single Frame stamped inside the budget may still be on its way
+            // through the channel's actor when the deadline fires; after this it is in the
+            // inbox, or its reception is on record (Codex on #150).
+            await SettleAsync().ConfigureAwait(false);
             // The in-progress check goes first: the channel withdraws the record only after the
             // completed PDU (or the abort's error item) is in the inbox, so a reception seen in
             // progress here is found by the wait below, and one not seen is either absent or
@@ -1027,7 +1308,11 @@ internal sealed class UdsClientImpl : IUdsClient
                 if (_channel.TryReceiveWithArrival(out var queued))
                     return queued;
 
-                throw new UdsTimeoutException(serviceId, timerKind, elapsedReported);
+                // The budget is spent as measured, which on a descheduled host can be true
+                // of a request the caller has already cancelled. Timeout would hide that
+                // cancellation (macOS CI on #153).
+                linkedToken.ThrowIfCancellationRequested();
+                throw new UdsTimeoutException(serviceId, timerKind, budget);
             }
 
             using var recheck = new CancellationTokenSource(InProgressRecheck);
@@ -1103,10 +1388,15 @@ internal sealed class UdsClientImpl : IUdsClient
         // the lock races WaitAsync/Release.
         try { _lifetimeCts.Cancel(); } catch { /* already disposed */ }
 
+        // If the holder does not let go in time -- an operation ignoring the cancellation --
+        // the semaphore stays undisposed: its Release on the holder's thread would otherwise
+        // throw ObjectDisposedException into an operation that was merely slow (#57). A
+        // SemaphoreSlim without a wait handle holds nothing that needs disposing.
+        bool lockAcquired = false;
         try
         {
-            if (_requestLock.Wait(TimeSpan.FromSeconds(5)))
-                _requestLock.Release();
+            lockAcquired = _requestLock.Wait(DisposeLockTimeout);
+            if (lockAcquired) _requestLock.Release();
         }
         catch (ObjectDisposedException)
         {
@@ -1114,7 +1404,7 @@ internal sealed class UdsClientImpl : IUdsClient
         }
 
         _lifetimeCts.Dispose();
-        _requestLock.Dispose();
+        if (lockAcquired) _requestLock.Dispose();
 
         if (_ownsChannel)
         {
