@@ -306,7 +306,11 @@ darüber** (Codex auf #129). Die Abschnitte oben prüfen den Normtext gegen den 
 dort ausdrücklich **mit beiden Hälften** geführt — die Client-Seite (`CanOpenNode.cs:1564`,
 Upload-Initiate-Antwort) gehört zur Master-Rolle und ist trotzdem hier belegt und begründet.
 Sie fällt damit **nicht** in die zweite Runde zurück; was dort neu zu entscheiden ist, steht in
-#131. Nur der **Zuschnitt** unten ist geräteseitig, nicht jede Aussage dieses Dokuments.
+#131. Die Runde liegt in
+[`2026-09-26-canopen-master-tool-scope.md`](2026-09-26-canopen-master-tool-scope.md). Der Maintainer
+hat am 26.09. die Master-Lücken als vorrangig entschieden; die Posten dieser Datei bleiben fachlich
+richtig und werden nicht zurückgenommen. Nur der **Zuschnitt** unten ist geräteseitig, nicht jede
+Aussage dieses Dokuments.
 
 Der Zuschnitt ist keine Liste von Einzelfällen mehr, sondern folgt aus einer Architekturentscheidung
 des Maintainers:
@@ -456,5 +460,9 @@ falsch, weil nichts mehr offen ist.
 
 ### Was offen bleibt
 
-Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und die
-CiA-302/304/305-Themen aus der GAP-Analyse. Die stehen in anderen Dokumenten.
+Was CiA 301 **nicht** entscheidet und offen bleibt: bit-granulares PDO-Mapping und CiA 304/305.
+Flying Master ist seit dem 26.09. keine Auslassung mehr: der Maintainer hat die frühere
+Einstufung als optional zurückgenommen und ihn als Pflicht der Master-Rolle festgelegt
+([`2026-09-26-canopen-master-tool-scope.md`](2026-09-26-canopen-master-tool-scope.md), #131).
+Der Ablauf steht dort nicht, weil CiA 302 nicht gelesen ist. Bit-granulares Mapping, CiA 304
+und CiA 305 bleiben außerhalb beider Runden.
