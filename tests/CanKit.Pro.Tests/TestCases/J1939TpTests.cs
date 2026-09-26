@@ -78,8 +78,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         datagram.Payload.Should().Equal(payload);
     }
 
-    // Regression for #23: a TP channel must never receive its own broadcast, even on an adapter
-    // whose echoes are not flagged.
+    // Regression for #23, now in both echo worlds (#94). A TP channel must never receive its own
+    // broadcast.
     //
     // #23 gave subscriptions a real IsEcho bit and withheld echoes by default, and the
     // source-address self-check in J1939TpChannel.RunReaderAsync was deleted as redundant. It is
@@ -89,30 +89,56 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // the check, SendBamAsync consumed its own globally addressed BAM and DT frames and
     // republished the outbound payload as an inbound datagram.
     //
-    // Deliberately the real Virtual adapter and not ControllableBus: the whole point is the
-    // behaviour of an adapter that does not flag its echo, so substituting a double that does
-    // would test the opposite of what this pins.
-    [Fact]
-    public async Task Bam_Sender_On_An_Unflagged_Echo_Bus_Does_Not_Receive_Its_Own_Broadcast()
+    // The original pin, Bam_Sender_On_An_Unflagged_Echo_Bus_Does_Not_Receive_Its_Own_Broadcast,
+    // reached only the unflagged world — the one where the gate is a no-op and the source-address
+    // check is the only defence. On a flagging bus the same check is what a later edit would be
+    // tempted to delete again, so the world is a parameter. The peer broadcast is the barrier:
+    // its frames are injected after ours, a single subscription delivers in that order, and the
+    // datagram that comes back has to be the peer's.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task Bam_Sender_Does_Not_Receive_Its_Own_Broadcast(EchoWorld world)
     {
-        var session = NewSession();
-        using var bus = VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo);
+        using var echo = EchoWorldFixture.Create(world, NewSession());
 
         var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
-        using var sender = J1939TpFactory.Open(bus, sourceAddress: 0x11, options: opts);
+        using var sender = J1939TpFactory.Open(echo.Bus, sourceAddress: 0x11, options: opts);
 
-        var payload = RandomPayload(100, seed: 23);
+        var ownPayload = RandomPayload(100, seed: 23);
+        var peerPayload = RandomPayload(9, seed: 24);
 
-        // Start listening before sending: if the channel does route its own echo, the datagram
-        // shows up here rather than being missed by a late subscriber.
-        var selfReceive = sender.ReceiveAsync();
-        await sender.SendBamAsync(0xFECAu, payload).WithTimeout(ShortTimeout);
+        // Start listening before sending: if the channel does route its own echo, that datagram
+        // is the one that comes back, ahead of the peer's.
+        var received = sender.ReceiveAsync();
+        await sender.SendBamAsync(0xFECAu, ownPayload).WithTimeout(ShortTimeout);
+        InjectBam(echo, sourceAddress: 0x22, pgn: 0xFECBu, peerPayload);
 
-        var settled = await Task.WhenAny(selfReceive, Task.Delay(TimeSpan.FromMilliseconds(500)));
-        settled.Should().NotBeSameAs(
-            selfReceive,
+        var datagram = await received.AsTaskWithTimeout(ShortTimeout);
+        datagram.SourceAddress.Should().Be(
+            0x22,
             "a TP channel must not reassemble its own broadcast; the echo gate cannot drop what "
-            + "the Virtual adapter never flagged, so the source-address check has to catch it");
+            + "an unflagged adapter never marked, so the source-address check has to catch it "
+            + "in both worlds");
+        datagram.Pgn.Should().Be(0xFECBu);
+        datagram.Payload.Should().Equal(peerPayload);
+    }
+
+    // A complete BAM from somebody else: TP.CM(BAM) then TP.DT 1..N, the same bytes the sender
+    // would have put on the wire. Nine bytes is the shortest payload the transport will carry.
+    private static void InjectBam(EchoWorldFixture echo, byte sourceAddress, uint pgn, byte[] payload)
+    {
+        int packets = J1939TpFrames.TotalPackets(payload.Length);
+        var cmId = unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, sourceAddress));
+        echo.InjectPeerFrame(CanFrame.Classic(cmId,
+            J1939TpFrames.BuildBam(payload.Length, packets, pgn), isExtendedFrame: true));
+
+        var dtId = unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, sourceAddress));
+        for (int i = 0; i < packets; i++)
+        {
+            echo.InjectPeerFrame(CanFrame.Classic(dtId,
+                J1939TpFrames.BuildDt((byte)(i + 1), payload, i * J1939TpFrames.DtDataBytes),
+                isExtendedFrame: true));
+        }
     }
 
     // FR-TP-030 + FR-TP-032 + FR-TP-033: TP.BAM sender broadcasts a 100-byte PDU; the receiver
