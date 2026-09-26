@@ -1,6 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -336,6 +338,228 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         await download.WithTimeoutAsync(ShortTimeout);
         segs.SelectMany(s => s.Skip(1)).Take(payload.Length).Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#167): the multiplexer check above only drops a well-formed initiate response
+    // for another object. A frame that names THIS object but carries a command specifier the
+    // phase is not waiting for — a classic response on 0x580+server, or a block frame from an
+    // earlier phase — used to be re-armed and then aborted with 0504 0001h, which fails a
+    // healthy client. The classic client ignores that frame and keeps waiting. 0504 0001h
+    // answers a request whose specifier the peer does not implement; it is not required here.
+    // The discriminator is the wire: under the bug the next client frame is the abort, and the
+    // task faults with that code before the real response can finish the transfer.
+    [Fact]
+    public async Task Sdo_BlockClient_Ignores_A_Stray_Command_Specifier_During_A_Download()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var payload = Enumerable.Range(0, 20).Select(i => (byte)(0x30 + i)).ToArray();
+        var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00, payload,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE1).Should().Be(SdoBlockFrames.CcsBlockDownloadInitBase);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        // Classic download initiate response (0x60) for the object this session asked about.
+        // Right multiplexer, wrong specifier for a block download waiting on 0xA0.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11),
+            new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 });
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, blockSize: 3));
+
+        var segs = new List<byte[]> { tap.Next(ShortTimeout) };
+        segs[0][0].Should().NotBe(SdoFrames.CsAbort,
+            "a classic ack that names this object must not abort the block download");
+        for (var i = 0; i < 2; i++) segs.Add(tap.Next(ShortTimeout));
+        segs.Select(s => s[0] & 0x7F).Should().Equal(1, 2, 3);
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSubBlockAck(
+            SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 3, nextBlockSize: 3));
+        var end = tap.Next(ShortTimeout);
+        (end[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockDownloadEndBase);
+
+        // Sub-block ack (0xA2) arriving once the client is waiting for the end response (0xA1).
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSubBlockAck(
+            SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 3, nextBlockSize: 3));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11),
+            SdoBlockFrames.BuildEndResponse(SdoBlockFrames.ScsBlockDownloadEndResponse));
+
+        await download.WithTimeoutAsync(ShortTimeout);
+        segs.SelectMany(s => s.Skip(1)).Take(payload.Length).Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#167): same stray-specifier rule on the upload client. An expedited classic
+    // upload (0x43) for this object must not complete or abort a block upload that is still
+    // waiting for its initiate response, and a duplicate initiate response must not abort the
+    // transfer once it is waiting for the end frame.
+    [Fact]
+    public async Task Sdo_BlockClient_Ignores_A_Stray_Command_Specifier_During_An_Upload()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x00));
+
+        var payload = new byte[] { 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77 };
+        // Expedited upload of this same object: the specifier a classic client would accept.
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x43, 0x01, 0x20, 0x00, 0xAA, 0xBB, 0xCC, 0xDD });
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 7));
+
+        var start = tap.Next(ShortTimeout);
+        start[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart,
+            "the expedited response must neither abort the block upload nor be taken as its result");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, payload));
+        var ack = tap.Next(ShortTimeout);
+        ack[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 7));
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
+            unusedBytesInLastSegment: 0, crc: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse,
+            "a duplicate initiate response while waiting for the end frame must not abort the upload");
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(payload);
+    }
+
+    // FR-CO-004 (#167): the matcher names only the phases a block client waits in. The download
+    // switch still has a branch for every other value of the phase enum — SendingSegments,
+    // which the client passes through without reading the bus, and AwaitEnd, which a download
+    // never uses. A frame delivered in either must be ignored, not aborted with 0504 0001h.
+    // The session is moved on its actor and the frame is handed to the same incoming path the
+    // reader uses, so the phase and the frame are one turn.
+    [Fact]
+    public async Task Sdo_BlockClient_Ignores_A_Download_Frame_In_A_Phase_With_No_Specifier()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var payload = new byte[] { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37 };
+        var download = master.SdoDownloadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00, payload,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE1).Should().Be(SdoBlockFrames.CcsBlockDownloadInitBase);
+
+        var stray = new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x00, 0, 0, 0, 0 };
+        // In the jump table (SendingSegments = 1) and past it (AwaitEnd = 5).
+        DeliverBlockFrameWhilePhase(master, 0x11, "SendingSegments", "AwaitInitResponse", stray);
+        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitEnd", "AwaitInitResponse", stray);
+        download.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the download");
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockDownloadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, blockSize: 1));
+        var seg = tap.Next(ShortTimeout);
+        seg[0].Should().NotBe(SdoFrames.CsAbort);
+        (seg[0] & 0x7F).Should().Be(1);
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSubBlockAck(
+            SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 1, nextBlockSize: 1));
+        (tap.Next(ShortTimeout)[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockDownloadEndBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x11),
+            SdoBlockFrames.BuildEndResponse(SdoBlockFrames.ScsBlockDownloadEndResponse));
+        await download.WithTimeoutAsync(ShortTimeout);
+    }
+
+    // FR-CO-004 (#167): the upload matcher names AwaitInitResponse, ReceivingSegments and
+    // AwaitEnd. The other three phase values are the download client's. A frame that arrives
+    // in one of them is ignored the same way.
+    [Fact]
+    public async Task Sdo_BlockClient_Ignores_An_Upload_Frame_In_A_Phase_With_No_Specifier()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(master, 0x11);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x00,
+            mode: SdoTransferMode.Block);
+        var init = tap.Next(ShortTimeout);
+        (init[0] & 0xE3).Should().Be(SdoBlockFrames.CcsBlockUploadInitBase);
+
+        var stray = new byte[] { 0x43, 0x01, 0x20, 0x00, 0xAA, 0xBB, 0xCC, 0xDD };
+        DeliverBlockFrameWhilePhase(master, 0x11, "SendingSegments", "AwaitInitResponse", stray);
+        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitSubBlockAck", "AwaitInitResponse", stray);
+        DeliverBlockFrameWhilePhase(master, 0x11, "AwaitEndResponse", "AwaitInitResponse", stray);
+        upload.IsCompleted.Should().BeFalse("a frame in a phase with no specifier must not finish the upload");
+
+        var payload = new byte[] { 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77 };
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2001, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 7));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart);
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, payload));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase,
+            unusedBytesInLastSegment: 0, crc: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse);
+        (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(payload);
+    }
+
+    // The phase is private and a block client never leaves it sitting across a bus frame, so the
+    // frame is delivered on the actor with the phase already set. Restoring the phase in that
+    // same turn is what lets the real response, sent afterwards, belong to the transfer again.
+    private static bool IsFatal(Exception ex) =>
+        ex is OutOfMemoryException
+            or StackOverflowException
+            or AccessViolationException
+            or AppDomainUnloadedException
+            or BadImageFormatException
+            or CannotUnloadAppDomainException
+            or InvalidProgramException
+            or ThreadAbortException;
+
+    private static void DeliverBlockFrameWhilePhase(ICanOpenNode node, byte serverNodeId, string phase,
+        string restore, byte[] data)
+    {
+        var nodeType = node.GetType();
+        var incoming = nodeType.GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var phaseType = nodeType.GetNestedType("SdoBlockClientPhase", BindingFlags.NonPublic)!;
+        var clientsField = nodeType.GetField("_sdoBlockClients", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var actor = nodeType.GetField("_actor", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(node)!;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Action work = () =>
+        {
+            try
+            {
+                var clients = (IDictionary)clientsField.GetValue(node)!;
+                object? session = null;
+                foreach (DictionaryEntry entry in clients)
+                    session = entry.Value;
+                var phaseProperty = session!.GetType().GetProperty("Phase")!;
+                phaseProperty.SetValue(session, Enum.Parse(phaseType, phase));
+                incoming.Invoke(node, new object[] { CanOpenCobId.SdoTx(serverNodeId), data, false });
+                phaseProperty.SetValue(session, Enum.Parse(phaseType, restore));
+                done.TrySetResult();
+            }
+            catch (Exception ex) when (!IsFatal(ex))
+            {
+                done.TrySetException(ex);
+            }
+        };
+        actor.GetType().GetMethod("Post", new[] { typeof(Action) })!.Invoke(actor, new object[] { work });
+        done.Task.GetAwaiter().GetResult();
     }
 
     // -----------------------------------------------------------------------------------------
