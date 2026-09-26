@@ -305,6 +305,51 @@ public interface ICanOpenNode : IDisposable
     /// respects the current NMT state (only fires in <see cref="NmtState.Operational"/>).</summary>
     Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Decodes a PDO payload of <paramref name="peerNodeId"/> and writes each mapped object to
+    /// <paramref name="sink"/>. Nothing is written to this node's object dictionary, and a frame
+    /// that is not one of this node's own RPDOs is still not applied when it arrives: this method
+    /// is the only path that splits a peer PDO.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Which PDO the COB-ID belongs to is taken from <c>1400h:01</c> / <c>1800h:01</c> in
+    /// <paramref name="peerDescription"/> (<c>$NODEID</c> resolved to <paramref name="peerNodeId"/>).
+    /// A PDO the file marks invalid (bit 31 set) is not a match. Those COB-ID entries are not
+    /// read from the live device.
+    /// </para>
+    /// <para>
+    /// The mapping is the live record <c>1600h</c>–<c>1603h</c> or <c>1A00h</c>–<c>1A03h</c>,
+    /// uploaded over SDO, when the description lists that record and every sub-index the live
+    /// count names. An upload that aborts or times out, a count above eight (MPDO included), or
+    /// a count that names a sub-index the file does not list, makes the live record unavailable
+    /// and the mapping in the file is used instead. A record the file does not list is not
+    /// uploaded, and that PDO is not decoded.
+    /// </para>
+    /// <para>
+    /// The split follows the same length rule as an RPDO this node consumes: fewer bytes than
+    /// the mapping writes nothing; extra bytes are ignored; a dummy entry <c>0002h</c>–<c>0007h</c>
+    /// consumes its bytes and writes no signal.
+    /// </para>
+    /// </remarks>
+    /// <param name="peerNodeId">The node whose PDO this payload is (1..127).</param>
+    /// <param name="cobId">The 11-bit COB-ID the payload was observed on.</param>
+    /// <param name="payload">The PDO data, 0..8 bytes.</param>
+    /// <param name="peerDescription">EDS or DCF of the peer. Selects the PDO and supplies the
+    /// mapping when the live record cannot be read. Also the list of sub-indexes that may be
+    /// uploaded.</param>
+    /// <param name="sink">Where each decoded object is written.</param>
+    /// <param name="cancellationToken">Cancels an in-flight mapping upload. Cancellation is not a
+    /// failed read: the file is not used in its place.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="peerDescription"/> or
+    /// <paramref name="sink"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside
+    /// 1..127, <paramref name="cobId"/> is not an 11-bit id, or <paramref name="payload"/> is
+    /// longer than 8 bytes.</exception>
+    Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId,
+        ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
+        CancellationToken cancellationToken = default);
+
     // -----------------------------------------------------------------------------------------
     // Parameter storage (CiA 301 §7.5.2.13 / §7.5.2.14)
     // -----------------------------------------------------------------------------------------

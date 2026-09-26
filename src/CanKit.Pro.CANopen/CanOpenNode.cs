@@ -757,6 +757,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 }
             }
             if (consumed) return;
+            // A frame that matched no RPDO of this node is not unpacked into this dictionary.
+            // ObserveForeignPdoAsync splits a peer PDO into the caller's sink.
             // EMCY 0x081..0x0FF.
             if (cobId is >= 0x081 and <= 0x0FF)
             {
