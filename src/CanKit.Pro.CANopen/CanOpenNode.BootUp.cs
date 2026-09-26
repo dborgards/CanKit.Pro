@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
@@ -56,7 +57,9 @@ internal sealed partial class CanOpenNode
             }
         }
 
-        int bootMs = (int)_od.ReadUnsigned(Co.BootTime, 0x00);
+        // 1F89h is UNSIGNED32. A signed cast would skip the deadline for every value from
+        // 0x80000000 upward, and a mandatory slave would then stay unseen.
+        uint bootMs = _od.ReadUnsigned(Co.BootTime, 0x00);
         if (bootMs > 0 && HasMandatorySlave())
         {
             int generation = _bootGeneration;
@@ -268,7 +271,10 @@ internal sealed partial class CanOpenNode
     private void SendNmt(NmtCommand command, byte target)
         => _ = EnqueueNmt(command, target);
 
-    private Task EnqueueNmt(NmtCommand command, byte target)
+    /// <summary>Queues one NMT frame behind the previous one. The task completes with
+    /// <see langword="true"/> only when the adapter confirmed the send. Cancellation faults
+    /// the task; a throw or an unconfirmed send completes with <see langword="false"/>.</summary>
+    private Task<bool> EnqueueNmt(NmtCommand command, byte target)
     {
         var payload = new[] { (byte)command, target };
         var previous = _nmtOrder;
@@ -277,12 +283,12 @@ internal sealed partial class CanOpenNode
         previous.ContinueWith(
             _ =>
             {
-                SendControlFrame(CanOpenCobId.NmtCommand, payload).ContinueWith(
+                SendNmtReporting(payload).ContinueWith(
                     send =>
                     {
                         if (send.IsCanceled) done.TrySetCanceled();
                         else if (send.IsFaulted) done.TrySetException(send.Exception!.InnerExceptions);
-                        else done.TrySetResult(true);
+                        else done.TrySetResult(send.Result);
                     },
                     CancellationToken.None,
                     TaskContinuationOptions.None,
@@ -292,5 +298,33 @@ internal sealed partial class CanOpenNode
             TaskContinuationOptions.None,
             TaskScheduler.Default);
         return done.Task;
+    }
+
+    /// <summary>Sends one NMT frame and reports the adapter's confirmation. A transport
+    /// exception is reported and comes back as <see langword="false"/>, so a caller can tell
+    /// a reset that never left the adapter from one that did. Cancellation still fails the task.</summary>
+    private Task<bool> SendNmtReporting(byte[] payload)
+    {
+        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
+        return Task.Run(async () =>
+        {
+            try
+            {
+                var conf = await _service.SendConfirmed(frame).ConfigureAwait(false);
+                if (conf.Confirmed) return true;
+                RaiseBackgroundException(new CanOpenTransportException(
+                    $"CANopen frame TX on COB-ID 0x{CanOpenCobId.NmtCommand:X3} failed: {conf.FailureReason}."));
+                return false;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                RaiseBackgroundException(ex);
+                return false;
+            }
+        });
     }
 }

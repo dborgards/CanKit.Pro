@@ -123,7 +123,10 @@ internal sealed partial class CanOpenNode
             StopFlyingMasterCore();
             uint startup = _od.ReadUnsigned(Co.NmtStartup, 0x00);
             _od.WriteUnsigned(Co.NmtStartup, 0x00, startup & ~(NmtMasterBit | FlyingMasterBit));
-            RememberFlyingMasterPowerOn();
+            // Stopping records the disabled startup only. A live network list, boot timeout or
+            // timing value is not a power-on value unless StartFlyingMaster or StoreParameters
+            // already took it.
+            RememberStartupPowerOn();
         });
     }
 
@@ -203,15 +206,22 @@ internal sealed partial class CanOpenNode
         {
             // Cold boot and nobody is master: Reset Communication takes every flying master
             // through a warm boot together, so the timeslot race is not racing PDO traffic or
-            // staggered startup. The warm election starts only after that frame has been sent.
-            // The echo applies the reset when it comes back; if the bus does not echo, the send
-            // completion applies the same reset once.
+            // staggered startup. The warm election starts only after that frame was confirmed.
+            // The echo applies the reset when it comes back; if the bus does not echo, the
+            // confirmed send applies the same reset once. A rejected, thrown or unconfirmed
+            // send leaves the network as it is and does not start the election.
             _flyingMasterFromPowerOn = false;
             _coldResetPending = true;
             var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
-            _ = sent.ContinueWith(_ =>
+            _ = sent.ContinueWith(send =>
             {
-                try { _actor.Post(CompleteColdReset); }
+                try
+                {
+                    if (send.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && send.Result)
+                        _actor.Post(CompleteColdReset);
+                    else
+                        _actor.Post(AbandonColdReset);
+                }
                 catch (ObjectDisposedException) { /* node already gone */ }
             }, System.Threading.CancellationToken.None,
                 System.Threading.Tasks.TaskContinuationOptions.None,
@@ -231,6 +241,14 @@ internal sealed partial class CanOpenNode
         PerformNmtReset(communicationOnly: true);
         // The echo of the frame we just sent must not reset this node again.
         _ignoreBroadcastResetEcho = true;
+    }
+
+    /// <summary>The cold reset did not leave the adapter. Drop the window without applying the
+    /// reset and without starting the warm election.</summary>
+    private void AbandonColdReset()
+    {
+        if (!_coldResetPending || _disposed != 0) return;
+        _coldResetPending = false;
     }
 
     private void BeginNegotiation(bool transmitTrigger)
@@ -531,15 +549,7 @@ internal sealed partial class CanOpenNode
 
     private void RememberFlyingMasterPowerOn()
     {
-        // The factory snapshot and the power-on snapshot start as one dictionary. Copying before
-        // the first edit keeps "load" (1011h) able to return to flying master off.
-        if (ReferenceEquals(_powerOnValues, _factoryDefaults))
-        {
-            var copy = new System.Collections.Generic.Dictionary<uint, byte[]>(_factoryDefaults.Count);
-            foreach (var kv in _factoryDefaults)
-                copy[kv.Key] = (byte[])kv.Value.Clone();
-            _powerOnValues = copy;
-        }
+        DetachPowerOnFromFactory();
         RememberOne(Co.NmtStartup, 0x00);
         for (byte sub = 0; sub <= TimingDetectCycle; sub++)
             RememberOne(Co.FlyingMasterTiming, sub);
@@ -548,6 +558,25 @@ internal sealed partial class CanOpenNode
         RememberOne(Co.BootTime, 0x00);
         for (byte sub = 0; sub <= CanOpenCobId.MaxNodeId; sub++)
             RememberOne(Co.SlaveAssignment, sub);
+    }
+
+    /// <summary>Records the disabled <c>1F80h</c> so a later reset does not rejoin. Does not
+    /// copy <c>1F81h</c>, <c>1F89h</c> or <c>1F90h</c>.</summary>
+    private void RememberStartupPowerOn()
+    {
+        DetachPowerOnFromFactory();
+        RememberOne(Co.NmtStartup, 0x00);
+    }
+
+    /// <summary>The factory snapshot and the power-on snapshot start as one dictionary. Copying
+    /// before the first edit keeps "load" (1011h) able to return to flying master off.</summary>
+    private void DetachPowerOnFromFactory()
+    {
+        if (!ReferenceEquals(_powerOnValues, _factoryDefaults)) return;
+        var copy = new System.Collections.Generic.Dictionary<uint, byte[]>(_factoryDefaults.Count);
+        foreach (var kv in _factoryDefaults)
+            copy[kv.Key] = (byte[])kv.Value.Clone();
+        _powerOnValues = copy;
     }
 
     private void RememberOne(ushort index, byte subindex)

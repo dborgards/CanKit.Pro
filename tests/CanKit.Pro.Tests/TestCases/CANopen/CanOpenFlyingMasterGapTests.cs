@@ -706,21 +706,173 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
-    public async Task A_Cancelled_Cold_Reset_Send_Still_Finishes_The_Election()
+    public Task A_Cancelled_Cold_Reset_Send_Does_Not_Start_The_Election()
+        => ColdResetSendDoesNotElect(gate => gate.Cancel = true);
+
+    [Fact]
+    public Task An_Unconfirmed_Cold_Reset_Send_Does_Not_Start_The_Election()
+        => ColdResetSendDoesNotElect(gate => gate.Reject = true);
+
+    [Fact]
+    public Task A_Throwing_Cold_Reset_Send_Does_Not_Start_The_Election()
+        => ColdResetSendDoesNotElect(gate => gate.Fault = new InvalidOperationException("adapter rejected the reset"));
+
+    private async Task ColdResetSendDoesNotElect(Action<ColdResetGate> arrange)
     {
         var session = NewSession();
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { Cancel = true };
+        using var gate = new ColdResetGate(new CanBusService(nodeBus));
+        arrange(gate);
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
         var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
 
         Tighten(node);
         node.StartFlyingMaster(0, Heartbeat);
         await UntilAsync(clock, witness, null,
-            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
-            "the cancelled send still applies the cold reset and the warm election wins");
+            () => node.FlyingMasterRole == FlyingMasterRole.Detecting, 200,
+            "the node is asking who is master");
+
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(30));
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        // The send task has already finished. Give its continuation time to reach the actor
+        // before the clock runs far enough for a warm election to win.
+        await Task.Delay(200);
+        await QuiesceAsync(witness, null);
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(800));
+
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Detecting,
+            "a cold reset that was not confirmed must not start the warm election");
+        log.Snapshot().Should().NotContain(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+    }
+
+    [Fact]
+    public async Task A_Boot_Timeout_At_Or_Above_2_31_Milliseconds_Still_Fires()
+    {
+        const byte slave = 0x22;
+        const uint bootMs = 0x80000000;
+        using var rig = OpenMaster();
+        var timedOut = new System.Collections.Concurrent.ConcurrentQueue<byte>();
+        rig.Node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, slave, Assigned | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, bootMs);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(200));
+        timedOut.Should().BeEmpty("200 ms is inside an unsigned timeout of 0x80000000 ms");
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(bootMs));
+        timedOut.Should().Contain(slave, "1F89h is unsigned, so 0x80000000 still arms the deadline");
+    }
+
+    [Fact]
+    public async Task Master_Heartbeats_Reach_The_Standby_Watch_Past_Node_Guarding()
+    {
+        using var pair = OpenPair();
+        var (clock, winner, standby, winnerWitness, standbyWitness, _) = pair;
+        var lost = new System.Collections.Concurrent.ConcurrentQueue<FlyingMasterSignal>();
+        standby.FlyingMasterChanged += (_, e) => lost.Enqueue(e.Signal);
+
+        var timeout = TimeSpan.FromMilliseconds(80);
+        standby.StartNodeGuardingConsumer(LeftId, TimeSpan.FromSeconds(30), 2);
+        await QuiesceAsync(winnerWitness, standbyWitness);
+
+        Tighten(winner);
+        Tighten(standby);
+        winner.StartFlyingMaster(0, timeout);
+        standby.StartFlyingMaster(2, timeout);
+        await UntilAsync(clock, winnerWitness, standbyWitness,
+            () => winner.FlyingMasterRole == FlyingMasterRole.Active
+                && standby.FlyingMasterRole == FlyingMasterRole.Standby, 1200,
+            "priority 0 wins and priority 2 watches it");
+
+        for (int elapsed = 0; elapsed < 300; elapsed += 10)
+            await AdvanceAsync(clock, winnerWitness, standbyWitness, TimeSpan.FromMilliseconds(10));
+
+        standby.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby,
+            "the winner's heartbeats rearm the watch even though a node-guarding consumer owns that COB-ID");
+        lost.Should().NotContain(FlyingMasterSignal.ActiveMasterLost);
+    }
+
+    [Fact]
+    public async Task An_Assigned_Slave_Heartbeat_Is_Seen_Past_Node_Guarding()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var timedOut = new System.Collections.Concurrent.ConcurrentQueue<byte>();
+        rig.Node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, slave, Assigned | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, 100);
+        rig.Node.StartNodeGuardingConsumer(slave, TimeSpan.FromSeconds(30), 2);
+        await QuiesceAsync(rig.Witness, null);
+
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        TransmitHeartbeat(rig.Peer, slave, (byte)NmtState.PreOperational);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.State.Should().Be(NmtState.Operational,
+            "the slave heartbeat marks it seen even though node guarding routed the COB-ID");
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(150));
+        timedOut.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Stop_Records_Only_The_Startup_Bits()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, slave, Assigned);
+        od.WriteUnsigned(0x1F89, 0x00, 100);
+        Tighten(rig.Node);
+        uint delay = od.ReadUnsigned(Timing, 0x02);
+
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, 250);
+        od.WriteUnsigned(Timing, 0x02, delay + 50);
+        rig.Node.StopFlyingMaster();
+        await QuiesceAsync(rig.Witness, null);
+
+        TransmitNmt(rig.Peer, NmtCommand.ResetCommunication, LeftId);
+        await QuiesceAsync(rig.Witness, null);
+
+        (od.ReadUnsigned(Startup, 0x00) & MasterBits).Should().Be(0u,
+            "stop records the cleared 1F80h, so the reset does not rejoin");
+        od.ReadUnsigned(0x1F81, slave).Should().Be(Assigned,
+            "stop does not snapshot the live network list");
+        od.ReadUnsigned(0x1F89, 0x00).Should().Be(100u,
+            "stop does not snapshot the live boot timeout");
+        od.ReadUnsigned(Timing, 0x02).Should().Be(delay,
+            "stop does not snapshot the live flying-master timing");
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
     }
 
     private static void Transmit(ICanBus peer, uint id, params byte[] data)
@@ -876,6 +1028,8 @@ public partial class CanOpenFlyingMasterTests
         public ColdResetGate(CanBusService inner) => _inner = inner;
 
         public bool Cancel { get; set; }
+        public bool Reject { get; set; }
+        public Exception? Fault { get; set; }
         public Task Entered => _entered.Task;
 
         public ICanBus Bus => _inner.Bus;
@@ -901,6 +1055,9 @@ public partial class CanOpenFlyingMasterTests
             {
                 _entered.TrySetResult(true);
                 if (Cancel) throw new OperationCanceledException();
+                if (Fault is not null) throw Fault;
+                if (Reject)
+                    return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
                 await _release.Task.ConfigureAwait(false);
             }
             return await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);

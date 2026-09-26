@@ -821,6 +821,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (_nodeGuardingConsumers.ContainsKey(producer))
                 {
                     HandleNodeGuardingResponse(producer, data);
+                    // Heartbeats and boot-up use this COB-ID too. Returning here used to hide
+                    // them from the standby watch of the active master and from boot-up, so the
+                    // watch expired while the master was still producing and an assigned slave
+                    // stayed unseen.
+                    if (data.Length >= 1)
+                    {
+                        byte guardedState = (byte)(data[0] & 0x7F);
+                        NoteSlaveNmtState(producer, guardedState);
+                        _heartbeatConsumer.NoteReceived(producer);
+                    }
                     return;
                 }
                 HandleHeartbeat(cobId, data);
