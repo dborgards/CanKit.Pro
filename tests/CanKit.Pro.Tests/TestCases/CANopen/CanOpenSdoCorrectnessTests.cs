@@ -802,6 +802,31 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         raw.Should().Equal(payload, "the client assembles the segments; the reserved bytes of 0x40 are not the value");
     }
 
+    // A frame that names the object this upload is waiting on, but is not an upload initiate
+    // response, is not this phase. The value that arrives afterwards is the discriminator: a
+    // download ack must neither complete the upload nor abort it.
+    [Fact]
+    public async Task Sdo_Client_Ignores_A_Download_Ack_That_Names_The_Upload_It_Is_Waiting_On()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var rawBus = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x11));
+
+        var upload = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2001, subindex: 0x05);
+        var init = tap.Next(ShortTimeout);
+        init[0].Should().Be(SdoFrames.CcsUploadInit);
+        SdoFrames.ReadIndex(init).Should().Be(((ushort)0x2001, (byte)0x05));
+
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { SdoFrames.ScsDownloadInitAck, 0x01, 0x20, 0x05, 0, 0, 0, 0 });
+        Send(rawBus, CanOpenCobId.SdoTx(0x11), new byte[] { 0x43, 0x01, 0x20, 0x05, 0x11, 0x22, 0x33, 0x44 });
+
+        var raw = await upload.WithTimeoutAsync(ShortTimeout);
+        raw.Should().Equal(new byte[] { 0x11, 0x22, 0x33, 0x44 },
+            "the download ack is not an upload response, so the expedited value that follows is the result");
+    }
+
     // Size-less server growth (#38, review on the exact-size realloc). The buffer starts empty
     // and the first allocation is 8 bytes, then capacity doubles until the next double would
     // pass MaxSdoTransferBytes, where it clamps to that cap. Offset stays the logical length,
@@ -1037,6 +1062,34 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         SendDownloadSegment(rawBus, 0x02, toggle: true, last: true, payload.AsSpan(7, 1));
         tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.ScsDownloadSegmentBase | SdoFrames.ToggleBit));
         server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
+    }
+
+    // The declared length is capped before the buffer is allocated. A 0x21 whose size field is
+    // past MaxSdoTransferBytes aborts with OutOfMemory and installs no session.
+    [Fact]
+    public void Sdo_Server_Sized_Download_Aborts_OutOfMemory_When_The_Declared_Length_Exceeds_The_Cap()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 16));
+        var original = new byte[] { 0xFF, 0xFF };
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, original);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SizedDownloadInit(0x2100, 0x00, 17));
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.OutOfMemory);
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
+
+        SendDownloadSegment(rawBus, 0x02, toggle: false, last: true, new byte[] { 0x01 });
+        var stray = tap.Next(ShortTimeout);
+        stray[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(stray).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid,
+            "the over-cap initiate was refused before a session existed");
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(original);
     }
 
     private static void SendSizelessDownloadInit(ICanBus rawBus, byte nodeId, ushort index, byte subindex)
