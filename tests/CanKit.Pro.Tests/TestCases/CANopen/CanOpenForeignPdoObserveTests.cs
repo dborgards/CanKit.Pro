@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -816,6 +817,68 @@ PDOMapping=0
     }
 
     [Fact]
+    public async Task A_cancelled_live_read_is_not_replaced_by_the_file()
+    {
+        var session = NewSession();
+        using var responder = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
+        using var entered = new SemaphoreSlim(0, 1);
+        using var release = new SemaphoreSlim(0, 1);
+        var held = 0;
+        using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
+        {
+            if (index == 0x1800 && sub == 1 && Interlocked.Exchange(ref held, 1) == 0)
+            {
+                entered.Release();
+                release.Wait(ShortTimeout);
+            }
+            if (index is >= 0x1400 and <= 0x1403 or >= 0x1800 and <= 0x1803)
+                return index == 0x1800 && sub == 1 ? U32(Tpdo1) : null;
+            if (index != 0x1A00) return null;
+            return sub == 0 ? new byte[] { 1 } : U32(0x20010008);
+        });
+
+        using var cancel = new CancellationTokenSource();
+        var sink = new ListSink();
+        var pending = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, sink, cancel.Token);
+        entered.Wait(ShortTimeout).Should().BeTrue();
+        cancel.Cancel();
+        Func<Task> wait = async () => await pending.WithTimeoutAsync(ShortTimeout);
+        try
+        {
+            await wait.Should().ThrowAsync<OperationCanceledException>();
+        }
+        finally
+        {
+            release.Release();
+        }
+
+        sink.Signals.Should().BeEmpty();
+
+        var again = new ListSink();
+        var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0xA5 }, file, again)
+            .WithTimeoutAsync(ShortTimeout);
+        result.Observations.Should().ContainSingle();
+        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        again.Signals.Should().ContainSingle();
+        again.Signals[0].Value.Should().Equal(0xA5);
+    }
+
+    [Fact]
+    public void A_transport_failure_is_a_failed_live_read_and_an_unrelated_exception_is_not()
+    {
+        // A failed transmit is reported on BackgroundExceptionOccurred. The SDO client then
+        // times out as SdoAbortException, so ObserveForeignPdoAsync never sees
+        // CanOpenTransportException. The filter still treats that exception as a failed live
+        // read, and it is invoked here because no upload throws it.
+        LiveReadUnavailable(new CanOpenTransportException("tx failed")).Should().BeTrue();
+        LiveReadUnavailable(new OperationCanceledException()).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task An_SDO_already_in_flight_falls_back_to_the_file_instead_of_throwing()
     {
         var session = NewSession();
@@ -1129,6 +1192,16 @@ PDOMapping=0
 
     private static byte[] U32(uint value)
         => new[] { (byte)value, (byte)(value >> 8), (byte)(value >> 16), (byte)(value >> 24) };
+
+    /// <summary><see cref="CanOpenNode"/> decides a failed live read with a private predicate.
+    /// The transport arm cannot be reached through <c>SdoUploadAsync</c>.</summary>
+    private static bool LiveReadUnavailable(Exception ex)
+    {
+        var method = typeof(CanOpenNode).GetMethod("IsLiveReadUnavailable",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        method.Should().NotBeNull();
+        return (bool)method!.Invoke(null, new object[] { ex })!;
+    }
 
     /// <summary>Answers SDO uploads for one server. A null payload is an abort. An empty payload
     /// is a segmented upload of no bytes. Anything else is an expedited upload of those bytes.</summary>
