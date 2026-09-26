@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
+using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -458,6 +459,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
 
         var unknown = await tool.ObserveForeignPdoAsync(Peer, 0x192, new byte[] { 0x11, 0x22 }, file, sink)
             .WithTimeoutAsync(ShortTimeout);
+        unknown.CobId.Should().Be(0x192u);
         unknown.Decoded.Should().BeFalse();
         unknown.Observations.Should().BeEmpty();
         unknown.Reason.Should().Contain("COB-ID");
@@ -512,6 +514,192 @@ PDOMapping=0
         result.Observations[0].Decoded.Should().BeFalse();
         result.Observations[0].Reason.Should().Contain("could not be read");
         sink.Signals.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_signal_rejects_a_null_value()
+    {
+        var act = () => new ForeignPdoSignal(Peer, ForeignPdoKind.Tpdo, 1, Tpdo1, 0x2000, 0, null!,
+            ForeignPdoMappingOrigin.LiveMapping);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("value");
+    }
+
+    [Fact]
+    public async Task A_file_that_is_not_a_usable_COB_ID_or_mapping_is_not_decoded()
+    {
+        var session = NewSession();
+        using var peerBus = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var peer = CanOpen.OpenNode(peerBus, Peer, MinimalEds());
+        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        await WaitForStateAsync(peer, NmtState.PreOperational);
+
+        async Task<ForeignPdoObserveResult> Observe(CanOpenDeviceDescription file, byte[] payload)
+        {
+            var sink = new ListSink();
+            var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, payload, file, sink)
+                .WithTimeoutAsync(ShortTimeout);
+            sink.Signals.Should().BeEmpty();
+            return result;
+        }
+
+        var extended = await Observe(FileWith(Comm("1800", "0x20000191", tpdo: true) + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
+        extended.Observations.Should().BeEmpty();
+        extended.Reason.Should().Contain("COB-ID");
+
+        var stray = await Observe(FileWith(Comm("1800", "0x800", tpdo: true) + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
+        stray.Observations.Should().BeEmpty();
+
+        var unreadableCob = await Observe(FileWith(Comm("1800", "nope", tpdo: true) + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
+        unreadableCob.Observations.Should().BeEmpty();
+
+        var blankCob = await Observe(FileWith(Comm("1800", "", tpdo: true) + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
+        blankCob.Observations.Should().BeEmpty();
+
+        var missingSub = await Observe(FileWith(@"
+[1800]
+ParameterName=PDO communication
+SubNumber=1
+ObjectType=0x9
+[1800sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+" + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
+        missingSub.Observations.Should().BeEmpty();
+
+        var bareCob = await Observe(FileWith(@"
+[1800]
+ParameterName=COB-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x191
+PDOMapping=0
+" + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
+        bareCob.Observations.Should().BeEmpty();
+
+        async Task Undecoded(string sections, string reason)
+        {
+            var result = await Observe(FileWith(Comm("1800", "$NODEID+0x180", tpdo: true) + sections), new byte[] { 0x5A });
+            result.Observations.Should().ContainSingle();
+            result.Observations[0].Decoded.Should().BeFalse();
+            result.Observations[0].Reason.Should().Contain(reason);
+        }
+
+        await Undecoded("", "not in the peer description");
+        await Undecoded(Map("1A00", "9", "0x20010008"), "at most 8");
+        await Undecoded(Map("1A00", "2", "0x20010008"), "no sub-index 2");
+        await Undecoded(Map("1A00", "1", "0x0"), "could not be read");
+        await Undecoded(Map("1A00", "1", "nope"), "could not be read");
+        await Undecoded(Map("1A00", "1", "0x20010004"), "byte-aligned");
+        await Undecoded(Map("1A00", "2", "0x20000040", "0x20010008"), "longer than 8");
+        await Undecoded(@"
+[1A00]
+ParameterName=TPDO1 mapping
+SubNumber=1
+ObjectType=0x9
+[1A00sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0x20010008
+PDOMapping=0
+", "no sub-index 0");
+        await Undecoded(@"
+[1A00]
+ParameterName=TPDO1 mapping
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=1
+PDOMapping=0
+", "no sub-index 1");
+
+        var empty = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A },
+            FileWith(Comm("1800", "$NODEID+0x180", tpdo: true) + @"
+[1A00]
+ParameterName=TPDO1 mapping
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+"), new ListSink()).WithTimeoutAsync(ShortTimeout);
+        empty.Observations.Should().ContainSingle();
+        empty.Observations[0].Decoded.Should().BeTrue();
+        empty.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+        empty.Observations[0].SignalsWritten.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_live_read_that_is_not_a_usable_COB_ID_or_mapping_falls_back_to_the_file()
+    {
+        var session = NewSession();
+        using var peerBus = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var responder = Open(session, 2);
+        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        var file = PeerFile();
+        byte[]? cob = null;
+        string mapping = "ok";
+        using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
+        {
+            if (index is >= 0x1400 and <= 0x1403 or >= 0x1800 and <= 0x1803)
+            {
+                if (index == 0x1800 && sub == 1 && cob is not null) return cob;
+                return null;
+            }
+            if (index != 0x1A00) return null;
+            return mapping switch
+            {
+                "short-count" => sub == 0 ? Array.Empty<byte>() : null,
+                "wide-count" => sub == 0 ? new byte[] { 9 } : null,
+                "short-entry" => sub == 0 ? new byte[] { 1 } : new byte[] { 0x08 },
+                "zero-entry" => sub == 0 ? new byte[] { 1 } : new byte[4],
+                "odd-length" => sub == 0 ? new byte[] { 1 } : U32(0x20010004),
+                "too-long" => sub switch
+                {
+                    0 => new byte[] { 2 },
+                    1 => U32(0x20000040),
+                    _ => U32(0x20010008),
+                },
+                "abort-entry" => sub == 0 ? new byte[] { 1 } : null,
+                _ => null,
+            };
+        });
+
+        async Task<ForeignPdoObserveResult> Observe(string mode, byte[]? liveCob = null)
+        {
+            mapping = mode;
+            cob = liveCob;
+            var sink = new ListSink();
+            return await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A, 0x00, 0x00 }, file, sink)
+                .WithTimeoutAsync(ShortTimeout);
+        }
+
+        var extended = await Observe("ok", U32(0x20000191));
+        extended.Observations.Should().BeEmpty();
+
+        var stray = await Observe("ok", U32(0x800));
+        stray.Observations.Should().BeEmpty();
+
+        var shortCob = await Observe("ok", new byte[] { 0x91 });
+        shortCob.Observations.Should().ContainSingle();
+        shortCob.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+        shortCob.Observations[0].Decoded.Should().BeTrue();
+
+        foreach (var mode in new[] { "short-count", "wide-count", "short-entry", "zero-entry", "odd-length", "too-long", "abort-entry" })
+        {
+            var result = await Observe(mode);
+            result.Observations.Should().ContainSingle();
+            result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+            result.Observations[0].Decoded.Should().BeTrue();
+        }
     }
 
     [Fact]
@@ -774,6 +962,91 @@ PDOMapping=0
 ");
         }
         return text.ToString();
+    }
+
+    private static CanOpenDeviceDescription FileWith(string sections)
+    {
+        bool mapping = sections.Contains("[1A00]", StringComparison.Ordinal);
+        return CanOpenDeviceDescription.ParseEds(Eds(
+            optional: mapping
+                ? @"SupportedObjects=2
+1=0x1800
+2=0x1A00"
+                : @"SupportedObjects=1
+1=0x1800",
+            manufacturer: "SupportedObjects=0",
+            sections: sections));
+    }
+
+    private static byte[] U32(uint value)
+        => new[] { (byte)value, (byte)(value >> 8), (byte)(value >> 16), (byte)(value >> 24) };
+
+    /// <summary>Answers SDO uploads for one server. A null payload is an abort. An empty payload
+    /// is a segmented upload of no bytes. Anything else is an expedited upload of those bytes.</summary>
+    private sealed class ScriptedUploadServer : IDisposable
+    {
+        private readonly ICanBus _bus;
+        private readonly byte _server;
+        private readonly Func<ushort, byte, byte[]?> _answer;
+        private readonly EventHandler<CanKit.Abstractions.API.Common.Definitions.CanReceiveDataView> _onFrame;
+
+        public ScriptedUploadServer(ICanBus bus, byte server, Func<ushort, byte, byte[]?> answer)
+        {
+            _bus = bus;
+            _server = server;
+            _answer = answer;
+            _onFrame = OnFrame;
+            _bus.FrameObserved += _onFrame;
+        }
+
+        public void Dispose() => _bus.FrameObserved -= _onFrame;
+
+        private void OnFrame(object? sender, CanKit.Abstractions.API.Common.Definitions.CanReceiveDataView e)
+        {
+            var frame = e.CanFrame;
+            if (frame.IsExtendedFrame || frame.IsRemoteFrame || (uint)frame.ID != CanOpenCobId.SdoRx(_server)) return;
+            var data = frame.Data.ToArray();
+            if (data.Length < 1) return;
+            if ((data[0] & ~SdoFrames.ToggleBit) == SdoFrames.CcsUploadSegmentBase)
+            {
+                Reply(EmptySegment(data[0]));
+                return;
+            }
+            if (data[0] != SdoFrames.CcsUploadInit || data.Length < 4) return;
+            var index = (ushort)(data[1] | (data[2] << 8));
+            var sub = data[3];
+            var payload = _answer(index, sub);
+            if (payload is null)
+                Reply(SdoFrames.BuildAbort(index, sub, (uint)SdoAbortCode.ObjectDoesNotExist));
+            else if (payload.Length == 0)
+                Reply(SegmentedEmptyInit(index, sub));
+            else
+                Reply(Expedited(index, sub, payload));
+        }
+
+        private void Reply(byte[] data)
+            => _bus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(_server)), data));
+
+        private static byte[] Expedited(ushort index, byte sub, byte[] payload)
+        {
+            int unused = 4 - payload.Length;
+            var buf = new byte[8];
+            buf[0] = (byte)(SdoFrames.ScsUploadInitExpeditedBase | ((unused & 0x03) << 2) | 0x03);
+            buf[1] = (byte)index;
+            buf[2] = (byte)(index >> 8);
+            buf[3] = sub;
+            payload.CopyTo(buf, 4);
+            return buf;
+        }
+
+        private static byte[] SegmentedEmptyInit(ushort index, byte sub)
+            => new byte[] { 0x40, (byte)index, (byte)(index >> 8), sub, 0, 0, 0, 0 };
+
+        private static byte[] EmptySegment(byte request)
+        {
+            byte toggle = (byte)(request & SdoFrames.ToggleBit);
+            return new byte[] { (byte)(SdoFrames.ContinueBit | (7 << 1) | toggle), 0, 0, 0, 0, 0, 0, 0 };
+        }
     }
 
     private static string Var(string index, string dataType, string value) => $@"
