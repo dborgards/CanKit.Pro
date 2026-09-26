@@ -2557,8 +2557,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 // was the first answer and is not sufficient on its own either: SettleAsync ends
                 // the actor callback, not the send it hands to the thread pool, so an early
                 // emission can still be off the wire when Count() reads (Bugbot on #113).
-                await clock.WaitUntilTimerArmedAsync(senderActor, slotPoint - clock.Elapsed,
-                    ShortTimeout);
+                var remaining = slotPoint - clock.Elapsed;
+                await clock.WaitUntilTimerArmedAsync(senderActor, remaining, ShortTimeout, Step);
+                // DueTimestamp reads the clock again after the delay was computed. One send-cost
+                // between those reads arms the tick a step past the slot; the grid assertion below
+                // still requires the announce on that slot, give or take this one step.
+                var armed = await senderActor.NextTimerDelayAsync();
+                var lateBy = armed is { } delay && delay > remaining ? delay - remaining : TimeSpan.Zero;
 
                 // One tick short of the slot: corroboration on the wire that the tick armed above
                 // has not fired early. It is the barrier, not this, that pins the period.
@@ -2569,6 +2574,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                     slot);
 
                 await clock.AdvanceToAsync(slotPoint);
+                if (lateBy > TimeSpan.Zero)
+                    await clock.AdvanceAsync(lateBy);
                 await WaitForAnnouncesAsync(Count, slot);
                 await WaitForAnnouncesAsync(() => Volatile.Read(ref dataFrames),
                     slot * dataFramesPerEmission);
