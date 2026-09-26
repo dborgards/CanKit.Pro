@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -52,14 +51,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _readerCts = new();
 
-    // Bounded, drop-oldest queue that decouples user event delivery from the actor loop.
-    // Events (RPDO / EMCY / heartbeat / SYNC / NMT / user-facing signals) are enqueued from
+    // User-event queue that decouples delivery from the actor loop. Events are enqueued from
     // the actor thread and drained by a single dispatcher task, so a slow subscriber can never
-    // stall the protocol loop. Bounded by CanOpenNodeOptions.EventQueueCapacity; when full,
-    // the oldest queued event is dropped (matches the option's documented semantics).
-    // BackgroundExceptionOccurred stays synchronous — it is a low-frequency diagnostic signal
-    // that should never be silently dropped by queue backpressure.
-    private readonly Channel<Action> _eventChannel;
+    // stall the protocol loop and handlers for different events never run concurrently.
+    //
+    // Ordinary events (heartbeat / SYNC / RPDO / NMT / node-guarding reception, life guarding)
+    // are bounded by CanOpenNodeOptions.EventQueueCapacity with drop-oldest. HeartbeatTimeout,
+    // NodeGuardingTimeout and EmcyReceived share that queue — same order, same thread — but are
+    // never the event that is discarded: a guarding consumer that misses one treats a silent
+    // peer as alive (#170). They can make the queue longer than the capacity. The wake-up is a
+    // single coalesced signal, not one token per event: a drop removes the event and leaves no
+    // token behind, and a burst while the pump is busy does not allocate. BackgroundExceptionOccurred
+    // stays synchronous and is not part of this queue.
+    private readonly object _eventLock = new();
+    private readonly LinkedList<PendingEvent> _pendingEvents = new();
+    private readonly SemaphoreSlim _eventWake = new(0, 1);
+    private LinkedListNode<PendingEvent>? _oldestNonCritical;
+    private int _pendingNonCritical;
+    private long _submittedEventCount;
+    private bool _eventPumpCompleted;
     private readonly Task _eventPumpTask;
 
     private readonly ObjectDictionary _od = new();
@@ -190,15 +200,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // event-driven TPDOs whose mapping contains the written entry.
         _od.EntryWritten += OnOdEntryWrittenForCoS;
 
-        // Bounded event queue: drop-oldest keeps steady-state memory constant when a subscriber
-        // falls behind, exactly matching the CanOpenNodeOptions.EventQueueCapacity contract.
-        _eventChannel = Channel.CreateBounded<Action>(new BoundedChannelOptions(_options.EventQueueCapacity)
-        {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
-            SingleWriter = false,
-            AllowSynchronousContinuations = false,
-        });
+        // The pump has to be running before the subscription exists: a frame can be dispatched
+        // as soon as Subscribe returns, and construction failure below signals the pump to
+        // exit so it does not outlive a node that never finished opening.
         _eventPumpTask = Task.Run(RunEventPumpAsync);
 
         try
@@ -239,6 +243,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
         catch
         {
+            CompleteEventQueue();
             _actor.Dispose();
             throw;
         }
@@ -621,12 +626,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
-        // Complete the event channel so the pump task exits after draining anything still
-        // queued. This keeps ordering: any event enqueued before Dispose is guaranteed to be
-        // delivered before the pump exits (unless the subscriber itself hangs), while further
-        // TryWrite calls (a stray raise from an actor callback still winding down) simply
-        // return false — dropped rather than kept alive past Dispose.
-        _eventChannel.Writer.TryComplete();
+        // Complete the queue so the pump exits after draining anything still queued. An event
+        // accepted before this point is delivered (unless the subscriber itself hangs); one that
+        // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
+        // Dispose.
+        CompleteEventQueue();
         try { _eventPumpTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
         _subscription.Dispose();
@@ -679,28 +683,127 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // =========================================================================================
     private async Task RunEventPumpAsync()
     {
-        try
+        while (true)
         {
-            while (await _eventChannel.Reader.WaitToReadAsync().ConfigureAwait(false))
-            {
-                while (_eventChannel.Reader.TryRead(out var raise))
-                {
-                    try { raise(); }
-                    catch (Exception ex) { RaiseBackgroundException(ex); }
-                }
-            }
+            await _eventWake.WaitAsync().ConfigureAwait(false);
+            // One signal covers every event queued by the time we look. Handlers already
+            // catch their own subscriber exceptions and report them; a failure here is a
+            // bug in that delegate, not something to swallow and keep dispatching past.
+            while (TryDequeueEvent() is { } raise)
+                raise();
+            // The queue was just drained. Closure is the completed flag alone: an event
+            // accepted before completion is still in the list and was delivered above, and
+            // one accepted after completion never enters the list.
+            if (EventQueueClosed()) return;
         }
-        catch (OperationCanceledException) { /* Dispose */ }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
     }
 
-    private void EnqueueEvent(Action raise)
+    private void EnqueueEvent(Action raise, bool critical = false)
     {
-        // DropOldest mode: TryWrite either enqueues or silently discards the oldest queued
-        // event to make room. It never blocks and never throws. Once the channel is completed
-        // (Dispose), TryWrite returns false and the raise is dropped, which is what we want:
-        // no delivery guarantee is documented past disposal.
-        _eventChannel.Writer.TryWrite(raise);
+        lock (_eventLock)
+        {
+            if (_eventPumpCompleted) return;
+            if (!critical)
+            {
+                // Drop the oldest ordinary event, never a timeout or an EMCY sitting in front
+                // of it. The newcomer still takes a slot, so the ordinary count stays at the cap.
+                if (_pendingNonCritical >= _options.EventQueueCapacity && _oldestNonCritical is { } drop)
+                {
+                    var next = NextNonCritical(drop.Next);
+                    _pendingEvents.Remove(drop);
+                    _pendingNonCritical--;
+                    _oldestNonCritical = next;
+                }
+                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false));
+                _oldestNonCritical ??= added;
+                _pendingNonCritical++;
+            }
+            else
+            {
+                _pendingEvents.AddLast(new PendingEvent(raise, critical: true));
+            }
+            _submittedEventCount++;
+            SignalEventQueue();
+        }
+    }
+
+    /// <summary>Wakes the pump if it is idle. Called under <see cref="_eventLock"/>. A second
+    /// call while a wake is already pending does nothing: the pump drains the whole queue,
+    /// so one signal is enough and dropped events leave nothing behind.</summary>
+    private void SignalEventQueue()
+    {
+        if (_eventWake.CurrentCount == 0)
+            _eventWake.Release();
+    }
+
+    private bool EventQueueClosed()
+    {
+        lock (_eventLock)
+            return _eventPumpCompleted;
+    }
+
+    private Action? TryDequeueEvent()
+    {
+        lock (_eventLock)
+        {
+            var node = _pendingEvents.First;
+            if (node is null) return null;
+            _pendingEvents.RemoveFirst();
+            if (!node.Value.Critical)
+            {
+                _pendingNonCritical--;
+                // The dequeued node was the first non-critical in the list, so the oldest
+                // pointer moves to the next one rather than being left on a removed node.
+                _oldestNonCritical = NextNonCritical(_pendingEvents.First);
+            }
+            return node.Value.Raise;
+        }
+    }
+
+    private static LinkedListNode<PendingEvent>? NextNonCritical(LinkedListNode<PendingEvent>? node)
+    {
+        while (node is { Value.Critical: true }) node = node.Next;
+        return node;
+    }
+
+    private void CompleteEventQueue()
+    {
+        lock (_eventLock)
+        {
+            _eventPumpCompleted = true;
+            SignalEventQueue();
+        }
+    }
+
+    /// <summary>Test seam: queues <paramref name="raise"/> the way a late actor callback would.
+    /// After the queue is completed this returns without running <paramref name="raise"/>.</summary>
+    internal void SubmitEventForTests(Action raise) => EnqueueEvent(raise);
+
+    /// <summary>Test seam: events accepted into the dispatch queue since construction, counting
+    /// an ordinary event that was later dropped to make room. Stops moving once the queue is
+    /// completed.</summary>
+    internal long SubmittedEventCount
+    {
+        get { lock (_eventLock) return _submittedEventCount; }
+    }
+
+    /// <summary>Test seam: events waiting for the dispatcher, not including one whose handler
+    /// is already running.</summary>
+    internal int QueuedEventCount
+    {
+        get { lock (_eventLock) return _pendingEvents.Count; }
+    }
+
+    private readonly struct PendingEvent
+    {
+        public PendingEvent(Action raise, bool critical)
+        {
+            Raise = raise;
+            Critical = critical;
+        }
+
+        public Action Raise { get; }
+        public bool Critical { get; }
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
@@ -1892,7 +1995,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        }, critical: true);
     }
 
     private void RaiseEmcyReceived(EmcyMessage msg, DateTime ts)
@@ -1902,7 +2005,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { EmcyReceived?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        }, critical: true);
     }
 
     private void RaiseSyncReceived(DateTime ts)

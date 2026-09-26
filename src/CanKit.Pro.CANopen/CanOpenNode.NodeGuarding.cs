@@ -370,7 +370,7 @@ internal sealed partial class CanOpenNode
         {
             try { NodeGuardingTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        }, critical: true);
     }
 
     private sealed class NodeGuardingConsumer
