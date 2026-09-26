@@ -1299,6 +1299,46 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Boot_Timeout_During_A_Held_Force_Does_Not_Command_The_Slave()
+    {
+        const byte slave = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+        var timedOut = new System.Collections.Concurrent.ConcurrentQueue<byte>();
+        node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, 40);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        int resets = log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetNode, slave));
+
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+        log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetNode, slave)).Should().Be(resets,
+            "the boot timeout landed while the reset was held, so it does not command the slave");
+        timedOut.Should().BeEmpty();
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+    }
+
+    [Fact]
     public async Task An_Unconfirmed_Force_Does_Not_Reset_Assigned_Slaves_Again()
     {
         const byte slave = 0x22;
