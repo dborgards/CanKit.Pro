@@ -1386,7 +1386,9 @@ public partial class CanOpenFlyingMasterTests
         var addThread = new Thread(() =>
         {
             try { standby.AddHeartbeatConsumer(LeftId, TimeSpan.FromMilliseconds(1500)); }
-            catch (Exception ex) { addError = ex; }
+            catch (ObjectDisposedException ex) { addError = ex; }
+            catch (InvalidOperationException ex) { addError = ex; }
+            catch (ArgumentException ex) { addError = ex; }
         });
         addThread.Start();
         var blockedSince = DateTime.UtcNow;
