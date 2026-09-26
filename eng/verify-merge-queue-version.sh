@@ -7,8 +7,10 @@
 # GitHub will build is `gh-readonly-queue/main/pr-<n>-<sha>`, and a group of two pull requests —
 # the shape behind #85 — is a chain of merge commits on that ref. Left unmatched, GitVersion
 # 6.8.2 still exits 0 and names it `1.2.4-gh-readonly-queue-main-pr-<n>-<sha>.1+<commits>`.
-# `GitVersion.yml`'s `merge-queue` branch is what turns that into `1.2.4-queue.<n>`, the same
-# shape as `1.2.4-ci.<n>` on main and `1.2.4-pr.<n>` on a pull request, with no build metadata.
+# `GitVersion.yml`'s `merge-queue` branch is what turns that into `1.2.4-queue.<n>`, with no
+# build metadata, the same shape as a pull request (`1.2.4-pr.<n>`) and as main between
+# releases (`1.2.4-ci.<n>`). A tagged release commit on main is the stable tag instead
+# (`1.2.3`); that result is accepted below.
 #
 # Run from anywhere in the clone. `dotnet tool restore` must already have succeeded (the version
 # job does that immediately above this script). The synthetic ref is built in a throwaway clone
@@ -86,14 +88,19 @@ main_full=$(
 )
 
 queue_pattern='^[0-9]+\.[0-9]+\.[0-9]+-queue\.[0-9]+$'
-main_pattern='^[0-9]+\.[0-9]+\.[0-9]+-ci\.[0-9]+$'
+# Between releases main is `1.2.4-ci.<n>`. The release commit itself is the tag, and GitVersion
+# reports that stable version (`1.2.3` on `v1.2.3`) because the main branch config does not
+# increment a tagged commit. This script runs in every version job, so refusing the tag would
+# fail every pull request for as long as that commit stayed at the tip of main. A queue label
+# still does not match.
+main_pattern='^[0-9]+\.[0-9]+\.[0-9]+(-ci\.[0-9]+)?$'
 
 if [[ ! "$queue_full" =~ $queue_pattern ]]; then
   echo "merge-queue ref versioned as '${queue_full}', expected ${queue_pattern}" >&2
   exit 1
 fi
 if [[ ! "$main_full" =~ $main_pattern ]]; then
-  echo "main versioned as '${main_full}', expected ${main_pattern}" >&2
+  echo "main versioned as '${main_full}', expected X.Y.Z or X.Y.Z-ci.N" >&2
   exit 1
 fi
 
