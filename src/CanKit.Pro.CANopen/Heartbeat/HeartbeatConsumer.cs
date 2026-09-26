@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using CanKit.Pro.Reliability;
 
 namespace CanKit.Pro.CANopen.Heartbeat;
@@ -54,27 +55,18 @@ internal sealed class HeartbeatConsumer : IHeartbeatConsumer
     {
         if (watches is null) throw new ArgumentNullException(nameof(watches));
 
-        List<byte>? stale = null;
-        foreach (var kv in _watches)
+        var stale = _watches
+            .Where(kv => !watches.TryGetValue(kv.Key, out var timeout) || timeout != kv.Value.Timeout)
+            .Select(kv => kv.Key)
+            .ToList();
+        foreach (var nodeId in stale)
         {
-            if (!watches.TryGetValue(kv.Key, out var timeout) || timeout != kv.Value.Timeout)
-            {
-                stale ??= new List<byte>();
-                stale.Add(kv.Key);
-            }
-        }
-        if (stale is not null)
-        {
-            foreach (var nodeId in stale)
-            {
-                _watches[nodeId].Deadline?.Dispose();
-                _watches.Remove(nodeId);
-            }
+            _watches[nodeId].Deadline?.Dispose();
+            _watches.Remove(nodeId);
         }
 
-        foreach (var kv in watches)
+        foreach (var kv in watches.Where(kv => !_watches.ContainsKey(kv.Key)))
         {
-            if (_watches.ContainsKey(kv.Key)) continue;
             var producer = kv.Key;
             var watch = new Watch(kv.Value);
             watch.Deadline = _scheduler.Arm(kv.Value, () => OnMissed(producer));
