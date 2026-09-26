@@ -263,6 +263,90 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         loser.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
     }
 
+    // The NAME check is the Address Claim half of the self-traffic gap (#94). The subscription
+    // opts into echoes — the flag marks the host, not the node, or a sibling's claim would
+    // vanish — so this node's own claim comes back on both kinds of echo bus, and only the
+    // flagging one sets IsEcho. Equal NAME fails HasHigherClaimPriorityThan in both directions,
+    // so without the check the node takes the "peer loses, re-announce" branch against itself
+    // and re-announces for as long as the echo keeps arriving.
+    //
+    // The two-node test above only shows that a *different* NAME is still arbitration input. It
+    // says nothing about our own. Both worlds, because deleting the check as "the echo gate
+    // covers it" is green on a flagging bus and a re-announce loop on Virtual.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Node_Does_Not_Arbitrate_Against_Its_Own_Name(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        var name = Name(1);
+        var nameBytes = name.ToBytes();
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+
+        int ownClaims = 0;
+        echo.Bus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 8) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn) || fields.SourceAddress != 0x11) return;
+            if (!e.CanFrame.Data.ToArray().SequenceEqual(nameBytes)) return;
+            Interlocked.Increment(ref ownClaims);
+        };
+
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+
+        // The claim's echo was queued before the arbitration window started. A peer frame after
+        // it has been through the reader once this message is raised, so any re-announce the
+        // echo provoked is already on the wire. The waiter is attached before the inject: the
+        // frame can otherwise be raised and gone before anyone is listening.
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true));
+        await barrier;
+
+        Volatile.Read(ref ownClaims).Should().Be(1,
+            "the node's own Address Claim comes back as an echo and must not be re-announced");
+
+        // A second node configured with this NAME is the same early return. It is not our
+        // transmit, so the observation count goes up by the injected frame alone.
+        const uint afterSameName = 0xFEF5u;
+        var sameNameSeen = WaitForMessageAsync(node, m => m.Pgn == afterSameName, ShortTimeout);
+        echo.InjectPeerFrame(AddressClaim(sourceAddress: 0x11, nameBytes));
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, afterSameName, sourceAddress: 0x33),
+            new byte[] { 2 }, isExtendedFrame: true));
+        await sameNameSeen;
+        Volatile.Read(ref ownClaims).Should().Be(2,
+            "a claim carrying our NAME is ignored, whether it is our echo or a peer's");
+
+        // And the check is not "ignore every claim". A worse NAME on our address still loses,
+        // and we re-announce exactly once. The re-announce is a transmit, so it is counted when
+        // it hits the wire; the following barrier is what says the reader has been through it.
+        var worse = Name(0x000200).ToBytes();
+        echo.InjectPeerFrame(AddressClaim(sourceAddress: 0x11, worse));
+        var until = DateTime.UtcNow + ShortTimeout;
+        while (Volatile.Read(ref ownClaims) < 3 && DateTime.UtcNow < until)
+            await Task.Delay(5);
+        const uint afterWorse = 0xFEF6u;
+        var worseSeen = WaitForMessageAsync(node, m => m.Pgn == afterWorse, ShortTimeout);
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, afterWorse, sourceAddress: 0x33),
+            new byte[] { 3 }, isExtendedFrame: true));
+        await worseSeen;
+        Volatile.Read(ref ownClaims).Should().Be(3,
+            "a contending peer with a worse NAME is answered with one re-announcement, not a loop");
+    }
+
+    private static CanFrame AddressClaim(byte sourceAddress, byte[] nameBytes) =>
+        CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.AddressClaimed, sourceAddress),
+            nameBytes, isExtendedFrame: true);
+
     // ---------------------------------------------------------------------------------------
     // FR-J1939-004: Cannot-Claim broadcasts SA=0xFE.
     // ---------------------------------------------------------------------------------------
@@ -2376,9 +2460,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     /// <summary>
     /// #92 step 2, J1939 half: the same fixed-rate property, on a clock the test drives.
     ///
-    /// The wall-clock version above calibrates a period from a measured send, then allows gaps
+    /// The wall-clock version calibrated a period from a measured send, then allowed gaps
     /// 30 % off the grid — a tolerance picked to survive the slowest runner seen so far, which is
-    /// the shape #92 says gets widened again next time. Here the node schedules against a clock
+    /// the shape #92 says gets widened again next time. It is gone: host latency is not a
+    /// property the schedule promises, so nothing here gates on it. The node schedules against a clock
     /// only this test moves, so "on the grid" is exact.
     ///
     /// <b>The trap this test had to avoid.</b> A virtual clock makes work free, and this test

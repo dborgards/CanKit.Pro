@@ -10,9 +10,11 @@ on:
   #
   # The reason it exists: #81 and #83 were each green and merged four minutes apart, and their
   # combination broke the net48 leg on `main` (#85). Neither pull request was ever built against
-  # the other. Nothing below is event-specific, so the same jobs cover this trigger unchanged --
-  # `github.ref` is the queue's own branch, which keeps the concurrency group per entry, and the
-  # version job already tolerates a git shape GitVersion cannot name.
+  # the other. Nothing below is event-specific, so the same jobs cover this trigger unchanged.
+  # On this event `github.ref` is `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`, a different
+  # ref for each queue entry, which is what keeps the concurrency group above from cancelling a
+  # neighbouring entry. GitVersion names that ref (`merge-queue` in GitVersion.yml); a ref it
+  # still cannot name falls back inside the version job rather than failing the build.
   merge_group:
   workflow_dispatch:
 
@@ -49,7 +51,8 @@ jobs:
 
       # Deliberately allowed to fail. GitVersion cannot version every git shape — a branch with no
       # merge base against a release branch, for one — and "we could not name this build" is not a
-      # reason to refuse to compile it.
+      # reason to refuse to compile it. A merge-queue ref is not one of those shapes; the step
+      # below checks that it is named rather than falling through to `unknown`.
       - name: Run GitVersion
         id: gitversion
         continue-on-error: true
@@ -58,6 +61,9 @@ jobs:
           dotnet tool restore
           semver=$(dotnet gitversion /showvariable FullSemVer)
           echo "semver=$semver" >> "$GITHUB_OUTPUT"
+
+      - name: Verify merge-queue version
+        run: bash eng/verify-merge-queue-version.sh
 
       - name: Pick the version for this run
         id: pick

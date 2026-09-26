@@ -8,7 +8,9 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using CanKit.Pro.Uds;
 using FluentAssertions;
@@ -1222,45 +1224,131 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     // -----------------------------------------------------------------------------------
     // After P2 timeout, a late ECU reply must not be consumed as the next request's answer
     // when the next request uses the same service (SID correlation alone is insufficient).
+    //
+    // The reply used to be a Thread.Sleep(250) against an 80 ms P2. That is a bet on the
+    // runner: starve the client past the sleep and both the expired deadline and the response
+    // are waiting, and a client that lets the response win the race returns 0xAA instead of
+    // throwing (#92). The client was the side that was wrong — P2 is the response's arrival
+    // stamp measured from the request's transmit stamp, not whichever of the deadline callback
+    // and the inbox write the scheduler runs first (UdsExpiredDeadlineTests). This test forces
+    // that ordering on the real channel. The actor is held before the request's transmit
+    // confirmation is posted, so the client cannot arm P2 or settle an empty inbox while the
+    // wait runs. The late response is then pumped onto that same actor — posted, not merely
+    // seen on the wire — and only then is the hold released. The timeout probe therefore
+    // finds the PDU and rejects it by its arrival stamp. A probe that ran first would time
+    // out on an empty inbox and the following discard would drop the frame before
+    // DatagramReceived.
     // -----------------------------------------------------------------------------------
     [Fact]
     public async Task TimedOut_Request_Does_Not_Poison_Next_Same_Service_Transaction()
     {
+        var budget = TimeSpan.FromMilliseconds(80);
         int calls = 0;
+        int holdArmed = 0;
+        var requestSeen = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseResponse = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var actorHeld = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseActor = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var requestStamp = new TaskCompletionSource<long>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var responsePosted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var staleEnqueued = new TaskCompletionSource<bool>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        var (client, _, dispose) = BuildPair(
-            e => e.On(0x22, req =>
-            {
-                int n = Interlocked.Increment(ref calls);
-                if (n == 1)
-                {
-                    // Arrive after the client's P2 budget so the first call times out.
-                    Thread.Sleep(250);
-                    return new byte[] { 0xF1, 0x90, 0xAA }; // stale payload
-                }
+        var session = NewSession();
+        using var busClient = OpenClassic(session, 0);
+        using var busEcu = OpenClassic(session, 1);
+        using var sniffer = OpenClassic(session, 2);
+        using var clientActor = new ProtocolActor();
+        using var clientService = new CanBusService(busClient);
+        var stamping = new FirstConfirmStampService(clientService, requestStamp);
+        using var clientChannel = new IsoTpChannel(stamping,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8),
+            FastIsoTp(), ownsService: false, clientActor);
 
-                return new byte[] { 0xF1, 0x90, 0xBB }; // fresh payload
-            }),
-            options: new UdsClientOptions
-            {
-                P2ClientMax = TimeSpan.FromMilliseconds(80),
-                P2StarClientMax = TimeSpan.FromMilliseconds(80),
-            });
-
-        using (dispose)
+        // The request's FrameObserved runs inside Transmit, before SendConfirmed returns and
+        // therefore before OnSendConfirmed is posted. Queuing the hold here puts it ahead of
+        // that confirmation, so the client stays inside SendAsync — P2 is not armed and no
+        // settle probe is queued — until the hold is released.
+        sniffer.FrameObserved += (_, view) =>
         {
-            client.Channel.DatagramReceived += (_, args) =>
+            if (view.CanFrame.ID != 0x7E0) return;
+            if (Interlocked.Exchange(ref holdArmed, 1) != 0) return;
+            clientActor.Post(() =>
             {
-                // Positive RDBI response carrying the stale 0xAA data record.
-                if (args.Data.Length >= 4 && args.Data[0] == 0x62 && args.Data[3] == 0xAA)
-                    staleEnqueued.TrySetResult(true);
-            };
+                actorHeld.TrySetResult(true);
+                releaseActor.Task.GetAwaiter().GetResult();
+            });
+        };
+        // CanBusService subscribed first, so when this runs the demux has already buffered the
+        // frame. SettleAsync pumps that buffer onto the actor before returning; awaiting its
+        // task would wait for the no-op posted behind the pump, which cannot run until the
+        // hold is released.
+        busClient.FrameObserved += (_, view) =>
+        {
+            if (view.CanFrame.ID != 0x7E8) return;
+            _ = clientChannel.SettleAsync();
+            responsePosted.TrySetResult(true);
+        };
 
-            Func<Task> first = () => client.ReadDataByIdentifierAsync(0xF190,
+        using var ecuChannel = IsoTpFactory.Open(busEcu,
+            IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0), FastIsoTp());
+        using var ecu = new SimulatedUdsEcu(ecuChannel);
+        ecu.On(0x22, _ =>
+        {
+            int n = Interlocked.Increment(ref calls);
+            if (n == 1)
+            {
+                // The request is already reassembled. Holding here keeps the answer off the bus
+                // until the test has moved past P2 and the actor is still held.
+                requestSeen.TrySetResult(true);
+                if (!releaseResponse.Task.Wait(ShortTimeout))
+                    throw new TimeoutException("the test did not release the late response");
+                return new byte[] { 0xF1, 0x90, 0xAA };
+            }
+
+            return new byte[] { 0xF1, 0x90, 0xBB };
+        });
+        ecu.Start();
+
+        using var client = UdsClient.Create(clientChannel, new UdsClientOptions
+        {
+            P2ClientMax = budget,
+            P2StarClientMax = budget,
+        });
+        client.Channel.DatagramReceived += (_, args) =>
+        {
+            if (args.Data.Length >= 4 && args.Data[0] == 0x62 && args.Data[3] == 0xAA)
+                staleEnqueued.TrySetResult(true);
+        };
+
+        try
+        {
+            var first = client.ReadDataByIdentifierAsync(0xF190,
                 new CancellationTokenSource(ShortTimeout).Token);
-            await first.Should().ThrowAsync<UdsTimeoutException>();
+
+            await requestSeen.Task.WaitAsync(ShortTimeout);
+            await actorHeld.Task.WaitAsync(ShortTimeout);
+            // Taken inside the driver's completion, before OnSendConfirmed is posted. Waiting
+            // out P2 from it — while the hold still owns the actor — makes the response's
+            // arrival stamp late against the same instant the client will use.
+            long transmitStamp = await requestStamp.Task.WaitAsync(ShortTimeout);
+            transmitStamp.Should().BeGreaterThan(0);
+            while (ElapsedSince(transmitStamp) <= budget)
+                await Task.Delay(1);
+
+            releaseResponse.TrySetResult(true);
+            await responsePosted.Task.WaitAsync(ShortTimeout);
+            releaseActor.TrySetResult(true);
+
+            Func<Task> act = () => first;
+            await act.Should().ThrowAsync<UdsTimeoutException>(
+                "a response posted to the actor after P2 must not answer the request");
 
             await staleEnqueued.Task.WaitAsync(ShortTimeout);
 
@@ -1268,6 +1356,18 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 new CancellationTokenSource(ShortTimeout).Token);
             data.Should().Equal(0xBB);
         }
+        finally
+        {
+            releaseResponse.TrySetResult(true);
+            releaseActor.TrySetResult(true);
+        }
+    }
+
+    private static TimeSpan ElapsedSince(long startTimestamp)
+    {
+        var ticks = Stopwatch.GetTimestamp() - startTimestamp;
+        if (ticks <= 0) return TimeSpan.Zero;
+        return TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
     }
 
     // -----------------------------------------------------------------------------------
@@ -1327,6 +1427,11 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     // UdsTimeoutException(Timer = P2Star). This path had no test at all before (the only
     // Timer assertion in the suite was P2); the elapsed-time assertion proves the timeout
     // fired on the restarted P2* budget, not on the initial P2 budget.
+    //
+    // The first 0x78 is an ISO-TP round trip this test does not pace (#118). Measured with
+    // this 100 ms and the 120 ms below lowered together, 8 CPU burners on 4 cores: no P2
+    // timeout at 25 ms or above, the first one at 20 ms, and a certain one at 5 ms. The
+    // unmodified class stayed green under that load. These budgets are not the tight edge.
     // -----------------------------------------------------------------------------------
     [Fact]
     public async Task Client_Times_Out_With_P2Star_When_Ecu_Sends_Only_ResponsePending()
@@ -1371,7 +1476,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             options: new UdsClientOptions
             {
                 // P2 short: proves the client actually restarts on 0x78 rather than living
-                // inside the (accidentally) generous initial budget.
+                // inside the (accidentally) generous initial budget. 120 ms is several times
+                // the first-hop cliff measured for #118 (see the P2* timeout test above).
                 P2ClientMax = TimeSpan.FromMilliseconds(120),
                 P2StarClientMax = TimeSpan.FromSeconds(1),
                 MaxResponsePendingCount = 10,
@@ -1618,6 +1724,54 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> waitRead = () => inFlight;
         await waitRead.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    /// <summary>
+    /// Records <see cref="TxConfirmation.HostTransmitTimestamp"/> of the first
+    /// <see cref="ICanBusService.SendConfirmed"/> and completes that task only afterwards,
+    /// so the channel posts its transmit confirmation after the stamp is visible to the test.
+    /// </summary>
+    private sealed class FirstConfirmStampService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly TaskCompletionSource<long> _stamp;
+        private int _recorded;
+
+        public FirstConfirmStampService(ICanBusService inner, TaskCompletionSource<long> stamp)
+        {
+            _inner = inner;
+            _stamp = stamp;
+        }
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            var confirmation = await _inner.SendConfirmed(frame, timeout, cancellationToken)
+                .ConfigureAwait(false);
+            if (Interlocked.Exchange(ref _recorded, 1) == 0)
+                _stamp.TrySetResult(confirmation.HostTransmitTimestamp);
+            return confirmation;
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
     }
 
     private sealed class CompositeDisposable : IDisposable
