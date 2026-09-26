@@ -1110,6 +1110,43 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Detect_Cycle_Does_Not_Run_While_The_Force_Reset_Is_Held()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+
+        Tighten(node);
+        node.ObjectDictionary.WriteUnsigned(Timing, 0x06, 30);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        await QuiesceAsync(witness, null);
+        int triggers = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+        int claims = log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim);
+
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
+            "the master stays active until the reset is confirmed, but it does not keep electing");
+        log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger).Should().Be(triggers,
+            "the detect cycle is cancelled while Reset Communication is still held");
+        log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim).Should().Be(claims);
+
+        gate.Release();
+        await QuiesceAsync(witness, null);
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
+    }
+
+    [Fact]
     public async Task Stopping_During_The_Held_Cold_Reset_Drops_It()
     {
         var session = NewSession();
@@ -1249,6 +1286,63 @@ public partial class CanOpenFlyingMasterTests
         await QuiesceAsync(winnerWitness, standbyWitness);
         standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01).Should().Be(taken,
             "the application replaced the installed watch, so stop does not delete it");
+    }
+
+    [Fact]
+    public async Task A_Takeover_And_Its_Ownership_Clear_Are_One_Actor_Job()
+    {
+        using var pair = OpenPair();
+        var (clock, winner, standby, winnerWitness, standbyWitness, _) = pair;
+        var timeout = TimeSpan.FromMilliseconds(80);
+        Tighten(winner);
+        Tighten(standby);
+        winner.StartFlyingMaster(0, timeout);
+        standby.StartFlyingMaster(2, timeout);
+        await UntilAsync(clock, winnerWitness, standbyWitness,
+            () => standby.FlyingMasterRole == FlyingMasterRole.Standby, 1200,
+            "priority 2 is watching the winner");
+
+        uint installed = standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = standby.PostToActorAsync(() =>
+        {
+            entered.TrySetResult(true);
+            release.Task.Wait(TimeSpan.FromSeconds(5));
+        });
+        (await entered.Task.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+
+        Exception? addError = null;
+        var addThread = new Thread(() =>
+        {
+            try { standby.AddHeartbeatConsumer(LeftId, TimeSpan.FromMilliseconds(1500)); }
+            catch (Exception ex) { addError = ex; }
+        });
+        addThread.Start();
+        var blockedSince = DateTime.UtcNow;
+        bool settled = SpinWait.SpinUntil(() =>
+        {
+            if (!addThread.IsAlive || standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01) != installed)
+                return true;
+            bool waiting = (addThread.ThreadState & ThreadState.WaitSleepJoin) != 0;
+            if (!waiting) blockedSince = DateTime.UtcNow;
+            return waiting && DateTime.UtcNow - blockedSince > TimeSpan.FromMilliseconds(30);
+        }, TimeSpan.FromSeconds(2));
+        settled.Should().BeTrue();
+        addThread.IsAlive.Should().BeTrue("the dictionary write waits with the ownership clear");
+        standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01).Should().Be(installed);
+
+        var stop = standby.PostToActorAsync(() => standby.StopFlyingMaster());
+        release.TrySetResult(true);
+        addThread.Join(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        addError.Should().BeNull();
+        await held.WaitAsync(TimeSpan.FromSeconds(5));
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
+
+        uint taken = standby.ObjectDictionary.ReadUnsigned(0x1016, 0x01);
+        ((taken >> 16) & 0xFF).Should().Be(LeftId);
+        (taken & 0xFFFF).Should().Be(1500u,
+            "stop was queued behind the takeover, so it cannot delete the consumer just claimed");
     }
 
     /// <summary>Holds the cold Reset Communication so a test can use the window before it completes,

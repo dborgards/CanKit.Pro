@@ -244,11 +244,16 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>The cold reset did not leave the adapter. Drop the window without applying the
-    /// reset and without starting the warm election.</summary>
+    /// reset and without starting the warm election. A forced reset that was abandoned leaves
+    /// this node the active master, so the detect cycle and boot-up paused for the wait start
+    /// again.</summary>
     private void AbandonColdReset()
     {
         if (!_coldResetPending || _disposed != 0) return;
         _coldResetPending = false;
+        if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
+        ArmActiveDetectCycle();
+        BeginBootUp();
     }
 
     private void BeginNegotiation(bool transmitTrigger)
@@ -274,7 +279,7 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterNegotiationElapsed()
     {
-        if (!FlyingMasterEnabled) return;
+        if (!FlyingMasterEnabled || _coldResetPending) return;
         if (_confirmingActiveMaster)
         {
             // Still the active master: claim again and keep the boot-up that is already running.
@@ -351,8 +356,13 @@ internal sealed partial class CanOpenNode
             // The active master restarts the network, but not before Reset Communication is
             // confirmed. Applying the reset here used to arm the warm-election delay while the
             // broadcast was only queued, so a short delay could elect again before the other
-            // candidates were reset. While Active, the echo is ignored; the flag after the
-            // local reset covers the echo that arrives once this node has left Active.
+            // candidates were reset. The detect cycle and boot-up stop for the wait: either one
+            // can still send 0x072, claim, or command a slave while the reset has not left, and
+            // peers then elect and ignore that reset. While Active, the echo is ignored; the
+            // flag after the local reset covers the echo that arrives once this node has left Active.
+            CancelFlyingMasterDeadline();
+            _confirmingActiveMaster = false;
+            CancelBootUp();
             _coldResetPending = true;
             var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
             _ = sent.ContinueWith(send =>
@@ -392,6 +402,7 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterDetectCycle()
     {
+        if (_coldResetPending) return;
         if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
         // Stay Active. Leaving for Negotiating would drop a slave heartbeat and a boot deadline
         // that only run in that role, and NMT aimed at this node would apply again.
@@ -417,10 +428,15 @@ internal sealed partial class CanOpenNode
         ReleaseInstalledWatch();
         EnsureHeartbeatProducer();
         if (changed) RaiseFlyingMaster(FlyingMasterSignal.BecameActive, null, null);
+        ArmActiveDetectCycle();
+        BeginBootUp();
+    }
+
+    private void ArmActiveDetectCycle()
+    {
         int cycle = ReadTiming(TimingDetectCycle);
         if (cycle > 0)
             ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
-        BeginBootUp();
     }
 
     private void EnterStandby(ushort priority, byte nodeId)

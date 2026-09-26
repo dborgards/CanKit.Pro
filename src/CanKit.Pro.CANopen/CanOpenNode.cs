@@ -301,53 +301,53 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (timeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(timeout));
         ushort ms = ToMilliseconds16(timeout, nameof(timeout), allowZero: false);
 
-        // 1016h consumer heartbeat time (CiA 301 §7.5.2.19): reuse the sub-index already
-        // monitoring this producer, else the first unused one, else grow the array. One
-        // transaction on the dictionary, so two callers cannot both grow into the same sub-index
-        // and a direct write of 1016h on another thread waits for the find-or-grow to finish.
-        _od.Transaction(() =>
+        // The dictionary write and, when the application is taking the watch over, the ownership
+        // clear are one actor job. A stop queued around this call then either removes the old
+        // consumer before the new value is stored, or sees the watch already given up and leaves
+        // the new value alone. Two jobs let stop land between them and delete what was just claimed.
+        RunOnActorAndWait(() =>
         {
-            byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
-            int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
-            if (slot < 0)
+            // 1016h consumer heartbeat time (CiA 301 §7.5.2.19): reuse the sub-index already
+            // monitoring this producer, else the first unused one, else grow the array. One
+            // transaction on the dictionary, so two callers cannot both grow into the same sub-index
+            // and a direct write of 1016h on another thread waits for the find-or-grow to finish.
+            _od.Transaction(() =>
             {
-                for (int s = 1; s <= count; s++)
+                byte count = (byte)_od.ReadUnsigned(Co.ConsumerHeartbeat, 0x00);
+                int slot = FindHeartbeatConsumerSlot(producerNodeId, count);
+                if (slot < 0)
                 {
-                    if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v) && (ushort)(v & 0xFFFF) == 0)
+                    for (int s = 1; s <= count; s++)
                     {
-                        slot = s;
-                        break;
+                        if (_od.TryReadUnsigned(Co.ConsumerHeartbeat, (byte)s, out var v) && (ushort)(v & 0xFFFF) == 0)
+                        {
+                            slot = s;
+                            break;
+                        }
                     }
                 }
-            }
-            if (slot < 0)
-            {
-                if (count >= 0x7F)
-                    throw new InvalidOperationException("1016h holds at most 127 consumer heartbeat times (CiA 301 §7.5.2.19).");
-                slot = count + 1;
-                // The sub-index may already exist: an NMT reset restores sub-index 00h to the
-                // stored count and zeroes the entries the array had grown by since, but keeps
-                // them, so growing again reuses such an entry rather than re-declaring it.
-                if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
-                    _od.Declare(Co.ConsumerHeartbeat, (byte)slot, OdDataType.Unsigned32, OdAccess.ReadWrite, new byte[4], pdoMappable: false);
-                // The entry first, while the slot is still outside the count — what a hidden slot
-                // held is being replaced, not brought back — then the count, which is validated
-                // against the entry it will show (Codex on #133).
+                if (slot < 0)
+                {
+                    if (count >= 0x7F)
+                        throw new InvalidOperationException("1016h holds at most 127 consumer heartbeat times (CiA 301 §7.5.2.19).");
+                    slot = count + 1;
+                    // The sub-index may already exist: an NMT reset restores sub-index 00h to the
+                    // stored count and zeroes the entries the array had grown by since, but keeps
+                    // them, so growing again reuses such an entry rather than re-declaring it.
+                    if (!_od.TryGet(Co.ConsumerHeartbeat, (byte)slot, out _))
+                        _od.Declare(Co.ConsumerHeartbeat, (byte)slot, OdDataType.Unsigned32, OdAccess.ReadWrite, new byte[4], pdoMappable: false);
+                    // The entry first, while the slot is still outside the count — what a hidden slot
+                    // held is being replaced, not brought back — then the count, which is validated
+                    // against the entry it will show (Codex on #133).
+                    _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
+                    _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
+                    return;
+                }
                 _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
-                _od.WriteUnsigned(Co.ConsumerHeartbeat, 0x00, (uint)slot);
-                return;
-            }
-            _od.WriteUnsigned(Co.ConsumerHeartbeat, (byte)slot, ((uint)producerNodeId << 16) | ms);
-        });
-        // The application now owns this consumer. Stop and yield must not delete it.
-        if (releaseInstalledWatch)
-        {
-            _actor.Post(() =>
-            {
-                if (_flyingMasterInstalledWatch == producerNodeId)
-                    _flyingMasterInstalledWatch = null;
             });
-        }
+            if (releaseInstalledWatch && _flyingMasterInstalledWatch == producerNodeId)
+                _flyingMasterInstalledWatch = null;
+        });
     }
 
     /// <inheritdoc />
