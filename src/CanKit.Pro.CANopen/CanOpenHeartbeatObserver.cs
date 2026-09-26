@@ -37,7 +37,15 @@ internal sealed class CanOpenHeartbeatObserver : IDisposable
     public static CanOpenHeartbeatObserver Open(ICanBus bus)
     {
         if (bus is null) throw new ArgumentNullException(nameof(bus));
-        var service = new CanBusService(bus);
+        return Attach(new CanBusService(bus));
+    }
+
+    /// <summary>
+    /// Subscribes <paramref name="service"/>. If that fails, the service is disposed and the
+    /// exception propagates, so a half-built observer does not leave the bus attached.
+    /// </summary>
+    internal static CanOpenHeartbeatObserver Attach(CanBusService service)
+    {
         try
         {
             return new CanOpenHeartbeatObserver(service);
@@ -65,7 +73,7 @@ internal sealed class CanOpenHeartbeatObserver : IDisposable
             && id <= CanOpenCobId.HeartbeatBase + CanOpenCobId.MaxNodeId;
     }
 
-    private void OnFrame(CanFrameEvent frameEvent)
+    internal void OnFrame(CanFrameEvent frameEvent)
     {
         var frame = frameEvent.Frame;
         if (frame.Data.Length < 1) return;

@@ -7,6 +7,7 @@ using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -90,6 +91,76 @@ public class CanOpenHeartbeatObserverTests : IClassFixture<VirtualAdapterFixture
             await nodeBootup.Task.WithTimeoutAsync(TimeSpan.FromSeconds(2));
         }
     }
+
+    [Fact]
+    public void Open_Rejects_A_Null_Bus()
+    {
+        var act = () => CanOpenHeartbeatObserver.Open(null!);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("bus");
+    }
+
+    [Fact]
+    public void Dispose_Is_Idempotent()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-listen-dispose-{Guid.NewGuid():N}");
+        var observer = CanOpenHeartbeatObserver.Open(bus);
+        observer.Dispose();
+        observer.Dispose();
+    }
+
+    [Fact]
+    public void A_Failed_Subscribe_Disposes_The_Service()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-listen-fail-{Guid.NewGuid():N}");
+        var service = new CanBusService(bus);
+        service.Dispose();
+
+        var act = () => CanOpenHeartbeatObserver.Attach(service);
+        act.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Every_Heartbeat_State_Is_Reported_And_Other_Frames_Are_Ignored()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-listen-states-{Guid.NewGuid():N}");
+        using var observer = CanOpenHeartbeatObserver.Open(bus);
+        observer.OnFrame(Event(0x711, new byte[] { 0x05 }));
+
+        var seen = new ConcurrentQueue<NmtState>();
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        observer.HeartbeatReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId != 0x11) return;
+            seen.Enqueue(e.State);
+            if (seen.Count >= 3) done.TrySetResult(true);
+        };
+
+        bus.RaiseObserved(
+            CanFrame.Classic(unchecked((int)CanOpenCobId.Heartbeat(0x11)), new byte[] { 0x05 }, isExtendedFrame: true),
+            isEcho: false);
+        bus.RaiseObserved(
+            CanFrame.Classic(unchecked((int)CanOpenCobId.Heartbeat(0x11)), ReadOnlyMemory<byte>.Empty, isRemoteFrame: true),
+            isEcho: false);
+        bus.RaiseObserved(Heartbeat(0x11, payload: null), isEcho: false);
+        bus.RaiseObserved(Heartbeat(0x00, 0x05), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(0x780, new byte[] { 0x05 }), isEcho: false);
+
+        bus.RaiseObserved(Heartbeat(0x11, 0x04), isEcho: false);
+        bus.RaiseObserved(Heartbeat(0x11, 0x7F), isEcho: false);
+        bus.RaiseObserved(Heartbeat(0x11, 0x01), isEcho: false);
+
+        await done.Task.WithTimeoutAsync(TimeSpan.FromSeconds(2));
+        seen.Should().Equal(NmtState.Stopped, NmtState.PreOperational, NmtState.Initializing);
+    }
+
+    private static CanFrame Heartbeat(byte nodeId, byte? payload)
+    {
+        var data = payload is { } state ? new byte[] { state } : Array.Empty<byte>();
+        return CanFrame.Classic(unchecked((int)CanOpenCobId.Heartbeat(nodeId)), data);
+    }
+
+    private static CanFrameEvent Event(int id, byte[] data)
+        => new(new CanFrameView(CanFrameType.Can20, id, data, FrameFlags.None), isEcho: false, TimeSpan.Zero);
 
     private static ICanBus Open(string session, int channel) => CanBus.Open(
         $"virtual://{session}/{channel}",
