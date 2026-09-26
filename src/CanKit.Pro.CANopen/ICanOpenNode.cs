@@ -341,6 +341,54 @@ public interface ICanOpenNode : IDisposable
     /// respects the current NMT state (only fires in <see cref="NmtState.Operational"/>).</summary>
     Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Decodes a PDO payload of <paramref name="peerNodeId"/> and writes each mapped object to
+    /// <paramref name="sink"/>. Nothing is written to this node's object dictionary, and a frame
+    /// that is not one of this node's own RPDOs is still not applied when it arrives: this method
+    /// is the only path that splits a peer PDO.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Which PDO the COB-ID belongs to is read live from <c>1400h:01</c> / <c>1800h:01</c>. A
+    /// value that comes back is used ahead of <paramref name="peerDescription"/>, including a PDO
+    /// the device marks invalid (bit 31 set) or a CAN-ID the file does not name. The same entry
+    /// in the file (<c>$NODEID</c> resolved to <paramref name="peerNodeId"/>) is used only when
+    /// that upload aborts, times out, is refused by the peer-SDO gate, finds another SDO already
+    /// in flight for the server, or does not return a word. A CAN-ID CiA 301 §7.3.5 restricts is
+    /// not accepted from either source. Observations of one peer are serialized, so two of them
+    /// do not fail each other on the one-transfer-per-server limit.
+    /// </para>
+    /// <para>
+    /// The mapping is the live record <c>1600h</c>–<c>1603h</c> or <c>1A00h</c>–<c>1A03h</c>,
+    /// uploaded over the same SDO client. A pair the bound peer description does not allow is
+    /// refused before a frame is sent and is a failed live read. An upload that aborts or times
+    /// out, or a count that is not a byte-aligned mapping of at most eight entries (MPDO
+    /// included), makes the live record unavailable and the mapping in the file is used instead.
+    /// A record neither the device nor the file can supply is not decoded.
+    /// </para>
+    /// <para>
+    /// The split follows the same length rule as an RPDO this node consumes: fewer bytes than
+    /// the mapping writes nothing; extra bytes are ignored; a dummy entry <c>0002h</c>–<c>0007h</c>
+    /// consumes its bytes and writes no signal.
+    /// </para>
+    /// </remarks>
+    /// <param name="peerNodeId">The node whose PDO this payload is (1..127).</param>
+    /// <param name="cobId">The 11-bit COB-ID the payload was observed on.</param>
+    /// <param name="payload">The PDO data, 0..8 bytes.</param>
+    /// <param name="peerDescription">EDS or DCF of the peer. Supplies the COB-ID and the mapping
+    /// when the live read of that record fails.</param>
+    /// <param name="sink">Where each decoded object is written.</param>
+    /// <param name="cancellationToken">Cancels an in-flight mapping upload. Cancellation is not a
+    /// failed read: the file is not used in its place.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="peerDescription"/> or
+    /// <paramref name="sink"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside
+    /// 1..127, <paramref name="cobId"/> is not an 11-bit id, or <paramref name="payload"/> is
+    /// longer than 8 bytes.</exception>
+    Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId,
+        ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
+        CancellationToken cancellationToken = default);
+
     // -----------------------------------------------------------------------------------------
     // Parameter storage (CiA 301 §7.5.2.13 / §7.5.2.14)
     // -----------------------------------------------------------------------------------------

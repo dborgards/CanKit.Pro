@@ -251,6 +251,25 @@ including `1003h`. `PeerSdoAccessException.IsAllowedWithoutPeerDescription` is t
 Anything else throws `PeerSdoAccessException` with `PeerDescriptionLoaded` false, again before
 a frame is sent.
 
+## Observing a peer PDO
+
+`ObserveForeignPdoAsync` splits a PDO of another node into a caller-supplied sink. Nothing is
+written to this node's object dictionary, and a frame that is not one of this node's own RPDOs
+is still not applied when it arrives.
+
+The COB-ID is read live from `1400h:01` / `1800h:01`. A word that comes back is used ahead of the
+peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID the file does
+not name. The same entry in the file is used only when that upload aborts, times out, is refused
+by the peer-SDO gate, finds another SDO already in flight, or does not return a word.
+
+The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
+the peer description bound for that node applies. A read that aborts, times out, is refused by
+that gate, or is not a mapping of at most eight byte-aligned entries uses the mapping in the
+file passed to the call. Observations of one peer run one after another. A CAN-ID CiA 301
+restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
+A payload shorter than the mapping writes nothing; a dummy entry `0002h`–`0007h` consumes its
+bytes and writes no signal.
+
 ## PDO engine
 
 Every TPDO and RPDO is rebuilt from its communication and mapping records whenever one of them

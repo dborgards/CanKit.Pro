@@ -111,6 +111,44 @@ namespace CanKit.Pro.CANopen
         public CanKit.Pro.CANopen.Emcy.EmcyMessage Message { get; }
         public System.DateTime Timestamp { get; }
     }
+    public enum ForeignPdoKind
+    {
+        Tpdo = 0,
+        Rpdo = 1,
+    }
+    public enum ForeignPdoMappingOrigin
+    {
+        LiveMapping = 0,
+        DeviceDescription = 1,
+    }
+    public sealed class ForeignPdoObservation
+    {
+        public bool Decoded { get; }
+        public CanKit.Pro.CANopen.ForeignPdoKind Kind { get; }
+        public CanKit.Pro.CANopen.ForeignPdoMappingOrigin? Origin { get; }
+        public int PdoNumber { get; }
+        public string? Reason { get; }
+        public int SignalsWritten { get; }
+    }
+    public sealed class ForeignPdoObserveResult
+    {
+        public uint CobId { get; }
+        public bool Decoded { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.ForeignPdoObservation> Observations { get; }
+        public string? Reason { get; }
+    }
+    public readonly struct ForeignPdoSignal
+    {
+        public ForeignPdoSignal(byte peerNodeId, CanKit.Pro.CANopen.ForeignPdoKind kind, int pdoNumber, uint cobId, ushort index, byte subIndex, byte[] value, CanKit.Pro.CANopen.ForeignPdoMappingOrigin origin) { }
+        public uint CobId { get; }
+        public ushort Index { get; }
+        public CanKit.Pro.CANopen.ForeignPdoKind Kind { get; }
+        public CanKit.Pro.CANopen.ForeignPdoMappingOrigin Origin { get; }
+        public int PdoNumber { get; }
+        public byte PeerNodeId { get; }
+        public byte SubIndex { get; }
+        public byte[] Value { get; }
+    }
     public sealed class HeartbeatReceivedEventArgs : System.EventArgs
     {
         public HeartbeatReceivedEventArgs(byte producerNodeId, CanKit.Pro.CANopen.Nmt.NmtState state, System.DateTime timestamp) { }
@@ -147,6 +185,7 @@ namespace CanKit.Pro.CANopen
         void ConfigureRpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, uint? cobId = default, CanKit.Pro.CANopen.Pdo.RpdoTransmission transmission = 0);
         void ConfigureTpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.PdoMapping mapping, CanKit.Pro.CANopen.Pdo.TpdoTransmission transmission = 0, uint? cobId = default, System.TimeSpan? eventTimerInterval = default, System.TimeSpan? inhibitTime = default);
         CanKit.Pro.CANopen.CanOpenDeviceDescription? GetPeerDeviceDescription(byte nodeId);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId, System.ReadOnlyMemory<byte> payload, CanKit.Pro.CANopen.CanOpenDeviceDescription peerDescription, CanKit.Pro.CANopen.IForeignPdoSink sink, System.Threading.CancellationToken cancellationToken = default);
         void RemoveHeartbeatConsumer(byte producerNodeId);
         void RestoreDefaultParameters();
         System.Threading.Tasks.Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, System.ReadOnlyMemory<byte> data, System.Threading.CancellationToken cancellationToken);
@@ -165,6 +204,10 @@ namespace CanKit.Pro.CANopen
         void StoreParameters();
         System.Threading.Tasks.Task TriggerTpdoAsync(int pdoIndex, System.Threading.CancellationToken cancellationToken = default);
         void UnbindPeerDeviceDescription(byte nodeId);
+    }
+    public interface IForeignPdoSink
+    {
+        void Write(CanKit.Pro.CANopen.ForeignPdoSignal signal);
     }
     public sealed class LifeGuardingEventArgs : System.EventArgs
     {
