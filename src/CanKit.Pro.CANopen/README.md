@@ -229,6 +229,10 @@ master.BindPeerDeviceDescription(nodeId: 0x11, peer);
 await master.SdoUploadAsync(0x11, 0x2000, 0x00);   // only if 2000h:00 is in remote.eds
 ```
 
+A DCF is commissioned for one node-id. Binding it to a different node throws
+`ArgumentException` and leaves any description already bound for that node in place. An EDS
+has no commissioned node-id and may be bound to any server.
+
 `CanOpenDeviceDescription.Contains` is that check. A pair the file does not declare throws
 `PeerSdoAccessException` (`PeerDescriptionLoaded` is true), including `1000h`, `1001h` and
 `1018h` when the file leaves them out. `UnbindPeerDeviceDescription` drops the binding.

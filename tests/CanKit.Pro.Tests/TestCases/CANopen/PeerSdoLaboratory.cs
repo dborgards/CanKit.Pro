@@ -43,6 +43,36 @@ internal static class PeerSdoLaboratory
         return CanOpenDeviceDescription.ParseEds(text.ToString());
     }
 
+    /// <summary>A DCF commissioned for <paramref name="nodeId"/>, with variables at sub-index 0.</summary>
+    public static CanOpenDeviceDescription Configuration(byte nodeId, params ushort[] indices)
+    {
+        var mandatory = new List<ushort>();
+        var optional = new List<ushort>();
+        var manufacturer = new List<ushort>();
+        foreach (var index in indices)
+        {
+            if (index is 0x1000 or 0x1001 or 0x1018) mandatory.Add(index);
+            else if (index < 0x2000) optional.Add(index);
+            else manufacturer.Add(index);
+        }
+
+        var text = new StringBuilder();
+        text.Append(Header.Replace("FileName=laboratory.eds", "FileName=peer.dcf"));
+        text.Append("[DeviceComissioning]\n");
+        text.Append("NodeID=").Append(nodeId.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        text.Append("NodeName=Peer\n");
+        text.Append("Baudrate=500\n");
+        text.Append("NetNumber=1\n");
+        text.Append("NetworkName=test\n");
+        text.Append("CANopenManager=0\n");
+        AppendList(text, "MandatoryObjects", mandatory);
+        AppendList(text, "OptionalObjects", optional);
+        AppendList(text, "ManufacturerObjects", manufacturer);
+        foreach (var index in indices)
+            AppendVariable(text, index);
+        return CanOpenDeviceDescription.ParseDcf(text.ToString());
+    }
+
     private static string Build()
     {
         var records = new List<(ushort Index, int HighestSubindex)>

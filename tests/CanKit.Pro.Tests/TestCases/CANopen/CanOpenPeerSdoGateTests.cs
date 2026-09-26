@@ -189,6 +189,41 @@ public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public void A_Dcf_Commissioned_For_Another_Node_Is_Rejected_And_Does_Not_Replace_A_Binding()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var eds = PeerSdoLaboratory.Variables(0x2000);
+        eds.NodeId.Should().BeNull();
+        master.BindPeerDeviceDescription(0x11, eds);
+
+        var dcf = PeerSdoLaboratory.Configuration(0x05, 0x2100);
+        dcf.IsConfigurationFile.Should().BeTrue();
+        dcf.NodeId.Should().Be(0x05);
+
+        Action bind = () => master.BindPeerDeviceDescription(0x11, dcf);
+        bind.Should().Throw<ArgumentException>();
+        master.GetPeerDeviceDescription(0x11).Should().BeSameAs(eds);
+
+        Action upload = () => master.SdoUploadAsync(0x11, 0x2100, 0x00);
+        upload.Should().Throw<PeerSdoAccessException>().Which.PeerDescriptionLoaded.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_Dcf_Commissioned_For_The_Same_Node_Is_Bound()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var dcf = PeerSdoLaboratory.Configuration(0x11, 0x2000);
+
+        master.BindPeerDeviceDescription(0x11, dcf);
+
+        master.GetPeerDeviceDescription(0x11).Should().BeSameAs(dcf);
+    }
+
+    [Fact]
     public void The_Mandatory_Base_Pairs_Are_1000h_1001h_And_The_Full_Identity()
     {
         PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1000, 0x00).Should().BeTrue();

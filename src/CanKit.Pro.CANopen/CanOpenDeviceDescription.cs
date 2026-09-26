@@ -24,7 +24,8 @@ namespace CanKit.Pro.CANopen;
 /// <see cref="CanOpen.OpenNode(CanKit.Abstractions.API.Can.ICanBus, CanOpenDeviceDescription, CanOpenNodeOptions?)"/>
 /// uses. <c>$NODEID+…</c> expressions are evaluated against the node-id the node is opened with.
 /// The same type is what <see cref="ICanOpenNode.BindPeerDeviceDescription"/> binds for a remote
-/// node: the SDO client then transfers only pairs <see cref="Contains"/> reports.
+/// node: the SDO client then transfers only pairs <see cref="Contains"/> reports. A DCF binds
+/// only to the node-id it was commissioned for; an EDS binds to any node.
 /// </remarks>
 public sealed class CanOpenDeviceDescription
 {

@@ -13,6 +13,13 @@ internal sealed partial class CanOpenNode
         ThrowIfDisposed();
         if (description is null) throw new ArgumentNullException(nameof(description));
         CanOpenCobId.ValidateNodeId(nodeId);
+        if (description.NodeId is { } commissioned && commissioned != nodeId)
+        {
+            throw new ArgumentException(
+                $"The DCF is commissioned for node 0x{commissioned:X2} and cannot be bound for node 0x{nodeId:X2}.",
+                nameof(description));
+        }
+
         _peerDescriptions[nodeId] = description;
     }
 

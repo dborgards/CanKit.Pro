@@ -214,6 +214,11 @@ public interface ICanOpenNode : IDisposable
     /// (<see cref="CanOpenDeviceDescription.Contains"/>). Replaces a description already bound
     /// for the same node-id. The description is read at the start of each transfer.
     /// </summary>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="description"/> is a DCF whose commissioned node-id is not
+    /// <paramref name="nodeId"/>. An EDS has no commissioned node-id and may be bound to any node.
+    /// A rejected bind leaves the description already stored for that node in place.
+    /// </exception>
     /// <remarks>
     /// Without a description bound for the server, <see cref="SdoUploadAsync(byte, ushort, byte, Sdo.SdoTransferMode, CancellationToken)"/>
     /// and <see cref="SdoDownloadAsync(byte, ushort, byte, ReadOnlyMemory{byte}, Sdo.SdoTransferMode, CancellationToken)"/>
