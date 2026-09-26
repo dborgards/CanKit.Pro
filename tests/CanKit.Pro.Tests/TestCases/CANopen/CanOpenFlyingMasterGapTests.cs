@@ -707,6 +707,42 @@ public partial class CanOpenFlyingMasterTests
     }
 
     [Fact]
+    public async Task A_Broadcast_Reset_While_The_Cold_Send_Is_Held_Applies_Once()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus));
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var resets = 0;
+        node.ApplicationReset += (_, _) => resets++;
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Detecting, 200,
+            "the node is asking who is master");
+
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(30));
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Transmit(peer, CanOpenCobId.NmtCommand, (byte)NmtCommand.ResetCommunication, 0);
+        await QuiesceAsync(witness, null);
+
+        resets.Should().Be(1, "the broadcast reset applies while the cold send is still held");
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
+            "that reset is the warm boot, so the election delay starts from it");
+
+        gate.Release();
+        await QuiesceAsync(witness, null);
+        resets.Should().Be(1,
+            "the broadcast cleared the pending reset, so the confirmation does not apply it again");
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
+    }
+
+    [Fact]
     public async Task A_Cancelled_Cold_Reset_Send_Does_Not_Start_The_Election()
     {
         var background = await ColdResetSendDoesNotElect(gate => gate.Cancel = true);
@@ -1071,6 +1107,96 @@ public partial class CanOpenFlyingMasterTests
         await QuiesceAsync(witness, null);
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
             "the confirmed reset applies locally and starts the warm election");
+    }
+
+    [Fact]
+    public async Task Stopping_During_The_Held_Cold_Reset_Drops_It()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus));
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var resets = 0;
+        node.ApplicationReset += (_, _) => resets++;
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Detecting, 200,
+            "the node is asking who is master");
+        await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(30));
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        node.StopFlyingMaster();
+        await QuiesceAsync(witness, null);
+        gate.Release();
+        await QuiesceAsync(witness, null);
+
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
+            "stop clears the pending reset, so the later confirmation does not start the election");
+        resets.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Stopping_During_The_Held_Force_Reset_Drops_It()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        var resets = 0;
+        node.ApplicationReset += (_, _) => resets++;
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        int applied = resets;
+
+        node.StopFlyingMaster();
+        await QuiesceAsync(witness, null);
+        gate.Release();
+        await QuiesceAsync(witness, null);
+
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive,
+            "stop clears the pending reset, so the later confirmation does not apply it");
+        resets.Should().Be(applied);
+    }
+
+    [Fact]
+    public async Task A_Force_Reset_Completion_After_Dispose_Is_Swallowed()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Dispose drops the actor and then releases the held send. The completion posts back
+        // onto a node that is already gone.
+        node.Dispose();
+        await Task.Delay(200);
     }
 
     [Fact]

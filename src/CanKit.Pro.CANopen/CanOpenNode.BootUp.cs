@@ -314,9 +314,15 @@ internal sealed partial class CanOpenNode
     {
         if (send.IsCanceled) return true;
         if (!send.IsFaulted || send.Exception is null) return false;
+
+        // The async send reports cancellation as TaskStatus.Canceled, handled above.
+        // TrySetException(OperationCanceledException) faults the task instead. That shape is
+        // the same outcome: every inner exception is cancellation, and it is not a transport failure.
+        var onlyCancellation = true;
         foreach (var ex in send.Exception.InnerExceptions)
-            if (ex is not OperationCanceledException) return false;
-        return true;
+            if (ex is not OperationCanceledException)
+                onlyCancellation = false;
+        return onlyCancellation;
     }
 
     /// <summary>
