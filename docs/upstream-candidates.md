@@ -50,6 +50,9 @@ per bus is a contract", which is what any demultiplexing layer needs.
   cannot be exercised on hardware-free CI at all.
 - Marking its self-echo with `IsEcho = true`, so consumers can tell an echo from bus traffic —
   without it, any TX-confirm implementation on top of CanKit silently cannot match echoes.
+  CanKit.Pro keeps a second, unflagged echo world in the tests (`EchoWorld.Unflagged`) because
+  the published adapter still leaves the flag false; protocol self-traffic guards are run in
+  both worlds until that changes.
 - `VirtualBusHub` registry rework: atomic join, and removing a hub when its last member leaves
   (the registry otherwise grows without bound across sessions).
 

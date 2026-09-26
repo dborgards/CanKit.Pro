@@ -940,8 +940,8 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         master.StopSyncProducer();
     }
 
-    // Regression for #23: a node that produces SYNC must still see its own SYNC on a bus whose
-    // echoes are flagged.
+    // Regression for #23, now in both echo worlds (#94). A node that produces SYNC must still
+    // see its own SYNC.
     //
     // `ICanOpenNode.SyncReceived` promises delivery "either from a remote producer or from this
     // node's own producer if echo is on", and `HandleSync` is the only path that raises it and
@@ -951,13 +951,17 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
     // asserts on the *remote* consumer, and the Virtual adapter does not flag its echoes, so on
     // it the gate is a no-op and the old behaviour survives by accident.
     //
-    // ControllableBus is used precisely because it *does* flag, which is what a real
-    // echo-capable adapter (SocketCAN, Kvaser, Vector) does and what makes the gate bite.
-    [Fact]
-    public async Task Sync_Producer_Still_Sees_Its_Own_Sync_On_A_Flagging_Echo_Bus()
+    // The original pin, Sync_Producer_Still_Sees_Its_Own_Sync_On_A_Flagging_Echo_Bus, used
+    // ControllableBus because that is the world where the gate can bite. The same assertion on
+    // the unflagged adapter is the other row: there the echo arrives without IsEcho, which is
+    // what let the bug hide in Sync_Producer_TriggersReceiver. Which world is under test is the
+    // parameter.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task Sync_Producer_Still_Sees_Its_Own_Sync(EchoWorld world)
     {
-        using var bus = ControllableBus.EchoCapable(NewSession());
-        using var producer = CanOpen.OpenNode(bus, nodeId: 0x01);
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var producer = CanOpen.OpenNode(echo.Bus, nodeId: 0x01);
 
         int syncCount = 0;
         var enough = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
