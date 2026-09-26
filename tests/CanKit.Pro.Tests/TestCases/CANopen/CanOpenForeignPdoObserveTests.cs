@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Text;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -673,7 +674,7 @@ PDOMapping=0
 
     private static string Map(string index, string count, params string[] entries)
     {
-        var text = $@"
+        var text = new StringBuilder($@"
 [{index}]
 ParameterName=PDO mapping
 SubNumber={entries.Length + 1}
@@ -685,10 +686,10 @@ DataType=0x0005
 AccessType=rw
 DefaultValue={count}
 PDOMapping=0
-";
+");
         for (int i = 0; i < entries.Length; i++)
         {
-            text += $@"
+            text.Append($@"
 [{index}sub{i + 1}]
 ParameterName=Mapping entry {i + 1}
 ObjectType=0x7
@@ -696,9 +697,9 @@ DataType=0x0007
 AccessType=rw
 DefaultValue={entries[i]}
 PDOMapping=0
-";
+");
         }
-        return text;
+        return text.ToString();
     }
 
     private static string Var(string index, string dataType, string value) => $@"

@@ -279,10 +279,9 @@ internal sealed partial class CanOpenNode
 
     private static bool TryDescribedObject(CanOpenDeviceDescription description, ushort index, out CanOpenObject obj)
     {
-        foreach (var candidate in description.Objects.Objects.Values)
+        if (description.Objects.Objects.TryGetValue(index, out var found))
         {
-            if (candidate.Index != index) continue;
-            obj = candidate;
+            obj = found;
             return true;
         }
         obj = null!;
@@ -301,9 +300,8 @@ internal sealed partial class CanOpenNode
             value = Prefer(obj.ParameterValue, obj.DefaultValue);
             return true;
         }
-        foreach (var sub in obj.SubObjects.Values)
+        if (obj.SubObjects.TryGetValue(subindex, out var sub))
         {
-            if (sub.SubIndex != subindex) continue;
             value = Prefer(sub.ParameterValue, sub.DefaultValue);
             return true;
         }
