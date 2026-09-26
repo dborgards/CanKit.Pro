@@ -1217,8 +1217,8 @@ public partial class CanOpenFlyingMasterTests
         using var nodeBus = Open(session, 0);
         using var peer = Open(session, 1);
         var clock = new ManualTimeSource();
-        var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
-        var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
         var witness = new ActorWitness(node, peer, WitnessForLeft);
 
         Tighten(node);
@@ -1260,6 +1260,76 @@ public partial class CanOpenFlyingMasterTests
         await AdvanceAsync(clock, witness, null, TimeSpan.FromMilliseconds(80));
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
             "a forced reset that was not confirmed does not reset this node or start the delay");
+    }
+
+    [Fact]
+    public async Task A_Heartbeat_During_A_Held_Force_Does_Not_Start_The_Slave_Again()
+    {
+        const byte slave = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1 };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+
+        node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        node.ObjectDictionary.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+
+        TransmitHeartbeat(peer, slave, 0x7F);
+        await QuiesceAsync(witness, null);
+        int starts = log.Snapshot().Count(f => IsNmt(f, NmtCommand.Start, slave));
+        starts.Should().BeGreaterThan(0);
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        TransmitHeartbeat(peer, slave, 0x7F);
+        await QuiesceAsync(witness, null);
+
+        log.Snapshot().Count(f => IsNmt(f, NmtCommand.Start, slave)).Should().Be(starts,
+            "boot stays as it was, so a heartbeat during the held reset does not start the slave again");
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+    }
+
+    [Fact]
+    public async Task An_Unconfirmed_Force_Does_Not_Reset_Assigned_Slaves_Again()
+    {
+        const byte slave = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var gate = new ColdResetGate(new CanBusService(nodeBus)) { PassResets = 1, Reject = true };
+        using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(peer);
+
+        node.ObjectDictionary.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        node.ObjectDictionary.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the node is the active master");
+        await QuiesceAsync(witness, null);
+        int resets = log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
+        resets.Should().BeGreaterThan(0);
+
+        Transmit(peer, CanOpenCobId.FlyingMasterForce);
+        await gate.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        await QuiesceAsync(witness, null);
+
+        log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave)).Should().Be(resets,
+            "an unconfirmed force leaves the slaves where they were");
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
     }
 
     [Fact]

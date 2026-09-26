@@ -243,17 +243,15 @@ internal sealed partial class CanOpenNode
         _ignoreBroadcastResetEcho = true;
     }
 
-    /// <summary>The cold reset did not leave the adapter. Drop the window without applying the
-    /// reset and without starting the warm election. A forced reset that was abandoned leaves
-    /// this node the active master, so the detect cycle and boot-up paused for the wait start
-    /// again.</summary>
+    /// <summary>The reset did not leave the adapter. Drop the window without applying it and
+    /// without starting the warm election. A forced reset that was abandoned leaves this node
+    /// the active master: the detect cycle starts again, and boot-up is not run a second time.</summary>
     private void AbandonColdReset()
     {
         if (!_coldResetPending || _disposed != 0) return;
         _coldResetPending = false;
         if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
         ArmActiveDetectCycle();
-        BeginBootUp();
     }
 
     private void BeginNegotiation(bool transmitTrigger)
@@ -356,13 +354,14 @@ internal sealed partial class CanOpenNode
             // The active master restarts the network, but not before Reset Communication is
             // confirmed. Applying the reset here used to arm the warm-election delay while the
             // broadcast was only queued, so a short delay could elect again before the other
-            // candidates were reset. The detect cycle and boot-up stop for the wait: either one
-            // can still send 0x072, claim, or command a slave while the reset has not left, and
-            // peers then elect and ignore that reset. While Active, the echo is ignored; the
-            // flag after the local reset covers the echo that arrives once this node has left Active.
+            // candidates were reset. The detect cycle stops for the wait: it can still send
+            // 0x072 and claim while the reset has not left, and peers then elect and ignore that
+            // reset. Boot-up is left in place and only held, so a heartbeat cannot start a slave
+            // again and a failed send does not boot the network a second time. While Active, the
+            // echo is ignored; the flag after the local reset covers the echo that arrives once
+            // this node has left Active.
             CancelFlyingMasterDeadline();
             _confirmingActiveMaster = false;
-            CancelBootUp();
             _coldResetPending = true;
             var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
             _ = sent.ContinueWith(send =>

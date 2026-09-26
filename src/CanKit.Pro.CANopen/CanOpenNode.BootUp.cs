@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -60,18 +61,23 @@ internal sealed partial class CanOpenNode
 
         // 1F89h is UNSIGNED32. A signed cast would skip the deadline for every value from
         // 0x80000000 upward, and a mandatory slave would then stay unseen.
-        uint bootMs = _od.ReadUnsigned(Co.BootTime, 0x00);
-        if (bootMs > 0 && HasMandatorySlave())
-        {
-            int generation = _bootGeneration;
-            _bootDeadline = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs), () =>
-            {
-                if (generation != _bootGeneration || _disposed != 0
-                    || _flyingMasterRole != FlyingMasterRole.Active) return;
-                OnBootTimeout();
-            });
-        }
+        ArmBootDeadline();
         TryFinishBoot();
+    }
+
+    private void ArmBootDeadline()
+    {
+        _bootDeadline?.Dispose();
+        _bootDeadline = null;
+        uint bootMs = _od.ReadUnsigned(Co.BootTime, 0x00);
+        if (bootMs == 0 || !HasMandatorySlave()) return;
+        int generation = _bootGeneration;
+        _bootDeadline = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs), () =>
+        {
+            if (generation != _bootGeneration || _disposed != 0
+                || _flyingMasterRole != FlyingMasterRole.Active) return;
+            OnBootTimeout();
+        });
     }
 
     private void CancelBootUp()
@@ -88,6 +94,9 @@ internal sealed partial class CanOpenNode
 
     private void NoteSlaveNmtState(byte nodeId, byte state)
     {
+        // Held while a forced Reset Communication is still unconfirmed. Clearing the boot record
+        // for that wait would make the next heartbeat start the slave again, behind the reset.
+        if (_coldResetPending) return;
         if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
         if (nodeId == _nodeId || nodeId > CanOpenCobId.MaxNodeId || !IsAssignedSlave(nodeId)) return;
 
@@ -124,6 +133,7 @@ internal sealed partial class CanOpenNode
 
     private void TryFinishBoot()
     {
+        if (_coldResetPending) return;
         if (_flyingMasterRole != FlyingMasterRole.Active || _bootHalted || _disposed != 0) return;
         if (HasUnseenMandatorySlave()) return;
 
@@ -149,6 +159,13 @@ internal sealed partial class CanOpenNode
     private void OnBootTimeout()
     {
         if (_disposed != 0) return;
+        if (_coldResetPending)
+        {
+            // This tick landed in the wait. Arm the same timeout again instead of commanding
+            // slaves while the broadcast reset is still held.
+            ArmBootDeadline();
+            return;
+        }
         if (!HasUnseenMandatorySlave())
         {
             TryFinishBoot();
@@ -318,11 +335,7 @@ internal sealed partial class CanOpenNode
         // The async send reports cancellation as TaskStatus.Canceled, handled above.
         // TrySetException(OperationCanceledException) faults the task instead. That shape is
         // the same outcome: every inner exception is cancellation, and it is not a transport failure.
-        var onlyCancellation = true;
-        foreach (var ex in send.Exception.InnerExceptions)
-            if (ex is not OperationCanceledException)
-                onlyCancellation = false;
-        return onlyCancellation;
+        return send.Exception.InnerExceptions.All(static ex => ex is OperationCanceledException);
     }
 
     /// <summary>
