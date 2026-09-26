@@ -89,12 +89,6 @@ Deliberate omissions, each checked against the norm text:
   as CiA 301 says (see below).
 * **The pst > 0 fallback from block to segmented transfer** — `pst = 0` is forced, which CiA 301
   §7.2.4.3.13 defines as "change of transfer protocol not allowed".
-* **Boot-up manager (CiA 302)** — not implemented. The maintainer decision on #131 made flying
-  master mandatory for the master role and did not cover the boot-up manager (slave assignment
-  `1F81h`, the request in `1F82h`, ordered startup). Flying master itself is implemented; see
-  [Flying master](#flying-master). Whether the boot-up manager belongs to that duty is still
-  open (review question 5).
-
 What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
 with such an entry instead of ignoring it.
@@ -105,8 +99,9 @@ with such an entry instead of ignoring it.
 flying-master objects, at their defaults: `1000h` (device type 0), `1001h` (error register), `1018h` (sub0 = `01h`,
 vendor-id 0 = "no vendor-ID assigned"), `1005h`/`1006h` (SYNC on `080h`, not generated),
 `100Ch`/`100Dh` (life guarding off), `1010h`/`1011h` (store / restore), `1014h` (EMCY on
-`080h` + node-id, valid), `1016h`/`1017h` (heartbeat off), `1F80h`/`1F90h` (flying master
-off; see [Flying master](#flying-master)), `1200h` (the default SDO server,
+`080h` + node-id, valid), `1016h`/`1017h` (heartbeat off), `1F80h`/`1F81h`/`1F82h`/`1F89h`/`1F90h`
+(flying master off, no slave assigned, boot timeout 0; see [Flying master](#flying-master)),
+`1200h` (the default SDO server,
 constant) and four RPDO plus four TPDO records (`1400h`–`1403h`, `1600h`–`1603h`,
 `1800h`–`1803h`, `1A00h`–`1A03h`) at their pre-defined connection set CAN-IDs, "not valid" until
 configured. `1000h` and `1018h` are placeholders the application replaces with `AddU32` — they
@@ -133,7 +128,7 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | Abort code | Raised for |
 | --- | --- |
 | `0601 0000h` | Writing a mapping entry while the mapping is enabled (`sub0` ≠ 0) |
-| `0601 0002h` | Download to a read-only object: the PDO records without `WritableCommunicationParameters`, `1200h`, `1000h`, `1001h`, `1018h`, `1F90h:00` |
+| `0601 0002h` | Download to a read-only object: the PDO records without `WritableCommunicationParameters`, `1200h`, `1000h`, `1001h`, `1018h`, `1F81h:00`, `1F82h:00`, `1F90h:00` |
 | `0602 0000h` | Mapping entry whose target object does not exist; `sub0` enabling a mapping with an empty slot |
 | `0604 0041h` | Target not PDO-mappable, not accessible in the PDO's direction, or of another width than mapped; dummy entry with the wrong width |
 | `0604 0042h` | Mapping longer than 8 bytes |
@@ -141,9 +136,9 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0607 0010h` | Mapping bit length 0, above 64 or not a multiple of 8 |
 | `0607 0012h` / `0607 0013h` | Download of the wrong width for the object — `sub0` of a mapping record is UNSIGNED8 |
 | `0609 0011h` | Sub-index `04h` of a PDO communication record, or any other absent sub-index |
-| `0609 0030h` | Reserved transmission type; bit 29 (frame) set; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time changed while the PDO is valid; mapping count above `40h`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot |
+| `0609 0030h` | Reserved transmission type; bit 29 (frame) set; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time changed while the PDO is valid; mapping count above `40h`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
 | `0800 0020h` | Wrong signature written to `1010h:01` / `1011h:01` |
-| `0800 0022h` | SDO server session open when the node entered Stopped or was reset |
+| `0800 0022h` | SDO server session open when the node entered Stopped or was reset; `1F82h` written while this node is not the active NMT master |
 
 **Read-only by default.** `CanOpenNodeOptions.WritableCommunicationParameters` (default
 `false`) decides whether a master may write the PDO communication and mapping records over SDO.
@@ -189,9 +184,11 @@ does, so a master sees the described device from its first frame:
   and value — a DCF's `ParameterValue` over the `DefaultValue` of the EDS it was made from.
   `$NODEID+…` expressions are evaluated against the node-id the node is opened with.
 * **The managed communication objects** (`1000h`, `1001h`, `1005h`, `1006h`, `100Ch`, `100Dh`,
-  `1014h`, `1016h`, `1017h`, `1018h`, `1F80h`, `1F90h`) take the file's access and value through the same
+  `1014h`, `1016h`, `1017h`, `1018h`, `1F80h`, `1F81h`, `1F89h`, `1F90h`) take the file's access and value through the same
   validated write path an SDO download uses, so a value the norm would reject on the bus is
-  rejected here too. A mandatory object the file omits keeps its placeholder.
+  rejected here too. A mandatory object the file omits keeps its placeholder. `1F82h` is the
+  exception: a described value is stored as the initial tracked NMT state and is not sent as a
+  command.
 * **PDO records** are applied in the order of §7.5.2.38 — communication parameters with the PDO
   destroyed, then the mapping, then "create PDO" — and a PDO the file does not declare does not
   exist (`0602 0000h`). The file's access rights on the records hold on the bus: a record it
@@ -401,20 +398,18 @@ and block transfer retransmits from the first unconfirmed segment on a partial s
 
 ## Flying master
 
-A master application joins the NMT flying-master election with `StartFlyingMaster`. The
-procedure is the one public vendor descriptions and the open CANopen literature agree on.
-[Lely's standards index](https://opensource.lely.com/canopen/docs/standards/) names it as
-CiA 302-2, object `1F90h`. The same services are described for the historical DSP 302 clause
-5.5. **That edition and that clause number are an assumption.** CiA 302 is members-only and is
-not in this repository, so the binding was not checked against a members' copy. Which edition
-and which clause actually bind this package is still review question 4
-(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`). The boot-up manager is not part of
-this procedure.
+A master application joins the NMT flying-master election with `StartFlyingMaster`. The binding
+is **CiA 302-2 version 4.1.0**, network management and NMT flying master, object `1F90h`.
+[Lely's standards index](https://opensource.lely.com/canopen/docs/standards/) lists that part,
+and its NMT master cites the same edition. DSP 302 clause 5.5 is the historical ancestor of
+those services, not the binding. CiA 302 is members-only and is not in this repository; the
+behaviour below follows the public descriptions of that edition, and the points those
+descriptions do not settle are listed as open questions on the pull request.
 
 `1F80h` bit 0 marks an NMT-master-capable device and bit 5 selects the flying-master process.
 Both are required. `StartFlyingMaster` sets them and writes the priority level (0 highest, 2
-lowest) to `1F90h:03`. Other bits of `1F80h` are stored and ignored. Clearing either bit, or
-calling `StopFlyingMaster`, leaves the election.
+lowest) to `1F90h:03`. The other bits of `1F80h` belong to the boot-up below. Clearing bit 0
+or bit 5, or calling `StopFlyingMaster`, leaves the election and stops the boot-up.
 
 `1F90h` is an array of six UNSIGNED16 values, in milliseconds:
 
@@ -453,11 +448,11 @@ error: `0x076` goes out and `FlyingMasterChanged` reports `ConfigurationError`.
 The first election after `StartFlyingMaster` is a cold boot. If nobody answers, the node
 broadcasts NMT Reset Communication (`0x82`, node 0) and runs the election again as a warm boot,
 so the timeslot race is not racing traffic from before the reset. That reset restores power-on
-values, which is why `StartFlyingMaster` records `1F80h` and `1F90h` as power-on values before
-it starts. Call `StoreParameters` first if the rest of the configuration must survive the same
-reset. A later loss of the active master starts a warm election and does not broadcast Reset
-Communication again. The active master is who sends Reset Communication when it receives
-`0x076`. Winning does not send NMT Start.
+values, which is why `StartFlyingMaster` records `1F80h`, `1F81h`, `1F89h` and `1F90h` as
+power-on values before it starts. Call `StoreParameters` first if the rest of the configuration
+must survive the same reset. A later loss of the active master starts a warm election and does
+not broadcast Reset Communication again. The active master is who sends Reset Communication when
+it receives `0x076`. Winning then runs the boot-up below.
 
 While this node stands by, `StartFlyingMaster`'s heartbeat timeout is installed as a `1016h`
 consumer for the winner, unless the application already monitors that node. A timeout raises
@@ -467,6 +462,51 @@ the bits of `1F80h` without calling `StartFlyingMaster` runs the same election a
 invent a heartbeat time; a standby node then reclaims only if some consumer for the winner
 times out. `FlyingMasterRole` is `Inactive`, `Delaying`, `Detecting`, `Negotiating`, `Active`
 or `Standby`. `ActiveFlyingMasterNodeId` names the winner once one is known.
+
+### Boot-up
+
+Once `FlyingMasterRole` is `Active`, this node initialises the slaves named in `1F81h`.
+Sub-index 0 is constant 127. Each other sub-index is the node-id, an UNSIGNED32:
+
+| Bit | Set means |
+| --- | --- |
+| 0 | This node-id is a slave. The sub-index equal to the master's own id is ignored. |
+| 2 | The master may boot it: after it is seen, NMT Start is sent. |
+| 3 | Mandatory. The master does not finish boot-up until this slave has been seen. |
+| 4 | Keep-alive. NMT Reset Communication is not sent to this slave. |
+
+Bits 8–15 and 16–31 are stored and not used; this node does not run node guarding from them.
+`1F84h`–`1F88h` (the identity check) and the concise DCF are not implemented.
+
+`1F80h`, read the way the open stack that cites 302-2 v4.1.0 reads it:
+
+| Bit | Clear | Set |
+| --- | --- | --- |
+| 1 | Start each slave on its own. | One NMT Start, target 0, after every mandatory slave has been seen. Sent only when bit 2 is also clear, because this node applies its own NMT echo. |
+| 2 | This node enters Operational when the mandatory slaves have been seen, or at once when there are none. | This node stays in its current NMT state. |
+| 3 | Boot the assigned slaves. | Do not reset them and do not send NMT Start. |
+| 4 | On a mandatory-slave timeout, reset that slave. | On a mandatory-slave timeout, NMT Reset Node to every assigned slave. |
+| 6 | — | On a mandatory-slave timeout, NMT Stop to every assigned slave. Takes precedence over bit 4. |
+
+`StartFlyingMaster` leaves bits 1, 2, 3, 4 and 6 as they were. With the defaults, that is all
+clear: the winner enters Operational, and it starts slaves individually if `1F81h` assigns any.
+
+Each assigned slave that is not keep-alive is sent NMT Reset Communication to its own node-id.
+A broadcast is not used there. This node would reset itself on the echo, and the election has
+already broadcast Reset Communication once on a cold boot.
+
+Heartbeats, including the boot-up byte `0x00`, update `1F82h` at that node-id. Reading `1F82h`
+returns the last state byte, or 0 when none has been seen. Writing it, while this node is the
+active master, requests a command and does not replace that state. The value is the state, not
+the command specifier: `4` stop, `5` operational (NMT Start), `6` reset node, `7` reset
+communication, `127` pre-operational. Sub-index `80h` addresses every node. Sub-index 0 is
+constant 128. A write while this node is not the active master is rejected with `0800 0022h`.
+
+`1F89h` is the boot timeout in milliseconds. 0 disables it. When it elapses, each mandatory
+slave that was never seen raises `FlyingMasterChanged` with `SlaveBootTimeout`, and the boot-up
+stops before this node enters Operational and before a simultaneous NMT Start. The error
+reaction is the `1F80h` bit 6 / bit 4 row above. With both clear, only the missing slave
+receives NMT Reset Node.
 
 ## Quick start
 
@@ -507,7 +547,7 @@ var value = await node.SdoUploadAsync(serverNodeId: 0x12, index: 0x1000, subinde
 // FR-CO-007: bring the network up as an NMT master (PDOs flow in Operational only).
 await node.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0);
 
-// Flying master (CiA 302-2, assumed binding): priority 0 is the highest. The heartbeat
+// Flying master (CiA 302-2 v4.1.0): priority 0 is the highest. The heartbeat
 // timeout is how long a standby waits before electing again.
 node.StartFlyingMaster(priorityLevel: 0, activeMasterHeartbeatTimeout: TimeSpan.FromMilliseconds(500));
 ```
@@ -527,6 +567,7 @@ CanKit.Pro.CANopen/
   CanOpenNode.SdoBlock.cs             // partial: SDO block transfer (client + server)
   CanOpenNode.NodeGuarding.cs         // partial: node-guarding consumer + producer, life guarding
   CanOpenNode.FlyingMaster.cs         // partial: NMT flying-master election
+  CanOpenNode.BootUp.cs               // partial: boot-up of the slaves in 1F81h once the master is active
   CanOpenNodeOptions.cs
   CanOpenCobId.cs                     // pre-defined connection set, COB-ID control bits, restricted CAN-IDs
   CanOpenEvents.cs                    // event argument types
