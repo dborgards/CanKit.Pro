@@ -89,7 +89,10 @@ Deliberate omissions, each checked against the norm text:
   as CiA 301 says (see below).
 * **The pst > 0 fallback from block to segmented transfer** — `pst = 0` is forced, which CiA 301
   §7.2.4.3.13 defines as "change of transfer protocol not allowed".
-* **CiA 302** (boot-up manager, flying master) — outside CiA 301 and outside this package.
+* **Flying Master (CiA 302)** — not implemented. As of the maintainer decision on #131 it is a
+  required master capability (`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); the
+  procedure is not specified here. The boot-up manager used to share this bullet and is not
+  covered by that decision.
 
 What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
