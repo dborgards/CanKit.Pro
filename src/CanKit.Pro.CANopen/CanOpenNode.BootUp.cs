@@ -320,7 +320,7 @@ internal sealed partial class CanOpenNode
             {
                 throw;
             }
-            catch (Exception ex)
+            catch (CanOpenTransportException ex)
             {
                 RaiseBackgroundException(ex);
                 return false;
