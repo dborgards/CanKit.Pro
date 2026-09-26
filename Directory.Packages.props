@@ -45,7 +45,7 @@
       (developmentDependency, no lib/), so it compiles in and never becomes a dependency of
       anything. It requires LangVersion 14; see the Language block in Directory.Build.props.
     -->
-    <PackageVersion Include="Polyfill" Version="11.3.0" />
+    <PackageVersion Include="Polyfill" Version="11.4.0" />
     <!--
       PublicApiGenerator renders the approved public-API surface (see PublicApiSurfaceTests). It is
       a test-only tool, never a dependency of a shipped package, so it carries PrivateAssets="all"
