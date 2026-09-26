@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
@@ -272,8 +273,10 @@ internal sealed partial class CanOpenNode
         => _ = EnqueueNmt(command, target);
 
     /// <summary>Queues one NMT frame behind the previous one. The task completes with
-    /// <see langword="true"/> only when the adapter confirmed the send. Cancellation faults
-    /// the task; a throw or an unconfirmed send completes with <see langword="false"/>.</summary>
+    /// <see langword="true"/> only when the adapter confirmed the send. Cancellation and any
+    /// exception that is not an adapter send failure fault the task. An unconfirmed send, or a
+    /// send that threw <see cref="CanKitException"/> or <see cref="ObjectDisposedException"/>,
+    /// completes with <see langword="false"/>.</summary>
     private Task<bool> EnqueueNmt(NmtCommand command, byte target)
     {
         var payload = new[] { (byte)command, target };
@@ -300,9 +303,16 @@ internal sealed partial class CanOpenNode
         return done.Task;
     }
 
-    /// <summary>Sends one NMT frame and reports the adapter's confirmation. A transport
-    /// exception is reported and comes back as <see langword="false"/>, so a caller can tell
-    /// a reset that never left the adapter from one that did. Cancellation still fails the task.</summary>
+    /// <summary>
+    /// Sends one NMT frame and reports the adapter's confirmation. An unconfirmed send (timeout,
+    /// bus-off, rejection) is a result, not a throw. <c>SendConfirmed</c> throws
+    /// <see cref="ObjectDisposedException"/> once the service is disposed, and it rethrows the bus:
+    /// the virtual adapter throws <see cref="ObjectDisposedException"/>, device adapters throw
+    /// <see cref="CanKitException"/> (<see cref="CanBusException"/> and the device exceptions).
+    /// Those are reported and come back as <see langword="false"/>. Anything else, including
+    /// <see cref="InvalidOperationException"/>, is not a send failure of this stack and still
+    /// fails the task. Cancellation does too.
+    /// </summary>
     private Task<bool> SendNmtReporting(byte[] payload)
     {
         var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
@@ -320,7 +330,12 @@ internal sealed partial class CanOpenNode
             {
                 throw;
             }
-            catch (CanOpenTransportException ex)
+            catch (CanKitException ex)
+            {
+                RaiseBackgroundException(ex);
+                return false;
+            }
+            catch (ObjectDisposedException ex)
             {
                 RaiseBackgroundException(ex);
                 return false;

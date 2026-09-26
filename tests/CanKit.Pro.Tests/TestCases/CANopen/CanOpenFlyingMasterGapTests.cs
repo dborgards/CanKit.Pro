@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.RawCan;
@@ -714,10 +715,30 @@ public partial class CanOpenFlyingMasterTests
         => ColdResetSendDoesNotElect(gate => gate.Reject = true);
 
     [Fact]
-    public Task A_Throwing_Cold_Reset_Send_Does_Not_Start_The_Election()
-        => ColdResetSendDoesNotElect(gate => gate.Fault = new InvalidOperationException("adapter rejected the reset"));
+    public async Task A_Disposed_Service_On_The_Cold_Reset_Is_Reported_And_Does_Not_Elect()
+    {
+        var background = await ColdResetSendDoesNotElect(
+            gate => gate.Fault = new ObjectDisposedException(nameof(CanBusService)));
+        background.Should().BeOfType<ObjectDisposedException>();
+    }
 
-    private async Task ColdResetSendDoesNotElect(Action<ColdResetGate> arrange)
+    [Fact]
+    public async Task An_Adapter_Bus_Fault_On_The_Cold_Reset_Is_Reported_And_Does_Not_Elect()
+    {
+        var background = await ColdResetSendDoesNotElect(
+            gate => gate.Fault = new CanBusException(CanKitErrorCode.NativeCallFailed, "driver rejected the frame"));
+        background.Should().BeOfType<CanBusException>();
+    }
+
+    [Fact]
+    public async Task An_Unrelated_Cold_Reset_Throw_Is_Not_Reported_As_A_Transport_Failure()
+    {
+        var background = await ColdResetSendDoesNotElect(
+            gate => gate.Fault = new InvalidOperationException("not an adapter send failure"));
+        background.Should().BeNull();
+    }
+
+    private async Task<Exception?> ColdResetSendDoesNotElect(Action<ColdResetGate> arrange)
     {
         var session = NewSession();
         using var nodeBus = Open(session, 0);
@@ -726,6 +747,8 @@ public partial class CanOpenFlyingMasterTests
         using var gate = new ColdResetGate(new CanBusService(nodeBus));
         arrange(gate);
         using var node = new CanOpenNode(gate, LeftId, new CanOpenNodeOptions(), ownsService: true, timeSource: clock);
+        Exception? background = null;
+        node.BackgroundExceptionOccurred += (_, ex) => background ??= ex;
         var witness = new ActorWitness(node, peer, WitnessForLeft);
         using var log = new FrameLog(peer);
 
@@ -746,6 +769,7 @@ public partial class CanOpenFlyingMasterTests
         node.FlyingMasterRole.Should().Be(FlyingMasterRole.Detecting,
             "a cold reset that was not confirmed must not start the warm election");
         log.Snapshot().Should().NotContain(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+        return background;
     }
 
     [Fact]
