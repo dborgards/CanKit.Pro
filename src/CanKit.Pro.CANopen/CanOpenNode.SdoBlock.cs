@@ -109,6 +109,12 @@ internal sealed partial class CanOpenNode
             SdoAbortCode.SdoProtocolTimedOut, SdoAbortOrigin.Local));
     }
 
+    /// <summary>
+    /// Restarts the block client's request timer after a frame that was attributed to
+    /// <paramref name="session"/> and leaves it open. Not called for a frame the session
+    /// ignores (#18, #167): a stray response must not keep a transfer alive that its own
+    /// server has gone silent on.
+    /// </summary>
     private void RearmBlockClient(SdoBlockClientSession session, byte serverNodeId)
     {
         var deadline = session.Deadline;
@@ -127,6 +133,35 @@ internal sealed partial class CanOpenNode
             SdoFrames.BuildAbort(session.Index, session.Subindex, (uint)code));
         session.Tcs.TrySetException(new SdoAbortException(session.Index, session.Subindex, code,
             SdoAbortOrigin.Local));
+    }
+
+    /// <summary>
+    /// True when <paramref name="cs"/> is the server command specifier
+    /// <paramref name="session"/> is waiting for. Kept in step with the phase handlers:
+    /// a frame that fails this test is ignored, so those handlers never see it.
+    /// <see cref="SdoBlockClientPhase.ReceivingSegments"/> accepts every byte, because byte 0
+    /// there is <c>(c &lt;&lt; 7) | seqno</c> and not a command specifier.
+    /// </summary>
+    private static bool BlockClientCommandSpecifierMatches(SdoBlockClientSession session, byte cs)
+    {
+        if (session.IsDownload)
+        {
+            return session.Phase switch
+            {
+                SdoBlockClientPhase.AwaitInitResponse => (cs & 0xE3) == ScsInitResponseMaskDownload,
+                SdoBlockClientPhase.AwaitSubBlockAck => cs == ScsBlockDownloadSubBlockAck,
+                SdoBlockClientPhase.AwaitEndResponse => cs == ScsBlockDownloadEndResponse,
+                _ => false,
+            };
+        }
+
+        return session.Phase switch
+        {
+            SdoBlockClientPhase.AwaitInitResponse => (cs & 0xE1) == ScsInitResponseMaskUpload,
+            SdoBlockClientPhase.ReceivingSegments => true,
+            SdoBlockClientPhase.AwaitEnd => (cs & 0xE3) == ScsBlockUploadEndMask,
+            _ => false,
+        };
     }
 
     /// <summary>
@@ -163,19 +198,33 @@ internal sealed partial class CanOpenNode
             return true;
         }
 
-        // Attribution before the deadline is touched (#18). While the initiate response is
-        // awaited, every legitimate frame carries the multiplexer in bytes 1..3 — the block
-        // download initiate response (CiA 301 §7.2.4.3.9, Figure 27) and the block upload
-        // initiate response (§7.2.4.3.13, Figure 31) alike — so a frame naming another object
-        // is somebody else's response (a late answer to an earlier request of ours, or the reply
-        // to a second client on the same server) and is consumed without effect: no abort, no
-        // phase change, no re-arm. The later phases exchange sub-block ACKs and end frames,
-        // which carry no multiplexer (Figures 28, 29, 32, 33) and are matched by phase alone.
+        // Attribution before the deadline is touched (#18, #167). A frame is this session's
+        // only when the phase, the command specifier and — while an initiate response is
+        // awaited — the multiplexer all agree with it. Only an attributed frame re-arms the
+        // deadline or moves the session; every other frame is ignored, not aborted.
+        //
+        // While the initiate response is awaited, every legitimate frame carries the
+        // multiplexer in bytes 1..3 — the block download initiate response (CiA 301
+        // §7.2.4.3.9, Figure 27) and the block upload initiate response (§7.2.4.3.13,
+        // Figure 31) alike — so a frame naming another object is somebody else's response
+        // (a late answer to an earlier request of ours, or the reply to a second client on
+        // the same server). The later phases exchange sub-block ACKs and end frames, which
+        // carry no multiplexer (Figures 28, 29, 32, 33) and are matched by phase and command
+        // specifier. A specifier this phase is not waiting for — a classic response on
+        // 0x580+server, or a block frame from another phase — is the same kind of stray:
+        // consumed with no abort, no phase change and no re-arm. 0504 0001h answers a
+        // request whose command specifier the peer does not implement; nothing in this tree
+        // requires the client to fail a healthy block transfer for a frame that is not the
+        // one it asked for, and the classic client ignores those frames the same way.
+        // Segment bytes while ReceivingSegments are not command specifiers (Figure 32) and
+        // stay on the segment path, including the 0504 0003h abort for an illegal seqno.
         if (session.Phase == SdoBlockClientPhase.AwaitInitResponse)
         {
             var (idx, sub) = SdoFrames.ReadIndex(data);
             if (idx != session.Index || sub != session.Subindex) return true;
         }
+
+        if (!BlockClientCommandSpecifierMatches(session, cs)) return true;
 
         RearmBlockClient(session, serverNodeId);
 
@@ -191,12 +240,7 @@ internal sealed partial class CanOpenNode
         switch (session.Phase)
         {
             case SdoBlockClientPhase.AwaitInitResponse:
-                // Expect 0xA0 | (sc<<2). Reject anything else.
-                if ((cs & 0xE3) != ScsInitResponseMaskDownload)
-                {
-                    AbortBlockClient(session, SdoAbortCode.CommandSpecifierInvalid);
-                    return true;
-                }
+                // 0xA0 | (sc<<2). A different specifier was ignored before the deadline moved.
                 {
                     byte serverBlkSize = data[4];
                     if (serverBlkSize is < 1 or > 127)
@@ -213,11 +257,6 @@ internal sealed partial class CanOpenNode
                 return true;
 
             case SdoBlockClientPhase.AwaitSubBlockAck:
-                if (cs != ScsBlockDownloadSubBlockAck)
-                {
-                    AbortBlockClient(session, SdoAbortCode.CommandSpecifierInvalid);
-                    return true;
-                }
                 {
                     var (ackseq, nextBlkSize) = SdoBlockFrames.ReadSubBlockAck(data);
                     // ackseq counts cumulatively from the start of the current sub-block
@@ -274,11 +313,6 @@ internal sealed partial class CanOpenNode
                 return true;
 
             case SdoBlockClientPhase.AwaitEndResponse:
-                if (cs != ScsBlockDownloadEndResponse)
-                {
-                    AbortBlockClient(session, SdoAbortCode.CommandSpecifierInvalid);
-                    return true;
-                }
                 _sdoBlockClients.Remove(session.ServerNodeId);
                 session.Deadline?.Dispose();
                 session.Tcs.TrySetResult(Array.Empty<byte>());
@@ -295,12 +329,8 @@ internal sealed partial class CanOpenNode
         switch (session.Phase)
         {
             case SdoBlockClientPhase.AwaitInitResponse:
-                // Expect scs=6 (0xC0 base) with optional sc / s bits.
-                if ((cs & 0xE1) != ScsInitResponseMaskUpload)
-                {
-                    AbortBlockClient(session, SdoAbortCode.CommandSpecifierInvalid);
-                    return true;
-                }
+                // scs=6 (0xC0 base) with optional sc / s bits. A different specifier was
+                // ignored before the deadline moved.
                 {
                     uint declared = SdoBlockFrames.ReadUploadTotalSize(data);
                     if (declared > (uint)_options.MaxSdoTransferBytes)
@@ -331,12 +361,7 @@ internal sealed partial class CanOpenNode
                 return HandleBlockUploadSegment(session, data, cs);
 
             case SdoBlockClientPhase.AwaitEnd:
-                // Expect 0xC1 | (n<<2) with CRC in bytes 1..2.
-                if ((cs & 0xE3) != ScsBlockUploadEndMask)
-                {
-                    AbortBlockClient(session, SdoAbortCode.CommandSpecifierInvalid);
-                    return true;
-                }
+                // 0xC1 | (n<<2) with CRC in bytes 1..2.
                 {
                     byte n = SdoBlockFrames.ReadEndUnusedBytes(cs);
                     ushort peerCrc = SdoBlockFrames.ReadEndCrc(data);
