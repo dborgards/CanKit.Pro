@@ -110,6 +110,8 @@ internal sealed partial class CanOpenNode
 
     private static int PdoRecordRank(ushort index) => index switch
     {
+        // 1F90h before 1F80h: the times are in the dictionary when bits 0 and 5 start the election.
+        Co.FlyingMasterTiming => -1,
         >= Co.RpdoComm and < Co.RpdoComm + 0x200 => 1,
         >= Co.TpdoComm and < Co.TpdoComm + 0x200 => 1,
         >= Co.RpdoMap and < Co.RpdoMap + 0x200 => 2,
@@ -188,7 +190,10 @@ internal sealed partial class CanOpenNode
             case Co.GuardTime:
             case Co.LifeTimeFactor:
             case Co.ErrorRegister:
+            case Co.NmtStartup:
                 return ApplyManagedVariable(index, entries, findings);
+            case Co.FlyingMasterTiming:
+                return ApplyFlyingMasterTiming(entries, findings);
         }
         if (index is >= Co.RpdoComm and < Co.RpdoComm + 0x200)
             return ApplyPdoCommunicationRecord(index, Co.RpdoComm, isTpdo: false, entries, findings, pendingPdoCreates);
@@ -237,7 +242,78 @@ internal sealed partial class CanOpenNode
         return 0;
     }
 
-    /// <summary>1005h, 1006h, 1014h, 1017h, 100Ch, 100Dh, 1001h: the node's type stays, the
+    /// <summary>
+    /// <c>1F90h</c>: six UNSIGNED16 times. Sub-index <c>00h</c> stays the constant 6. Each other
+    /// value goes through the checks an SDO download hits. Sub-indices <c>04h</c> and <c>05h</c>
+    /// constrain each other, so they are written in whichever order keeps a currently valid pair
+    /// valid between the two writes.
+    /// </summary>
+    private int ApplyFlyingMasterTiming(List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
+    {
+        const ushort index = Co.FlyingMasterTiming;
+        int loaded = 0;
+        var described = new Dictionary<byte, DescribedEntry>();
+        foreach (var entry in entries) described[entry.Subindex] = entry;
+
+        if (described.TryGetValue(0, out var sub0))
+        {
+            if (ParseUnsigned(sub0, out _) == 6) loaded++;
+            else
+            {
+                findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
+                    "1F90h sub-index 00h is constant 6; the described count is not applied", sub0.Value));
+            }
+        }
+        foreach (var entry in entries.Where(e => e.Subindex > 6))
+        {
+            findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
+                "1F90h implements sub-indices 01h to 06h; this sub-index is not created", entry.Value));
+        }
+
+        void Take(byte sub)
+        {
+            if (!described.TryGetValue(sub, out var entry)) return;
+            if (!_od.TryGet(index, sub, out var current)) return;
+            _od.Declare(index, sub, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            loaded++;
+            ApplyManagedValue(index, sub, current.DataType, entry, findings);
+        }
+
+        Take(0x01);
+        Take(0x02);
+        Take(0x03);
+        Take(0x06);
+
+        int currentDevice = (int)_od.ReadUnsigned(index, 0x05);
+        int currentPrioritySlot = (int)_od.ReadUnsigned(index, 0x04);
+        int nextDevice = DescribedU16(0x05) ?? currentDevice;
+        int nextPrioritySlot = DescribedU16(0x04) ?? currentPrioritySlot;
+        // A larger priority slot has to land before a larger device slot, and a smaller device
+        // slot before a smaller priority slot. Otherwise the pair is rejected mid-way even when
+        // the two described values together would be accepted.
+        bool deviceFirst = nextPrioritySlot <= 127 * currentDevice && currentPrioritySlot > 127 * nextDevice;
+        if (deviceFirst)
+        {
+            Take(0x05);
+            Take(0x04);
+        }
+        else
+        {
+            Take(0x04);
+            Take(0x05);
+        }
+        return loaded;
+
+        int? DescribedU16(byte sub)
+        {
+            if (!described.TryGetValue(sub, out var entry)) return null;
+            var parsed = ParseUnsigned(entry, out _);
+            if (parsed is null || parsed > ushort.MaxValue) return null;
+            return (int)parsed.Value;
+        }
+    }
+
+    /// <summary>1005h, 1006h, 1014h, 1017h, 100Ch, 100Dh, 1001h, 1F80h: the node's type stays, the
     /// description's access and value are taken — the value through the validated path.</summary>
     private int ApplyManagedVariable(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
     {

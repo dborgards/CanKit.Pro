@@ -234,7 +234,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (frame.IsExtendedFrame) return false;
                 uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
-                return id == CanOpenCobId.NmtCommand || (id >= 0x080 && id <= 0x77F);
+                // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
+                // reserves and this subscription otherwise skips.
+                return id == CanOpenCobId.NmtCommand
+                    || id is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
+                        or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce
+                    || (id >= 0x080 && id <= 0x77F);
             }, includeEcho: true);
         }
         catch
@@ -587,6 +592,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 DisposePdoRuntime();
                 _lifeGuardingDeadline?.Dispose();
                 _lifeGuardingDeadline = null;
+                CancelFlyingMasterDeadline();
 
                 _sdoServer?.Deadline?.Dispose();
                 _sdoServer = null;
@@ -718,6 +724,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (cobId == CanOpenCobId.NmtCommand)
             {
                 HandleNmtCommand(data);
+                return;
+            }
+            // Flying-master services are broadcasts with no node-id in the CAN-ID. A claim names
+            // its sender in the payload, which is how a node ignores the echo of its own claim.
+            if (cobId is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
+                or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce)
+            {
+                if (!isRtr) HandleFlyingMasterFrame(cobId, data);
                 return;
             }
             // SYNC on the COB-ID configured in 1005h (0x080 unless a device description or a
@@ -967,6 +981,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         consumer.Deadline?.Dispose();
         consumer.Deadline = _deadlines.Arm(consumer.Timeout, () => OnHeartbeatMissed(producerNodeId));
         RaiseHeartbeatTimeout(producerNodeId, consumer.Timeout);
+        NoteFlyingMasterHeartbeatLost(producerNodeId);
     }
 
     private void ScheduleHeartbeatProducerTick()

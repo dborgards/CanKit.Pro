@@ -30,6 +30,22 @@ public static class CanOpenCobId
     /// <summary>NMT master command COB-ID (single-broadcast, no node offset).</summary>
     public const uint NmtCommand = 0x000;
 
+    /// <summary>Flying-master claim: the active master, or the winner of a timeslot race, sends
+    /// its priority level and node-id here (2 data bytes).</summary>
+    public const uint FlyingMasterClaim = 0x071;
+
+    /// <summary>Flying-master timeslot trigger. No data. Receiving it starts the wait; the sender
+    /// does not need a second copy from every other candidate.</summary>
+    public const uint FlyingMasterTrigger = 0x072;
+
+    /// <summary>Flying-master detection request. No data. The active master answers on
+    /// <see cref="FlyingMasterClaim"/>.</summary>
+    public const uint FlyingMasterDetect = 0x073;
+
+    /// <summary>Flying-master force. No data. Asks the active master to restart the election
+    /// with a broadcast Reset Communication.</summary>
+    public const uint FlyingMasterForce = 0x076;
+
     /// <summary>SYNC COB-ID.</summary>
     public const uint Sync = 0x080;
 

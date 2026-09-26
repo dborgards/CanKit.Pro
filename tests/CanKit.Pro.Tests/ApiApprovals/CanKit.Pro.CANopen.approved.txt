@@ -13,6 +13,10 @@ namespace CanKit.Pro.CANopen
         public const uint CanIdMask = 2047u;
         public const uint EmcyBase = 128u;
         public const uint ExtendedFrameBit = 536870912u;
+        public const uint FlyingMasterClaim = 113u;
+        public const uint FlyingMasterDetect = 115u;
+        public const uint FlyingMasterForce = 118u;
+        public const uint FlyingMasterTrigger = 114u;
         public const uint HeartbeatBase = 1792u;
         public const uint InvalidBit = 2147483648u;
         public const byte MaxNodeId = 127;
@@ -111,6 +115,14 @@ namespace CanKit.Pro.CANopen
         public CanKit.Pro.CANopen.Emcy.EmcyMessage Message { get; }
         public System.DateTime Timestamp { get; }
     }
+    public sealed class FlyingMasterChangedEventArgs : System.EventArgs
+    {
+        public FlyingMasterChangedEventArgs(CanKit.Pro.CANopen.Nmt.FlyingMasterSignal signal, CanKit.Pro.CANopen.Nmt.FlyingMasterRole role, byte? otherNodeId, ushort? otherPriority) { }
+        public byte? OtherNodeId { get; }
+        public ushort? OtherPriority { get; }
+        public CanKit.Pro.CANopen.Nmt.FlyingMasterRole Role { get; }
+        public CanKit.Pro.CANopen.Nmt.FlyingMasterSignal Signal { get; }
+    }
     public enum ForeignPdoKind
     {
         Tpdo = 0,
@@ -164,7 +176,10 @@ namespace CanKit.Pro.CANopen
     }
     public interface ICanOpenNode : System.IDisposable
     {
+        byte? ActiveFlyingMasterNodeId { get; }
+        ushort? ActiveFlyingMasterPriority { get; }
         CanKit.Pro.CANopen.DeviceDescriptionReport? DeviceDescription { get; }
+        CanKit.Pro.CANopen.Nmt.FlyingMasterRole FlyingMasterRole { get; }
         byte NodeId { get; }
         CanKit.Pro.CANopen.ObjectDictionary ObjectDictionary { get; }
         CanKit.Pro.CANopen.CanOpenNodeOptions Options { get; }
@@ -172,6 +187,7 @@ namespace CanKit.Pro.CANopen
         event System.EventHandler<CanKit.Pro.CANopen.NmtResetEventArgs>? ApplicationReset;
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         event System.EventHandler<CanKit.Pro.CANopen.EmcyReceivedEventArgs>? EmcyReceived;
+        event System.EventHandler<CanKit.Pro.CANopen.FlyingMasterChangedEventArgs>? FlyingMasterChanged;
         event System.EventHandler<CanKit.Pro.CANopen.HeartbeatReceivedEventArgs>? HeartbeatReceived;
         event System.EventHandler<CanKit.Pro.CANopen.HeartbeatTimeoutEventArgs>? HeartbeatTimeout;
         event System.EventHandler<CanKit.Pro.CANopen.LifeGuardingEventArgs>? LifeGuardingEvent;
@@ -195,9 +211,11 @@ namespace CanKit.Pro.CANopen
         System.Threading.Tasks.Task SendEmcyAsync(ushort errorCode, byte errorRegister, System.ReadOnlyMemory<byte> manufacturerSpecific = default, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task SendNmtCommandAsync(CanKit.Pro.CANopen.Nmt.NmtCommand command, byte targetNodeId, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task SendSyncAsync(System.Threading.CancellationToken cancellationToken = default);
+        void StartFlyingMaster(ushort priorityLevel, System.TimeSpan activeMasterHeartbeatTimeout);
         void StartHeartbeatProducer(System.TimeSpan interval);
         void StartNodeGuardingConsumer(byte producerNodeId, System.TimeSpan guardTime, byte lifeTimeFactor);
         void StartSyncProducer(System.TimeSpan interval);
+        void StopFlyingMaster();
         void StopHeartbeatProducer();
         void StopNodeGuardingConsumer(byte producerNodeId);
         void StopSyncProducer();
@@ -342,6 +360,23 @@ namespace CanKit.Pro.CANopen.Emcy
 }
 namespace CanKit.Pro.CANopen.Nmt
 {
+    public enum FlyingMasterRole
+    {
+        Inactive = 0,
+        Delaying = 1,
+        Detecting = 2,
+        Negotiating = 3,
+        Active = 4,
+        Standby = 5,
+    }
+    public enum FlyingMasterSignal
+    {
+        BecameActive = 0,
+        BecameStandby = 1,
+        ForcedRenegotiation = 2,
+        ActiveMasterLost = 3,
+        ConfigurationError = 4,
+    }
     public enum NmtCommand : byte
     {
         Start = 1,

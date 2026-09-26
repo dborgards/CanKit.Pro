@@ -146,6 +146,51 @@ public interface ICanOpenNode : IDisposable
         CancellationToken cancellationToken = default);
 
     // -----------------------------------------------------------------------------------------
+    // Flying master (CiA 302-2, assumed binding — see the package README)
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>Role in the flying-master election. <see cref="Nmt.FlyingMasterRole.Inactive"/>
+    /// until <see cref="StartFlyingMaster"/> or until bits 0 and 5 of <c>1F80h</c> are set.</summary>
+    FlyingMasterRole FlyingMasterRole { get; }
+
+    /// <summary>Node-id of the active NMT master, once one is known: this node's own id when
+    /// <see cref="FlyingMasterRole"/> is <see cref="Nmt.FlyingMasterRole.Active"/>.</summary>
+    byte? ActiveFlyingMasterNodeId { get; }
+
+    /// <summary>Priority level (0 highest, 2 lowest) of <see cref="ActiveFlyingMasterNodeId"/>.</summary>
+    ushort? ActiveFlyingMasterPriority { get; }
+
+    /// <summary>Raised when this node becomes the active master, yields, forces a new election,
+    /// loses the active master, or sees an inconsistent claim.</summary>
+    event EventHandler<FlyingMasterChangedEventArgs>? FlyingMasterChanged;
+
+    /// <summary>
+    /// Joins the NMT flying-master election at <paramref name="priorityLevel"/> (0 highest, 2
+    /// lowest). Writes that level to <c>1F90h:03</c> and sets bits 0 and 5 of <c>1F80h</c>.
+    /// The first election after this call is a cold boot: if no master answers, the node
+    /// broadcasts NMT Reset Communication and runs the election again as a warm boot. That
+    /// reset restores power-on values, so this method records <c>1F80h</c> and <c>1F90h</c> as
+    /// power-on values before it starts; call <see cref="StoreParameters"/> first if the rest of
+    /// the configuration must survive the same reset.
+    /// </summary>
+    /// <param name="priorityLevel">0, 1 or 2. Lower wins. Equal priority does not depose an
+    /// active master; in a timeslot race the lower node-id waits less and claims first.</param>
+    /// <param name="activeMasterHeartbeatTimeout">While this node stands by, a heartbeat consumer
+    /// (<c>1016h</c>) for the active master is installed at this timeout unless one already
+    /// exists. A timeout starts a new election. When this node becomes the active master and
+    /// <c>1017h</c> is 0, the producer is started at half this timeout so peers can see the loss.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="priorityLevel"/> is above 2,
+    /// or <paramref name="activeMasterHeartbeatTimeout"/> is outside 1..65535 ms.</exception>
+    /// <exception cref="ArgumentException"><c>1F90h:04</c> is not greater than 127 times
+    /// <c>1F90h:05</c>, so the timeslots would not keep a better priority ahead of a worse one.</exception>
+    void StartFlyingMaster(ushort priorityLevel, TimeSpan activeMasterHeartbeatTimeout);
+
+    /// <summary>Leaves the election: clears bits 0 and 5 of <c>1F80h</c> and drops a heartbeat
+    /// consumer this node installed for the active master. Recorded as the power-on value of
+    /// <c>1F80h</c>, so a later reset does not rejoin.</summary>
+    void StopFlyingMaster();
+
+    // -----------------------------------------------------------------------------------------
     // Heartbeat producer / consumer (FR-CO-008)
     // -----------------------------------------------------------------------------------------
 
