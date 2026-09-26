@@ -630,6 +630,20 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
         int resets = rig.Log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
         resets.Should().BeGreaterThan(0);
         int claims = rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim);
+        int triggers = rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger) > triggers,
+            80, "the detect cycle puts a trigger on the bus");
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
+            "the confirm keeps the master active, so boot-up and NMT self-ignore still apply");
+
+        TransmitHeartbeat(rig.Peer, slave, (byte)NmtState.Operational);
+        TransmitNmt(rig.Peer, NmtCommand.ResetCommunication, LeftId);
+        await QuiesceAsync(rig.Witness, null);
+        od.ReadUnsigned(0x1F82, slave).Should().Be((uint)NmtState.Operational,
+            "a slave seen while the detect cycle is running is still tracked");
+        rig.Node.State.Should().Be(NmtState.PreOperational);
 
         await UntilAsync(rig.Clock, rig.Witness, null,
             () => rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim) > claims,

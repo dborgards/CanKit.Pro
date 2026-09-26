@@ -256,17 +256,33 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterNegotiationElapsed()
     {
-        if (_flyingMasterRole != FlyingMasterRole.Negotiating || !FlyingMasterEnabled) return;
+        if (!FlyingMasterEnabled) return;
+        if (_confirmingActiveMaster)
+        {
+            // Still the active master: claim again and keep the boot-up that is already running.
+            _confirmingActiveMaster = false;
+            if (_flyingMasterRole != FlyingMasterRole.Active || _disposed != 0) return;
+            TransmitClaim();
+            int cycle = ReadTiming(TimingDetectCycle);
+            if (cycle > 0)
+                ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
+            return;
+        }
+        if (_flyingMasterRole != FlyingMasterRole.Negotiating) return;
         TransmitClaim();
-        // A detect cycle confirms a master that is already active. It must not boot the slaves again.
-        bool startBoot = !_confirmingActiveMaster;
-        _confirmingActiveMaster = false;
-        BecomeActive(startBoot);
+        BecomeActive();
     }
 
     private void OnFlyingMasterTrigger()
     {
-        if (!FlyingMasterEnabled || _flyingMasterRole == FlyingMasterRole.Inactive) return;
+        if (!FlyingMasterEnabled || _flyingMasterRole == FlyingMasterRole.Inactive || _coldResetPending) return;
+        // A confirmation stays Active, so boot-up and the NMT self-ignore keep working. The echo
+        // of the trigger only restarts the timeslot.
+        if (_confirmingActiveMaster)
+        {
+            ArmNegotiationWait();
+            return;
+        }
         // A trigger we did not send, and our own echo, both start or restart the wait. Restarting
         // on the echo measures the wait from the moment the trigger is on the bus.
         if (_flyingMasterRole == FlyingMasterRole.Negotiating)
@@ -277,6 +293,7 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterClaim(ushort priority, byte nodeId)
     {
+        if (_coldResetPending) return;
         if (nodeId == _nodeId || nodeId is < CanOpenCobId.MinNodeId or > CanOpenCobId.MaxNodeId) return;
         if (_flyingMasterRole is FlyingMasterRole.Inactive or FlyingMasterRole.Delaying) return;
 
@@ -331,8 +348,11 @@ internal sealed partial class CanOpenNode
     private void OnFlyingMasterDetectCycle()
     {
         if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
+        // Stay Active. Leaving for Negotiating would drop a slave heartbeat and a boot deadline
+        // that only run in that role, and NMT aimed at this node would apply again.
         _confirmingActiveMaster = true;
-        BeginNegotiation(transmitTrigger: true);
+        _ = SendControlFrame(CanOpenCobId.FlyingMasterTrigger, Array.Empty<byte>());
+        ArmNegotiationWait();
     }
 
     private void TransmitClaim()
@@ -340,7 +360,7 @@ internal sealed partial class CanOpenNode
         _ = SendControlFrame(CanOpenCobId.FlyingMasterClaim, new[] { (byte)OurPriority(), _nodeId });
     }
 
-    private void BecomeActive(bool startBoot)
+    private void BecomeActive()
     {
         CancelFlyingMasterDeadline();
         bool changed = _flyingMasterRole != FlyingMasterRole.Active || _activeFlyingMasterNodeId != _nodeId;
@@ -355,8 +375,7 @@ internal sealed partial class CanOpenNode
         int cycle = ReadTiming(TimingDetectCycle);
         if (cycle > 0)
             ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
-        if (startBoot)
-            BeginBootUp();
+        BeginBootUp();
     }
 
     private void EnterStandby(ushort priority, byte nodeId)
@@ -429,6 +448,9 @@ internal sealed partial class CanOpenNode
 
     private void HandleFlyingMasterFrame(uint cobId, byte[] data)
     {
+        // The cold reset is already committed. A claim in this window must not move us to
+        // standby and then have the reset tear down the master we just accepted.
+        if (_coldResetPending) return;
         switch (cobId)
         {
             case CanOpenCobId.FlyingMasterClaim:

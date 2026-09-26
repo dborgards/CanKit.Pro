@@ -917,7 +917,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private bool ShouldIgnoreOwnNmt(NmtCommand cmd, byte target)
     {
-        if (target == _nodeId && _flyingMasterRole == FlyingMasterRole.Active)
+        // Active, and the short confirm that stays active while the timeslot runs again.
+        bool holding = _flyingMasterRole == FlyingMasterRole.Active || _confirmingActiveMaster;
+        if (target == _nodeId && holding)
             return true;
 
         bool reset = cmd is NmtCommand.ResetNode or NmtCommand.ResetCommunication;
@@ -927,7 +929,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return true;
         }
 
-        if (target != 0 || _flyingMasterRole != FlyingMasterRole.Active)
+        if (target != 0 || !holding)
             return false;
 
         return reset || cmd == NmtCommand.Stop;
