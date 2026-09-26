@@ -397,6 +397,15 @@ internal sealed partial class CanOpenNode
         if (changed) RaiseFlyingMaster(FlyingMasterSignal.BecameStandby, nodeId, priority);
     }
 
+    /// <summary>
+    /// Subscribes the flying master to the consumer module. A missed heartbeat from the master
+    /// this node is standing by for starts a warm election. The producer module is not involved.
+    /// </summary>
+    private void AttachFlyingMasterHeartbeatWatch()
+    {
+        _heartbeatConsumer.TimedOut += (producer, _) => NoteFlyingMasterHeartbeatLost(producer);
+    }
+
     private void NoteFlyingMasterHeartbeatLost(byte producerNodeId)
     {
         if (_flyingMasterRole != FlyingMasterRole.Standby || _activeFlyingMasterNodeId != producerNodeId) return;
@@ -409,6 +418,8 @@ internal sealed partial class CanOpenNode
         RaiseFlyingMaster(FlyingMasterSignal.ActiveMasterLost, lost, priority);
     }
 
+    // The active master does not own a heartbeat timer. Writing 1017h starts the producer
+    // module, and only when the application had not already set one.
     private void EnsureHeartbeatProducer()
     {
         if (_flyingMasterHeartbeatTimeout is not { } timeout) return;
@@ -417,12 +428,14 @@ internal sealed partial class CanOpenNode
         _od.WriteUnsigned(Co.ProducerHeartbeat, 0x00, (ushort)half);
     }
 
+    // Standby watches the winner through the consumer module. An application consumer for that
+    // node is left in place; its timeout is the same signal.
     private void WatchActiveMaster(byte nodeId)
     {
         if (_flyingMasterHeartbeatTimeout is not { } timeout) return;
         if (_flyingMasterInstalledWatch == nodeId) return;
         ReleaseInstalledWatch();
-        if (_heartbeatConsumers.ContainsKey(nodeId)) return;
+        if (_heartbeatConsumer.IsWatching(nodeId)) return;
         AddHeartbeatConsumer(nodeId, timeout);
         _flyingMasterInstalledWatch = nodeId;
     }

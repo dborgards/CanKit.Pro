@@ -334,9 +334,11 @@ picks the record up at the last step.
 
 ## Error control
 
-**Heartbeat.** `1017h` ≠ 0 runs the producer. Each sub-index of `1016h` with a node-id in
-1..127 and a non-zero time is a consumer whose timeout is armed immediately, so a producer that
-never appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
+**Heartbeat.** The producer and the consumer are separate modules. `HeartbeatProducer` sends
+this node's heartbeat; `HeartbeatConsumer` watches other nodes. Neither module references the
+other. `1017h` ≠ 0 runs the producer. Each sub-index of `1016h` with a node-id in 1..127 and a
+non-zero time is a consumer whose timeout is armed immediately, so a producer that never
+appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
 `0x700 + id`.
 
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
@@ -454,13 +456,14 @@ must survive the same reset. A later loss of the active master starts a warm ele
 not broadcast Reset Communication again. The active master is who sends Reset Communication when
 it receives `0x076`. Winning then runs the boot-up below.
 
-While this node stands by, `StartFlyingMaster`'s heartbeat timeout is installed as a `1016h`
-consumer for the winner, unless the application already monitors that node. A timeout raises
-`ActiveMasterLost` and starts a new election. When this node becomes the active master and
-`1017h` is 0, the producer is started at half that timeout so peers can see the loss. Writing
-the bits of `1F80h` without calling `StartFlyingMaster` runs the same election and does not
-invent a heartbeat time; a standby node then reclaims only if some consumer for the winner
-times out. `FlyingMasterRole` is `Inactive`, `Delaying`, `Detecting`, `Negotiating`, `Active`
+The flying master composes those two modules and does not keep a heartbeat timer of its own.
+While this node stands by, `StartFlyingMaster`'s heartbeat timeout is installed on the consumer
+as a `1016h` entry for the winner, unless the application already monitors that node. A timeout
+from that module raises `ActiveMasterLost` and starts a new election. When this node becomes
+the active master and `1017h` is 0, the producer module is started at half that timeout so
+peers can see the loss. Writing the bits of `1F80h` without calling `StartFlyingMaster` runs
+the same election and does not invent a heartbeat time; a standby node then reclaims only if
+some consumer for the winner times out. `FlyingMasterRole` is `Inactive`, `Delaying`, `Detecting`, `Negotiating`, `Active`
 or `Standby`. `ActiveFlyingMasterNodeId` names the winner once one is known.
 
 ### Boot-up

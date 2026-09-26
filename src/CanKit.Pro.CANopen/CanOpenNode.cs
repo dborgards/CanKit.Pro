@@ -9,6 +9,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Emcy;
+using CanKit.Pro.CANopen.Heartbeat;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
@@ -33,8 +34,8 @@ namespace CanKit.Pro.CANopen;
 /// <see cref="ISubscription.Frames"/>.
 /// </para>
 /// <para>
-/// All state (NMT slave state machine, SDO client/server sessions, heartbeat consumer table,
-/// PDO tables, timer handles) lives inside the actor and is only touched from posted callbacks;
+/// All state (NMT slave state machine, SDO client/server sessions, the heartbeat producer and
+/// consumer modules, PDO tables, timer handles) lives inside the actor and is only touched from posted callbacks;
 /// public methods marshal work in via <see cref="IProtocolActor.PostAsync{T}"/>. This is the
 /// same threading model that the J1939-TP / IsoTp / UDS clients rely on.
 /// </para>
@@ -92,12 +93,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // guardTime deadline (RTR poll) and life-time deadline (timeout).
     private readonly Dictionary<byte, NodeGuardingConsumer> _nodeGuardingConsumers = new();
 
-    // Heartbeat producer.
-    private IDisposable? _heartbeatProducerHandle;
-    private TimeSpan _heartbeatProducerInterval;
-
-    // Heartbeat consumers: node-id → (configured timeout, live deadline).
-    private readonly Dictionary<byte, HeartbeatConsumer> _heartbeatConsumers = new();
+    // Heartbeat. Two modules that do not know about each other: the producer sends, the
+    // consumer watches. The flying master composes them; it does not keep a timer of its own.
+    private readonly IHeartbeatProducer _heartbeatProducer;
+    private readonly IHeartbeatConsumer _heartbeatConsumer;
 
     // SYNC producer.
     private IDisposable? _syncProducerHandle;
@@ -177,6 +176,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             timeSource, shutdownTimeout: null);
         _actor.BackgroundExceptionOccurred += (_, ex) => RaiseBackgroundException(ex);
         _deadlines = new DeadlineScheduler(_actor);
+        _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0,
+            () => { _ = EmitHeartbeat((byte)_state); });
+        _heartbeatConsumer = new HeartbeatConsumer(_deadlines);
+        _heartbeatConsumer.TimedOut += (producer, timeout) => RaiseHeartbeatTimeout(producer, timeout);
+        AttachFlyingMasterHeartbeatWatch();
 
         // The communication-profile objects at their CiA 301 defaults, plus the OD hooks that
         // validate writes to them and carry accepted values into the runtime
@@ -583,12 +587,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             _actor.Post(() =>
             {
-                _heartbeatProducerHandle?.Dispose();
-                _heartbeatProducerHandle = null;
+                _heartbeatProducer.Dispose();
+                _heartbeatConsumer.Dispose();
                 _syncProducerHandle?.Dispose();
                 _syncProducerHandle = null;
-                foreach (var kv in _heartbeatConsumers) kv.Value.Deadline?.Dispose();
-                _heartbeatConsumers.Clear();
                 DisposePdoRuntime();
                 _lifeGuardingDeadline?.Dispose();
                 _lifeGuardingDeadline = null;
@@ -808,7 +810,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // states: an explicitly configured consumer outranks a guess about the sender.
                 if (producer == _nodeId
                     && !_nodeGuardingConsumers.ContainsKey(producer)
-                    && !_heartbeatConsumers.ContainsKey(producer))
+                    && !_heartbeatConsumer.IsWatching(producer))
                     return;
                 // Consumer role (FR-CO-009): if we have a node-guarding consumer registered
                 // for this producer, treat the incoming data frame as a node-guarding reply
@@ -993,46 +995,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         };
         RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
         NoteSlaveNmtState(producer, stateByte);
-        if (_heartbeatConsumers.TryGetValue(producer, out var consumer))
-        {
-            // Rearm the deadline — best-effort. On failure, allocate a fresh one to preserve
-            // the semantic "if we do not see another heartbeat within timeout, fire".
-            var deadline = consumer.Deadline;
-            if (deadline is null || deadline.IsExpired || deadline.IsCancelled || !deadline.Rearm(consumer.Timeout))
-            {
-                deadline?.Dispose();
-                consumer.Deadline = _deadlines.Arm(consumer.Timeout, () => OnHeartbeatMissed(producer));
-            }
-        }
-    }
-
-    private void OnHeartbeatMissed(byte producerNodeId)
-    {
-        if (!_heartbeatConsumers.TryGetValue(producerNodeId, out var consumer)) return;
-        // Rearm so subsequent misses still fire; consumer explicitly re-registered on every
-        // heartbeat receipt above, but if the heartbeat is completely absent we keep firing.
-        consumer.Deadline?.Dispose();
-        consumer.Deadline = _deadlines.Arm(consumer.Timeout, () => OnHeartbeatMissed(producerNodeId));
-        RaiseHeartbeatTimeout(producerNodeId, consumer.Timeout);
-        NoteFlyingMasterHeartbeatLost(producerNodeId);
-    }
-
-    private void ScheduleHeartbeatProducerTick()
-    {
-        if (_heartbeatProducerInterval <= TimeSpan.Zero) return;
-        _heartbeatProducerHandle = _actor.Schedule(_heartbeatProducerInterval, () =>
-        {
-            try
-            {
-                if (_disposed != 0) return;
-                _ = EmitHeartbeat((byte)_state);
-            }
-            finally
-            {
-                if (_disposed == 0 && _heartbeatProducerInterval > TimeSpan.Zero)
-                    ScheduleHeartbeatProducerTick();
-            }
-        });
+        _heartbeatConsumer.NoteReceived(producer);
     }
 
     // =========================================================================================
@@ -2069,19 +2032,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         /// </summary>
         public bool InSegmentPhase { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
-        public IDeadline? Deadline { get; set; }
-    }
-
-    private sealed class HeartbeatConsumer
-    {
-        public HeartbeatConsumer(byte producerNodeId, TimeSpan timeout)
-        {
-            ProducerNodeId = producerNodeId;
-            Timeout = timeout;
-        }
-
-        public byte ProducerNodeId { get; }
-        public TimeSpan Timeout { get; }
         public IDeadline? Deadline { get; set; }
     }
 }

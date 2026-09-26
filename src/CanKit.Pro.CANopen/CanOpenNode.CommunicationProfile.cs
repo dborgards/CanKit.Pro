@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
@@ -599,24 +598,17 @@ internal sealed partial class CanOpenNode
         _emcyValid = (word & CanOpenCobId.InvalidBit) == 0;
     }
 
-    // §7.5.2.20: "The value 0 shall disable the producer heartbeat."
+    // §7.5.2.20: "The value 0 shall disable the producer heartbeat." The producer module follows
+    // the object; it does not read the dictionary itself.
     private void ApplyHeartbeatProducerConfiguration()
     {
         var ms = (ushort)_od.ReadUnsigned(Co.ProducerHeartbeat, 0x00);
         var interval = ms == 0 ? TimeSpan.Zero : TimeSpan.FromMilliseconds(ms);
-        if (interval == _heartbeatProducerInterval && (interval == TimeSpan.Zero || _heartbeatProducerHandle is not null))
-            return;
-        _heartbeatProducerHandle?.Dispose();
-        _heartbeatProducerHandle = null;
-        _heartbeatProducerInterval = interval;
-        if (interval > TimeSpan.Zero)
-        {
-            // §7.2.8.3.2.2: with 1017h ≠ 0 the heartbeat protocol is used, so guarding ends here
-            // — a node life time still running from the last poll, and an event that occurred,
-            // would otherwise outlive the switch and report a master that was told to stop polling.
+        // §7.2.8.3.2.2: with 1017h ≠ 0 the heartbeat protocol is used, so guarding ends here
+        // — a node life time still running from the last poll, and an event that occurred,
+        // would otherwise outlive the switch and report a master that was told to stop polling.
+        if (_heartbeatProducer.Apply(interval))
             ResetLifeGuardingState();
-            ScheduleHeartbeatProducerTick();
-        }
     }
 
     // §7.5.2.19: every sub-index with a node-id in 1..127 and a non-zero time is a consumer.
@@ -633,22 +625,7 @@ internal sealed partial class CanOpenNode
             desired[nodeId] = TimeSpan.FromMilliseconds(ms);
         }
 
-        var stale = _heartbeatConsumers
-            .Where(kv => !desired.TryGetValue(kv.Key, out var timeout) || timeout != kv.Value.Timeout)
-            .Select(kv => kv.Key)
-            .ToList();
-        foreach (var nodeId in stale)
-        {
-            _heartbeatConsumers[nodeId].Deadline?.Dispose();
-            _heartbeatConsumers.Remove(nodeId);
-        }
-        foreach (var kv in desired.Where(kv => !_heartbeatConsumers.ContainsKey(kv.Key)))
-        {
-            var producer = kv.Key;
-            var consumer = new HeartbeatConsumer(producer, kv.Value);
-            consumer.Deadline = _deadlines.Arm(kv.Value, () => OnHeartbeatMissed(producer));
-            _heartbeatConsumers[producer] = consumer;
-        }
+        _heartbeatConsumer.Replace(desired);
     }
 
     // =========================================================================================
@@ -684,7 +661,7 @@ internal sealed partial class CanOpenNode
         // and goes out only while that protocol is in use (1017h ≠ 0). With the producer off the
         // node is in the configuration node guarding runs in, and an unsolicited data frame on
         // 0x700 + id is indistinguishable from a toggle-0 guarding reply (#43).
-        if (_heartbeatProducerInterval > TimeSpan.Zero)
+        if (_heartbeatProducer.Interval > TimeSpan.Zero)
             _ = EmitHeartbeat((byte)_state);
     }
 
@@ -727,13 +704,9 @@ internal sealed partial class CanOpenNode
         // hook ran, so a tick that became due meanwhile would otherwise fire right behind this.
         // Re-armed before the frames are ordered, for the same reason the guarding reply arms
         // its life time first (#141): a frame on the wire implies the timer behind it is set.
-        if (_heartbeatProducerInterval > TimeSpan.Zero)
-        {
-            _heartbeatProducerHandle?.Dispose();
-            ScheduleHeartbeatProducerTick();
-        }
+        _heartbeatProducer.RestartCycle();
         _ = EmitHeartbeat(0x00);
-        if (_heartbeatProducerInterval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
+        if (_heartbeatProducer.Interval > TimeSpan.Zero) _ = EmitHeartbeat((byte)NmtState.PreOperational);
     }
 
     private void AbortServerSessions(SdoAbortCode code)
