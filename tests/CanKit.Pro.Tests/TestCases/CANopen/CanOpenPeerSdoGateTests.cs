@@ -233,4 +233,23 @@ public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
         PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1003, 0x00).Should().BeFalse();
         PeerSdoAccessException.IsAllowedWithoutPeerDescription(0x1018, 0x05).Should().BeFalse();
     }
+
+    [Fact]
+    public void BindPeerDeviceDescription_Rejects_A_Null_Description()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+
+        Action bind = () => master.BindPeerDeviceDescription(0x11, null!);
+        bind.Should().Throw<ArgumentNullException>().WithParameterName("description");
+        master.GetPeerDeviceDescription(0x11).Should().BeNull();
+    }
+
+    [Fact]
+    public void PeerSdoAccessException_Rejects_A_Null_Message()
+    {
+        Action create = () => new PeerSdoAccessException(0x11, 0x2000, 0x00, peerDescriptionLoaded: false, null!);
+        create.Should().Throw<ArgumentNullException>().WithParameterName("message");
+    }
 }
