@@ -520,6 +520,16 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     // The phase is private and a block client never leaves it sitting across a bus frame, so the
     // frame is delivered on the actor with the phase already set. Restoring the phase in that
     // same turn is what lets the real response, sent afterwards, belong to the transfer again.
+    private static bool IsFatal(Exception ex) =>
+        ex is OutOfMemoryException
+            or StackOverflowException
+            or AccessViolationException
+            or AppDomainUnloadedException
+            or BadImageFormatException
+            or CannotUnloadAppDomainException
+            or InvalidProgramException
+            or ThreadAbortException;
+
     private static void DeliverBlockFrameWhilePhase(ICanOpenNode node, byte serverNodeId, string phase,
         string restore, byte[] data)
     {
@@ -543,7 +553,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
                 phaseProperty.SetValue(session, Enum.Parse(phaseType, restore));
                 done.TrySetResult();
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!IsFatal(ex))
             {
                 done.TrySetException(ex);
             }
