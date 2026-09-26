@@ -44,8 +44,8 @@ Gemessen fehlt heute:
   (`ICanOpenNode.cs:211-228`). `CanOpenDeviceDescription` speist den **eigenen** Knoten
   (`CanOpen.cs:61-66`), nicht die Leseliste eines Peers.
 - Fremde PDO-Nutzdaten werden nicht zerlegt. Frames ohne gültiges eigenes RPDO fallen aus
-  `HandleIncoming` (`CanOpenNode.cs:746-759`). Weder ein gelesenes `1600h`/`1A00h` noch das
-  Mapping einer fremden EDS/DCF ist eine Quelle für diese Zerlegung.
+  `HandleIncoming` (`CanOpenNode.cs:746-759`). Weder ein gelesenes `1600h`–`1603h` /
+  `1A00h`–`1A03h` noch das Mapping einer fremden EDS/DCF ist eine Quelle für diese Zerlegung.
 - `samples/CanKit.Pro.Sample.CanOpenBusScan` hört eine einstellbare Zeit (Vorgabe 2000 ms) und
   liest danach bei jeder Node-ID ohne Heartbeat `1000h` per SDO (`Program.cs:33`, `79-90`).
   Ein Hörfenster, nach dem **nicht** alle IDs abgefragt werden, hat die Bibliothek nicht.
@@ -64,9 +64,9 @@ Das ist heute nicht gebaut. Der Client liest jeden Index, den man ihm gibt.
 
 ### 2. Fremde PDOs
 
-Primärquelle des Mappings ist das lebende Objektverzeichnis: `1600h` und `1A00h`. Rückfall ist
-das Mapping aus der vorhandenen EDS oder DCF. Beide Wege sind nicht implementiert und sind zu
-bauen.
+Primärquelle des Mappings ist das lebende Objektverzeichnis: die Records `1600h`–`1603h` und
+`1A00h`–`1A03h`, nicht nur `1600h` und `1A00h`. Rückfall ist das Mapping aus der vorhandenen
+EDS oder DCF. Beide Wege sind nicht implementiert und sind zu bauen.
 
 Der ausgelieferte SDO-Client kann die Bytes eines Index holen. Eine Beobachtung, die daraus oder
 aus der Datei eine fremde Nutzlast zerlegt, gibt es nicht. Beides ist offene Arbeit, nicht
@@ -74,9 +74,11 @@ Bestand.
 
 ### 3. Erkennung der Knoten
 
-Voller Scan der Node-IDs 1..127, der aktiv abfragt, ist nur der zweite Weg. Die primäre
-Anwesenheitserkennung hört am Bus Heartbeat **und** Boot-up, etwa 1–2 Sekunden, und scannt
-danach nur auf Abruf. Alle Node-IDs 1..127 aktiv anzufragen ist nicht der Default.
+Voller Scan der Node-IDs 1..127, der aktiv abfragt, ist nur der zweite Weg. Die Node-ID des
+Scanners selbst fällt aus 1..127 heraus, so wie das Sample `clientNodeId` ausnimmt
+(`Program.cs:35`, `82`). Die primäre Anwesenheitserkennung hört am Bus Heartbeat **und**
+Boot-up, etwa 1–2 Sekunden, und scannt danach nur auf Abruf. Alle übrigen Node-IDs aktiv
+anzufragen ist nicht der Default.
 
 `HeartbeatReceived` liefert die beiden Meldungsarten schon. Das Fenster und die Regel „Scan nur
 auf Abruf" sind nicht das, was das Sample tut: es fragt danach die IDs ohne Heartbeat per SDO ab.
@@ -100,7 +102,7 @@ FR-CO-013..028 bleiben, was sie sind, einschließlich dieser Records. An ihrer
 Aufmerksamkeit. Vor den Fallback-Records ohne EDS kommen:
 
 1. die Gerätebeschreibung als Tor für das Lesen eines fremden Knotens,
-2. das Zerlegen fremder PDOs aus `1600h`/`1A00h` und, als Rückfall, aus der EDS/DCF,
+2. das Zerlegen fremder PDOs aus `1600h`–`1603h` und `1A00h`–`1A03h` und, als Rückfall, aus der EDS/DCF,
 3. die Anwesenheitserkennung (Hören, Scan nur auf Abruf),
 4. Flying Master.
 
@@ -117,12 +119,13 @@ Er wird nicht durch eine Implementierung ersetzt.
 1. **Anwesenheit im Hörfenster.** Genügt je Node-ID eine der beiden Meldungen — Heartbeat oder
    Boot-up — oder müssen im Fenster beide beobachtet worden sein?
 2. **Abruf-Scan.** Was wird gesendet, wenn die Node-IDs 1..127 auf Abruf aktiv abgefragt werden?
-   Lesen von Objekten, die nicht in einer vorliegenden EDS oder DCF stehen, lassen die
-   Entscheidungen nicht zu. Ob `1000h` und `1018h` dabei eine Ausnahme sind, steht dort nicht.
-3. **Live-Mapping und das Lese-Tor.** Primärquelle sind `1600h` und `1A00h`. Gültiges Lesen
-   setzt die Datei voraus und erlaubt nur Objekte aus ihr. Dürfen `1600h` und `1A00h` gelesen
-   werden, wenn die Datei sie nicht führt? Gehören `1400h:01` und `1800h:01` (die COB-ID) zur
-   Primärquelle, oder nur die genannten Mapping-Records?
+   Die eigene Node-ID des Scanners ist davon ausgenommen. Lesen von Objekten, die nicht in einer
+   vorliegenden EDS oder DCF stehen, lassen die Entscheidungen nicht zu. Ob `1000h` und `1018h`
+   dabei eine Ausnahme sind, steht dort nicht.
+3. **Live-Mapping und das Lese-Tor.** Primärquelle sind `1600h`–`1603h` und `1A00h`–`1A03h`.
+   Gültiges Lesen setzt die Datei voraus und erlaubt nur Objekte aus ihr. Dürfen diese Records
+   gelesen werden, wenn die Datei sie nicht führt? Gehören `1400h:01` und `1800h:01` (die COB-ID)
+   zur Primärquelle, oder nur die genannten Mapping-Records?
 4. **Flying Master, Umfang.** Welche Ausgabe und welcher Abschnitt von CiA 302 binden die
    Pflicht? Ohne diese Angabe wird kein Ablauf geschrieben.
 5. **Boot-up-Manager.** Die Paket-README nennt ihn im selben Satz wie Flying Master. Die
