@@ -777,6 +777,45 @@ PDOMapping=0
     }
 
     [Fact]
+    public async Task The_payload_is_copied_before_the_live_read_waits()
+    {
+        var session = NewSession();
+        using var responder = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
+        using var entered = new SemaphoreSlim(0, 1);
+        using var release = new SemaphoreSlim(0, 1);
+        var held = 0;
+        using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
+        {
+            if (index == 0x1800 && sub == 1 && Interlocked.Exchange(ref held, 1) == 0)
+            {
+                entered.Release();
+                release.Wait(ShortTimeout);
+            }
+            if (index is >= 0x1400 and <= 0x1403 or >= 0x1800 and <= 0x1803)
+                return index == 0x1800 && sub == 1 ? U32(Tpdo1) : null;
+            if (index != 0x1A00) return null;
+            return sub == 0 ? new byte[] { 1 } : U32(0x20010008);
+        });
+
+        var bytes = new byte[] { 0x5A };
+        var sink = new ListSink();
+        var pending = tool.ObserveForeignPdoAsync(Peer, Tpdo1, bytes, file, sink);
+        entered.Wait(ShortTimeout).Should().BeTrue();
+        bytes[0] = 0xFF;
+        release.Release();
+
+        var result = await pending.WithTimeoutAsync(ShortTimeout);
+        result.Observations.Should().ContainSingle();
+        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        sink.Signals.Should().ContainSingle();
+        sink.Signals[0].Value.Should().Equal(0x5A);
+    }
+
+    [Fact]
     public async Task An_SDO_already_in_flight_falls_back_to_the_file_instead_of_throwing()
     {
         var session = NewSession();

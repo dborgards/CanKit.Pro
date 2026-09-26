@@ -50,11 +50,15 @@ internal sealed partial class CanOpenNode
             throw new ArgumentOutOfRangeException(nameof(payload), payload.Length,
                 "A classic CAN PDO payload is at most 8 bytes.");
 
+        // The caller's buffer may be a frame slot that is reused as soon as this method yields.
+        // Copy before the first wait, as SdoDownloadAsync does.
+        var payloadCopy = payload.ToArray();
+
         var gate = _foreignPdoObserve.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await ObserveForeignPdoCoreAsync(peerNodeId, cobId, payload, peerDescription, sink, cancellationToken)
+            return await ObserveForeignPdoCoreAsync(peerNodeId, cobId, payloadCopy, peerDescription, sink, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
