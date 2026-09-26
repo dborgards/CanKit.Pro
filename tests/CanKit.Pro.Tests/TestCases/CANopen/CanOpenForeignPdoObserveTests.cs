@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -17,8 +19,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 /// <summary>
 /// Observing a PDO that belongs to another node (#163): the COB-ID and the mapping are read
-/// from the peer over SDO, including a mapping sub-index the file does not list. The file is
-/// used when that read aborts or times out. The bytes go to the caller's sink. This node's
+/// from the peer over SDO when the peer-SDO gate allows the pair. The file is used when that
+/// read aborts, times out, or is refused. The bytes go to the caller's sink. This node's
 /// object dictionary is left alone, and a frame that is not one of its RPDOs still is.
 /// </summary>
 public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture>
@@ -112,6 +114,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         tool.ObjectDictionary.ContainsIndex(0x2001).Should().BeFalse();
         tool.ObjectDictionary.ReadUnsigned(0x1001, 0x00).Should().Be(0u);
         background.Should().BeEmpty();
+        tool.BindPeerDeviceDescription(Peer, file);
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x00, 0x5A, 0xFF }, file, sink)
             .WithTimeoutAsync(ShortTimeout);
@@ -139,13 +142,8 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
 
         uploads.Uploads.Should().Equal(
             ((ushort)0x1800, (byte)0x01),
-            ((ushort)0x1801, (byte)0x01),
-            ((ushort)0x1802, (byte)0x01),
             ((ushort)0x1803, (byte)0x01),
             ((ushort)0x1400, (byte)0x01),
-            ((ushort)0x1401, (byte)0x01),
-            ((ushort)0x1402, (byte)0x01),
-            ((ushort)0x1403, (byte)0x01),
             ((ushort)0x1A00, (byte)0x00),
             ((ushort)0x1A00, (byte)0x01),
             ((ushort)0x1A00, (byte)0x02));
@@ -163,6 +161,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ConfigureTpdo(4, new PdoMapping().Add(0x2000, 0x00, 16));
         peer.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0x00, 16));
+        tool.BindPeerDeviceDescription(Peer, file);
 
         var tpdo = new ListSink();
         var tpdoResult = await tool.ObserveForeignPdoAsync(Peer, Tpdo4, new byte[] { 0x34, 0x12 }, file, tpdo)
@@ -197,6 +196,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ConfigureTpdo(4, new PdoMapping());
+        tool.BindPeerDeviceDescription(Peer, file);
 
         var sink = new ListSink();
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo4, new byte[] { 0x11, 0x22 }, file, sink)
@@ -220,6 +220,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ObjectDictionary.ReadUnsigned(0x1A00, 0x00).Should().Be(2u);
+        tool.BindPeerDeviceDescription(Peer, file);
 
         var sink = new ListSink();
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x11 }, file, sink)
@@ -243,6 +244,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
         var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
@@ -272,6 +274,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         peer.ConfigureTpdo(4, new PdoMapping().Add(0x2000, 0x00, 16));
         await tool.SendNmtCommandAsync(NmtCommand.Stop, Peer);
         await WaitForStateAsync(peer, NmtState.Stopped);
+        tool.BindPeerDeviceDescription(Peer, file);
 
         var sink = new ListSink();
         var watch = Stopwatch.StartNew();
@@ -309,7 +312,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
     }
 
     [Fact]
-    public async Task A_live_count_that_names_an_unlisted_subindex_is_read_over_SDO()
+    public async Task A_subindex_the_bound_description_omits_falls_back_to_the_file()
     {
         var session = NewSession();
         using var peerBus = Open(session, 0);
@@ -328,6 +331,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         await WaitForStateAsync(peer, NmtState.PreOperational);
         peer.ConfigureTpdo(1, new PdoMapping().Add(0x2001, 0x00, 8).Add(0x2001, 0x00, 8));
+        tool.BindPeerDeviceDescription(Peer, narrow);
         var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
@@ -335,18 +339,17 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
             .WithTimeoutAsync(ShortTimeout);
 
         result.Observations.Should().ContainSingle();
-        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
-        sink.Signals.Should().HaveCount(2);
-        sink.Signals[0].Index.Should().Be(0x2001);
-        sink.Signals[0].Value.Should().Equal(0xAB);
-        sink.Signals[1].Index.Should().Be(0x2001);
-        sink.Signals[1].Value.Should().Equal(0xCD);
+        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+        sink.Signals.Should().ContainSingle();
+        sink.Signals[0].Index.Should().Be(0x2000);
+        sink.Signals[0].Value.Should().Equal(0xAB, 0xCD);
         uploads.Uploads.Should().Contain(pair => pair.Index == 0x1A00 && pair.Sub == 0);
-        uploads.Uploads.Should().Contain(pair => pair.Index == 0x1A00 && pair.Sub == 2);
+        uploads.Uploads.Should().Contain(pair => pair.Index == 0x1A00 && pair.Sub == 1);
+        uploads.Uploads.Should().NotContain(pair => pair.Index == 0x1A00 && pair.Sub == 2);
     }
 
     [Fact]
-    public async Task A_mapping_record_the_file_does_not_list_is_still_read_over_SDO()
+    public async Task A_mapping_record_the_bound_description_omits_is_not_read_over_SDO()
     {
         var session = NewSession();
         using var peerBus = Open(session, 0);
@@ -361,19 +364,20 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
 1=0x1800",
             manufacturer: "SupportedObjects=0",
             sections: Comm("1800", "$NODEID+0x180", tpdo: true)));
+        tool.BindPeerDeviceDescription(Peer, file);
         var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, sink)
             .WithTimeoutAsync(ShortTimeout);
 
+        result.Decoded.Should().BeFalse();
         result.Observations.Should().ContainSingle();
-        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
-        sink.Signals.Should().ContainSingle();
-        sink.Signals[0].Index.Should().Be(0x2001);
-        sink.Signals[0].Value.Should().Equal(0x5A);
+        result.Observations[0].Decoded.Should().BeFalse();
+        result.Observations[0].Reason.Should().Contain("not in the peer description");
+        sink.Signals.Should().BeEmpty();
         uploads.Uploads.Should().Contain(pair => pair.Index == 0x1800 && pair.Sub == 1);
-        uploads.Uploads.Should().Contain(pair => pair.Index == 0x1A00 && pair.Sub == 0);
+        uploads.Uploads.Should().NotContain(pair => pair.Index == 0x1A00);
     }
 
     [Fact]
@@ -388,6 +392,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
         await WaitForStateAsync(peer, NmtState.PreOperational);
         const uint moved = 0x222;
         peer.ConfigureTpdo(1, new PdoMapping().Add(0x2001, 0x00, 8), cobId: moved);
+        tool.BindPeerDeviceDescription(Peer, file);
 
         var onTheFileId = new ListSink();
         var missed = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, onTheFileId)
@@ -424,6 +429,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
 2=0x1A00",
             manufacturer: "SupportedObjects=0",
             sections: Comm("1800", "$NODEID+0x180", tpdo: true) + Map("1A00", "1", "0x20000010")));
+        tool.BindPeerDeviceDescription(Peer, file);
         var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
@@ -454,6 +460,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
 2=0x1A00",
             manufacturer: "SupportedObjects=0",
             sections: Comm("1800", "0x80000191", tpdo: true) + Map("1A00", "1", "0x20000010")));
+        tool.BindPeerDeviceDescription(Peer, file);
         var uploads = new SdoTap(observer, Peer);
         var sink = new ListSink();
 
@@ -472,7 +479,7 @@ public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture
 
         await tool.SdoUploadAsync(Peer, 0x1001, 0x00).WithTimeoutAsync(ShortTimeout);
         uploads.Uploads.Should().Contain(pair => pair.Index == 0x1800 && pair.Sub == 1);
-        uploads.Uploads.Should().Contain(pair => pair.Index == 0x1400 && pair.Sub == 1);
+        uploads.Uploads.Should().NotContain(pair => pair.Index == 0x1400);
         uploads.Uploads.Should().NotContain(pair => pair.Index == 0x1A00 || pair.Index == 0x1600);
         uploads.Uploads.Should().Contain(pair => pair.Index == 0x1001);
     }
@@ -504,6 +511,7 @@ AccessType=rw
 DefaultValue=nope
 PDOMapping=0
 "));
+        tool.BindPeerDeviceDescription(Peer, file);
         var sink = new ListSink();
 
         var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x11, 0x22 }, file, sink)
@@ -549,6 +557,18 @@ PDOMapping=0
 
         var stray = await Observe(FileWith(Comm("1800", "0x800", tpdo: true) + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
         stray.Observations.Should().BeEmpty();
+
+        var restricted = await tool.ObserveForeignPdoAsync(Peer, 0x000, new byte[] { 0x5A },
+            FileWith(Comm("1800", "0x000", tpdo: true) + Map("1A00", "1", "0x20010008")), new ListSink())
+            .WithTimeoutAsync(ShortTimeout);
+        restricted.Observations.Should().BeEmpty();
+        restricted.Reason.Should().Contain("COB-ID");
+
+        var sdoRange = await tool.ObserveForeignPdoAsync(Peer, 0x581, new byte[] { 0x5A },
+            FileWith(Comm("1800", "0x581", tpdo: true) + Map("1A00", "1", "0x20010008")), new ListSink())
+            .WithTimeoutAsync(ShortTimeout);
+        sdoRange.Observations.Should().BeEmpty();
+        sdoRange.Reason.Should().Contain("COB-ID");
 
         var unreadableCob = await Observe(FileWith(Comm("1800", "nope", tpdo: true) + Map("1A00", "1", "0x20010008")), new byte[] { 0x5A });
         unreadableCob.Observations.Should().BeEmpty();
@@ -645,6 +665,7 @@ PDOMapping=0
         using var responder = Open(session, 2);
         using var tool = CanOpen.OpenNode(toolBus, Tool);
         var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
         byte[]? cob = null;
         string mapping = "ok";
         using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
@@ -700,6 +721,95 @@ PDOMapping=0
             result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
             result.Observations[0].Decoded.Should().BeTrue();
         }
+
+        cob = U32(0x000);
+        var restrictedSink = new ListSink();
+        var restricted = await tool.ObserveForeignPdoAsync(Peer, 0x000, new byte[] { 0x5A, 0x00, 0x00 },
+            FileWith(Comm("1800", "0x000", tpdo: true) + Map("1A00", "1", "0x20010008")), restrictedSink)
+            .WithTimeoutAsync(ShortTimeout);
+        restricted.Observations.Should().BeEmpty();
+        restrictedSink.Signals.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Overlapping_observations_of_one_peer_both_read_the_live_mapping()
+    {
+        var session = NewSession();
+        using var responder = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
+        using var entered = new SemaphoreSlim(0, 1);
+        using var release = new SemaphoreSlim(0, 1);
+        var held = 0;
+        using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
+        {
+            if (index == 0x1800 && sub == 1 && System.Threading.Interlocked.Exchange(ref held, 1) == 0)
+            {
+                entered.Release();
+                release.Wait(ShortTimeout);
+            }
+            if (index is >= 0x1400 and <= 0x1403 or >= 0x1800 and <= 0x1803)
+                return index == 0x1800 && sub == 1 ? U32(Tpdo1) : null;
+            if (index != 0x1A00) return null;
+            return sub == 0 ? new byte[] { 1 } : U32(0x20010008);
+        });
+
+        var firstSink = new ListSink();
+        var secondSink = new ListSink();
+        var first = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, firstSink);
+        entered.Wait(ShortTimeout).Should().BeTrue();
+        var second = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0xA5 }, file, secondSink);
+        await Task.Delay(50);
+        release.Release();
+
+        var firstResult = await first.WithTimeoutAsync(ShortTimeout);
+        var secondResult = await second.WithTimeoutAsync(ShortTimeout);
+        firstResult.Observations.Should().ContainSingle();
+        firstResult.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        firstSink.Signals.Should().ContainSingle();
+        firstSink.Signals[0].Value.Should().Equal(0x5A);
+        secondResult.Observations.Should().ContainSingle();
+        secondResult.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        secondSink.Signals.Should().ContainSingle();
+        secondSink.Signals[0].Value.Should().Equal(0xA5);
+    }
+
+    [Fact]
+    public async Task An_SDO_already_in_flight_falls_back_to_the_file_instead_of_throwing()
+    {
+        var session = NewSession();
+        using var responder = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var observer = Open(session, 2);
+        using var tool = CanOpen.OpenNode(toolBus, Tool, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(2) });
+        var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
+        using var server = new ScriptedUploadServer(responder, Peer, (_, _) => null, (index, _) => index == 0x1001);
+        var uploads = new SdoTap(observer, Peer);
+        using var cancel = new CancellationTokenSource();
+        var pending = tool.SdoUploadAsync(Peer, 0x1001, 0x00, cancel.Token);
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!uploads.Uploads.Any(pair => pair.Index == 0x1001))
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("the in-flight upload was not sent");
+            await Task.Delay(5);
+        }
+
+        var sink = new ListSink();
+        var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x34, 0x12, 0x00 }, file, sink)
+            .WithTimeoutAsync(ShortTimeout);
+        cancel.Cancel();
+
+        result.Observations.Should().ContainSingle();
+        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+        result.Observations[0].Decoded.Should().BeTrue();
+        sink.Signals.Should().ContainSingle();
+        sink.Signals[0].Index.Should().Be(0x2000);
+        Func<Task> wait = () => pending;
+        await wait.Should().ThrowAsync<OperationCanceledException>();
     }
 
     [Fact]
@@ -988,13 +1098,16 @@ PDOMapping=0
         private readonly ICanBus _bus;
         private readonly byte _server;
         private readonly Func<ushort, byte, byte[]?> _answer;
+        private readonly Func<ushort, byte, bool>? _suppress;
         private readonly EventHandler<CanKit.Abstractions.API.Common.Definitions.CanReceiveDataView> _onFrame;
 
-        public ScriptedUploadServer(ICanBus bus, byte server, Func<ushort, byte, byte[]?> answer)
+        public ScriptedUploadServer(ICanBus bus, byte server, Func<ushort, byte, byte[]?> answer,
+            Func<ushort, byte, bool>? suppress = null)
         {
             _bus = bus;
             _server = server;
             _answer = answer;
+            _suppress = suppress;
             _onFrame = OnFrame;
             _bus.FrameObserved += _onFrame;
         }
@@ -1015,6 +1128,7 @@ PDOMapping=0
             if (data[0] != SdoFrames.CcsUploadInit || data.Length < 4) return;
             var index = (ushort)(data[1] | (data[2] << 8));
             var sub = data[3];
+            if (_suppress?.Invoke(index, sub) == true) return;
             var payload = _answer(index, sub);
             if (payload is null)
                 Reply(SdoFrames.BuildAbort(index, sub, (uint)SdoAbortCode.ObjectDoesNotExist));

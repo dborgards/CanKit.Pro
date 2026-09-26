@@ -138,6 +138,11 @@ Er wird nicht durch eine Implementierung ersetzt.
    werden, auch wenn die Datei sie nicht führt. `1400h:01` und `1800h:01` werden live gelesen,
    nicht nur aus der Datei. Die Datei bleibt der Rückfall, wenn das Live-Lesen abbricht, die Zeit
    überschreitet oder kein verwendbares Wort liefert. `ObserveForeignPdoAsync` (#163) folgt dem.
+
+   Nachgetragen mit #174: der Aufruf geht über `SdoUploadAsync`. Verweigert das Peer-SDO-Tor das
+   Paar, ist das ein gescheitertes Live-Lesen und die an den Aufruf übergebene Datei wird
+   genommen. Ein Subindex, den die für den Knoten gebundene Beschreibung nicht enthält, geht
+   deshalb nicht auf den Bus.
 4. **Flying Master, Umfang.** Welche Ausgabe und welcher Abschnitt von CiA 302 binden die
    Pflicht? Ohne diese Angabe wird kein Ablauf geschrieben.
 5. **Boot-up-Manager.** Die Paket-README nennt ihn im selben Satz wie Flying Master. Die

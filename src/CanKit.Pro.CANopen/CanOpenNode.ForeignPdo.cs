@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -18,12 +19,19 @@ namespace CanKit.Pro.CANopen;
 /// </summary>
 /// <remarks>
 /// The COB-ID is read live from <c>1400h:01</c> / <c>1800h:01</c>. The mapping is read live from
-/// <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c>, including a sub-index the peer file does
-/// not list. A live value is used ahead of the file. The file is used only when that upload
-/// aborts, times out, or does not come back as a usable value.
+/// <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c>. A live value is used ahead of the file.
+/// The file is used when that upload aborts, times out, is refused by the peer-SDO gate, finds
+/// another SDO already in flight for the server, or does not come back as a usable value.
+/// Observations of one peer run one at a time, so two of them do not trip that in-flight limit
+/// on each other. A CAN-ID CiA 301 §7.3.5 restricts is not a match.
 /// </remarks>
 internal sealed partial class CanOpenNode
 {
+    /// <summary>One observation of a peer at a time. The SDO client allows a single transfer per
+    /// server; queueing here lets a second <see cref="ObserveForeignPdoAsync"/> wait instead of
+    /// failing with <see cref="InvalidOperationException"/>.</summary>
+    private readonly ConcurrentDictionary<byte, SemaphoreSlim> _foreignPdoObserve = new();
+
     /// <inheritdoc />
     public async Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId,
         ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
@@ -42,6 +50,23 @@ internal sealed partial class CanOpenNode
             throw new ArgumentOutOfRangeException(nameof(payload), payload.Length,
                 "A classic CAN PDO payload is at most 8 bytes.");
 
+        var gate = _foreignPdoObserve.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await ObserveForeignPdoCoreAsync(peerNodeId, cobId, payload, peerDescription, sink, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<ForeignPdoObserveResult> ObserveForeignPdoCoreAsync(byte peerNodeId, uint cobId,
+        ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
+        CancellationToken cancellationToken)
+    {
         var matches = await MatchPdosAsync(peerDescription, peerNodeId, cobId, cancellationToken)
             .ConfigureAwait(false);
         if (matches.Count == 0)
@@ -150,15 +175,19 @@ internal sealed partial class CanOpenNode
         return UsableCanId(word);
     }
 
-    /// <summary>Bits 0–10 when the word is a classic CAN-ID with bit 31 clear. Bit 30 (no RTR)
-    /// is ignored. Bit 31, bit 29, or any other bit above the 11-bit id is not a match.</summary>
+    /// <summary>Bits 0–10 when the word is a classic CAN-ID with bit 31 clear and the id is one
+    /// a PDO may use. Bit 30 (no RTR) is ignored. Bit 31, bit 29, any other bit above the 11-bit
+    /// id, or a CAN-ID CiA 301 §7.3.5 restricts (<see cref="CanOpenCobId.IsRestricted"/>) is not
+    /// a match.</summary>
     private static uint? UsableCanId(uint word)
     {
         if ((word & CanOpenCobId.InvalidBit) != 0) return null;
         if ((word & CanOpenCobId.ExtendedFrameBit) != 0) return null;
         const uint controlBits = CanOpenCobId.InvalidBit | CanOpenCobId.NoRtrBit | CanOpenCobId.ExtendedFrameBit;
         if ((word & ~controlBits & ~CanOpenCobId.CanIdMask) != 0) return null;
-        return word & CanOpenCobId.CanIdMask;
+        uint canId = word & CanOpenCobId.CanIdMask;
+        if (CanOpenCobId.IsRestricted(canId)) return null;
+        return canId;
     }
 
     private async Task<ForeignPdoObservation> DecodeOneAsync(byte peerNodeId, uint cobId,
@@ -263,8 +292,14 @@ internal sealed partial class CanOpenNode
         return entries;
     }
 
+    /// <summary>
+    /// An upload that did not yield a value: the server aborted or the transport failed, the
+    /// peer-SDO gate refused the pair (<see cref="PeerSdoAccessException"/>), or the client
+    /// already has a transfer with that server (<see cref="InvalidOperationException"/>).
+    /// Cancellation is not one of these — it propagates.
+    /// </summary>
     private static bool IsLiveReadUnavailable(Exception ex)
-        => ex is SdoAbortException or CanOpenTransportException;
+        => ex is SdoAbortException or CanOpenTransportException or InvalidOperationException;
 
     private static bool TryDescribedMapping(CanOpenDeviceDescription description, DescribedPdo pdo, byte peerNodeId,
         out PdoMappingEntry[] entries, out string reason)

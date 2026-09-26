@@ -353,14 +353,18 @@ public interface ICanOpenNode : IDisposable
     /// value that comes back is used ahead of <paramref name="peerDescription"/>, including a PDO
     /// the device marks invalid (bit 31 set) or a CAN-ID the file does not name. The same entry
     /// in the file (<c>$NODEID</c> resolved to <paramref name="peerNodeId"/>) is used only when
-    /// that upload aborts, times out, or does not return a word.
+    /// that upload aborts, times out, is refused by the peer-SDO gate, finds another SDO already
+    /// in flight for the server, or does not return a word. A CAN-ID CiA 301 §7.3.5 restricts is
+    /// not accepted from either source. Observations of one peer are serialized, so two of them
+    /// do not fail each other on the one-transfer-per-server limit.
     /// </para>
     /// <para>
     /// The mapping is the live record <c>1600h</c>–<c>1603h</c> or <c>1A00h</c>–<c>1A03h</c>,
-    /// uploaded over SDO, including a sub-index the description does not list. An upload that
-    /// aborts or times out, or a count that is not a byte-aligned mapping of at most eight
-    /// entries (MPDO included), makes the live record unavailable and the mapping in the file is
-    /// used instead. A record neither the device nor the file can supply is not decoded.
+    /// uploaded over the same SDO client. A pair the bound peer description does not allow is
+    /// refused before a frame is sent and is a failed live read. An upload that aborts or times
+    /// out, or a count that is not a byte-aligned mapping of at most eight entries (MPDO
+    /// included), makes the live record unavailable and the mapping in the file is used instead.
+    /// A record neither the device nor the file can supply is not decoded.
     /// </para>
     /// <para>
     /// The split follows the same length rule as an RPDO this node consumes: fewer bytes than
