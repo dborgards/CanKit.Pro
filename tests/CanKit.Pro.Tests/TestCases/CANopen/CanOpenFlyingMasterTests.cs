@@ -170,7 +170,11 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
         right.ActiveFlyingMasterNodeId.Should().Be(LeftId);
         right.ActiveFlyingMasterPriority.Should().Be(0);
         log.Snapshot().Should().NotContain(f => f.Id == CanOpenCobId.FlyingMasterForce);
-        signals.Should().Contain(e => e.Signal == FlyingMasterSignal.BecameStandby && e.OtherNodeId == LeftId);
+        signals.Should().Contain(e =>
+            e.Signal == FlyingMasterSignal.BecameStandby
+            && e.Role == FlyingMasterRole.Standby
+            && e.OtherNodeId == LeftId
+            && e.OtherPriority == 0);
     }
 
     [Fact]
@@ -728,6 +732,390 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
             "the stored delay elapses and the node asks who is master");
     }
 
+    [Fact]
+    public async Task Rewriting_1F80h_While_Active_Boots_The_Slaves_Again()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        int resets = rig.Log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
+        resets.Should().BeGreaterThan(0);
+        od.WriteUnsigned(Startup, 0x00, MasterBits | SuppressSelfStart);
+        await QuiesceAsync(rig.Witness, null);
+
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+        rig.Log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave))
+            .Should().BeGreaterThan(resets, "1F80h still enables the flying master, so boot-up runs again");
+    }
+
+    [Fact]
+    public async Task Clearing_1F80h_Stops_An_Election_That_Is_Already_Running()
+    {
+        using var rig = OpenMaster();
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
+
+        rig.Node.ObjectDictionary.WriteUnsigned(Startup, 0x00, 0);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(200));
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
+        rig.Log.Snapshot().Should().NotContain(f => f.Id == CanOpenCobId.FlyingMasterDetect);
+    }
+
+    [Fact]
+    public async Task A_Force_While_Detecting_Restarts_The_Delay()
+    {
+        using var rig = OpenMaster();
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Any(f => f.Id == CanOpenCobId.FlyingMasterDetect), 800,
+            "the node is asking who is master");
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Detecting);
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterClaim),
+            new byte[] { 1 }, isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Detecting,
+            "a claim shorter than the priority and the node-id is ignored");
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterForce),
+            Array.Empty<byte>(), isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
+            "a force before this node is active starts the delay again");
+    }
+
+    [Fact]
+    public async Task A_Trigger_During_The_Race_Restarts_The_Timeslot()
+    {
+        using var rig = OpenMaster();
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Any(f => f.Id == CanOpenCobId.FlyingMasterTrigger), 800,
+            "the warm boot has reached the timeslot race");
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Negotiating);
+
+        int triggers = rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterTrigger),
+            Array.Empty<byte>(), isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger).Should().BeGreaterThan(triggers);
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(10));
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Negotiating,
+            "the timeslot started again when the trigger arrived");
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 40,
+            "the restarted timeslot elapses and this node wins");
+    }
+
+    [Fact]
+    public async Task A_Trigger_During_The_Detect_Cycle_Keeps_The_Master_Active()
+    {
+        using var rig = OpenMaster();
+        Tighten(rig.Node);
+        rig.Node.ObjectDictionary.WriteUnsigned(Timing, 0x06, 30);
+        rig.Node.StartFlyingMaster(1, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        int triggers = rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterTrigger) > triggers,
+            80, "the detect cycle has put its trigger on the bus");
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterTrigger),
+            Array.Empty<byte>(), isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterClaim),
+            new byte[] { 1, 0x05 }, isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Standby,
+            "the foreign trigger restarted the confirm timeslot, so an equal claim still wins the race");
+    }
+
+    [Fact]
+    public async Task A_Time_Slot_Pair_That_No_Longer_Separates_Levels_Aborts_The_Race()
+    {
+        using var rig = OpenMaster();
+        var signals = new ConcurrentQueue<FlyingMasterSignal>();
+        rig.Node.FlyingMasterChanged += (_, e) => signals.Enqueue(e.Signal);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Negotiating, 800,
+            "the timeslot race has started");
+
+        // The validated write path refuses this pair. The race checks the pair again when a
+        // trigger restarts it, which is the path a restored dictionary can still reach.
+        rig.Node.ObjectDictionary.WriteRawUnchecked(Timing, 0x05, new byte[] { 100, 0 });
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterTrigger),
+            Array.Empty<byte>(), isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+
+        signals.Should().Contain(FlyingMasterSignal.ConfigurationError);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
+    }
+
+    [Fact]
+    public void A_Priority_Slot_Shorter_Than_Every_Node_Id_Is_Rejected()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(bus, LeftId, clock);
+        var od = node.ObjectDictionary;
+
+        Action slot = () => od.WriteUnsigned(Timing, 0x04, 100);
+        slot.Should().Throw<ArgumentException>().WithMessage("*06090030*");
+        od.ReadUnsigned(Timing, 0x04).Should().Be(1500u);
+
+        Action device = () => od.WriteUnsigned(Timing, 0x05, 0);
+        device.Should().Throw<ArgumentException>().WithMessage("*06090030*");
+        od.ReadUnsigned(Timing, 0x05).Should().Be(10u);
+
+        Action count = () => od.WriteUnsigned(Timing, 0x00, 6);
+        count.Should().Throw<ArgumentException>().WithMessage("*06010002*");
+    }
+
+    [Fact]
+    public async Task A_Boot_Timeout_After_The_Mandatory_Slave_Was_Seen_Does_Not_Reset_It()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var timedOut = new ConcurrentQueue<byte>();
+        rig.Node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, 100);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        TransmitHeartbeat(rig.Peer, slave, 0x00);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.State.Should().Be(NmtState.Operational, "the mandatory slave has been seen");
+
+        rig.Log.Clear();
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(150));
+        timedOut.Should().BeEmpty("the boot timeout finds the mandatory slave already seen");
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.ResetNode, slave));
+        rig.Node.State.Should().Be(NmtState.Operational);
+    }
+
+    [Fact]
+    public async Task A_Mandatory_Timeout_Resets_Every_Assigned_Slave_When_Bit_4_Is_Set()
+    {
+        const byte missing = 0x22;
+        const byte other = 0x23;
+        using var rig = OpenMaster();
+        var timedOut = new ConcurrentQueue<byte>();
+        rig.Node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, 0x10);
+        od.WriteUnsigned(0x1F81, missing, Assigned | MandatorySlave);
+        od.WriteUnsigned(0x1F81, other, Assigned);
+        od.WriteUnsigned(0x1F89, 0x00, 100);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => timedOut.Contains(missing), 800,
+            "1F89h elapses without the mandatory slave");
+
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.ResetNode, missing));
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.ResetNode, other),
+            "bit 4 resets every assigned slave, not only the one that timed out");
+        timedOut.Should().NotContain(other);
+    }
+
+    [Fact]
+    public async Task A_Mandatory_Timeout_Stops_Every_Assigned_Slave_When_Bit_6_Is_Set()
+    {
+        const byte missing = 0x22;
+        const byte other = 0x23;
+        using var rig = OpenMaster();
+        var timedOut = new ConcurrentQueue<byte>();
+        rig.Node.FlyingMasterChanged += (_, e) =>
+        {
+            if (e.Signal == FlyingMasterSignal.SlaveBootTimeout && e.OtherNodeId is { } id)
+                timedOut.Enqueue(id);
+        };
+
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, 0x40);
+        od.WriteUnsigned(0x1F81, missing, Assigned | MandatorySlave);
+        od.WriteUnsigned(0x1F81, other, Assigned);
+        od.WriteUnsigned(0x1F89, 0x00, 100);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => timedOut.Contains(missing), 800,
+            "1F89h elapses without the mandatory slave");
+
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.Stop, missing));
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.Stop, other));
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.ResetNode, missing));
+    }
+
+    [Fact]
+    public async Task Request_Nmt_Rejects_This_Node_And_Sends_Reset_And_Pre_Operational()
+    {
+        const byte slave = 0x22;
+        const byte stranger = 0x23;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart | SuppressSlaveStart);
+        od.WriteUnsigned(0x1F81, slave, Assigned);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        Action own = () => od.WriteUnsigned(0x1F82, LeftId, 0x06);
+        own.Should().Throw<ArgumentException>().WithMessage("*06090030*");
+        Action unassigned = () => od.WriteUnsigned(0x1F82, stranger, 0x06);
+        unassigned.Should().Throw<ArgumentException>().WithMessage("*06090030*");
+
+        rig.Log.Clear();
+        od.WriteUnsigned(0x1F82, slave, 0x06);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.ResetNode, slave));
+
+        rig.Log.Clear();
+        od.WriteUnsigned(0x1F82, slave, 0x07);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
+
+        rig.Log.Clear();
+        od.WriteUnsigned(0x1F82, slave, 0x7F);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.EnterPreOperational, slave));
+        od.ReadUnsigned(0x1F82, slave).Should().Be(0u, "the request does not replace the tracked state");
+    }
+
+    [Fact]
+    public async Task A_Boot_Time_With_No_Mandatory_Slave_Does_Not_Time_Out()
+    {
+        using var rig = OpenMaster();
+        var timedOut = new ConcurrentQueue<FlyingMasterSignal>();
+        rig.Node.FlyingMasterChanged += (_, e) => timedOut.Enqueue(e.Signal);
+        rig.Node.ObjectDictionary.WriteUnsigned(0x1F89, 0x00, 100);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+        rig.Node.State.Should().Be(NmtState.Operational);
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(200));
+        timedOut.Should().NotContain(FlyingMasterSignal.SlaveBootTimeout);
+        rig.Node.State.Should().Be(NmtState.Operational);
+    }
+
+    [Fact]
+    public async Task Simultaneous_Start_Does_Not_Broadcast_When_No_Slave_May_Be_Booted()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, 0x02);
+        od.WriteUnsigned(0x1F81, slave, Assigned);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        rig.Node.State.Should().Be(NmtState.Operational);
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0),
+            "bit 1 is set, but no assigned slave has the boot bit");
+    }
+
+    [Fact]
+    public async Task A_Device_Description_Stores_The_Network_List_And_The_Tracked_State()
+    {
+        var description = CanOpenDeviceDescription.ParseEds(NetworkListEds(accepted: true));
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(bus, LeftId, clock, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        await witness.SettleAsync();
+
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x1F81, 0x00).Should().Be(127u);
+        od.ReadUnsigned(0x1F81, 0x22).Should().Be(Assigned | BootSlave);
+        od.ReadUnsigned(0x1F82, 0x00).Should().Be(128u);
+        od.ReadUnsigned(0x1F82, 0x22).Should().Be(4u, "a described 1F82h value is the tracked state, not a command");
+        od.ReadUnsigned(0x1F89, 0x00).Should().Be(100u);
+        od.ReadUnsigned(Timing, 0x04).Should().Be(2000u);
+        od.ReadUnsigned(Timing, 0x05).Should().Be(1u);
+        node.FlyingMasterRole.Should().Be(FlyingMasterRole.Inactive);
+
+        var report = node.DeviceDescription!;
+        report.Findings.Should().NotContain(f =>
+            (f.Index == 0x1F81 || f.Index == 0x1F82 || f.Index == 0x1F89)
+            && f.Outcome != DeviceDescriptionOutcome.NotImplemented);
+    }
+
+    [Fact]
+    public async Task A_Device_Description_Corrects_1F81h_And_1F82h_It_Cannot_Apply()
+    {
+        var description = CanOpenDeviceDescription.ParseEds(NetworkListEds(accepted: false));
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(bus, LeftId, clock, description);
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        await witness.SettleAsync();
+
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x1F81, 0x00).Should().Be(127u, "sub-index 00h stays the constant 127");
+        od.TryGet(0x1F81, 0x81, out _).Should().BeFalse();
+        od.ReadUnsigned(0x1F82, 0x00).Should().Be(128u);
+        od.ReadUnsigned(0x1F82, 0x22).Should().Be(0u, "999 does not fit in the UNSIGNED8 state");
+        od.TryGet(0x1F82, 0x81, out _).Should().BeFalse();
+
+        var report = node.DeviceDescription!;
+        Finding(0x1F81, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        Finding(0x1F81, 0x81).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
+        Finding(0x1F82, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        Finding(0x1F82, 0x22).Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        Finding(0x1F82, 0x81).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
+
+        DeviceDescriptionFinding Finding(ushort index, byte subindex)
+            => report.Findings.Single(f => f.Index == index && f.Subindex == subindex);
+    }
+
     /// <summary>Short times, still ordered so a better priority level always waits less than a
     /// worse one: the device slot is narrowed before the priority slot, or the write is rejected.</summary>
     private static void Tighten(CanOpenNode node)
@@ -881,6 +1269,146 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
         await left.SettleAsync();
         if (right is not null) await right.SettleAsync();
     }
+
+    /// <summary>
+    /// <paramref name="accepted"/> stores a legal network list and a priority slot written
+    /// before the device slot. Otherwise the count, the extra sub-index and the state byte are
+    /// values the node refuses.
+    /// </summary>
+    private static string NetworkListEds(bool accepted) => $$"""
+        [FileInfo]
+        FileName=network-list.eds
+        FileVersion=1
+        FileRevision=0
+        EDSVersion=4.0
+        Description=Network list loader test
+        CreationTime=10:00AM
+        CreationDate=09-26-2026
+        CreatedBy=CanKit.Pro tests
+
+        [DeviceInfo]
+        VendorName=CanKit.Pro
+        VendorNumber=0
+        ProductName=Network list
+        ProductNumber=0
+        RevisionNumber=0
+        BaudRate_500=1
+        SimpleBootUpSlave=1
+        Granularity=8
+        NrOfRXPDO=0
+        NrOfTXPDO=0
+
+        [MandatoryObjects]
+        SupportedObjects=1
+        1=0x1000
+
+        [1000]
+        ParameterName=Device type
+        ObjectType=0x7
+        DataType=0x0007
+        AccessType=ro
+        DefaultValue=0
+        PDOMapping=0
+
+        [OptionalObjects]
+        SupportedObjects={{(accepted ? 4 : 2)}}
+        1=0x1F81
+        2=0x1F82
+        {{(accepted ? "3=0x1F89\n        4=0x1F90" : "")}}
+
+        [1F81]
+        ParameterName=NMT slave assignment
+        SubNumber=130
+        ObjectType=0x8
+
+        [1F81sub0]
+        ParameterName=Highest sub-index supported
+        ObjectType=0x7
+        DataType=0x0005
+        AccessType=ro
+        DefaultValue={{(accepted ? 127 : 3)}}
+        PDOMapping=0
+
+        [1F81sub22]
+        ParameterName=Node 34
+        ObjectType=0x7
+        DataType=0x0007
+        AccessType=rw
+        DefaultValue={{(accepted ? 5 : 1)}}
+        PDOMapping=0
+        {{(accepted ? "" : """
+
+        [1F81sub81]
+        ParameterName=Past the array
+        ObjectType=0x7
+        DataType=0x0007
+        AccessType=rw
+        DefaultValue=1
+        PDOMapping=0
+        """)}}
+
+        [1F82]
+        ParameterName=Request NMT
+        SubNumber=130
+        ObjectType=0x8
+
+        [1F82sub0]
+        ParameterName=Highest sub-index supported
+        ObjectType=0x7
+        DataType=0x0005
+        AccessType=ro
+        DefaultValue={{(accepted ? 128 : 1)}}
+        PDOMapping=0
+
+        [1F82sub22]
+        ParameterName=Node 34
+        ObjectType=0x7
+        DataType=0x0005
+        AccessType=rw
+        DefaultValue={{(accepted ? 4 : 999)}}
+        PDOMapping=0
+        {{(accepted ? "" : """
+
+        [1F82sub81]
+        ParameterName=Past the array
+        ObjectType=0x7
+        DataType=0x0005
+        AccessType=rw
+        DefaultValue=4
+        PDOMapping=0
+        """)}}
+        {{(accepted ? """
+
+        [1F89]
+        ParameterName=Boot time
+        ObjectType=0x7
+        DataType=0x0007
+        AccessType=rw
+        DefaultValue=100
+        PDOMapping=0
+
+        [1F90]
+        ParameterName=Flying master timing
+        SubNumber=6
+        ObjectType=0x8
+
+        [1F90sub4]
+        ParameterName=Priority time slot
+        ObjectType=0x7
+        DataType=0x0006
+        AccessType=rw
+        DefaultValue=2000
+        PDOMapping=0
+
+        [1F90sub5]
+        ParameterName=Device time slot
+        ObjectType=0x7
+        DataType=0x0006
+        AccessType=rw
+        DefaultValue=1
+        PDOMapping=0
+        """ : "")}}
+        """;
 
     private const string FlyingMasterEds = """
         [FileInfo]
