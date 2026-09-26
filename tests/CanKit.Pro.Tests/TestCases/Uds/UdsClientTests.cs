@@ -1427,6 +1427,11 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     // UdsTimeoutException(Timer = P2Star). This path had no test at all before (the only
     // Timer assertion in the suite was P2); the elapsed-time assertion proves the timeout
     // fired on the restarted P2* budget, not on the initial P2 budget.
+    //
+    // The first 0x78 is an ISO-TP round trip this test does not pace (#118). Measured with
+    // this 100 ms and the 120 ms below lowered together, 8 CPU burners on 4 cores: no P2
+    // timeout at 25 ms or above, the first one at 20 ms, and a certain one at 5 ms. The
+    // unmodified class stayed green under that load. These budgets are not the tight edge.
     // -----------------------------------------------------------------------------------
     [Fact]
     public async Task Client_Times_Out_With_P2Star_When_Ecu_Sends_Only_ResponsePending()
@@ -1471,7 +1476,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             options: new UdsClientOptions
             {
                 // P2 short: proves the client actually restarts on 0x78 rather than living
-                // inside the (accidentally) generous initial budget.
+                // inside the (accidentally) generous initial budget. 120 ms is several times
+                // the first-hop cliff measured for #118 (see the P2* timeout test above).
                 P2ClientMax = TimeSpan.FromMilliseconds(120),
                 P2StarClientMax = TimeSpan.FromSeconds(1),
                 MaxResponsePendingCount = 10,
