@@ -593,6 +593,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 _lifeGuardingDeadline?.Dispose();
                 _lifeGuardingDeadline = null;
                 CancelFlyingMasterDeadline();
+                CancelBootUp();
 
                 _sdoServer?.Deadline?.Dispose();
                 _sdoServer = null;
@@ -879,6 +880,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // shared bus (Bugbot 3600812708).
         bool forUs = target == 0 || target == _nodeId;
         if (!forUs) return;
+        if (ShouldIgnoreOwnNmt(cmd, target)) return;
+        // The cold broadcast is this node's own reset. Counting it here means the send
+        // completion does not apply that reset a second time.
+        if (target == 0 && cmd == NmtCommand.ResetCommunication && _coldResetPending)
+            _coldResetPending = false;
         RaiseNmtCommandReceived(cmd, target);
 
         // The transitions themselves live in CanOpenNode.CommunicationProfile.cs, next to the
@@ -901,6 +907,30 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 PerformNmtReset(communicationOnly: true);
                 break;
         }
+    }
+
+    /// <summary>
+    /// The active flying master does not obey NMT addressed to its own node-id, and it does not
+    /// reset or stop itself because a broadcast it sent came back. A broadcast Start still
+    /// applies: that is how a simultaneous start is specified, and self-start is also applied
+    /// locally when bit 2 of <c>1F80h</c> allows it.
+    /// </summary>
+    private bool ShouldIgnoreOwnNmt(NmtCommand cmd, byte target)
+    {
+        if (target == _nodeId && _flyingMasterRole == FlyingMasterRole.Active)
+            return true;
+
+        bool reset = cmd is NmtCommand.ResetNode or NmtCommand.ResetCommunication;
+        if (target == 0 && reset && _ignoreBroadcastResetEcho)
+        {
+            _ignoreBroadcastResetEcho = false;
+            return true;
+        }
+
+        if (target != 0 || _flyingMasterRole != FlyingMasterRole.Active)
+            return false;
+
+        return reset || cmd == NmtCommand.Stop;
     }
 
     // =========================================================================================

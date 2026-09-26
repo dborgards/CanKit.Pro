@@ -27,6 +27,8 @@ internal sealed partial class CanOpenNode
 
     // 1F81h, one UNSIGNED32 per node-id. Bit 0 assigns the slave, bit 2 lets the master boot
     // it, bit 3 marks it mandatory, bit 4 is keep-alive (Reset Communication is not sent).
+    // The guard time and life time in the upper bytes are stored with the entry. Heartbeat is
+    // the keep-alive this node uses; node guarding is not started from those bytes.
     private const uint SlaveAssignedBit = 0x0000_0001;
     private const uint SlaveBootBit = 0x0000_0004;
     private const uint SlaveMandatoryBit = 0x0000_0008;
@@ -41,6 +43,10 @@ internal sealed partial class CanOpenNode
 
     private FlyingMasterRole _flyingMasterRole = FlyingMasterRole.Inactive;
     private bool _flyingMasterFromPowerOn = true;
+    private bool _suppressFlyingMasterStartup;
+    private bool _confirmingActiveMaster;
+    private bool _coldResetPending;
+    private bool _ignoreBroadcastResetEcho;
     private byte? _activeFlyingMasterNodeId;
     private ushort? _activeFlyingMasterPriority;
     private TimeSpan? _flyingMasterHeartbeatTimeout;
@@ -130,9 +136,17 @@ internal sealed partial class CanOpenNode
         }
     }
 
+    /// <summary>
+    /// Bits 2 and 3 of <c>1F80h</c> at creation. A device leaves them clear; a tool sets them.
+    /// The check is the profile this node was opened with, not a fixed constant.
+    /// </summary>
+    private uint DefaultNmtStartup() => _options.Profile == CanOpenNodeProfile.Tool
+        ? NmtSuppressSelfStartBit | NmtSuppressSlaveStartBit
+        : 0u;
+
     private void ApplyFlyingMasterStartup()
     {
-        if (_disposed != 0) return;
+        if (_suppressFlyingMasterStartup || _disposed != 0) return;
         if (FlyingMasterEnabled)
         {
             if (_flyingMasterRole == FlyingMasterRole.Inactive)
@@ -163,6 +177,7 @@ internal sealed partial class CanOpenNode
     {
         if (!FlyingMasterEnabled || _disposed != 0) return;
         CancelFlyingMasterDeadline();
+        _confirmingActiveMaster = false;
         _flyingMasterRole = FlyingMasterRole.Delaying;
         _flyingMasterReclaimStarted = false;
         _activeFlyingMasterNodeId = null;
@@ -172,6 +187,9 @@ internal sealed partial class CanOpenNode
 
     private void OnFlyingMasterDelayElapsed()
     {
+        // The reset echo this delay was waiting out has had its chance. A later broadcast reset
+        // is someone else's command and applies normally.
+        _ignoreBroadcastResetEcho = false;
         if (_flyingMasterRole != FlyingMasterRole.Delaying || !FlyingMasterEnabled) return;
         _flyingMasterRole = FlyingMasterRole.Detecting;
         _ = SendControlFrame(CanOpenCobId.FlyingMasterDetect, Array.Empty<byte>());
@@ -185,14 +203,34 @@ internal sealed partial class CanOpenNode
         {
             // Cold boot and nobody is master: Reset Communication takes every flying master
             // through a warm boot together, so the timeslot race is not racing PDO traffic or
-            // staggered startup. The echo of that command restarts this node; Begin below covers
-            // the same restart when the echo has not been seen yet.
+            // staggered startup. The warm election starts only after that frame has been sent.
+            // The echo applies the reset when it comes back; if the bus does not echo, the send
+            // completion applies the same reset once.
             _flyingMasterFromPowerOn = false;
-            _ = SendControlFrame(CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.ResetCommunication, (byte)0 });
-            BeginFlyingMaster();
+            _coldResetPending = true;
+            var sent = EnqueueNmt(NmtCommand.ResetCommunication, 0);
+            _ = sent.ContinueWith(_ =>
+            {
+                try { _actor.Post(CompleteColdReset); }
+                catch (ObjectDisposedException) { /* node already gone */ }
+            }, System.Threading.CancellationToken.None,
+                System.Threading.Tasks.TaskContinuationOptions.None,
+                System.Threading.Tasks.TaskScheduler.Default);
             return;
         }
         BeginNegotiation(transmitTrigger: true);
+    }
+
+    /// <summary>The cold Reset Communication is on the wire. Apply it here when the echo has
+    /// not already done so, and do not start the warm election before that.</summary>
+    private void CompleteColdReset()
+    {
+        if (!_coldResetPending || _disposed != 0) return;
+        _coldResetPending = false;
+        if (_flyingMasterRole != FlyingMasterRole.Detecting || !FlyingMasterEnabled) return;
+        PerformNmtReset(communicationOnly: true);
+        // The echo of the frame we just sent must not reset this node again.
+        _ignoreBroadcastResetEcho = true;
     }
 
     private void BeginNegotiation(bool transmitTrigger)
@@ -220,7 +258,10 @@ internal sealed partial class CanOpenNode
     {
         if (_flyingMasterRole != FlyingMasterRole.Negotiating || !FlyingMasterEnabled) return;
         TransmitClaim();
-        BecomeActive();
+        // A detect cycle confirms a master that is already active. It must not boot the slaves again.
+        bool startBoot = !_confirmingActiveMaster;
+        _confirmingActiveMaster = false;
+        BecomeActive(startBoot);
     }
 
     private void OnFlyingMasterTrigger()
@@ -270,12 +311,12 @@ internal sealed partial class CanOpenNode
         _flyingMasterFromPowerOn = false;
         if (_flyingMasterRole == FlyingMasterRole.Active)
         {
-            // The active master is who restarts the network. Apply it here as well as on the
-            // wire: a node does act on its own NMT when the echo comes back, and applying it
-            // now means a late echo cannot leave this node active across the next detection.
-            // The echo, if it arrives, is a second warm boot of the same election.
+            // The active master is who restarts the network. Apply the reset here. The echo of
+            // the broadcast must not apply it a second time. The flag is set after the reset,
+            // because the reset itself clears election state.
             PerformNmtReset(communicationOnly: true);
-            _ = SendControlFrame(CanOpenCobId.NmtCommand, new[] { (byte)NmtCommand.ResetCommunication, (byte)0 });
+            _ignoreBroadcastResetEcho = true;
+            SendNmt(NmtCommand.ResetCommunication, 0);
             return;
         }
         BeginFlyingMaster();
@@ -290,6 +331,7 @@ internal sealed partial class CanOpenNode
     private void OnFlyingMasterDetectCycle()
     {
         if (_flyingMasterRole != FlyingMasterRole.Active || !FlyingMasterEnabled) return;
+        _confirmingActiveMaster = true;
         BeginNegotiation(transmitTrigger: true);
     }
 
@@ -298,7 +340,7 @@ internal sealed partial class CanOpenNode
         _ = SendControlFrame(CanOpenCobId.FlyingMasterClaim, new[] { (byte)OurPriority(), _nodeId });
     }
 
-    private void BecomeActive()
+    private void BecomeActive(bool startBoot)
     {
         CancelFlyingMasterDeadline();
         bool changed = _flyingMasterRole != FlyingMasterRole.Active || _activeFlyingMasterNodeId != _nodeId;
@@ -313,13 +355,15 @@ internal sealed partial class CanOpenNode
         int cycle = ReadTiming(TimingDetectCycle);
         if (cycle > 0)
             ArmFlyingMaster(TimeSpan.FromMilliseconds(cycle), OnFlyingMasterDetectCycle);
-        BeginBootUp();
+        if (startBoot)
+            BeginBootUp();
     }
 
     private void EnterStandby(ushort priority, byte nodeId)
     {
         CancelBootUp();
         CancelFlyingMasterDeadline();
+        _confirmingActiveMaster = false;
         _flyingMasterFromPowerOn = false;
         bool changed = _flyingMasterRole != FlyingMasterRole.Standby
             || _activeFlyingMasterNodeId != nodeId
@@ -373,6 +417,9 @@ internal sealed partial class CanOpenNode
     {
         CancelBootUp();
         CancelFlyingMasterDeadline();
+        _confirmingActiveMaster = false;
+        _coldResetPending = false;
+        _ignoreBroadcastResetEcho = false;
         _flyingMasterRole = FlyingMasterRole.Inactive;
         _activeFlyingMasterNodeId = null;
         _activeFlyingMasterPriority = null;
@@ -472,11 +519,9 @@ internal sealed partial class CanOpenNode
     private void RaiseFlyingMaster(FlyingMasterSignal signal, byte? otherNodeId, ushort? otherPriority)
     {
         var args = new FlyingMasterChangedEventArgs(signal, _flyingMasterRole, otherNodeId, otherPriority);
-        EnqueueEvent(() =>
-        {
-            try { FlyingMasterChanged?.Invoke(this, args); }
-            catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        // The event pump already reports a subscriber exception. A second catch here is the
+        // generic handler CodeQL flags, and it does not change where the exception goes.
+        EnqueueEvent(() => FlyingMasterChanged?.Invoke(this, args));
     }
 
     private OdWriteDecision ValidateFlyingMasterTimingWrite(byte subindex, byte[] value)

@@ -148,8 +148,11 @@ internal sealed partial class CanOpenNode
         // three priority levels (1500 > 127 × 10). The detect cycle carries the node-id so two
         // masters do not poll in lockstep. 1F81h is the network list (one entry per node-id),
         // 1F82h the tracked NMT state and the request that sends a command, 1F89h the boot
-        // timeout (0 = none).
-        _od.AddU32(Co.NmtStartup, 0x00, 0, rw, nm);
+        // timeout (0 = none). 1F81h's guard time and life time are stored and not acted on:
+        // heartbeat is the keep-alive this node runs, and node guarding is not started from
+        // those bytes. The suppress bits of 1F80h follow the node's profile: a device leaves
+        // self-start and slave-start allowed, a tool suppresses both.
+        _od.AddU32(Co.NmtStartup, 0x00, DefaultNmtStartup(), rw, nm);
         _od.AddU8(Co.SlaveAssignment, 0x00, CanOpenCobId.MaxNodeId, ro, nm);
         for (byte node = 1; node <= CanOpenCobId.MaxNodeId; node++)
             _od.AddU32(Co.SlaveAssignment, node, 0, rw, nm);
@@ -546,11 +549,12 @@ internal sealed partial class CanOpenNode
                 ApplyFlyingMasterStartup();
                 return;
             case Co.SlaveAssignment:
-                if (FlyingMasterEnabled) RememberOne(index, subindex);
+                // A live edit is the network list the active master boots now. It is not a
+                // power-on value: StartFlyingMaster and StoreParameters are what record one,
+                // and a reset must come back to that rather than to whatever was written since.
                 if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
                 return;
             case Co.BootTime:
-                if (FlyingMasterEnabled) RememberOne(index, 0x00);
                 if (_flyingMasterRole == FlyingMasterRole.Active) BeginBootUp();
                 return;
             case Co.GuardTime:
@@ -775,27 +779,39 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private void RestoreValues(Dictionary<uint, byte[]> values, bool communicationOnly)
     {
-        _od.Transaction(() =>
+        // 1F80h sorts before 1F90h. Applying the startup bit as soon as 1F80h is written would
+        // arm the election from the live timing, and the restored 1F90h would arrive too late
+        // to move that deadline. Hold the startup until every restored value is in the dictionary.
+        _suppressFlyingMasterStartup = true;
+        try
         {
-            foreach (var key in _od.SnapshotKeys())
+            _od.Transaction(() =>
             {
-                var index = (ushort)(key >> 8);
-                var subindex = (byte)(key & 0xFF);
-                if (!IsRestorableObject(index)) continue;
-                if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
-                if (values.TryGetValue(key, out var stored))
+                foreach (var key in _od.SnapshotKeys())
                 {
-                    if (_od.TryGet(index, subindex, out var current) && OdEntryLayout.FixedSize(current.DataType) is var size
-                        && size > 0 && stored.Length != size)
-                        continue; // re-declared with another width since the snapshot: no power-on value for it
-                    _od.WriteRawUnchecked(index, subindex, stored);
+                    var index = (ushort)(key >> 8);
+                    var subindex = (byte)(key & 0xFF);
+                    if (!IsRestorableObject(index)) continue;
+                    if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
+                    if (values.TryGetValue(key, out var stored))
+                    {
+                        if (_od.TryGet(index, subindex, out var current) && OdEntryLayout.FixedSize(current.DataType) is var size
+                            && size > 0 && stored.Length != size)
+                            continue; // re-declared with another width since the snapshot: no power-on value for it
+                        _od.WriteRawUnchecked(index, subindex, stored);
+                    }
+                    else if (IsManagedCommunicationObject(index) && _od.TryGet(index, subindex, out var entry))
+                    {
+                        _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
+                    }
                 }
-                else if (IsManagedCommunicationObject(index) && _od.TryGet(index, subindex, out var entry))
-                {
-                    _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
-                }
-            }
-        });
+            });
+        }
+        finally
+        {
+            _suppressFlyingMasterStartup = false;
+        }
+        ApplyFlyingMasterStartup();
     }
 
     /// <inheritdoc />

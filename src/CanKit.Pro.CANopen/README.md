@@ -403,8 +403,8 @@ is **CiA 302-2 version 4.1.0**, network management and NMT flying master, object
 [Lely's standards index](https://opensource.lely.com/canopen/docs/standards/) lists that part,
 and its NMT master cites the same edition. DSP 302 clause 5.5 is the historical ancestor of
 those services, not the binding. CiA 302 is members-only and is not in this repository; the
-behaviour below follows the public descriptions of that edition, and the points those
-descriptions do not settle are listed as open questions on the pull request.
+behaviour below follows the public descriptions of that edition. The maintainer decisions
+for the points those descriptions do not settle are on the pull request.
 
 `1F80h` bit 0 marks an NMT-master-capable device and bit 5 selects the flying-master process.
 Both are required. `StartFlyingMaster` sets them and writes the priority level (0 highest, 2
@@ -475,25 +475,34 @@ Sub-index 0 is constant 127. Each other sub-index is the node-id, an UNSIGNED32:
 | 3 | Mandatory. The master does not finish boot-up until this slave has been seen. |
 | 4 | Keep-alive. NMT Reset Communication is not sent to this slave. |
 
-Bits 8–15 and 16–31 are stored and not used; this node does not run node guarding from them.
-`1F84h`–`1F88h` (the identity check) and the concise DCF are not implemented.
+Bits 8–31 hold the guard time and life time. They are stored. Heartbeat is preferred, and
+node guarding is not started from them. `1F84h`–`1F88h` (the identity check) and the concise
+DCF are not implemented.
 
 `1F80h`, read the way the open stack that cites 302-2 v4.1.0 reads it:
 
 | Bit | Clear | Set |
 | --- | --- | --- |
-| 1 | Start each slave on its own. | One NMT Start, target 0, after every mandatory slave has been seen. Sent only when bit 2 is also clear, because this node applies its own NMT echo. |
+| 1 | Start each slave on its own. | One NMT Start, target 0, after every mandatory slave has been seen. Sent only when bit 2 is also clear, so the master enters Operational together with the slaves. The master does not apply that broadcast to itself. |
 | 2 | This node enters Operational when the mandatory slaves have been seen, or at once when there are none. | This node stays in its current NMT state. |
 | 3 | Boot the assigned slaves. | Do not reset them and do not send NMT Start. |
 | 4 | On a mandatory-slave timeout, reset that slave. | On a mandatory-slave timeout, NMT Reset Node to every assigned slave. |
 | 6 | — | On a mandatory-slave timeout, NMT Stop to every assigned slave. Takes precedence over bit 4. |
 
-`StartFlyingMaster` leaves bits 1, 2, 3, 4 and 6 as they were. With the defaults, that is all
-clear: the winner enters Operational, and it starts slaves individually if `1F81h` assigns any.
+`StartFlyingMaster` leaves bits 1, 2, 3, 4 and 6 as they were. Which value that is depends on
+the profile the node was opened with (`CanOpenNodeOptions.Profile`), checked when `1F80h` is
+created. A device starts with bits 2 and 3 clear: the winner enters Operational, and it starts
+slaves individually if `1F81h` assigns any. A tool starts with both bits set, so self-start and
+slave-start stay suppressed until the application clears them.
 
 Each assigned slave that is not keep-alive is sent NMT Reset Communication to its own node-id.
-A broadcast is not used there. This node would reset itself on the echo, and the election has
-already broadcast Reset Communication once on a cold boot.
+A broadcast is not used there. While this node is the active flying master it ignores NMT
+addressed to its own node-id, and a broadcast reset or stop does not take the master down
+(including the echo of a reset it sent itself).
+
+The guard time and life time stored in the upper bytes of each `1F81h` entry are kept as
+written and are not used to start node guarding. Heartbeat (`1016h` / `1017h`) is the
+keep-alive this node runs.
 
 Heartbeats, including the boot-up byte `0x00`, update `1F82h` at that node-id. Reading `1F82h`
 returns the last state byte, or 0 when none has been seen. Writing it, while this node is the

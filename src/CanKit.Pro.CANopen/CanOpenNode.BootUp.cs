@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
@@ -29,11 +31,16 @@ internal sealed partial class CanOpenNode
     private int _bootGeneration;
     private IDeadline? _bootDeadline;
 
+    // NMT the master sends, in the order it was asked for. Each frame waits for the previous
+    // send to finish, so a simultaneous Start cannot pass the Reset Communication that was
+    // queued ahead of it. Only the tail is kept, so the chain does not retain every frame.
+    private Task _nmtOrder = Task.CompletedTask;
+
     /// <summary>
     /// Takes the network list. Runs only while this node is the active master, and again when
     /// <c>1F80h</c>, <c>1F81h</c> or <c>1F89h</c> change in that role. A slave that is not
-    /// keep-alive is reset individually: a broadcast Reset Communication would reset this node
-    /// as well, because it applies its own NMT echo.
+    /// keep-alive is reset individually. A broadcast Reset is not used: the cold election
+    /// already broadcast one, and the active master does not apply a broadcast reset to itself.
     /// </summary>
     private void BeginBootUp()
     {
@@ -55,7 +62,8 @@ internal sealed partial class CanOpenNode
             int generation = _bootGeneration;
             _bootDeadline = _deadlines.Arm(TimeSpan.FromMilliseconds(bootMs), () =>
             {
-                if (generation != _bootGeneration || _flyingMasterRole != FlyingMasterRole.Active) return;
+                if (generation != _bootGeneration || _disposed != 0
+                    || _flyingMasterRole != FlyingMasterRole.Active) return;
                 OnBootTimeout();
             });
         }
@@ -101,8 +109,8 @@ internal sealed partial class CanOpenNode
         }
         if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
 
-        // Bit 1 waits for one broadcast, and only when this node may enter Operational too:
-        // a broadcast Start would otherwise start this node through its own NMT echo.
+        // Bit 1 waits for one broadcast, and only when this node may enter Operational too.
+        // Self-start is applied locally; the active master does not take the broadcast as its own.
         bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
         if (simultaneous && !_bootBroadcastSent) return;
 
@@ -136,6 +144,7 @@ internal sealed partial class CanOpenNode
 
     private void OnBootTimeout()
     {
+        if (_disposed != 0) return;
         if (!HasUnseenMandatorySlave())
         {
             TryFinishBoot();
@@ -257,5 +266,31 @@ internal sealed partial class CanOpenNode
     }
 
     private void SendNmt(NmtCommand command, byte target)
-        => _ = SendControlFrame(CanOpenCobId.NmtCommand, new[] { (byte)command, target });
+        => _ = EnqueueNmt(command, target);
+
+    private Task EnqueueNmt(NmtCommand command, byte target)
+    {
+        var payload = new[] { (byte)command, target };
+        var previous = _nmtOrder;
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _nmtOrder = done.Task;
+        previous.ContinueWith(
+            _ =>
+            {
+                SendControlFrame(CanOpenCobId.NmtCommand, payload).ContinueWith(
+                    send =>
+                    {
+                        if (send.IsCanceled) done.TrySetCanceled();
+                        else if (send.IsFaulted) done.TrySetException(send.Exception!.InnerExceptions);
+                        else done.TrySetResult(true);
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.None,
+                    TaskScheduler.Default);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+        return done.Task;
+    }
 }

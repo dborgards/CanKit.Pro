@@ -54,8 +54,8 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
     private static CanOpenNode OpenClockedNode(ICanBus bus, byte nodeId, ManualTimeSource clock,
-        CanOpenDeviceDescription? description = null)
-        => new(new CanBusService(bus), nodeId, new CanOpenNodeOptions(), ownsService: true,
+        CanOpenDeviceDescription? description = null, CanOpenNodeOptions? options = null)
+        => new(new CanBusService(bus), nodeId, options ?? new CanOpenNodeOptions(), ownsService: true,
             timeSource: clock, description: description);
 
     [Fact]
@@ -344,7 +344,8 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Device_Description_Feeds_1F80h_And_1F90h_Through_The_Validated_Path()
     {
-        var path = Path.Combine(Path.GetTempPath(), $"flying-master-{Guid.NewGuid():N}.eds");
+        var fileName = Path.GetFileName($"flying-master-{Guid.NewGuid():N}.eds");
+        var path = Path.Combine(Path.GetTempPath(), fileName);
         File.WriteAllText(path, FlyingMasterEds);
         try
         {
@@ -522,6 +523,171 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
         rig.Log.Snapshot().Should().Contain(f => IsNmt(f, NmtCommand.Stop, 0));
     }
 
+    [Fact]
+    public void A_Tool_Starts_With_Self_Start_And_Slave_Start_Suppressed()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(bus, LeftId, clock,
+            options: new CanOpenNodeOptions { Profile = CanOpenNodeProfile.Tool });
+
+        node.ObjectDictionary.ReadUnsigned(Startup, 0x00)
+            .Should().Be(SuppressSelfStart | SuppressSlaveStart);
+    }
+
+    [Fact]
+    public async Task A_Tool_Does_Not_Start_Itself_Or_Its_Slaves_Until_The_Bits_Are_Cleared()
+    {
+        const byte slave = 0x22;
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peer = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, LeftId, clock,
+            options: new CanOpenNodeOptions { Profile = CanOpenNodeProfile.Tool });
+        var witness = new ActorWitness(node, peer, WitnessForLeft);
+        using var log = new FrameLog(nodeBus, peer);
+
+        node.ObjectDictionary.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        (node.ObjectDictionary.ReadUnsigned(Startup, 0x00) & (SuppressSelfStart | SuppressSlaveStart))
+            .Should().Be(SuppressSelfStart | SuppressSlaveStart, "starting the election keeps the tool's suppress bits");
+
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800, "the tool wins the election");
+
+        node.State.Should().Be(NmtState.PreOperational);
+        log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
+        log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, slave));
+    }
+
+    [Fact]
+    public async Task The_Active_Master_Ignores_Nmt_Addressed_To_Itself_And_A_Broadcast_Reset()
+    {
+        using var rig = OpenMaster();
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active and has started itself");
+        rig.Node.State.Should().Be(NmtState.Operational);
+
+        TransmitNmt(rig.Peer, NmtCommand.ResetCommunication, LeftId);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+        rig.Node.State.Should().Be(NmtState.Operational);
+
+        TransmitNmt(rig.Peer, NmtCommand.Stop, LeftId);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.State.Should().Be(NmtState.Operational);
+
+        TransmitNmt(rig.Peer, NmtCommand.ResetNode, 0);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active,
+            "a broadcast reset does not take the active master down");
+        rig.Node.State.Should().Be(NmtState.Operational);
+    }
+
+    [Fact]
+    public async Task Simultaneous_Start_Is_Sent_After_The_Per_Slave_Reset()
+    {
+        const byte slave = 0x22;
+        const uint startAll = 0x02;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, startAll);
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        var frames = rig.Log.Snapshot();
+        int resetAt = frames.FindIndex(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
+        int startAt = frames.FindIndex(f => IsNmt(f, NmtCommand.Start, 0));
+        resetAt.Should().BeGreaterOrEqualTo(0);
+        startAt.Should().BeGreaterThan(resetAt);
+    }
+
+    [Fact]
+    public async Task A_Detect_Cycle_Does_Not_Reset_Assigned_Slaves_Again()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        od.WriteUnsigned(Timing, 0x06, 30);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        int resets = rig.Log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
+        resets.Should().BeGreaterThan(0);
+        int claims = rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim);
+
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Log.Snapshot().Count(f => f.Id == CanOpenCobId.FlyingMasterClaim) > claims,
+            200, "the detect cycle claims the mastership again");
+
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Active);
+        rig.Log.Snapshot().Count(f => IsNmt(f, NmtCommand.ResetCommunication, slave)).Should().Be(resets);
+    }
+
+    [Fact]
+    public async Task A_Live_Slave_Edit_Is_Not_Restored_As_The_Power_On_Assignment()
+    {
+        const byte slave = 0x22;
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart | SuppressSlaveStart);
+        od.WriteUnsigned(0x1F81, slave, Assigned);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the master is active");
+
+        od.WriteUnsigned(0x1F81, slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F89, 0x00, 250);
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterForce),
+            Array.Empty<byte>(), isExtendedFrame: false));
+        await QuiesceAsync(rig.Witness, null);
+
+        od.ReadUnsigned(0x1F81, slave).Should().Be(Assigned,
+            "the reset restores the assignment recorded at start, not the live edit");
+        od.ReadUnsigned(0x1F89, 0x00).Should().Be(0u);
+    }
+
+    [Fact]
+    public async Task A_Reset_Rearms_The_Election_From_The_Stored_Flying_Master_Delay()
+    {
+        using var rig = OpenMaster();
+        var od = rig.Node.ObjectDictionary;
+        Tighten(rig.Node);
+        od.WriteUnsigned(Timing, 0x02, 800);
+        od.WriteUnsigned(Startup, 0x00, MasterBits);
+        rig.Node.StoreParameters();
+        od.WriteUnsigned(Timing, 0x02, 40);
+
+        TransmitNmt(rig.Peer, NmtCommand.ResetCommunication, LeftId);
+        await QuiesceAsync(rig.Witness, null);
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying);
+
+        await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(50));
+        rig.Node.FlyingMasterRole.Should().Be(FlyingMasterRole.Delaying,
+            "the restored delay is 800 ms, so 50 ms is still inside it");
+
+        await UntilAsync(rig.Clock, rig.Witness, null,
+            () => rig.Node.FlyingMasterRole == FlyingMasterRole.Detecting, 900,
+            "the stored delay elapses and the node asks who is master");
+    }
+
     /// <summary>Short times, still ordered so a better priority level always waits less than a
     /// worse one: the device slot is narrowed before the priority slot, or the write is rejected.</summary>
     private static void Tighten(CanOpenNode node)
@@ -545,6 +711,10 @@ public class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixture>
     private static void TransmitHeartbeat(ICanBus peer, byte nodeId, byte state)
         => peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.Heartbeat(nodeId)),
             new[] { state }, isExtendedFrame: false));
+
+    private static void TransmitNmt(ICanBus peer, NmtCommand command, byte target)
+        => peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new[] { (byte)command, target }, isExtendedFrame: false));
 
     private static MasterRig OpenMaster()
     {

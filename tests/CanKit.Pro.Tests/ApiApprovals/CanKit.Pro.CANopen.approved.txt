@@ -67,6 +67,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableChangeOfStateTpdo { get; init; }
         public int EventQueueCapacity { get; init; }
         public int MaxSdoTransferBytes { get; init; }
+        public CanKit.Pro.CANopen.CanOpenNodeProfile Profile { get; init; }
         public bool RespondToNodeGuardingRtr { get; init; }
         public bool SdoBlockCrcSupported { get; init; }
         public int SdoBlockMaxRetransmissions { get; init; }
@@ -75,7 +76,12 @@ namespace CanKit.Pro.CANopen
         public System.TimeSpan SdoServerTimeout { get; init; }
         public System.TimeSpan SdoTimeout { get; init; }
         public bool WritableCommunicationParameters { get; init; }
-        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default, CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default) { }
+    }
+    public enum CanOpenNodeProfile
+    {
+        Device = 0,
+        Tool = 1,
     }
     public sealed class CanOpenTransportException : CanKit.Core.Exceptions.CanKitException
     {

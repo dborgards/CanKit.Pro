@@ -19,9 +19,11 @@ namespace CanKit.Pro.CANopen;
 /// One instance represents one CANopen node identity (1..127) on one physical bus, and serves
 /// both roles a CANopen application takes: a <b>device</b> (its own object dictionary, PDOs it
 /// produces and consumes, configured by a master over SDO) and a <b>tool or master</b> (the
-/// SDO client, the NMT master, heartbeat and node-guarding consumers, the SYNC producer). Two or
-/// more nodes may share the same underlying <see cref="CanKit.Pro.RawCan.ICanBusService"/> so
-/// a process-hosted master and one or more simulated slaves can coexist on a virtual bus.
+/// SDO client, the NMT master, heartbeat and node-guarding consumers, the SYNC producer).
+/// <see cref="CanOpenNodeOptions.Profile"/> says which of the two this instance is; the default
+/// of <c>1F80h</c> follows that profile. Two or more nodes may share the same underlying
+/// <see cref="CanKit.Pro.RawCan.ICanBusService"/> so a process-hosted master and one or more
+/// simulated slaves can coexist on a virtual bus.
 /// </para>
 /// <para>
 /// The object dictionary is the single source of truth for the node's communication
@@ -92,9 +94,11 @@ public interface ICanOpenNode : IDisposable
     event EventHandler<RpdoReceivedEventArgs>? RpdoReceived;
 
     /// <summary>Raised for every NMT master command whose target matches this node (or the
-    /// broadcast target 0). Delivered on the node's event queue, after the node has acted on the
-    /// command — for a reset, possibly after the boot-up is on the bus; to restore application
-    /// objects before that, use <see cref="ApplicationReset"/>.</summary>
+    /// broadcast target 0) and which the node applies. Delivered on the node's event queue, after
+    /// the node has acted on the command — for a reset, possibly after the boot-up is on the bus;
+    /// to restore application objects before that, use <see cref="ApplicationReset"/>. While this
+    /// node is the active flying master it ignores a command addressed to its own node-id, and it
+    /// does not apply a broadcast reset or stop to itself.</summary>
     event EventHandler<NmtCommandReceivedEventArgs>? NmtCommandReceived;
 
     /// <summary>
