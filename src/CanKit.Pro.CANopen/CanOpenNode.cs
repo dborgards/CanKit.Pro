@@ -1044,8 +1044,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             HandleServerUploadInit(index, subindex, entry);
             return;
         }
-        // Download init (client → server). Cs matches expedited (0x2X) or segmented (0x21).
-        if (cs == SdoFrames.CcsDownloadInitSegmented || (cs & 0xE0) == SdoFrames.CcsDownloadInitExpeditedBase)
+        // Download init (client → server). ccs = 1 covers expedited (e = 1) and segmented
+        // (e = 0), and the segmented form is legal with or without a size indicator (0x21 / 0x20).
+        if ((cs & 0xE0) == SdoFrames.CcsDownloadInitExpeditedBase)
         {
             HandleServerDownloadInit(index, subindex, entry, cs, data);
             return;
@@ -1187,36 +1188,47 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return;
         }
 
-        if (cs == SdoFrames.CcsDownloadInitSegmented)
+        // e = 0 is a segmented (normal) transfer whether or not s is set. 0x21 carries the
+        // length in bytes 4..7; 0x20 leaves those bytes reserved and the length is whatever
+        // the segments deliver (#38). Reading 0x20 as expedited committed four bytes out of
+        // that reserved field and then aborted the segments that followed.
+        if ((cs & 0x02) == 0)
         {
-            // Segmented download — reply Init-Ack, prepare a growing buffer with declared size.
-            uint declaredLen = (uint)(data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24));
-
-            // Cap the initiator's 32-bit declared length before the `new byte[declaredLen]`
-            // below: a hostile / buggy peer can otherwise drive us into an unbounded allocation
-            // (up to 4 GiB) purely by choosing the bytes in the init frame's size field. Beyond
-            // the option cap the CiA 301 "out of memory" abort code (0x05040005) is the right
-            // signal to send back to the peer. See Bugbot 3600644166.
-            if (declaredLen > (uint)_options.MaxSdoTransferBytes)
+            bool sizeIndicated = (cs & 0x01) != 0;
+            uint declaredLen = 0;
+            if (sizeIndicated)
             {
-                SendSdoServerAbort(index, subindex, SdoAbortCode.OutOfMemory);
-                return;
-            }
+                declaredLen = (uint)(data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24));
 
-            // For fixed-width types the declared length must equal the OD's declared width.
-            int fixedSize = OdEntryLayout.FixedSize(entry.DataType);
-            if (fixedSize > 0 && declaredLen != fixedSize)
-            {
-                var reason = declaredLen > fixedSize
-                    ? SdoAbortCode.LengthTooHigh : SdoAbortCode.LengthTooLow;
-                SendSdoServerAbort(index, subindex, reason);
-                return;
+                // Cap the initiator's 32-bit declared length before the `new byte[declaredLen]`
+                // below: a hostile / buggy peer can otherwise drive us into an unbounded allocation
+                // (up to 4 GiB) purely by choosing the bytes in the init frame's size field. Beyond
+                // the option cap the CiA 301 "out of memory" abort code (0x05040005) is the right
+                // signal to send back to the peer. See Bugbot 3600644166.
+                if (declaredLen > (uint)_options.MaxSdoTransferBytes)
+                {
+                    SendSdoServerAbort(index, subindex, SdoAbortCode.OutOfMemory);
+                    return;
+                }
+
+                // For fixed-width types the declared length must equal the OD's declared width.
+                // With no size indicated the length is not known until the last segment, so that
+                // check waits until then.
+                int fixedSize = OdEntryLayout.FixedSize(entry.DataType);
+                if (fixedSize > 0 && declaredLen != fixedSize)
+                {
+                    var reason = declaredLen > fixedSize
+                        ? SdoAbortCode.LengthTooHigh : SdoAbortCode.LengthTooLow;
+                    SendSdoServerAbort(index, subindex, reason);
+                    return;
+                }
             }
 
             // Supersede handling already ran at the top of the method; install the fresh
             // segmented-download session cleanly here.
             var session = new SdoServerSession(inDownload: true, index, subindex,
-                new byte[declaredLen], offset: 0, toggle: false);
+                sizeIndicated ? new byte[declaredLen] : Array.Empty<byte>(),
+                offset: 0, toggle: false, sizeIndicated: sizeIndicated);
             session.Deadline = _deadlines.Arm(_options.SdoServerTimeout, OnSdoServerTimeout);
             _sdoServer = session;
             var ack = new byte[8];
@@ -1228,7 +1240,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return;
         }
 
-        // Expedited download.
+        // Expedited download (e = 1). s = 0 means all four data bytes are valid.
         var payload = SdoFrames.ReadExpeditedPayload(data);
         int required = OdEntryLayout.FixedSize(entry.DataType);
         if (required > 0 && payload.Length != required)
@@ -1270,7 +1282,45 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             _sdoServer = null;
             return;
         }
-        if (session.Offset + payload.Length > session.Buffer.Length)
+        int incoming = session.Offset + payload.Length;
+        if (!session.SizeIndicated)
+        {
+            // No declared length (#38): the buffer is capacity and Offset is the logical
+            // length. Capacity doubles so a transfer near the cap does not recopy every
+            // preceding byte on each segment, and it never exceeds the same cap a sized
+            // initiate is held to. A segment past that cap is refused before any allocation,
+            // not copied and then trimmed.
+            if (incoming > _options.MaxSdoTransferBytes)
+            {
+                SendSdoServerAbort(session.Index, session.Subindex, SdoAbortCode.OutOfMemory);
+                _sdoServer = null;
+                return;
+            }
+            if (incoming > session.Buffer.Length)
+            {
+                int max = _options.MaxSdoTransferBytes;
+                int capacity = session.Buffer.Length == 0 ? 8 : session.Buffer.Length;
+                while (capacity < incoming)
+                {
+                    // Doubling past the cap would allocate more than we are willing to keep.
+                    // Clamp and stop; incoming is already known to fit in max.
+                    if (capacity > max / 2)
+                    {
+                        capacity = max;
+                        break;
+                    }
+                    capacity *= 2;
+                }
+                if (capacity > max)
+                {
+                    capacity = max;
+                }
+                var grown = new byte[capacity];
+                Buffer.BlockCopy(session.Buffer, 0, grown, 0, session.Offset);
+                session.Buffer = grown;
+            }
+        }
+        else if (incoming > session.Buffer.Length)
         {
             SendSdoServerAbort(session.Index, session.Subindex, SdoAbortCode.LengthTooHigh);
             _sdoServer = null;
@@ -1294,11 +1344,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // relying on field-level memory ordering of OdEntry._value.
         if (last)
         {
-            if (session.Offset != session.Buffer.Length)
+            if (session.SizeIndicated && session.Offset != session.Buffer.Length)
             {
                 SendSdoServerAbort(session.Index, session.Subindex, SdoAbortCode.LengthTooLow);
                 _sdoServer = null;
                 return;
+            }
+            // The size was not in the initiate, so a fixed-width object can only be checked now.
+            if (!session.SizeIndicated
+                && _od.TryGet(session.Index, session.Subindex, out var entry))
+            {
+                int fixedSize = OdEntryLayout.FixedSize(entry.DataType);
+                if (fixedSize > 0 && session.Offset != fixedSize)
+                {
+                    var reason = session.Offset > fixedSize
+                        ? SdoAbortCode.LengthTooHigh : SdoAbortCode.LengthTooLow;
+                    SendSdoServerAbort(session.Index, session.Subindex, reason);
+                    _sdoServer = null;
+                    return;
+                }
             }
             var final = new byte[session.Offset];
             Buffer.BlockCopy(session.Buffer, 0, final, 0, session.Offset);
@@ -1573,8 +1637,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 return;
             }
 
-            // Upload path — expected: expedited response 0x43/0x47/0x4B/0x4F, or segmented
-            // init 0x41.
+            // Upload path. e = 1: expedited (0x43/0x47/0x4B/0x4F, or e = 1 and s = 0, which
+            // carries four data bytes). e = 0: segmented, with a size (0x41) or without one
+            // (0x40). 0x40 is a normal transfer whose length arrives with the segments (#38);
+            // matching only 0x41 dropped it and the transfer ran into its timeout.
             if ((cs & 0xE0) == SdoFrames.ScsUploadInitExpeditedBase && (cs & 0x02) != 0)
             {
                 // Expedited upload complete.
@@ -1584,7 +1650,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 session.Tcs.TrySetResult(value);
                 return;
             }
-            if (cs == SdoFrames.ScsUploadInitSegmented)
+            if ((cs & 0xE0) == SdoFrames.ScsUploadInitExpeditedBase && (cs & 0x02) == 0)
             {
                 uint declared = SdoFrames.ReadSegmentedTotalLength(data);
                 // Cap the server's 32-bit declared length before the `new byte[declared]`
@@ -1895,7 +1961,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private sealed class SdoServerSession
     {
         public SdoServerSession(bool inDownload, ushort index, byte subindex, byte[] buffer,
-            int offset, bool toggle)
+            int offset, bool toggle, bool sizeIndicated = true)
         {
             InDownload = inDownload;
             Index = index;
@@ -1903,12 +1969,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             Buffer = buffer;
             Offset = offset;
             Toggle = toggle;
+            SizeIndicated = sizeIndicated;
         }
 
         public bool InDownload { get; }
         public ushort Index { get; }
         public byte Subindex { get; }
-        public byte[] Buffer { get; }
+        public byte[] Buffer { get; set; }
+        /// <summary>False for a segmented download whose initiate did not carry a size (#38).
+        /// The buffer then grows with each segment instead of being allocated up front.</summary>
+        public bool SizeIndicated { get; }
         public int Offset { get; set; }
         public bool Toggle { get; set; }
         public IDeadline? Deadline { get; set; }
