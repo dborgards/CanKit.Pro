@@ -47,17 +47,19 @@ public sealed class CanOpenNodeOptions
     public TimeSpan DefaultTpdoEventTimerInterval { get; init; } = TimeSpan.FromMilliseconds(100);
 
     /// <summary>
-    /// Bounded capacity of the outbound event dispatch queue that feeds
-    /// <see cref="CanOpenNode.HeartbeatReceived"/> / <see cref="CanOpenNode.HeartbeatTimeout"/> /
-    /// <see cref="CanOpenNode.EmcyReceived"/> / <see cref="CanOpenNode.SyncReceived"/> /
-    /// <see cref="CanOpenNode.RpdoReceived"/> / <see cref="CanOpenNode.NmtCommandReceived"/>
-    /// subscribers. The node uses a bounded <see cref="System.Threading.Channels.Channel{T}"/>
-    /// with drop-oldest semantics: when a subscriber cannot keep up, the queue silently
-    /// discards the oldest pending events so it never grows past this bound and the actor
-    /// loop is never blocked by a slow handler. Defaults to 64.
-    /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> is dispatched synchronously and
-    /// is not subject to this bound — it is a low-frequency diagnostic signal that must not
-    /// be silently dropped by queue backpressure.
+    /// How many ordinary events may wait in the dispatch queue that feeds
+    /// <see cref="CanOpenNode.HeartbeatReceived"/>, <see cref="CanOpenNode.SyncReceived"/>,
+    /// <see cref="CanOpenNode.RpdoReceived"/>, <see cref="CanOpenNode.NmtCommandReceived"/>,
+    /// <see cref="CanOpenNode.NodeGuardingReceived"/> and <see cref="CanOpenNode.LifeGuardingEvent"/>.
+    /// When a subscriber falls behind, the oldest of those events is discarded so the queue
+    /// never holds more than this many of them and the actor loop is never blocked by a slow
+    /// handler. Defaults to 64.
+    /// <see cref="CanOpenNode.HeartbeatTimeout"/>, <see cref="CanOpenNode.NodeGuardingTimeout"/>
+    /// and <see cref="CanOpenNode.EmcyReceived"/> travel on the same queue, in the order they
+    /// were raised, but are never discarded to make room: a guarding consumer that misses one
+    /// treats a silent peer as alive. They can make the queue longer than this capacity while
+    /// a handler is stuck. <see cref="CanOpenNode.BackgroundExceptionOccurred"/> is dispatched
+    /// synchronously and is not queued.
     /// </summary>
     public int EventQueueCapacity { get; init; } = 64;
 
