@@ -334,6 +334,20 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             }
         };
 
+        // #171: "each Wait FC is processed within 20 ms before the next is sent" was a
+        // Task.Delay(20) standing in for two facts: the frame reached the sender's bus, and the
+        // sender's actor took it off the mailbox. fcArrived is the first (a frame on the wire,
+        // observed on busA where the sender listens); SettleAsync is the second (an actor
+        // round-trip after that frame was delivered). Sending the next Wait FC before both have
+        // happened would let two Waits collapse into the actor's mailbox as one delivery.
+        using var fcArrived = new SemaphoreSlim(0);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x401) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x3) fcArrived.Release();
+        };
+
         byte[] pdu = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
 
         var sendTask = sender.SendAsync(pdu);
@@ -346,7 +360,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             var fc = IsoTpFrameCodec.BuildFlowControl(epBA, FlowStatus.Wait,
                 blockSize: 0, stMinRaw: 0, isCanFd: false, padding: true);
             busB.Transmit(CanFrame.Classic(0x401, fc));
-            await Task.Delay(20);
+            (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue(
+                $"the sender's bus must see Wait FC #{i + 1}");
+            await sender.SettleAsync().WaitAsync(ShortTimeout);
         }
 
         Func<Task> act = () => sendTask;
@@ -432,8 +448,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
         long arrival = Stopwatch.GetTimestamp();
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
-        // Buffered, but nothing has taken it yet -- the reader task is starved by construction.
-        await Task.Delay(50);
+        // Buffered, but nothing has taken it yet -- the reader task is starved by construction
+        // (StarvedReaderBusService.WaitToReadAsync never completes). #171: that starvation is
+        // deterministic, not a race, so what proves "nothing has taken it yet" is not "enough
+        // wall time for a non-starved reader" but an actor round-trip: the actor has nothing
+        // queued for this frame because nothing pumped the subscription for it.
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
         channel.TryReceiveWithArrival(out _).Should().BeFalse("the reader task has not run");
 
         await channel.SettleAsync().WaitAsync(ShortTimeout);
@@ -456,7 +476,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
 
         long stamp = Stopwatch.GetTimestamp();
-        await Task.Delay(5);
+        // #171: Task.Delay(5) was a guess at how long it takes Stopwatch to tick past `stamp`.
+        // What the test actually needs is a later reading, which a busy check gets deterministically
+        // and without depending on the runner's scheduler granularity at all.
+        while (Stopwatch.GetTimestamp() == stamp) { }
         byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), Stopwatch.GetTimestamp());
 
@@ -635,11 +658,25 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Mid-reassembly reset — must clear _rx so the trailing CF cannot complete a PDU.
         receiver.DiscardPendingPdus();
 
+        // #171: "the trailing CF was processed within 50 ms" was a Task.Delay(50) guessing at
+        // cross-bus delivery. staleCfSeen is a frame on the wire (the receiver's own bus,
+        // busB); the SettleAsync after it is the actor round-trip that proves the receiver has
+        // taken it off the mailbox -- both before the fresh exchange below can be attributed to
+        // whichever run first.
+        var staleCfSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != unchecked((int)epPeer.TxCanId)) return;
+            var data = e.CanFrame.Data.ToArray();
+            if (data.Length > 0 && (data[0] >> 4) == 0x2) staleCfSeen.TrySetResult(true);
+        };
+
         byte[] chunk = stalePayload.AsSpan(ffData).ToArray();
         var cf = IsoTpFrameCodec.BuildConsecutiveFrame(epPeer, sequenceNumber: 1, chunk,
             isCanFd: false, padding: true);
         busA.Transmit(CanFrame.Classic(unchecked((int)epPeer.TxCanId), cf));
-        await Task.Delay(50);
+        await staleCfSeen.Task.WaitAsync(ShortTimeout);
+        await receiver.SettleAsync().WaitAsync(ShortTimeout);
 
         // Stale multi-frame must not appear; a fresh SF must be the next ReceiveAsync result.
         using var sender = IsoTpFactory.Open(busA, epPeer, FastOptions());
@@ -1152,8 +1189,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = () => sendTask.WaitAsync(ShortTimeout);
         await act.Should().ThrowAsync<OperationCanceledException>();
 
-        // Give any straggling actor work time to (incorrectly) hit the wire under the bug.
-        await Task.Delay(100);
+        // #171: "give any straggling actor work time to hit the wire" was a Task.Delay(100).
+        // Under the bug the errant transmit is itself dispatched from inside the actor's
+        // processing of [begin, cleanup] (SendConfirmed transmits synchronously before it parks
+        // on confirmation -- see the DelayingConfirmService doubles below), so a round-trip on
+        // the very actor we parked and released proves that work has run, whichever way it went.
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
         framesToPeer.Should().Be(0,
             "a send cancelled before the actor delivers BeginSendOnLoop must never put a frame on the bus");
 
@@ -1303,6 +1344,21 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // the gate is already free and this SF (DL=3) hits the bus immediately; under the fix it
         // must wait until we release the first confirmation.
         var secondSend = sender.SendAsync(new byte[] { 0x11, 0x22, 0x33 });
+
+        // #171: "no SF may hit the peer" was checked after a Task.Delay(100). SendAsync acquires
+        // _sendGate before ever posting to the actor (IsoTpChannel.cs), so while the gate is
+        // held secondSend cannot even reach the actor's mailbox at all -- under the fix nothing
+        // is scheduled, ever, and the round-trip below is a complete, deterministic proof of
+        // that. A regression that skipped the gate would instead post BeginSendOnLoop, whose own
+        // transmit is dispatched onto the thread pool (SendFrameOnBus's Task.Run) rather than
+        // run inline on the actor, so the round-trip alone only proves the actor's *decision*,
+        // not that dispatch's completion; the residual wait below covers only that one
+        // thread-pool hop, unchanged from the original margin, not lengthened for this.
+        var actorField = sender.GetType().GetField("_actor",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        actorField.Should().NotBeNull("IsoTpChannel must keep an _actor field for this race test");
+        var actor = (IProtocolActor)actorField!.GetValue(sender)!;
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
         await Task.Delay(100);
         framesToPeer.Should().Be(0,
             "no SF may hit the peer while the aborted send's SendConfirmed is still parked");
@@ -1377,6 +1433,18 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             }
         };
 
+        // #171: "ensure peer FC is processed into DeferredFcs" was a Task.Delay(30). fcArrived
+        // is a frame on the wire (the sender's own bus, busA, where epAB.RxCanId = 0x261); the
+        // SettleAsync after it is the actor round-trip that proves the sender has taken it off
+        // the mailbox before the held CF confirm is released.
+        using var fcArrived = new SemaphoreSlim(0);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x261) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x3) fcArrived.Release();
+        };
+
         // 20 bytes classic: FF(6) + CF1(7) + CF2(7). BS=1 => wait for FC after FF and after CF1.
         byte[] pdu = Enumerable.Range(0, 20).Select(i => (byte)(i + 1)).ToArray();
         var sendTask = sender.SendAsync(pdu);
@@ -1388,7 +1456,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             cfConfirmParked.Wait(TimeSpan.FromSeconds(3)).Should().BeTrue(
                 $"CF confirm #{i + 1} must park after transmit so peer FC can defer");
             cfConfirmParked.Reset();
-            await Task.Delay(30); // ensure peer FC is processed into DeferredFcs
+            (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue(
+                $"the sender's bus must see the FC deferred for block #{i + 1}");
+            await sender.SettleAsync().WaitAsync(ShortTimeout);
             holdCfConfirm.Release();
         }
 
@@ -1428,6 +1498,18 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
                 ffSeen.TrySetResult(true);
         };
 
+        // #171: "each Wait FC is processed within 20 ms" was a Task.Delay(20). fcArrived is a
+        // frame on the wire (the sender's own bus, busA, where epAB.RxCanId = 0x271); the
+        // SettleAsync after it is the actor round-trip that proves it has been queued as its own
+        // DeferredFc before the next one goes out, which is exactly what this test guards.
+        using var fcArrived = new SemaphoreSlim(0);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x271) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x3) fcArrived.Release();
+        };
+
         byte[] pdu = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
         var sendTask = sender.SendAsync(pdu);
 
@@ -1442,7 +1524,9 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             var fc = IsoTpFrameCodec.BuildFlowControl(epBA, FlowStatus.Wait,
                 blockSize: 0, stMinRaw: 0, isCanFd: false, padding: true);
             busB.Transmit(CanFrame.Classic(0x271, fc));
-            await Task.Delay(20);
+            (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue(
+                $"the sender's bus must see Wait FC #{i + 1}");
+            await sender.SettleAsync().WaitAsync(ShortTimeout);
         }
 
         holdConfirm.Release();
@@ -1528,6 +1612,16 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
                 Interlocked.Increment(ref anyFc);
         };
 
+        // #171: "an illegal FC would have been sent within 100 ms" was a Task.Delay(100).
+        // hugeFfSeen is a frame on the wire (the receiver's own bus, busA); SettleAsync after it
+        // is the actor round-trip that proves the receiver has taken it off the mailbox and made
+        // its (silent) decision before anyFc is read.
+        var hugeFfSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == 0x7E8) hugeFfSeen.TrySetResult(true);
+        };
+
         // CAN-FD escape FF announcing 0x01000000 bytes. Classic TryParsePci must reject it
         // (isCanFd: false) so HandleRxFirstFrame never sees pci.Length = 16_777_216.
         byte[] hugeFf =
@@ -1538,7 +1632,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         };
         busB.Transmit(CanFrame.Classic(0x7E8, hugeFf));
 
-        await Task.Delay(100);
+        await hugeFfSeen.Task.WaitAsync(ShortTimeout);
+        await receiver.SettleAsync().WaitAsync(ShortTimeout);
         anyFc.Should().Be(0, "classic channels must drop CAN-FD escape FFs without FC reply");
 
         // Channel remains usable for a normal SF afterwards.
@@ -1683,9 +1778,19 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         ff2.Skip(2).Take(6).Should().Equal(second.Take(6));
 
         // Now the old STmin elapses. Nothing may follow the FF: the peer has not sent Flow Control.
+        // #171: the trailing Task.Delay(100) ("a frame the timer released would be on the wire
+        // by now") added a wall-clock guess on top of an already-virtual clock. AdvanceAsync
+        // returns once the due timer's callback has run, and SettleAsync's round-trip proves the
+        // actor-side decision -- SendNextConsecutiveFrame's stale-tx check (IsoTpChannel.cs) --
+        // is deterministic under the clock: a released timer for a superseded transfer decides
+        // not to build a frame at all, and nothing is ever handed to the wire. What neither
+        // proves is that a frame the timer *did* release has finished transmitting: SendFrameOnBus
+        // hands the actual bus write to the thread pool (Task.Run), a hop with no actor-side
+        // observable, so the residual wait below covers only that one hop -- unchanged from the
+        // original margin, not lengthened for this.
         await clock.AdvanceAsync(stMin);
         await clock.SettleAsync();
-        await Task.Delay(100); // a frame the timer released would be on the wire by now
+        await Task.Delay(100);
         fromSender.Reader.TryRead(out var stray).Should().BeFalse(
             $"no Consecutive Frame may go out before the peer's Flow Control, but one did: {(stray is null ? "" : BitConverter.ToString(stray))}");
 
@@ -1741,12 +1846,17 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             FastOptions(localBs: 2));
 
         var fcCount = 0;
+        // #171: "all three FCs have been counted within 50 ms of receive completing" was a
+        // Task.Delay(50). thirdFcSeen is set from inside the handler itself once the count this
+        // assertion needs has actually been observed on the sniffer's own (independent)
+        // subscription, which a fixed window could only ever approximate.
+        var thirdFcSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         snifferBus.FrameObserved += (_, view) =>
         {
             if (view.CanFrame.ID != 0x7E8) return;
             var data = view.CanFrame.Data.Span;
             if (data.Length > 0 && (data[0] & 0xF0) == 0x30)
-                Interlocked.Increment(ref fcCount);
+                if (Interlocked.Increment(ref fcCount) == 3) thirdFcSeen.TrySetResult(true);
         };
 
         // 38 bytes => FF (6) + 5 CFs (7,7,7,7,4): with BS=2 the receiver sends its initial
@@ -1757,7 +1867,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var got = await recvTask;
         got.Should().Equal(pdu);
 
-        await Task.Delay(50);
+        await thirdFcSeen.Task.WaitAsync(ShortTimeout);
         Volatile.Read(ref fcCount).Should().Be(3);
     }
 

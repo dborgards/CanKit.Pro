@@ -126,6 +126,13 @@ public class IsoTpCanFdTests : IClassFixture<VirtualAdapterFixture>
         using var receiver = IsoTpFactory.Open(busB, IsoTpEndpoint.Normal(0x7E8, 0x7E0), FastOptions(useCanFd: true));
 
         var kinds = new List<(uint id, byte pci, CanFrameType kind)>();
+        // #171: "let the hub deliver the tail frames to the sniffer" was a Task.Delay(100)
+        // guessing at how long the sniffer's independent subscription takes to catch up with
+        // the last CF/FC. sniffedAllKinds is set from inside the handler itself once every kind
+        // this assertion needs has actually arrived, which is what a fixed window could only
+        // ever approximate.
+        var sniffedAllKinds = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool sawSf = false, sawFf = false, sawCf = false, sawFc = false;
         snifferBus.FrameObserved += (_, view) =>
         {
             var id = view.CanFrame.ID;
@@ -138,6 +145,11 @@ public class IsoTpCanFdTests : IClassFixture<VirtualAdapterFixture>
             lock (kinds)
             {
                 kinds.Add(((uint)id, pci, view.CanFrame.FrameKind));
+                if (id == 0x7E0 && (pci & 0xF0) == 0x00) sawSf = true;
+                if (id == 0x7E0 && (pci & 0xF0) == 0x10) sawFf = true;
+                if (id == 0x7E0 && (pci & 0xF0) == 0x20) sawCf = true;
+                if (id == 0x7E8 && (pci & 0xF0) == 0x30) sawFc = true;
+                if (sawSf && sawFf && sawCf && sawFc) sniffedAllKinds.TrySetResult(true);
             }
         };
 
@@ -153,7 +165,7 @@ public class IsoTpCanFdTests : IClassFixture<VirtualAdapterFixture>
         await sender.SendAsync(sf);
         (await recvSf).Should().Equal(sf);
 
-        await Task.Delay(100); // let the hub deliver the tail frames to the sniffer
+        await sniffedAllKinds.Task.WaitAsync(ShortTimeout);
 
         List<(uint id, byte pci, CanFrameType kind)> observed;
         lock (kinds)

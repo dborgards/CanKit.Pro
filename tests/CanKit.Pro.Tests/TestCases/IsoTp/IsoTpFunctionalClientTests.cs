@@ -284,12 +284,23 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
                 busB.Transmit(realFrame);
         };
 
-        // Blast the stale SF into the pipe. Give the virtual hub a moment to route it —
-        // if it lands after SendAndCollectAsync's internal Subscribe, DrainBuffered must
-        // drop it; if it lands before Subscribe, the subscription never sees it. Either
-        // way the assertion below must hold.
+        // #171: "give the virtual hub a moment to route it" was a Task.Delay(50). staleArrived
+        // is a frame on the wire -- the tester's own bus, busA -- which is what the comment
+        // below actually needs: the stale frame must have reached busA before
+        // SendAndCollectAsync's internal Subscribe runs, so it lands in the "before Subscribe"
+        // case rather than possibly inside the collection window itself, where it would be
+        // counted as a genuine (if spurious) response and break the HaveCount(1) assertion.
+        var staleArrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == unchecked((int)StaleEcuResponseId)) staleArrived.TrySetResult(true);
+        };
+
+        // Blast the stale SF into the pipe. If it lands after SendAndCollectAsync's internal
+        // Subscribe, DrainBuffered must drop it; if it lands before Subscribe (guaranteed by the
+        // wait below), the subscription never sees it. Either way the assertion below must hold.
         busB.Transmit(staleFrame);
-        await Task.Delay(50);
+        await staleArrived.Task.WaitAsync(ShortTimeout);
 
         byte[] request = { 0x22, 0xF1, 0x90 };
         var responses = await client.SendAndCollectAsync(request, CollectionWindow)
@@ -422,6 +433,17 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     {
         // Bugbot 3604785766: after ResponseTimeout, disposing the subscription before the
         // TryRead drain must prevent a post-window frame from being admitted.
+        //
+        // #171: this used to be a Task.Delay(window * 2) followed by a Task.Delay(60), both
+        // guessing at wall-clock margins around the window -- the comment they replaced records
+        // that a 40 ms window and an 80 ms wait had already failed once on macOS for want of
+        // that margin. IsoTpFunctionalClient takes an injected ProtocolActor clock exactly for
+        // this (its constructor doc cites this issue); CanBusService(bus, actor.TimeSource.
+        // GetTimestamp) puts frame arrival stamps on that same clock. Once the clock has been
+        // advanced past the deadline, any frame delivered from here on is stamped past it too
+        // -- CollectFromSubscriptionAsync compares HostArrivalTimestamp against a deadline taken
+        // from the same clock -- so the property holds regardless of whether the late frame
+        // lands before or after the window's own dispose-then-drain runs.
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
@@ -429,18 +451,17 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         const uint FunctionalTxId = 0x7DF;
         const uint EcuResponseId = 0x7E8;
 
-        using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, 0x7E8, 0x7EF,
-            FastOptions());
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var service = new CanBusService(busA, actor.TimeSource.GetTimestamp);
+        using var client = new IsoTpFunctionalClient(service, FunctionalTxId, 0x7E8, 0x7EF,
+            FastOptions(), ownsService: true, actor);
 
-        // Collect with a bounded window and no ECU reply during it. The window has to be
-        // long enough that the delay below is unambiguously past its end: CollectResponsesAsync
-        // arms the window on a continuation, so on a loaded runner the window can start tens of
-        // milliseconds after the call — with a 40 ms window and an 80 ms wait, that alone was
-        // enough to inject the frame while the window was still open and fail this test on
-        // macOS. The property under test is unchanged; only the margin is.
+        // Collect with a bounded window and no ECU reply during it.
         var window = TimeSpan.FromMilliseconds(200);
         var collectTask = client.CollectResponsesAsync(window);
-        await Task.Delay(TimeSpan.FromMilliseconds(window.TotalMilliseconds * 2));
+        await clock.WaitUntilTimerArmedAsync(actor, window, ShortTimeout);
+        await clock.AdvanceAsync(window + TimeSpan.FromMilliseconds(1));
 
         // Inject a late SF after the window has expired — must not appear in the result.
         var ep = IsoTpEndpoint.Normal(EcuResponseId, 0);
@@ -448,7 +469,6 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busB.Transmit(CanFrame.Classic(
             unchecked((int)EcuResponseId),
             IsoTpFrameCodec.BuildSingleFrame(ep, latePdu, isCanFd: false, padding: true)));
-        await Task.Delay(60);
 
         var responses = await collectTask.WaitAsync(ShortTimeout);
         responses.Should().BeEmpty(

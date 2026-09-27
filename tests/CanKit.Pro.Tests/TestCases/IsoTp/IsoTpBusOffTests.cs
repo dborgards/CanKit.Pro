@@ -57,13 +57,24 @@ public class IsoTpBusOffTests : IClassFixture<VirtualAdapterFixture>
 
         using var sender = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x300, 0x301), FastOptions());
 
+        // #171: "give the channel a moment to register the pending FF confirmation" was a
+        // Task.Delay(100) guessing at a race. OnTransmitting fires synchronously from inside
+        // Transmit, and its own doc says CanBusService calls it "with the transmitting send
+        // already registered" -- i.e. once this has fired, the FF's entry is in the pending-send
+        // list, which is exactly the state the test needs before it drives BusOff.
+        var ffTransmitted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.OnTransmitting = frame =>
+        {
+            var payload = frame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x1) ffTransmitted.TrySetResult(true);
+        };
+
         // Multi-frame send: the FF goes out and its TX confirmation stays pending behind the
         // blocked echo. Driving the bus off while that confirmation is outstanding must abort
         // the send (L2 -> L3 propagation per FR-RAW-051), not hang.
         var send = sender.SendAsync(Enumerable.Range(0, 30).Select(i => (byte)i).ToArray());
 
-        // Give the channel a moment to register the pending FF confirmation.
-        await Task.Delay(100);
+        await ffTransmitted.Task.WaitAsync(ShortTimeout);
         bus.BusState = BusState.BusOff;
         bus.RaiseFault(new InvalidOperationException("simulated bus-off"));
 
