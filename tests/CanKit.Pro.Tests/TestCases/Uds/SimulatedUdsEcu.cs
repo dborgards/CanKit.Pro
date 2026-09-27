@@ -55,6 +55,15 @@ public sealed class SimulatedUdsEcu : IDisposable
     /// <summary>Last request the ECU saw (or <c>null</c>).</summary>
     public byte[]? LastRequest => Volatile.Read(ref _lastRequest);
 
+    /// <summary>
+    /// How the ECU waits out the delays its sentinel exceptions ask for -- the pause before and
+    /// after a pending answer, the gap between 0x78s. Real time by default. A test on a virtual
+    /// clock replaces it with gates it opens itself, so each answer goes out at the virtual
+    /// instant the test has moved the clock to rather than whenever the host gets round to it
+    /// (#171).
+    /// </summary>
+    public Func<TimeSpan, CancellationToken, Task> Delay { get; set; } = (delay, ct) => Task.Delay(delay, ct);
+
     /// <summary>The ECU's own ISO-TP channel, for a handler that puts something on the wire
     /// other than the response the loop would build for it.</summary>
     public IIsoTpChannel Channel => _channel;
@@ -150,7 +159,7 @@ public sealed class SimulatedUdsEcu : IDisposable
                             // Pending NRCs are intermediate; only the final response counts.
                             await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
                             if (pending.DelayBetween > TimeSpan.Zero)
-                                await Task.Delay(pending.DelayBetween, ct).ConfigureAwait(false);
+                                await Delay(pending.DelayBetween, ct).ConfigureAwait(false);
                         }
                         if (ct.IsCancellationRequested) return;
 
@@ -170,14 +179,14 @@ public sealed class SimulatedUdsEcu : IDisposable
                             try
                             {
                                 if (pn.DelayBefore > TimeSpan.Zero)
-                                    await Task.Delay(pn.DelayBefore, ct).ConfigureAwait(false);
+                                    await Delay(pn.DelayBefore, ct).ConfigureAwait(false);
                                 for (int i = 0; i < pn.PendingCount && !ct.IsCancellationRequested; i++)
                                 {
                                     await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
                                     Interlocked.Increment(ref _pendingNrcsSent);
                                 }
                                 if (pn.DelayAfter > TimeSpan.Zero)
-                                    await Task.Delay(pn.DelayAfter, ct).ConfigureAwait(false);
+                                    await Delay(pn.DelayAfter, ct).ConfigureAwait(false);
                                 if (ct.IsCancellationRequested) return;
                                 await SendAndCountAsync(new byte[] { 0x7F, sid, pn.Nrc }, ct)
                                     .ConfigureAwait(false);
@@ -194,7 +203,7 @@ public sealed class SimulatedUdsEcu : IDisposable
                         {
                             await SendNrcAsync(sid, 0x78, ct).ConfigureAwait(false);
                             if (pendingSilent.DelayBetween > TimeSpan.Zero)
-                                await Task.Delay(pendingSilent.DelayBetween, ct).ConfigureAwait(false);
+                                await Delay(pendingSilent.DelayBetween, ct).ConfigureAwait(false);
                         }
                         // Then silence: the client's restarted P2* must expire (FR-UDS-008).
                     }
