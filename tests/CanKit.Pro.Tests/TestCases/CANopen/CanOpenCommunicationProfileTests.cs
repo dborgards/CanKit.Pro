@@ -92,6 +92,25 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
     private static uint HeartbeatEntry(byte nodeId, ushort milliseconds) => ((uint)nodeId << 16) | milliseconds;
 
     /// <summary>
+    /// Spin-waits, synchronously, until <see cref="ObjectDictionary.WriteGateWaiters"/> (the
+    /// write-gate test seam, #171) reaches at least <paramref name="count"/> — real evidence that
+    /// another writer's own <c>lock (_writeGate)</c> attempt has reached the gate this call is
+    /// itself holding, rather than a fixed sleep that only ever guessed how long that takes. Used
+    /// from inside a <c>WriteValidator</c> callback, which runs synchronously on the holding
+    /// thread, so the wait is a blocking spin, not an awaited one.
+    /// </summary>
+    private static void SpinUntilAtTheWriteGate(ObjectDictionary od, int count = 1)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (od.WriteGateWaiters < count)
+        {
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException($"Fewer than {count} writer(s) reached the write gate within {ShortTimeout}.");
+            Thread.Sleep(1);
+        }
+    }
+
+    /// <summary>
     /// Counts the boot-up frames (<c>00h</c> on <c>700h + producer</c>) one node sees from another.
     /// A node sends one when it is opened and one on every NMT reset; a test that waits for the
     /// reset's boot-up first consumes the opening one, so the two cannot be confused. The observer
@@ -439,7 +458,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
             if (index == 0x2000 && redeclare is null)
             {
                 redeclare = Task.Run(() => od.AddU8(0x2000, 0x00, 0x01));
-                Thread.Sleep(200); // a re-declaration that did not wait for the gate would land here
+                SpinUntilAtTheWriteGate(od); // the re-declaration is genuinely blocked on this gate
             }
             return inner(index, subindex, value);
         };
@@ -499,8 +518,8 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
             {
                 gateHeld.Set();
                 writeStarted.Wait(ShortTimeout);
-                Thread.Sleep(200);          // the typed write has started and waits for the gate
-                od.AddU32(0x2000, 0x00, 0); // re-declared while the gate is held
+                SpinUntilAtTheWriteGate(od); // the typed write is genuinely blocked on this gate
+                od.AddU32(0x2000, 0x00, 0);  // re-declared while the gate is held
             }
             return inner(index, subindex, value);
         };
@@ -642,7 +661,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
             if (index == 0x1800 && subindex == 0x01 && !sequenceStarted.IsSet)
             {
                 sequenceStarted.Set();
-                Thread.Sleep(100); // the hammers are at the gate before the sequence goes on
+                SpinUntilAtTheWriteGate(od, count: 4); // all four hammers are genuinely blocked on this gate
             }
             return inner(index, subindex, value);
         };
