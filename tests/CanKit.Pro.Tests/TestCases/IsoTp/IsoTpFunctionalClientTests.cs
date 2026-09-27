@@ -710,4 +710,28 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             .Should().BeTrue();
         response!.HostArrivalTimestamp.Should().Be(42);
     }
+
+    // Codex and Bugbot on #183: a clocked window is disposed without the actor's help, so an
+    // actor already torn down does not turn a collection's end into ObjectDisposedException,
+    // and a timer callback the loop took before the disposal finds the window gone and does
+    // nothing.
+    [Fact]
+    public async Task A_Clocked_Window_Ends_On_Its_Clock_And_Outlives_Its_Actor()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+
+        using (var ended = new FunctionalWindow(actor, TimeSpan.FromMilliseconds(10), CancellationToken.None))
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, TimeSpan.FromMilliseconds(10), ShortTimeout);
+            ended.Token.IsCancellationRequested.Should().BeFalse();
+            await clock.AdvanceAsync(TimeSpan.FromMilliseconds(10));
+            ended.Token.IsCancellationRequested.Should().BeTrue("the window ends when its clock says so");
+        }
+
+        var late = new FunctionalWindow(actor, TimeSpan.FromMilliseconds(10), CancellationToken.None);
+        actor.Dispose();
+        late.Invoking(w => w.Dispose()).Should().NotThrow("the actor is not needed to dispose the window");
+        late.Invoking(w => w.End()).Should().NotThrow("a callback taken before the disposal does nothing");
+    }
 }

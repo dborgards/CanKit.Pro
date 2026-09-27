@@ -136,8 +136,9 @@ public sealed class IsoTpFunctionalListener : IDisposable
 internal sealed class FunctionalWindow : IDisposable
 {
     private readonly CancellationTokenSource _linked;
-    private readonly ProtocolActor? _actor;
     private readonly IDisposable? _timer;
+    private readonly object _gate = new();
+    private bool _disposed;
 
     public FunctionalWindow(ProtocolActor? actor, TimeSpan window, CancellationToken cancellationToken)
     {
@@ -148,25 +149,31 @@ internal sealed class FunctionalWindow : IDisposable
             return;
         }
 
-        _actor = actor;
-        _timer = actor.Schedule(window, _linked.Cancel);
+        _timer = actor.Schedule(window, End);
     }
 
     public CancellationToken Token => _linked.Token;
 
+    /// <summary>
+    /// The injected actor's timer. Cancelling that timer only flags it, so a callback the loop
+    /// has already taken can run after <see cref="Dispose"/>; under the same lock it then finds
+    /// the window disposed and does nothing. Nothing here depends on the actor still running.
+    /// </summary>
+    internal void End()
+    {
+        lock (_gate)
+        {
+            if (!_disposed) _linked.Cancel();
+        }
+    }
+
     public void Dispose()
     {
-        if (_actor is null)
+        _timer?.Dispose();
+        lock (_gate)
         {
+            _disposed = true;
             _linked.Dispose();
-            return;
         }
-
-        // Cancelling the timer only flags it: a callback the loop has already taken still runs.
-        // It runs on the actor, so the source is disposed there too, after it -- a window
-        // disposed while its timer fires never cancels a disposed source. The actor is the
-        // caller's and outlives the collections on it.
-        _timer!.Dispose();
-        _actor.Post(_linked.Dispose);
     }
 }
