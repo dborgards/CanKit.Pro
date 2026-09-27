@@ -279,9 +279,22 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         // landed before the subscription (never seen) or inside it. The hook below puts it
         // where the drain matters: into the collection's own subscription, after that
         // subscription exists and before SendAndCollectAsync drains it and sends (Codex on #185).
+        // The hook returns only once busA has raised the stale frame. The service attaches to
+        // busA when it is created, before the handler below, so by the time that handler runs
+        // the service has dispatched the frame into the new subscription, where the drain has
+        // to find it (Codex on #185).
+        using var staleBuffered = new ManualResetEventSlim();
         using var service = new FrameConsumptionCountingBusService(new CanBusService(busA))
         {
-            OnNextSubscribe = () => busB.Transmit(staleFrame),
+            OnNextSubscribe = () =>
+            {
+                busB.Transmit(staleFrame);
+                staleBuffered.Wait(ShortTimeout).Should().BeTrue("the stale frame must reach the tester's bus");
+            },
+        };
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == unchecked((int)StaleEcuResponseId)) staleBuffered.Set();
         };
         using var client = new IsoTpFunctionalClient(service, FunctionalTxId, RangeStart, RangeEnd,
             FastOptions(), ownsService: false);
