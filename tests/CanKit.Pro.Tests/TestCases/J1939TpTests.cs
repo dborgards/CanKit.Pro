@@ -2572,7 +2572,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
-        var service = new DisposalRecordingBusService(new CanBusService(bus));
+        using var service = new DisposalRecordingBusService(new CanBusService(bus)); // the channel owns it; disposing twice is harmless
         using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
             new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: true, actor);
         var sends = await SendBamsInFlight(clock, actor, sender);
