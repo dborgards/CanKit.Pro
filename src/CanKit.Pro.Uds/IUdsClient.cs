@@ -259,7 +259,13 @@ public interface IUdsClient : IDisposable
     /// RequestDownload, then loops <see cref="TransferDataAsync"/> with an automatically-managed
     /// block sequence counter (starts at <c>0x01</c>, increments per block, wraps
     /// <c>0xFF → 0x00</c>), and finally calls <see cref="RequestTransferExitAsync"/>.
+    /// <paramref name="memorySize"/> is the big-endian byte count sent in RequestDownload and
+    /// must equal the length of <paramref name="data"/>. A mismatch is rejected before
+    /// RequestDownload, the same kind of local check <see cref="UploadAsync"/> makes when a
+    /// declared length cannot be honored.
     /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="memorySize"/> does not decode to
+    /// the length of <paramref name="data"/>.</exception>
     /// <exception cref="UdsProtocolException">The ECU reported a
     /// <c>maxNumberOfBlockLength</c> of <c>0</c> or <c>1</c> so no payload byte would fit in a
     /// TransferData request, or a chunk validation failed.</exception>

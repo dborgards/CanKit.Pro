@@ -822,6 +822,19 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
+        // Local hardening, aligned with UploadAsync: memorySize is the big-endian count
+        // RequestDownload tells the ECU, and it has to be the number of bytes the following
+        // TransferData blocks will actually carry. This client cites ISO 14229-1 §14.3 for the
+        // block-sequence counter only; the length check is ours. Reject it before RequestDownload
+        // so the ECU is never given a count we will not send.
+        ulong totalBytes = 0;
+        for (int i = 0; i < memorySize.Length; i++)
+            totalBytes = (totalBytes << 8) | memorySize.Span[i];
+        if (totalBytes != (ulong)data.Length)
+            throw new ArgumentException(
+                $"memorySize ({totalBytes}) does not match data.Length ({data.Length}).",
+                nameof(memorySize));
+
         // Hold the request lock across the entire 0x34 → 0x36…0x36 → 0x37 sequence so
         // TesterPresent keep-alive (or any other UDS call) cannot interleave mid-download and
         // desynchronise the ECU's block-sequence counter (ISO 14229-1 §14.3). Mirror of

@@ -244,12 +244,9 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
 
             await client.DownloadAsync(
                 dataFormatIdentifier: 0x00,
-                addressAndLengthFormatIdentifier: 0x11,
+                addressAndLengthFormatIdentifier: 0x21, // 1-byte address, 2-byte size
                 memoryAddress: new byte[] { 0x10 },
-                // sizeWidth=1 caps at 255, but the ECU only echoes width from ALFI; we simply
-                // need a well-formed 1-byte size for the wire encoding test (this test does not
-                // verify size semantics).
-                memorySize: new byte[] { (byte)payload.Length },
+                memorySize: new byte[] { (byte)(payload.Length >> 8), (byte)payload.Length },
                 data: payload,
                 cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
 
@@ -344,6 +341,70 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // DownloadAsync must refuse a memorySize that does not decode to data.Length before it
+    // tells the ECU that count (RequestDownload) or sends any TransferData. Local hardening
+    // in the same spirit as UploadAsync's declared-size check; see issue #166.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task DownloadAsync_Rejects_MemorySize_Mismatch_Before_TransferData()
+    {
+        int requestDownloadCalls = 0;
+        int transferDataCalls = 0;
+        int transferExitCalls = 0;
+        var (client, _, dispose) = BuildPair(e =>
+        {
+            e.On(0x34, _ =>
+            {
+                requestDownloadCalls++;
+                return new byte[] { 0x10, 0x10 };
+            });
+            e.On(0x36, req =>
+            {
+                transferDataCalls++;
+                return new byte[] { req[1] };
+            });
+            e.On(0x37, _ =>
+            {
+                transferExitCalls++;
+                return Array.Empty<byte>();
+            });
+        });
+        using (dispose)
+        {
+            // 0x0100 is 256 big-endian and 1 little-endian. A little-endian decode would
+            // accept a 1-byte payload; the client must not.
+            var oneByte = new byte[] { 0xAA };
+            Func<Task> tooLarge = () => client.DownloadAsync(
+                dataFormatIdentifier: 0x00,
+                addressAndLengthFormatIdentifier: 0x21,
+                memoryAddress: new byte[] { 0x10 },
+                memorySize: new byte[] { 0x01, 0x00 },
+                data: oneByte,
+                cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
+            var large = (await tooLarge.Should().ThrowAsync<ArgumentException>()).Which;
+            large.ParamName.Should().Be("memorySize");
+            large.Message.Should().Contain("memorySize (256)").And.Contain("data.Length (1)");
+
+            // Declared count smaller than the buffer, single-byte width.
+            var fourBytes = new byte[] { 1, 2, 3, 4 };
+            Func<Task> tooSmall = () => client.DownloadAsync(
+                dataFormatIdentifier: 0x00,
+                addressAndLengthFormatIdentifier: 0x11,
+                memoryAddress: new byte[] { 0x10 },
+                memorySize: new byte[] { 0x02 },
+                data: fourBytes,
+                cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
+            var small = (await tooSmall.Should().ThrowAsync<ArgumentException>()).Which;
+            small.ParamName.Should().Be("memorySize");
+            small.Message.Should().Contain("memorySize (2)").And.Contain("data.Length (4)");
+
+            requestDownloadCalls.Should().Be(0);
+            transferDataCalls.Should().Be(0);
+            transferExitCalls.Should().Be(0);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
     // The client must reject a mismatched addressAndLengthFormatIdentifier before touching
     // the wire (defensive contract check, so callers see the error at their call site).
     // -----------------------------------------------------------------------------------
@@ -407,9 +468,9 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
 
             var downloadTask = client.DownloadAsync(
                 dataFormatIdentifier: 0x00,
-                addressAndLengthFormatIdentifier: 0x11,
+                addressAndLengthFormatIdentifier: 0x21, // 1-byte address, 2-byte size (256 does not fit in one)
                 memoryAddress: new byte[] { 0x10 },
-                memorySize: new byte[] { (byte)payload.Length },
+                memorySize: new byte[] { (byte)(payload.Length >> 8), (byte)payload.Length },
                 data: payload,
                 cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
 
