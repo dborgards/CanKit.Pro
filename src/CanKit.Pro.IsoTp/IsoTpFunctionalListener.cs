@@ -146,7 +146,11 @@ internal static class FunctionalWindow
         return actor.Schedule(window, () =>
         {
             try { windowCts.Cancel(); }
-            catch (ObjectDisposedException) { }
+            catch (ObjectDisposedException)
+            {
+                // Expected race: the collection may have been disposed before this scheduled callback fires.
+                // Cancellation is best-effort here, so a disposed CTS can be safely ignored.
+            }
         });
     }
 }
