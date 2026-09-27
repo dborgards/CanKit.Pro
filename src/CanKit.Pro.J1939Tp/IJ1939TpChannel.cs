@@ -66,7 +66,8 @@ public interface IJ1939TpChannel : IDisposable
     /// <summary>
     /// Awaits the next fully reassembled inbound TP.BAM or TP.CM datagram, or faults with
     /// <see cref="J1939TpAbortException"/> when an in-flight reassembly is aborted (bad TP.DT
-    /// sequence number, T1/T2 timeout, or peer Connection Abort). One waiter consumes the fault;
+    /// sequence number, T1/T2 timeout, peer Connection Abort, or a new BAM from the same source
+    /// replacing one still in progress — J1939-21 §5.10.3). One waiter consumes the fault;
     /// subsequent receives remain available for later successful datagrams.
     /// </summary>
     Task<J1939TpDatagram> ReceiveAsync(CancellationToken cancellationToken = default);

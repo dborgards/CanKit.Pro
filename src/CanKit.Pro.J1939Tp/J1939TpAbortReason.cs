@@ -21,7 +21,9 @@ public enum J1939TpAbortReason : byte
 
     /// <summary>
     /// System resources were needed for another task so this connection managed session was
-    /// terminated (table 7, code 2).
+    /// terminated (table 7, code 2). Also the local classification when a new BAM from the
+    /// same source aborts the previous one (J1939-21 §5.10.3): BAM has no Connection Abort
+    /// on the wire, and this is the closest table-7 code for "the slot was needed elsewhere".
     /// </summary>
     NoResourcesAvailable = 2,
 
