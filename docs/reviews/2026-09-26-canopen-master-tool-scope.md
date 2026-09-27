@@ -97,6 +97,12 @@ implementiert. Er ist eine geforderte Fähigkeit der Master-Rolle, keine Kür.
 CiA 302 ist in dieser Runde nicht gelesen. Deshalb steht hier kein Zustandsautomat, kein Index
 und keine Zeit. Die Pflicht ist entschieden; der Ablauf nicht.
 
+Nachgetragen mit #164: die Wahl des aktiven Masters ist umgesetzt, und der Maintainer hat die
+Bindung auf **CiA 302-2 Version 4.1.0** festgelegt (Network management, NMT flying master,
+Objekt `1F90h`). DSP 302 Abschnitt 5.5 ist nur die historische Herkunft. Der Boot-up-Manager
+(`1F80h`, `1F81h`, `1F82h`, `1F89h`) gehört zu derselben Umsetzung. Der Mitgliedstext liegt
+nicht im Repository; was die öffentlichen Beschreibungen offen lassen, steht am Pull Request.
+
 ### 5. Aufmerksamkeit gegenüber der Geräterunde
 
 Tool und Master sind für die Aufmerksamkeit der Hauptfall. Manche Geräteposten bleiben fachlich
@@ -145,8 +151,15 @@ Er wird nicht durch eine Implementierung ersetzt.
    deshalb nicht auf den Bus.
 4. **Flying Master, Umfang.** Welche Ausgabe und welcher Abschnitt von CiA 302 binden die
    Pflicht? Ohne diese Angabe wird kein Ablauf geschrieben.
+
+   Beantwortet: CiA 302-2 Version 4.1.0, NMT flying master, Objekt `1F90h`. DSP 302 Abschnitt 5.5
+   ist nur die historische Herkunft, nicht die Bindung. Der Mitgliedstext ist nicht im
+   Repository; umgesetzt ist die öffentliche Beschreibung dieser Ausgabe.
 5. **Boot-up-Manager.** Die Paket-README nennt ihn im selben Satz wie Flying Master. Die
    Entscheidung vom 26.09. nennt nur Flying Master. Gehört der Boot-up-Manager zur Pflicht?
+
+   Beantwortet: ja. Er ist Teil von #164, gebunden an dieselbe Ausgabe, mit `1F80h`, `1F81h`,
+   `1F82h` und `1F89h`. Die Identitätsprüfung `1F84h`–`1F88h` ist nicht dabei.
 6. **Dauer des Hörfensters.** „Etwa 1–2 Sekunden" ist das Band. Liegt darin ein fester Wert,
    oder wählt der Aufrufer die Dauer in diesem Band?
 7. **Weitere Geräteposten.** Welche Posten der Geräterunde außer den Fallback-Records ohne EDS

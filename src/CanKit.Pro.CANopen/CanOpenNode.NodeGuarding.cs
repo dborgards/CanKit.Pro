@@ -249,7 +249,7 @@ internal sealed partial class CanOpenNode
         // protocol and heartbeat protocol on one NMT slave at the same time. If the heartbeat
         // producer time is unequal 0 the heartbeat protocol is used." So while 1017h ≠ 0 the RTR
         // is ignored and the consumer falls back on heartbeat error control.
-        if (_heartbeatProducerInterval > TimeSpan.Zero) return;
+        if (_heartbeatProducer.Interval > TimeSpan.Zero) return;
 
         byte state = (byte)_state;
         byte payload = (byte)((_nodeGuardingProducerToggle ? 0x80 : 0x00) | (state & 0x7F));

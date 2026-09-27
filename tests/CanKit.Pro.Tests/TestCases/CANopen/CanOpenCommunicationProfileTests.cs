@@ -1432,6 +1432,23 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         od.ReadUnsigned(0x1016, 0x00).Should().Be(3u, "the array still grows");
     }
 
+    [Fact]
+    public void AddHeartbeatConsumer_Rejects_A_Full_Array_That_Has_No_Free_Slot()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var node = CanOpen.OpenNode(bus, nodeId: Slave);
+        for (byte id = 1; id <= 127; id++)
+            node.AddHeartbeatConsumer(id, TimeSpan.FromMilliseconds(10));
+
+        // Node-id 0 with a non-zero time is an unused entry, and it is not a free slot:
+        // a free slot is one whose time is 0. The array is full, and producer 1 is no longer in it.
+        node.ObjectDictionary.WriteUnsigned(0x1016, 0x01, 100);
+
+        Action add = () => node.AddHeartbeatConsumer(1, TimeSpan.FromMilliseconds(10));
+        add.Should().Throw<InvalidOperationException>().WithMessage("*127*");
+    }
+
     // FR-CO-023 (#133 review) — a slot beyond the count is out of the duplicate check while it is
     // hidden, so growing the array again brings its entry back into view: a count that would
     // make two entries name one producer is refused with 0604 0043h, as a single write is.
