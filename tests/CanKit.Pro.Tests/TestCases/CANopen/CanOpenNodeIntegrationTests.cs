@@ -717,12 +717,16 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var expectedShortPayload = new byte[8];
         Buffer.BlockCopy(shortPattern, 0, expectedShortPayload, 0, shortPattern.Length);
         var expectedLongPayload = longPattern;
+        // Written only once the writer has stopped, for the TPDO that flushes the consumer's
+        // RPDO event pump below: the one payload nothing else emits, so its delivery is that
+        // TPDO's own and not a queued earlier one's.
+        var flushPattern = Enumerable.Repeat((byte)0xCC, 8).ToArray();
 
         int observedCount = 0;
         int tornCount = 0;
         consumer.RpdoReceived += (_, e) =>
         {
-            if (e.CobId != producerCobId) return;
+            if (e.CobId != producerCobId || e.Payload.SequenceEqual(flushPattern)) return;
             Interlocked.Increment(ref observedCount);
             if (!e.Payload.SequenceEqual(expectedShortPayload)
                 && !e.Payload.SequenceEqual(expectedLongPayload))
@@ -763,12 +767,14 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // TPDO, and wait for ITS delivery. The pump is a single reader that delivers events in
         // enqueue order (RunEventPumpAsync), so this one's arrival proves every event the 2000
         // emissions above queued has already been delivered too — not a guess at how long that
-        // drain takes.
-        producer.ObjectDictionary.WriteRaw(0x2A00, 0x00, longPattern);
+        // drain takes. It is recognised by its payload: an event still queued from the loop
+        // above is raised to every handler subscribed when it runs, this one included (Codex
+        // on #188).
+        producer.ObjectDictionary.WriteRaw(0x2A00, 0x00, flushPattern);
         var flushed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnFlush(object? _, RpdoReceivedEventArgs e)
         {
-            if (e.CobId == producerCobId) flushed.TrySetResult(true);
+            if (e.CobId == producerCobId && e.Payload.SequenceEqual(flushPattern)) flushed.TrySetResult(true);
         }
         consumer.RpdoReceived += OnFlush;
         try
