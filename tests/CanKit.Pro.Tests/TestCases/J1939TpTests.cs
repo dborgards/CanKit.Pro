@@ -7,6 +7,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939Tp;
 using CanKit.Pro.RawCan;
@@ -2383,6 +2384,88 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await sender.SendBamAsync(0xFECAu, payload).WaitAsync(ShortTimeout);
         var datagram = await fromHandler.Task.WaitAsync(ShortTimeout);
         datagram.Payload.Should().Equal(payload);
+    }
+
+    // #171: the channel used to build its own actor on the wall clock, so a BAM spacing could
+    // only be waited out. An injected actor is the caller's, including when construction fails
+    // before the channel exists to be asked.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_Failed_Construction_Disposes_Its_Own_Actor_But_Never_An_Injected_One(bool inject)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var inner = new CanBusService(bus);
+
+        using var clock = new VirtualClock();
+        var injected = inject ? clock.NewActor() : null;
+        var failing = new ThrowingSubscribeService(inner, failOnCall: 1);
+        var loopsBefore = ProtocolActor.RunningLoopCount;
+
+        Action construct = () => new J1939TpChannel(failing, sourceAddress: 0x10,
+            new J1939TpOptions(), ownsService: false, injected);
+        construct.Should().Throw<InvalidOperationException>();
+
+        failing.SubscribeCalls.Should().Be(1);
+        inner.SubscriptionCount.Should().Be(0, "the subscription that threw was never installed");
+        if (injected is not null)
+        {
+            (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
+                "an injected actor belongs to the caller and must survive a construction that failed");
+        }
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            inject
+                ? "the channel created no actor here, so it must not have ended one either"
+                : "the actor the channel created for itself must be gone once construction fails");
+    }
+
+    // The spacing timer starts the send; the frame is handed to the driver on the pool.
+    private static async Task WaitForTransmitCount(ControllableBus bus, int count)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (bus.TransmitCount < count)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"TransmitCount stayed at {bus.TransmitCount}; wanted {count}.");
+            await Task.Yield();
+        }
+    }
+
+    // #171: BAM packet spacing is an actor timer. With the clock frozen, wall time past the
+    // spacing must not release the next TP.DT; advancing the clock must.
+    [Fact]
+    public async Task Bam_Packet_Spacing_Follows_The_Injected_Actors_Clock()
+    {
+        var spacing = TimeSpan.FromMilliseconds(50);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
+
+        var send = sender.SendBamAsync(0xFECBu, RandomPayload(9, seed: 171));
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+
+        bus.TransmitCount.Should().Be(1, "only the BAM announce is out before the spacing elapses");
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        await actor.PostAsync(() => 0);
+        bus.TransmitCount.Should().Be(1,
+            "wall time past the spacing must not release a TP.DT while the injected clock stands still");
+
+        await clock.AdvanceAsync(spacing);
+        // The timer only starts the send; the frame leaves on the pool, after the callback.
+        await WaitForTransmitCount(bus, 2);
+        bus.TransmitCount.Should().Be(2, "the first TP.DT goes out once the clock says the spacing elapsed");
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+        await clock.AdvanceAsync(spacing);
+        await send.WaitAsync(ShortTimeout);
+        bus.TransmitCount.Should().Be(3, "nine bytes are a BAM plus two TP.DT frames");
+
+        sender.Dispose();
+        (await actor.PostAsync(() => 7).WaitAsync(ShortTimeout)).Should().Be(7,
+            "disposing the channel must not dispose the actor it was given");
     }
 }
 

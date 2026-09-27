@@ -51,6 +51,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private readonly J1939TpOptions _options;
 
     private readonly ProtocolActor _actor;
+    private readonly bool _ownsActor;
     private readonly DeadlineScheduler _deadlines;
     private readonly ISubscription _subscription;
     private readonly Task _readerTask;
@@ -89,7 +90,22 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
-    internal J1939TpChannel(ICanBusService service, byte sourceAddress, J1939TpOptions options, bool ownsService)
+    /// <summary>
+    /// Builds a channel on <paramref name="service"/>. A null <paramref name="actor"/> -- the only
+    /// value production passes -- makes the channel create and own its own loop; an injected one
+    /// stays the caller's to dispose.
+    /// </summary>
+    /// <remarks>
+    /// A seam for tests, not a feature: substituting a loop built on a hand-driven monotonic
+    /// source is what lets T1..T4 and the BAM packet spacing be asserted without measuring
+    /// wall-clock gaps on a shared runner (#171). Every one of those intervals is armed through
+    /// <see cref="IProtocolActor.Schedule"/> or the <see cref="DeadlineScheduler"/> built on this
+    /// actor, and the clock is that actor's time source. The channel does not take one of its
+    /// own, so the loop and the timers cannot be given
+    /// different clocks -- the same rule <c>J1939NodeImpl</c> follows.
+    /// </remarks>
+    internal J1939TpChannel(ICanBusService service, byte sourceAddress, J1939TpOptions options, bool ownsService,
+        ProtocolActor? actor = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         if (sourceAddress == J1939Pgn.GlobalAddress)
@@ -108,7 +124,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         };
         _pduInbox = Channel.CreateBounded<RxInboxItem>(inboxOptions);
 
-        _actor = new ProtocolActor();
+        _ownsActor = actor is null;
+        _actor = actor ?? new ProtocolActor();
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
         _deadlines = new DeadlineScheduler(_actor);
 
@@ -142,7 +159,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
         catch
         {
-            _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
             throw;
         }
 
@@ -328,7 +346,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
         _subscription.Dispose();
-        _actor.Dispose();
+        // An injected actor is not ours to dispose -- the caller may still be running other
+        // work on it -- but the handler is, so it comes off either way.
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+        if (_ownsActor) _actor.Dispose();
         _readerCts.Dispose();
 
         if (_ownsService)
