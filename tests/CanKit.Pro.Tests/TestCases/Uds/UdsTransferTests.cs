@@ -343,7 +343,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     // -----------------------------------------------------------------------------------
     // DownloadAsync must refuse a memorySize that does not decode to data.Length before it
     // tells the ECU that count (RequestDownload) or sends any TransferData. Local hardening
-    // in the same spirit as UploadAsync's declared-size check; see issue #166.
+    // for DFI 0x00 only; see issue #166.
     // -----------------------------------------------------------------------------------
     [Fact]
     public async Task DownloadAsync_Rejects_MemorySize_Mismatch_Before_TransferData()
@@ -371,6 +371,9 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
         });
         using (dispose)
         {
+            using var largeCts = new CancellationTokenSource(ShortTimeout);
+            using var smallCts = new CancellationTokenSource(ShortTimeout);
+
             // 0x0100 is 256 big-endian and 1 little-endian. A little-endian decode would
             // accept a 1-byte payload; the client must not.
             var oneByte = new byte[] { 0xAA };
@@ -380,7 +383,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
                 memoryAddress: new byte[] { 0x10 },
                 memorySize: new byte[] { 0x01, 0x00 },
                 data: oneByte,
-                cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
+                cancellationToken: largeCts.Token);
             var large = (await tooLarge.Should().ThrowAsync<ArgumentException>()).Which;
             large.ParamName.Should().Be("memorySize");
             large.Message.Should().Contain("memorySize (256)").And.Contain("data.Length (1)");
@@ -393,7 +396,7 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
                 memoryAddress: new byte[] { 0x10 },
                 memorySize: new byte[] { 0x02 },
                 data: fourBytes,
-                cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
+                cancellationToken: smallCts.Token);
             var small = (await tooSmall.Should().ThrowAsync<ArgumentException>()).Which;
             small.ParamName.Should().Be("memorySize");
             small.Message.Should().Contain("memorySize (2)").And.Contain("data.Length (4)");
@@ -401,6 +404,79 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
             requestDownloadCalls.Should().Be(0);
             transferDataCalls.Should().Be(0);
             transferExitCalls.Should().Be(0);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // With compression/encryption DFI, memorySize is the decoded target range and data is
+    // the encoded payload — lengths may differ; the equality check must not fire.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task DownloadAsync_Allows_MemorySize_Mismatch_When_Dfi_Encodes()
+    {
+        var capture = new List<byte>();
+        var (client, ecu, dispose) = BuildPair(e => { });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            // Encoded payload shorter than the declared (decoded) memorySize.
+            var encoded = new byte[] { 0xCA, 0xFE };
+            // ALFI 0x14: size width 1, addr width 4. memorySize=8 decoded bytes, data=2 encoded.
+            ecu.On(0x34, req =>
+            {
+                req[1].Should().Be(0x10); // compression nibble set
+                return new byte[] { 0x10, 0x10 };
+            });
+            ecu.On(0x36, req =>
+            {
+                capture.AddRange(req.Skip(2));
+                return new byte[] { req[1] };
+            });
+            ecu.On(0x37, _ => Array.Empty<byte>());
+
+            await client.DownloadAsync(
+                dataFormatIdentifier: 0x10,
+                addressAndLengthFormatIdentifier: 0x14,
+                memoryAddress: new byte[] { 0x00, 0x10, 0x00, 0x00 },
+                memorySize: new byte[] { 0x08 },
+                data: encoded,
+                cancellationToken: cts.Token);
+
+            capture.Should().Equal(encoded);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // A 9-byte memorySize with a nonzero high-order byte must not truncate to ulong and
+    // then pass the equality check against a short payload.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task DownloadAsync_Rejects_Oversized_MemorySize_Before_Decode()
+    {
+        int requestDownloadCalls = 0;
+        var (client, _, dispose) = BuildPair(e =>
+        {
+            e.On(0x34, _ =>
+            {
+                requestDownloadCalls++;
+                return new byte[] { 0x10, 0x10 };
+            });
+        });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            // 9 bytes: 01 00 00 00 00 00 00 00 01 — truncating to ulong would yield 1.
+            var oversized = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+            Func<Task> act = () => client.DownloadAsync(
+                dataFormatIdentifier: 0x00,
+                addressAndLengthFormatIdentifier: 0x91, // size width 9, addr width 1
+                memoryAddress: new byte[] { 0x10 },
+                memorySize: oversized,
+                data: new byte[] { 0xAA },
+                cancellationToken: cts.Token);
+            var ex = (await act.Should().ThrowAsync<ArgumentOutOfRangeException>()).Which;
+            ex.ParamName.Should().Be("memorySize");
+            requestDownloadCalls.Should().Be(0);
         }
     }
 
