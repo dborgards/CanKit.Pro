@@ -51,6 +51,28 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         return client.SdoDownloadAsync(serverNodeId, commIndex, 0x01, U32Bytes(cobId)).WithTimeoutAsync(ShortTimeout);
     }
 
+    // The barrier for "the NMT Start each node was just sent has been dequeued off its bus and
+    // applied by ApplyNmtTransition": ICanOpenNode.State round-trips through the node's actor
+    // (CanOpenNode.State getter posts to the actor and returns what it reads there), so polling
+    // it cannot observe a state the actor has not actually reached yet. It replaces a fixed
+    // Task.Delay that only ever guessed how long the dequeue-and-apply hop would take.
+    private static async Task WaitUntilOperationalAsync(params ICanOpenNode[] nodes)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (true)
+        {
+            var allOperational = true;
+            foreach (var node in nodes)
+            {
+                if (node.State != NmtState.Operational) { allOperational = false; break; }
+            }
+            if (allOperational) return;
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException($"Node(s) did not reach Operational within {ShortTimeout}.");
+            await Task.Delay(5);
+        }
+    }
+
     private static byte[] MappingEntryBytes(ushort index, byte subindex, byte bitLength)
     {
         uint raw = ((uint)index << 16) | ((uint)subindex << 8) | bitLength;
@@ -122,7 +144,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
 
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
         await producer.TriggerTpdoAsync(1);
 
         var payload = await received.Task.WithTimeoutAsync(ShortTimeout);
@@ -168,7 +190,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
 
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
         await producer.TriggerTpdoAsync(1);
 
         await received.Task.WithTimeoutAsync(ShortTimeout);
@@ -371,7 +393,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
 
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
 
         // Application-originated OD write — no TriggerTpdoAsync.
         producer.ObjectDictionary.WriteUnsigned(0x2000, 0x00, 0x1234u);
@@ -420,7 +442,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
 
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
         await producer.TriggerTpdoAsync(1);
         await Task.Delay(300); // give any (wrong) echo ample time to appear
 

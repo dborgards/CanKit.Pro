@@ -35,6 +35,58 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
+    // The barrier for "the NMT Start each node was just sent has been dequeued off its bus and
+    // applied by ApplyNmtTransition": ICanOpenNode.State round-trips through the node's actor
+    // (CanOpenNode.State getter posts to the actor and returns what it reads there), so polling
+    // it cannot observe a state the actor has not actually reached yet. It replaces a fixed
+    // Task.Delay that only ever guessed how long the dequeue-and-apply hop would take.
+    private static async Task WaitUntilOperationalAsync(params ICanOpenNode[] nodes)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (true)
+        {
+            var allOperational = true;
+            foreach (var node in nodes)
+            {
+                if (node.State != NmtState.Operational) { allOperational = false; break; }
+            }
+            if (allOperational) return;
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException($"Node(s) did not reach Operational within {ShortTimeout}.");
+            await Task.Delay(5);
+        }
+    }
+
+    /// <summary>
+    /// Counts the boot-up frames (<c>00h</c> on <c>700h + producer</c>) one node sees from another.
+    /// A node sends one when it is opened and one on every NMT reset; a test that waits for the
+    /// reset's boot-up first consumes the opening one, so the two cannot be confused. The observer
+    /// must be opened before the producer so that the first one is guaranteed to be seen.
+    /// </summary>
+    private sealed class BootupWatch
+    {
+        private readonly TaskCompletionSource<bool> _first = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _second = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _seen;
+
+        public BootupWatch(ICanOpenNode observer, byte producer)
+        {
+            observer.HeartbeatReceived += (_, e) =>
+            {
+                if (e.ProducerNodeId != producer || e.State != NmtState.Initializing) return;
+                switch (Interlocked.Increment(ref _seen))
+                {
+                    case 1: _first.TrySetResult(true); break;
+                    case 2: _second.TrySetResult(true); break;
+                }
+            };
+        }
+
+        public Task First => _first.Task.WithTimeoutAsync(ShortTimeout);
+
+        public Task Second => _second.Task.WithTimeoutAsync(ShortTimeout);
+    }
+
     // -----------------------------------------------------------------------------------------
     // FR-CO-002 — SDO expedited upload/download over two nodes on the same virtual bus.
     // -----------------------------------------------------------------------------------------
@@ -361,6 +413,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Observe every SDO frame the slave emits (COB-ID 0x580+0x11 = 0x591) on a third bus
         // so we can distinguish the slave's own transmits from anything the master sends.
         var slaveSdoTx = new List<byte[]>();
+        var sessionInstalled = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         busObserver.FrameObserved += (_, e) =>
         {
@@ -369,6 +422,10 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
             if ((uint)frame.ID != 0x580u + 0x11u) return;
             var data = frame.Data.ToArray();
             lock (slaveSdoTx) slaveSdoTx.Add(data);
+            // scs=0x60 for (0x2100, 0x00): the server acknowledged the segmented initiate, so
+            // the session this test needs to be superseded is now genuinely installed.
+            if (data.Length >= 4 && data[0] == 0x60 && data[1] == 0x00 && data[2] == 0x21 && data[3] == 0x00)
+                sessionInstalled.TrySetResult(data);
             // cs=0x80 -> SDO abort. Fire completion for the FIRST abort we see with the
             // superseded (index, subindex) = (0x2100, 0x00). That is the marker we care
             // about for this regression; ignore other frames.
@@ -390,8 +447,9 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         };
         busA.Transmit(CanFrame.Classic(0x600 + 0x11, priorInit, isExtendedFrame: false));
 
-        // Give the actor loop a moment to install the segmented session for 0x2100:00.
-        await Task.Delay(50);
+        // Wait for the server's own ack rather than a delay: the segmented session for 0x2100
+        // is installed exactly when that ack goes out.
+        await sessionInstalled.Task.WithTimeoutAsync(ShortTimeout);
 
         // Now supersede: master runs an expedited download to an unrelated (index, subindex)
         // on the same server. Per CiA 301 the server must abort the still-open 0x2100 transfer
@@ -432,12 +490,21 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
         PeerSdoLaboratory.Bind(master, 0x11);
 
+        // Wait for the master's own upload-init request to be on the wire, rather than guessing
+        // how long that takes: COB-ID 0x600+0x11 is where the master's SDO client transmits.
+        var initOnWire = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (frame.IsExtendedFrame || (uint)frame.ID != 0x600u + 0x11u) return;
+            initOnWire.TrySetResult(true);
+        };
+
         // Master initiates an expedited upload from a phantom server 0x11 at (0x2500, 0x00).
         // We do NOT open a slave; instead we fake the server response on busB.
         var uploadTask = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2500, subindex: 0x00);
 
-        // Give the master a moment to actually put its init request on the wire.
-        await Task.Delay(30);
+        await initOnWire.Task.WithTimeoutAsync(ShortTimeout);
 
         // Fake a 5-byte SDO expedited upload response: cs=0x4F selects size-indicated with
         // n=3 (one valid byte), followed by index (0x2500), subindex (0x00), and one payload
@@ -550,6 +617,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // side of the fix (the master must abort the transfer back to the peer, not silently
         // fail its own task).
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var initOnWire = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         busB.FrameObserved += (_, e) =>
         {
             var frame = e.CanFrame;
@@ -557,12 +625,13 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
             if ((uint)frame.ID != 0x600u + 0x11u) return;
             var data = frame.Data.ToArray();
             if (data.Length >= 8 && data[0] == 0x80) abortSeen.TrySetResult(data);
+            else initOnWire.TrySetResult(true);
         };
 
         var uploadTask = master.SdoUploadAsync(serverNodeId: 0x11, index: 0x2900, subindex: 0x00);
 
-        // Give the master a moment to put its upload-init request on the wire.
-        await Task.Delay(30);
+        // Wait for the master's upload-init request to be on the wire, rather than guessing.
+        await initOnWire.Task.WithTimeoutAsync(ShortTimeout);
 
         // Fake a segmented upload-init response: cs=0x41 (size-indicated), then (index,
         // subindex), then a little-endian 32-bit declared length way above the cap. The client
@@ -635,7 +704,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
 
         var shortPattern = Enumerable.Repeat((byte)0xAA, 2).ToArray();  // 2 bytes
         var longPattern = Enumerable.Repeat((byte)0xBB, 8).ToArray();   // 8 bytes
@@ -687,10 +756,30 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
             catch (Exception) { Interlocked.Increment(ref emitCrashes); }
         }
 
-        // Give the RPDO event pump time to drain before we sample counts.
-        await Task.Delay(200);
         cts.Cancel();
         await writer;
+
+        // Flush the consumer's RPDO event pump before sampling counts: one more deterministic
+        // TPDO, and wait for ITS delivery. The pump is a single reader that delivers events in
+        // enqueue order (RunEventPumpAsync), so this one's arrival proves every event the 2000
+        // emissions above queued has already been delivered too — not a guess at how long that
+        // drain takes.
+        producer.ObjectDictionary.WriteRaw(0x2A00, 0x00, longPattern);
+        var flushed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnFlush(object? _, RpdoReceivedEventArgs e)
+        {
+            if (e.CobId == producerCobId) flushed.TrySetResult(true);
+        }
+        consumer.RpdoReceived += OnFlush;
+        try
+        {
+            await producer.TriggerTpdoAsync(1);
+            await flushed.Task.WithTimeoutAsync(ShortTimeout);
+        }
+        finally
+        {
+            consumer.RpdoReceived -= OnFlush;
+        }
 
         observedCount.Should().BeGreaterThan(0,
             "the consumer must have observed at least one TPDO frame to make the tear check meaningful");
@@ -746,7 +835,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var slave2 = CanOpen.OpenNode(busC, nodeId: 0x12);
 
         await master.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0); // broadcast
-        await Task.Delay(100); // give the slave loops time to apply
+        await WaitUntilOperationalAsync(slave1, slave2);
         slave1.State.Should().Be(NmtState.Operational);
         slave2.State.Should().Be(NmtState.Operational);
     }
@@ -804,20 +893,14 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var bootups = new BootupWatch(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
 
-        // Wait until the initial bootup from `slave` is consumed.
-        await Task.Delay(50);
-
-        var bootup = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
-        master.HeartbeatReceived += (s, e) =>
-        {
-            if (e.ProducerNodeId == 0x11 && e.State == NmtState.Initializing)
-                bootup.TrySetResult(e.State);
-        };
+        // Consume the initial bootup before the reset's own, so the two cannot be confused.
+        await bootups.First;
 
         await master.SendNmtCommandAsync(NmtCommand.ResetNode, targetNodeId: 0x11);
-        (await bootup.Task.WithTimeoutAsync(ShortTimeout)).Should().Be(NmtState.Initializing);
+        await bootups.Second;
     }
 
     // FR-CO-007: ResetCommunication (0x82) follows the same re-init path as ResetNode —
@@ -830,20 +913,16 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var bootups = new BootupWatch(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
 
-        await Task.Delay(50); // consume the initial bootup
-
-        var bootup = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
-        master.HeartbeatReceived += (s, e) =>
-        {
-            if (e.ProducerNodeId == 0x11 && e.State == NmtState.Initializing)
-                bootup.TrySetResult(e.State);
-        };
+        await bootups.First; // consume the initial bootup
 
         await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, targetNodeId: 0x11);
-        (await bootup.Task.WithTimeoutAsync(ShortTimeout)).Should().Be(NmtState.Initializing);
-        await Task.Delay(50);
+        await bootups.Second;
+        // PerformNmtReset sets _state = PreOperational before it emits the boot-up frame, on the
+        // slave's own actor: by the time master's HeartbeatReceived for that boot-up has fired
+        // (bootups.Second), the slave has already reached PreOperational -- no further wait needed.
         slave.State.Should().Be(NmtState.PreOperational);
     }
 
@@ -859,15 +938,27 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
         slave.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[20]);
 
+        var sdoTxCobId = CanOpenCobId.SdoTx(0x11);
+        var initAck = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rawBus.FrameObserved += (_, e) =>
+        {
+            var frame = e.CanFrame;
+            if (frame.IsExtendedFrame || (uint)frame.ID != sdoTxCobId) return;
+            var data = frame.Data;
+            // scs=0x60 for (0x2100, 0x00): the segmented download initiate was acknowledged, so
+            // the session the wrong-toggle segment below must land against is genuinely open.
+            if (data.Length >= 4 && data.Span[0] == 0x60 && data.Span[1] == 0x00 && data.Span[2] == 0x21 && data.Span[3] == 0x00)
+                initAck.TrySetResult(true);
+        };
+
         // Segmented download initiate (cs = 0x21), then the FIRST segment with the wrong
         // toggle bit (0x10 set instead of 0x00 expected).
         rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x11)),
             new byte[] { 0x21, 0x00, 0x21, 0x00, 0x14, 0x00, 0x00, 0x00 }));
-        await Task.Delay(100); // let the init-ack happen
+        await initAck.Task.WithTimeoutAsync(ShortTimeout); // the init-ack, not a guess at its timing
         rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x11)),
             new byte[] { 0x10, 1, 2, 3, 4, 5, 6, 7 }));
 
-        var sdoTxCobId = CanOpenCobId.SdoTx(0x11);
         using var cts = new CancellationTokenSource(ShortTimeout);
         while (true)
         {
@@ -922,10 +1013,11 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 1);
 
         using var master = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var bootups = new BootupWatch(master, 0x11);
         using var slave = CanOpen.OpenNode(busB, nodeId: 0x11);
 
-        // Wait past the initial bootup so the consumer arms cleanly.
-        await Task.Delay(100);
+        // Consume the initial bootup so the consumer arms cleanly.
+        await bootups.First;
 
         var timeout = new TaskCompletionSource<HeartbeatTimeoutEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         master.HeartbeatTimeout += (s, e) =>
@@ -1231,7 +1323,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Operational on both ends (RPDO unpack gated in HandleRpdo).
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
         await producer.TriggerTpdoAsync(1);
 
         var payload = await received.Task.WithTimeoutAsync(ShortTimeout);
@@ -1300,7 +1392,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
         await producer.TriggerTpdoAsync(1);
 
         var payload = await received.Task.WithTimeoutAsync(ShortTimeout);
@@ -1331,7 +1423,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Bring producer Operational.
         await consumer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x11);
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
-        await Task.Delay(50);
+        await WaitUntilOperationalAsync(producer, consumer);
 
         int rpdoCount = 0;
         var enough = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
