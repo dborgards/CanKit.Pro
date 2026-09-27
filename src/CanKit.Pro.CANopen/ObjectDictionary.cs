@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
@@ -42,6 +43,17 @@ public sealed class ObjectDictionary
     // writes validating against the same state could both pass a rule that only one of them
     // may. Readers never take this lock, so a validator reading under _sync cannot deadlock.
     private readonly object _writeGate = new();
+
+    // Test seam (#171): the number of callers that have reached the write gate and are not yet
+    // inside it — WriteUnsigned's and Add's own <c>lock (_writeGate)</c>, the only two entry
+    // points a concurrent test "hammer" reaches. While a test holds the gate, every caller
+    // counted here is blocked on it; tests poll it as that signal instead of a fixed sleep that
+    // only ever guessed how long reaching the gate takes. Not counted for Transaction /
+    // WriteRawUnchecked / Declare, which no such test hammers.
+    private int _writeGateWaiters;
+
+    /// <summary>Test seam (#171): see <see cref="_writeGateWaiters"/>.</summary>
+    internal int WriteGateWaiters => Volatile.Read(ref _writeGateWaiters);
 
     /// <summary>
     /// Internal hook for <see cref="CanOpenNode"/>: raised after a value-mutating write
@@ -394,8 +406,10 @@ public sealed class ObjectDictionary
         // The type is resolved under the write gate, so a re-declaration is either fully before
         // or fully after this write: the value is encoded and range-checked against the
         // declaration it lands on (Codex on #133).
+        Interlocked.Increment(ref _writeGateWaiters);
         lock (_writeGate)
         {
+            Interlocked.Decrement(ref _writeGateWaiters);
             OdDataType type;
             lock (_sync)
             {
@@ -437,8 +451,10 @@ public sealed class ObjectDictionary
         bool replaced;
         // Under the write gate: a write validated against the entry being replaced is stored on
         // it before the replacement lands, never on the new declaration (Codex on #133).
+        Interlocked.Increment(ref _writeGateWaiters);
         lock (_writeGate)
         {
+            Interlocked.Decrement(ref _writeGateWaiters);
             lock (_sync)
             {
                 var key = Key(index, subindex);
