@@ -2604,10 +2604,161 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await service.Disposed.WaitAsync(ShortTimeout);
     }
 
+    // Codex on #183: a reader that outlived its join could still hand frames to a borrowed actor
+    // after the session cleanup. Whenever the actor gets to them, frames handed over before or
+    // during Dispose are dropped: here a whole BAM waits behind the caller's work while the
+    // channel is disposed, and must not be delivered once the actor is free.
+    [Fact]
+    public async Task Frames_The_Actor_Reaches_After_Dispose_Began_Are_Dropped()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        using var receiver = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
+            ownsService: false, actor);
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, _) => delivered.TrySetResult(true);
+        var receiving = receiver.ReceiveAsync();
+
+        using var release = new ManualResetEventSlim();
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+        Task disposing;
+        try
+        {
+            await occupied.Task.WaitAsync(ShortTimeout);
+
+            const byte peerSa = 0x20;
+            const uint pgn = 0xFECDu;
+            var payload = RandomPayload(9, seed: 185);
+            CanFrame FromPeer(uint framePgn, byte[] data) => CanFrame.Classic(
+                (int)J1939Id.ComposePgn(7, framePgn, peerSa, J1939Pgn.GlobalAddress), data, isExtendedFrame: true);
+            bus.RaiseObserved(FromPeer(J1939Pgn.TpCm, J1939TpFrames.BuildBam(9, 2, pgn)), isEcho: false);
+            bus.RaiseObserved(FromPeer(J1939Pgn.TpDt, J1939TpFrames.BuildDt(1, payload, 0)), isEcho: false);
+            bus.RaiseObserved(FromPeer(J1939Pgn.TpDt, J1939TpFrames.BuildDt(2, payload, 7)), isEcho: false);
+            // The reader asked for a fourth frame, so it has handed all three to the actor.
+            await service.WaitUntilConsumedAsync(3).WaitAsync(ShortTimeout);
+
+            disposing = Task.Run(receiver.Dispose);
+            // The inbox is completed right after Dispose marks the channel disposed.
+            await receiving.Invoking(t => t).Should().ThrowAsync<Exception>();
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        await disposing.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0).WaitAsync(ShortTimeout);
+        // The event is raised on the pool; a delivered BAM would have raised it by now.
+        (await Task.WhenAny(delivered.Task, Task.Delay(TimeSpan.FromMilliseconds(500))))
+            .Should().NotBeSameAs(delivered.Task, "a BAM the actor reached after Dispose began is not delivered");
+    }
+
     private static async Task ShouldAllFailDisposed(Task[] sends)
     {
         foreach (var send in sends)
             await send.Invoking(t => t).Should().ThrowAsync<ObjectDisposedException>();
+    }
+}
+
+/// <summary>
+/// Test double: forwards to an inner service it owns, and counts the frames each subscriber has
+/// finished with -- a frame counts once the subscriber asks for the next one, i.e. once the
+/// J1939-TP reader has handed it to the actor (#183).
+/// </summary>
+internal sealed class FrameConsumptionCountingBusService : ICanBusService
+{
+    private readonly ICanBusService _inner;
+    private readonly object _gate = new();
+    private int _consumed;
+    private readonly List<(int Count, TaskCompletionSource<bool> Reached)> _waiters = new();
+
+    public FrameConsumptionCountingBusService(ICanBusService inner) => _inner = inner;
+
+    public Task WaitUntilConsumedAsync(int count)
+    {
+        lock (_gate)
+        {
+            if (_consumed >= count) return Task.CompletedTask;
+            var reached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _waiters.Add((count, reached));
+            return reached.Task;
+        }
+    }
+
+    private void Consumed()
+    {
+        lock (_gate)
+        {
+            _consumed++;
+            foreach (var (count, reached) in _waiters)
+                if (_consumed >= count) reached.TrySetResult(true);
+        }
+    }
+
+    public ICanBus Bus => _inner.Bus;
+    public int SubscriptionCount => _inner.SubscriptionCount;
+
+    public event EventHandler<Exception>? BackgroundExceptionOccurred
+    {
+        add => _inner.BackgroundExceptionOccurred += value;
+        remove => _inner.BackgroundExceptionOccurred -= value;
+    }
+
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => new Counted(this, _inner.Subscribe(predicate, bufferCapacity, includeEcho));
+
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => new Counted(this, _inner.Subscribe(filter, bufferCapacity, includeEcho));
+
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+        => _inner.FindOverlappingFilterSubscriptions();
+
+    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+
+    public void Dispose() => _inner.Dispose();
+
+    private sealed class Counted : ISubscription
+    {
+        private readonly FrameConsumptionCountingBusService _owner;
+        private readonly ISubscription _inner;
+
+        public Counted(FrameConsumptionCountingBusService owner, ISubscription inner)
+        {
+            _owner = owner;
+            _inner = inner;
+        }
+
+        public IAsyncEnumerable<CanFrameEvent> Frames => Count();
+
+        private async IAsyncEnumerable<CanFrameEvent> Count(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await foreach (var frameEvent in _inner.Frames.WithCancellation(cancellationToken))
+            {
+                yield return frameEvent;
+                _owner.Consumed(); // runs when the subscriber asks for the next frame
+            }
+        }
+
+        public bool TryRead(out CanFrameEvent frameEvent) => _inner.TryRead(out frameEvent);
+
+        public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+            => _inner.WaitToReadAsync(cancellationToken);
+
+        public void Reconfigure(CanIdFilter filter) => _inner.Reconfigure(filter);
+
+        public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => _inner.Reconfigure(predicate);
+
+        public void Dispose() => _inner.Dispose();
     }
 }
 

@@ -321,7 +321,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // The reader is joined and the subscription closed before the sessions are failed: a
         // frame the reader was still handing to the actor is then queued ahead of the cleanup,
         // not behind it where it could open a session nobody fails (Bugbot on #183).
-        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
+        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* observed via task; not fatal */ }
         _subscription.Dispose();
 
         // Cancel every still-in-flight session on the actor so their TCSs get an
@@ -469,6 +469,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     private void HandleIncoming(uint pgn, byte sa, byte da, byte[] payload)
     {
+        // A frame the reader handed over is dropped once Dispose has begun, whenever the actor
+        // gets to it: a reader that outlived its join could otherwise post one behind the
+        // session cleanup and open a session nobody fails on a borrowed actor (Codex on #183).
+        if (Volatile.Read(ref _disposed) != 0) return;
         try
         {
             if (J1939Pgn.IsTransportCm(pgn))
