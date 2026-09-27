@@ -1527,7 +1527,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
         using (var loser = new J1939NodeImpl(serviceB, new J1939NodeOptions(Name(0x00015D))
-               { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor)) // backoff 153 ms
+        { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor)) // backoff 153 ms
         {
             var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             loser.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lossSeen.TrySetResult(true); };
