@@ -729,7 +729,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             ended.Token.IsCancellationRequested.Should().BeTrue("the window ends when its clock says so");
         }
 
-        var late = new FunctionalWindow(actor, TimeSpan.FromMilliseconds(10), CancellationToken.None);
+        using var late = new FunctionalWindow(actor, TimeSpan.FromMilliseconds(10), CancellationToken.None);
         actor.Dispose();
         late.Invoking(w => w.Dispose()).Should().NotThrow("the actor is not needed to dispose the window");
         late.Invoking(w => w.End()).Should().NotThrow("a callback taken before the disposal does nothing");

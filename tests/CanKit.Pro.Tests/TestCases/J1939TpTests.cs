@@ -2468,22 +2468,24 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             "disposing the channel must not dispose the actor it was given");
     }
 
+    private static readonly TimeSpan InFlightSpacing = TimeSpan.FromMilliseconds(50);
+
+    private static J1939TpChannel BamSenderOn(ProtocolActor actor, ICanBusService service)
+        => new(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor);
+
     // A BAM on a borrowed, frozen clock: the announce is out and the first TP.DT waits on the
     // spacing timer, so the send is in flight until the channel is disposed. A second BAM to the
     // same global destination waits in the queue behind it.
-    private static async Task<(J1939TpChannel Sender, Task[] Sends)> SendBamInFlight(
-        VirtualClock clock, ProtocolActor actor, ICanBusService service)
+    private static async Task<Task[]> SendBamsInFlight(VirtualClock clock, ProtocolActor actor, J1939TpChannel sender)
     {
-        var spacing = TimeSpan.FromMilliseconds(50);
-        var sender = new J1939TpChannel(service, sourceAddress: 0x10,
-            new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
         var first = sender.SendBamAsync(0xFECBu, RandomPayload(9, seed: 183));
-        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
         var queued = sender.SendBamAsync(0xFECCu, RandomPayload(9, seed: 184));
         await clock.SettleAsync();
         first.IsCompleted.Should().BeFalse("the send waits on the spacing timer of a frozen clock");
         queued.IsCompleted.Should().BeFalse("the second BAM waits for the first one's session slot");
-        return (sender, new[] { first, queued });
+        return new[] { first, queued };
     }
 
     // Codex on #183: a borrowed actor is not drained by disposing it, so Dispose must wait for
@@ -2496,7 +2498,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
-        var (sender, sends) = await SendBamInFlight(clock, actor, service);
+        using var sender = BamSenderOn(actor, service);
+        var sends = await SendBamsInFlight(clock, actor, sender);
 
         // The caller's other work holds the actor for 100 ms, and releases it on its own: the
         // assertion does not depend on how long that takes, only on Dispose's 2 s budget for
@@ -2527,7 +2530,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
-        var (sender, sends) = await SendBamInFlight(clock, actor, service);
+        using var sender = BamSenderOn(actor, service);
+        var sends = await SendBamsInFlight(clock, actor, sender);
 
         var failedInside = await actor.PostAsync(() =>
         {
@@ -2548,7 +2552,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
-        var (sender, sends) = await SendBamInFlight(clock, actor, service);
+        using var sender = BamSenderOn(actor, service);
+        var sends = await SendBamsInFlight(clock, actor, sender);
 
         actor.Dispose();
         sender.Invoking(c => c.Dispose()).Should().NotThrow();
