@@ -319,31 +319,33 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         _pduInbox.Writer.TryComplete();
 
         // Cancel every still-in-flight session on the actor so their TCSs get an
-        // ObjectDisposedException instead of hanging on the now-disposed inbox.
-        try
+        // ObjectDisposedException instead of hanging on the now-disposed inbox. Disposed from
+        // the actor's own loop, the sessions are this thread's to fail, and a post would only
+        // run after this call returned; an actor already disposed runs no loop that could race
+        // this thread for them (Codex on #183).
+        var cleanup = Task.CompletedTask;
+        if (_actor.IsOnCurrentActor)
         {
-            _actor.Post(() =>
-            {
-                foreach (var kv in _txSessions)
-                    kv.Value.Fail(new ObjectDisposedException(nameof(J1939TpChannel)));
-                _txSessions.Clear();
-                foreach (var kv in _txQueues)
-                {
-                    foreach (var pending in kv.Value)
-                        pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
-                }
-                _txQueues.Clear();
-                foreach (var kv in _rxSessions)
-                    kv.Value.Cancel();
-                _rxSessions.Clear();
-            });
+            FailSessionsOnDispose();
         }
-        catch (ObjectDisposedException)
+        else
         {
-            // actor already gone; nothing more to do
+            try
+            {
+                cleanup = _actor.PostAsync(FailSessionsOnDispose);
+            }
+            catch (ObjectDisposedException)
+            {
+                FailSessionsOnDispose();
+            }
         }
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
+
+        // An owned actor runs the cleanup as it is disposed below. A borrowed one keeps running,
+        // possibly busy with the caller's other work, so the cleanup is waited for here: once
+        // this returns no session may still be using the service (Codex on #183).
+        if (!_ownsActor) cleanup.Wait(TimeSpan.FromSeconds(2));
 
         _subscription.Dispose();
         // An injected actor is not ours to dispose -- the caller may still be running other
@@ -354,6 +356,22 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
         if (_ownsService)
             _service.Dispose();
+    }
+
+    private void FailSessionsOnDispose()
+    {
+        foreach (var kv in _txSessions)
+            kv.Value.Fail(new ObjectDisposedException(nameof(J1939TpChannel)));
+        _txSessions.Clear();
+        foreach (var kv in _txQueues)
+        {
+            foreach (var pending in kv.Value)
+                pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
+        }
+        _txQueues.Clear();
+        foreach (var kv in _rxSessions)
+            kv.Value.Cancel();
+        _rxSessions.Clear();
     }
 
     // -----------------------------------------------------------------------------------------

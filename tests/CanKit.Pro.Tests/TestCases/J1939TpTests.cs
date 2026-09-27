@@ -2467,6 +2467,101 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         (await actor.PostAsync(() => 7).WaitAsync(ShortTimeout)).Should().Be(7,
             "disposing the channel must not dispose the actor it was given");
     }
+
+    // A BAM on a borrowed, frozen clock: the announce is out and the first TP.DT waits on the
+    // spacing timer, so the send is in flight until the channel is disposed. A second BAM to the
+    // same global destination waits in the queue behind it.
+    private static async Task<(J1939TpChannel Sender, Task[] Sends)> SendBamInFlight(
+        VirtualClock clock, ProtocolActor actor, ICanBusService service)
+    {
+        var spacing = TimeSpan.FromMilliseconds(50);
+        var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
+        var first = sender.SendBamAsync(0xFECBu, RandomPayload(9, seed: 183));
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+        var queued = sender.SendBamAsync(0xFECCu, RandomPayload(9, seed: 184));
+        await clock.SettleAsync();
+        first.IsCompleted.Should().BeFalse("the send waits on the spacing timer of a frozen clock");
+        queued.IsCompleted.Should().BeFalse("the second BAM waits for the first one's session slot");
+        return (sender, new[] { first, queued });
+    }
+
+    // Codex on #183: a borrowed actor is not drained by disposing it, so Dispose must wait for
+    // its session cleanup itself. With the actor busy on the caller's other work, a Dispose
+    // that only posted the cleanup would return with the send still in flight.
+    [Fact]
+    public async Task Disposing_On_A_Busy_Borrowed_Actor_Fails_The_Send_Before_It_Returns()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var (sender, sends) = await SendBamInFlight(clock, actor, service);
+
+        // The caller's other work holds the actor for 100 ms, and releases it on its own: the
+        // assertion does not depend on how long that takes, only on Dispose's 2 s budget for
+        // the cleanup outlasting it. A Dispose that only posted the cleanup returns inside it.
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            Thread.Sleep(TimeSpan.FromMilliseconds(100));
+        });
+        await occupied.Task.WaitAsync(ShortTimeout);
+        var noneInFlight = await Task.Run(() =>
+        {
+            sender.Dispose();
+            return sends.All(t => t.IsCompleted);
+        }).WaitAsync(ShortTimeout);
+
+        noneInFlight.Should().BeTrue("Dispose returned, so no send may still be in flight");
+        await ShouldAllFailDisposed(sends);
+    }
+
+    // Disposed from the borrowed actor's own loop: a posted cleanup could only run after this
+    // work item, so the sessions are failed on the spot.
+    [Fact]
+    public async Task Disposing_From_The_Borrowed_Actors_Loop_Fails_The_Send_At_Once()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var (sender, sends) = await SendBamInFlight(clock, actor, service);
+
+        var failedInside = await actor.PostAsync(() =>
+        {
+            sender.Dispose();
+            return sends.All(t => t.IsCompleted);
+        }).WaitAsync(ShortTimeout);
+
+        failedInside.Should().BeTrue("the loop that disposed the channel failed its sends itself");
+        await ShouldAllFailDisposed(sends);
+    }
+
+    // A borrowed actor disposed before the channel runs no loop any more: the channel fails its
+    // sessions itself rather than leaving the send hanging on a timer that will never fire.
+    [Fact]
+    public async Task Disposing_After_The_Borrowed_Actor_Still_Fails_The_Send()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var (sender, sends) = await SendBamInFlight(clock, actor, service);
+
+        actor.Dispose();
+        sender.Invoking(c => c.Dispose()).Should().NotThrow();
+
+        sends.Should().OnlyContain(t => t.IsCompleted);
+        await ShouldAllFailDisposed(sends);
+    }
+
+    private static async Task ShouldAllFailDisposed(Task[] sends)
+    {
+        foreach (var send in sends)
+            await send.Invoking(t => t).Should().ThrowAsync<ObjectDisposedException>();
+    }
 }
 
 /// <summary>
