@@ -442,23 +442,34 @@ public class UdsExpiredDeadlineTests
 
         // Cancelled at 150 ms: past the 80 ms window noted before the send, with the send
         // still held (macOS CI on #150 fired a 150 ms timer after a 300 ms send had completed).
-        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
-        Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
-        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        using var early = new CancellationTokenSource();
+        var pending = client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
+        await Task.Delay(TimeSpan.FromMilliseconds(150));
+        // Read before the cancellation, so no later than the client's note it causes. Read
+        // after the throw was observed, as it once was, it lagged the note by however long the
+        // test's continuation took to be scheduled -- 13 ms under load on a 4-CPU runner, 14
+        // runs in 20 -- and every millisecond of that came off the gap.
         var cancelledAt = Stopwatch.GetTimestamp();
+        early.Cancel();
+        Func<Task> cancelled = () => pending;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
         Func<Task> next = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
         await next.Should().ThrowAsync<Exception>(); // the stub never answers; what matters is when it sent
 
-        long gapTicks;
+        long heldTicks, gapTicks;
         lock (channel.Sent)
         {
             channel.Sent.Should().HaveCount(2);
+            heldTicks = cancelledAt - channel.Sent[0].StartedAt;
             gapTicks = channel.Sent[1].StartedAt - cancelledAt;
         }
-        // The second send waited P2 from the cancellation, less a margin for the note preceding
-        // the throw; with only the pre-send window, already over, it would go out at once.
+        TimeSpan.FromSeconds((double)heldTicks / Stopwatch.Frequency).Should().BeGreaterThan(Budget,
+            "the provisional window must be over when the send is cancelled, or this is test O");
+        // The second send waited P2 from the cancellation; with only the pre-send window, already
+        // over, it would go out at once. Scheduling delay can only lengthen the gap now, never
+        // shorten it, so the margin -- O's and Q's -- no longer has to absorb it.
         TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
             Budget - TimeSpan.FromMilliseconds(5),
             "the cancelled send's window was noted again from the cancellation");
