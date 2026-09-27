@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
 using CanKit.Pro.Reliability;
+using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
 
@@ -37,11 +38,16 @@ public class DeadlineTests
     [Fact]
     public async Task Complete_Before_Expiry_Prevents_OnExpired_And_Is_Idempotent()
     {
-        using var actor = new ProtocolActor();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var scheduler = new DeadlineScheduler(actor);
         var fired = false;
 
-        var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(200), () => fired = true);
+        var timeout = TimeSpan.FromMilliseconds(200);
+        var deadline = scheduler.Arm(timeout, () => fired = true);
+        // Arm before you advance: prove the deadline really was scheduled for the configured
+        // timeout before Complete races ahead of it.
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, Bounded);
 
         deadline.Complete().Should().BeTrue("Complete wins the race well before the deadline would expire");
         deadline.IsCompleted.Should().BeTrue();
@@ -53,54 +59,76 @@ public class DeadlineTests
         deadline.IsCompleted.Should().BeTrue();
         deadline.IsCancelled.Should().BeFalse();
 
-        // Let the original timer's due point pass and round-trip through the loop; onExpired must
-        // never fire for a completed deadline.
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
-        await actor.PostAsync(() => 0);
+        // Move the clock past the original timer's due point and let the loop settle; onExpired
+        // must never fire for a completed deadline.
+        await clock.AdvanceAsync(timeout + TimeSpan.FromMilliseconds(100));
+        await clock.SettleAsync();
         fired.Should().BeFalse();
     }
 
     [Fact]
     public async Task Cancel_Before_Expiry_Prevents_OnExpired()
     {
-        using var actor = new ProtocolActor();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var scheduler = new DeadlineScheduler(actor);
         var fired = false;
 
-        var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(200), () => fired = true);
+        var timeout = TimeSpan.FromMilliseconds(200);
+        var deadline = scheduler.Arm(timeout, () => fired = true);
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, Bounded);
+
         deadline.Dispose(); // Dispose == Cancel
         deadline.IsCancelled.Should().BeTrue();
 
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
-        await actor.PostAsync(() => 0);
+        await clock.AdvanceAsync(timeout + TimeSpan.FromMilliseconds(100));
+        await clock.SettleAsync();
         fired.Should().BeFalse();
     }
 
     [Fact]
-    public void Rearm_Before_Original_Expiry_Extends_The_Deadline()
+    public async Task Rearm_Before_Original_Expiry_Extends_The_Deadline()
     {
-        using var actor = new ProtocolActor();
-        var scheduler = new DeadlineScheduler(actor);
-
-        // #130. Task.Delay completes on the thread pool, and a saturated net48 pool injects
-        // threads only one or two per second. Delay(850) can still be pending when the rearmed
-        // 2000 ms deadline fires on the actor's dedicated thread, so WhenAny reports that fire
-        // and the assertion blames the superseded timer. These waits block the calling thread.
-        // The windows stay 50 / 850 / 2000 ms. The generation guard itself is
+        // Previously #130 kept this test on the wall clock: a saturated net48 thread pool injects
+        // threads only one or two per second, so Task.Delay(850) could still be pending when the
+        // rearmed 2000 ms deadline fired, and WhenAny would report that fire and blame the
+        // superseded timer instead. A VirtualClock sidesteps the thread pool race entirely -- the
+        // deadline's due points are moments this test itself schedules, so there is nothing left
+        // for the pool to starve. The generation guard itself is covered separately by
         // Rearm_Leaves_An_Already_Dispatched_Callback_Unable_To_Expire.
-        using var fired = new ManualResetEventSlim(false);
-        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(600), () => fired.Set());
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        var scheduler = new DeadlineScheduler(actor);
+        var fired = false;
 
-        Thread.Sleep(TimeSpan.FromMilliseconds(50));
-        deadline.Rearm(TimeSpan.FromMilliseconds(2000)).Should().BeTrue("re-arming a still-pending deadline succeeds");
+        var original = TimeSpan.FromMilliseconds(600);
+        var extended = TimeSpan.FromMilliseconds(2000);
+        using var deadline = scheduler.Arm(original, () => fired = true);
+        await clock.WaitUntilTimerArmedAsync(actor, original, Bounded);
 
-        // Past the original 600 ms, and still more than a second short of the rearmed deadline.
-        fired.Wait(TimeSpan.FromMilliseconds(850)).Should().BeFalse(
-            "the original timeout must have been superseded by Rearm");
+        deadline.Rearm(extended).Should().BeTrue("re-arming a still-pending deadline succeeds");
+        // The rearmed timer must now be armed for the extended interval, not the remainder of the
+        // original one -- this is the generation guard's counterpart on the happy path.
+        await clock.WaitUntilTimerArmedAsync(actor, extended, Bounded);
+
+        // Bracket from both sides. First: past the original due point, well short of the
+        // rearmed one.
+        await clock.AdvanceAsync(original);
+        await clock.SettleAsync();
+        fired.Should().BeFalse("the original timeout must have been superseded by Rearm");
         deadline.IsExpired.Should().BeFalse();
 
-        fired.Wait(Bounded).Should().BeTrue(
-            "the re-armed timeout must still fire at its new deadline");
+        // One tick short of the rearmed due point: still must not have fired.
+        var epsilon = TimeSpan.FromMilliseconds(1);
+        await clock.AdvanceAsync(extended - original - epsilon);
+        await clock.SettleAsync();
+        fired.Should().BeFalse("the rearmed deadline has not reached its own due point yet");
+        deadline.IsExpired.Should().BeFalse();
+
+        // The last tick reaches it.
+        await clock.AdvanceAsync(epsilon);
+        await clock.SettleAsync();
+        fired.Should().BeTrue("the re-armed timeout must still fire at its new deadline");
         deadline.IsExpired.Should().BeTrue();
     }
 
@@ -195,19 +223,24 @@ public class DeadlineTests
     [Fact]
     public async Task Disposing_The_Owning_Actor_While_Pending_Never_Fires_The_Deadline_And_Escapes_No_Exception()
     {
-        var actor = new ProtocolActor();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var scheduler = new DeadlineScheduler(actor);
         var backgroundFaulted = false;
         actor.BackgroundExceptionOccurred += (_, _) => backgroundFaulted = true;
         var fired = false;
 
-        using var deadline = scheduler.Arm(TimeSpan.FromMilliseconds(200), () => fired = true);
+        var timeout = TimeSpan.FromMilliseconds(200);
+        using var deadline = scheduler.Arm(timeout, () => fired = true);
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, Bounded);
 
         // The actor's FinalDrain discards not-yet-due Schedule callbacks, so a deadline that was
-        // still Pending simply never resolves (documented best-effort behavior).
+        // still Pending simply never resolves (documented best-effort behavior). actor.Dispose()
+        // joins the dedicated thread and only returns once FinalDrain has already run, so the
+        // outcome is settled the moment this call returns -- no wait, virtual or otherwise, is
+        // needed to observe it.
         actor.Dispose();
 
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
         fired.Should().BeFalse("a pending deadline whose actor is disposed must never fire");
         deadline.IsExpired.Should().BeFalse();
         backgroundFaulted.Should().BeFalse("disposing the actor under a pending deadline must not raise any exception");

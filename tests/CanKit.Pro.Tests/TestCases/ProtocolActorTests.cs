@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
+using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
 
@@ -130,16 +131,18 @@ public class ProtocolActorTests
     [Fact]
     public async Task Disposing_The_Schedule_Handle_Before_Due_Prevents_The_Callback_From_Firing()
     {
-        using var actor = new ProtocolActor();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
         var fired = false;
 
-        var handle = actor.Schedule(TimeSpan.FromMilliseconds(100), () => fired = true);
+        var timeout = TimeSpan.FromMilliseconds(100);
+        var handle = actor.Schedule(timeout, () => fired = true);
+        await clock.WaitUntilTimerArmedAsync(actor, timeout, TimeSpan.FromSeconds(5));
         handle.Dispose();
 
-        await Task.Delay(TimeSpan.FromMilliseconds(300));
-        // Round-trip through the actor once more so we know the loop has definitely passed the
-        // point where the (cancelled) timer would have fired.
-        await actor.PostAsync(() => 0);
+        // Move the clock well past the (cancelled) timer's due point and let the loop settle.
+        await clock.AdvanceAsync(timeout + TimeSpan.FromMilliseconds(200));
+        await clock.SettleAsync();
 
         fired.Should().BeFalse();
     }
@@ -191,8 +194,12 @@ public class ProtocolActorTests
         (await Task.WhenAny(completed.Task, Task.Delay(TimeSpan.FromSeconds(5)))).Should().Be(completed.Task,
             "a self-disposing callback must return promptly instead of deadlocking on its own loop");
 
-        // The loop must still actually finish tearing itself down shortly afterward.
-        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        // No further wait is needed: Dispose flips _disposedFlag inside the same _disposeGate lock
+        // that Post checks, and it does so as the very first thing it does -- even on the reentrant
+        // path that returns immediately without joining the loop thread. Since actor.Dispose() is
+        // called (and therefore has already flipped the flag) strictly before completed.TrySetResult
+        // runs inside that same synchronous callback, the flag is already set by the time
+        // completed.Task above resolves.
         Action postAfter = () => actor.Post(() => { });
         postAfter.Should().Throw<ObjectDisposedException>();
     }

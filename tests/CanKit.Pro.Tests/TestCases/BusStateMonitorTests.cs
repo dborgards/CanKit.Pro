@@ -46,15 +46,22 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task StateChanged_Is_Not_Raised_While_The_State_Is_Unchanged()
     {
+        using var clock = new VirtualClock();
         using var bus = OpenBus();
-        using var actor = new ProtocolActor();
-        using var monitor = new BusStateMonitor(bus, actor, TimeSpan.FromMilliseconds(20));
+        var actor = clock.NewActor();
+        var pollInterval = TimeSpan.FromMilliseconds(20);
+        using var monitor = new BusStateMonitor(bus, actor, pollInterval);
 
         var changes = 0;
         monitor.StateChanged += (_, _) => Interlocked.Increment(ref changes);
 
-        // Let many poll ticks run without ever changing the bus state.
-        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        // Let ten poll ticks run without ever changing the bus state, each proven armed before the
+        // clock moves past it.
+        for (var i = 0; i < 10; i++)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, pollInterval, Bounded);
+            await clock.AdvanceAsync(pollInterval);
+        }
 
         Volatile.Read(ref changes).Should().Be(0, "an unchanged state must never raise an edge-triggered event");
     }
@@ -105,19 +112,28 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Dispose_Stops_Further_StateChanged_Events_And_Is_Idempotent()
     {
+        using var clock = new VirtualClock();
         using var bus = OpenBus();
-        using var actor = new ProtocolActor();
-        var monitor = new BusStateMonitor(bus, actor, TimeSpan.FromMilliseconds(20));
+        var actor = clock.NewActor();
+        var pollInterval = TimeSpan.FromMilliseconds(20);
+        var monitor = new BusStateMonitor(bus, actor, pollInterval);
 
         var changes = 0;
         monitor.StateChanged += (_, _) => Interlocked.Increment(ref changes);
+
+        // Wait for the first poll to actually be armed before disposing: disposing while the
+        // constructor's initial RearmPoll post is still in flight would let the race resolve
+        // either way (a handle Dispose never gets to see and cancel is not what "Dispose stops
+        // the poll" is claiming).
+        await clock.WaitUntilTimerArmedAsync(actor, pollInterval, Bounded);
 
         monitor.Dispose();
         monitor.Dispose(); // idempotent
 
         // Change the state only after disposing: with the poll stopped, no event may arrive.
         bus.BusState = BusState.BusOff;
-        await Task.Delay(TimeSpan.FromMilliseconds(150)); // several poll intervals
+        await clock.AdvanceAsync(pollInterval + pollInterval + pollInterval); // several poll intervals
+        await clock.SettleAsync();
 
         Volatile.Read(ref changes).Should().Be(0, "a disposed monitor must stop polling and raising events");
     }
