@@ -493,30 +493,46 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
     // the in-flight guard -- the claim in hand stays registered through the backoff -- and the
     // re-claim completes for its caller.
+    //
+    // The Claiming event for the next candidate is raised before that claim is registered, and
+    // its continuation runs on the pool. A wall-clock test that claims again from that event
+    // can miss the guard: on a slow runner the 150 ms backoff and the announce window both
+    // elapse before the second ClaimAddressAsync is processed, the first claim completes, and
+    // the second call succeeds. The clock stays put until the backoff timer is armed, which is
+    // after the claim is registered, and only then is the second call issued.
     [Fact]
     public async Task A_Claim_During_The_Backoff_Before_A_Reclaim_Faults_And_The_Reclaim_Completes()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var backoff = TimeSpan.FromMilliseconds(150);
+        var announce = TimeSpan.FromMilliseconds(80);
         const byte contended = 0x81;
 
-        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158))
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            ClaimAnnounceTimeout = announce,
             EnableArbitraryAddressClaiming = true,
-        });
+        }, ownsService: false, actor);
 
         var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true); };
 
         var first = node.ClaimAddressAsync(contended); // lost to the winner; the scan moves on after the backoff
         await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
         Func<Task> second = () => node.ClaimAddressAsync(0x90).WithTimeout(ShortTimeout);
         await second.Should().ThrowAsync<InvalidOperationException>();
 
+        await clock.AdvanceAsync(backoff);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
         await first.WithTimeout(ShortTimeout);
         node.Address.Should().Be((byte)(contended + 1));
     }
@@ -2253,28 +2269,38 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = NewSession();
         using var busA = Open(session, 0);
+        using var spectator = Open(session, 1);
 
-        // Longer Th so a multi-frame TP.BAM stays on the wire long enough for us to start a
-        // re-claim while the send is still awaiting the last TP.DT.
+        // The gap after the announce is what keeps the send in flight. A short spacing lets
+        // a slow runner finish every TP.DT before ClaimAddressAsync reaches the actor, and
+        // the send then succeeds on the address it captured. The spacing is not slept: the
+        // re-claim starts once the BAM is on the wire, while the next DT is still waiting.
         var opts = new J1939NodeOptions(Name(1))
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
-            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(60)),
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromSeconds(30)),
         };
         using var node = J1939Node.Open(busA, opts);
         await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
         node.Address.Should().Be((byte)0x11);
 
-        // Multi-frame BAM: 60 bytes → 9 TP.DT frames at Th ≈ 60 ms each keeps the send task
-        // awaiting for several hundred ms, giving us room to trigger a re-claim.
+        var bamOnWire = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        spectator.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 1) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress == 0x11 && J1939Pgn.IsBam(fields.Pgn, e.CanFrame.Data.Span[0]))
+                bamOnWire.TrySetResult(true);
+        };
+
+        // Multi-frame BAM: 60 bytes is nine TP.DT frames. None of them are due until the
+        // spacing above, so the session observed by the BAM is still the one in hand.
         var payload = new byte[60];
         for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
         var sendTask = node.SendAsync(new J1939Message(0xFED2u, payload, destinationAddress: 0xFF));
-
-        // Wait for the actor to actually start the TP session before racing the re-claim
-        // in; otherwise BeginClaim could run before SendCoreAsync captured the SA.
-        for (int i = 0; i < 20 && !sendTask.IsCompleted && node.ClaimState == J1939ClaimState.Claimed; i++)
-            await Task.Delay(10);
+        await bamOnWire.Task.AsTaskWithTimeout(ShortTimeout);
+        sendTask.IsCompleted.Should().BeFalse(
+            "the BAM has gone out and the next TP.DT is still a packet-spacing away");
 
         // Kick off a reclaim to a different preferred address. BeginClaim clears the
         // captured address, and (with the Bugbot 3600591973 fix) synchronously disposes the
@@ -2557,8 +2583,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                 // was the first answer and is not sufficient on its own either: SettleAsync ends
                 // the actor callback, not the send it hands to the thread pool, so an early
                 // emission can still be off the wire when Count() reads (Bugbot on #113).
-                await clock.WaitUntilTimerArmedAsync(senderActor, slotPoint - clock.Elapsed,
-                    ShortTimeout);
+                var remaining = slotPoint - clock.Elapsed;
+                await clock.WaitUntilTimerArmedAsync(senderActor, remaining, ShortTimeout, Step);
+                // DueTimestamp reads the clock again after the delay was computed. One send-cost
+                // between those reads arms the tick a step past the slot; the grid assertion below
+                // still requires the announce on that slot, give or take this one step.
+                var armed = await senderActor.NextTimerDelayAsync();
+                var lateBy = armed is { } delay && delay > remaining ? delay - remaining : TimeSpan.Zero;
 
                 // One tick short of the slot: corroboration on the wire that the tick armed above
                 // has not fired early. It is the barrier, not this, that pins the period.
@@ -2569,6 +2600,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
                     slot);
 
                 await clock.AdvanceToAsync(slotPoint);
+                if (lateBy > TimeSpan.Zero)
+                    await clock.AdvanceAsync(lateBy);
                 await WaitForAnnouncesAsync(Count, slot);
                 await WaitForAnnouncesAsync(() => Volatile.Read(ref dataFrames),
                     slot * dataFramesPerEmission);
