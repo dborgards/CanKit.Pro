@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -120,6 +121,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // echo, so its marker stays until that echo or until ClaimEchoGrace, and a retry's
     // marker is not the one a content match spends on it.
     private readonly List<ClaimEcho> _claimEchoes = new();
+
+    // Every grace armed for a claim echo, including one whose marker the echo already took.
+    // Dispose cancels these; the callback itself no-ops when the marker is gone (#180).
+    private readonly List<IDeadline> _claimEchoGraces = new();
 
     // How long a timed-out claim's marker stays after SendConfirmed gives up. The frame was
     // accepted, so the echo can still arrive and has to be recognised as ours; past this
@@ -546,8 +551,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // The peer's claim may already have been through this loop, before the claim was
         // pending. Their NAME is not lower than ours, so §4.4.3.3 does not have them
         // retransmit it — this round would otherwise finish uncontested. The announce above
-        // is what unseats them; the loss here is ours.
-        if (_equalNameHeardOn == preferredAddress)
+        // is what unseats them; the loss here is ours. A value still stored is this address:
+        // one heard on any other address was cleared before the announce.
+        if (_equalNameHeardOn is not null)
         {
             _equalNameHeardOn = null;
             LoseEqualNameContest(preferredAddress, _name);
@@ -725,7 +731,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
             {
                 // This observation is the contest. A claim we have not started yet must not
                 // also lose on the strength of a frame we are answering right now.
-                if (_equalNameHeardOn == peerSa) _equalNameHeardOn = null;
+                if (_equalNameHeardOn is byte heardOn && heardOn == peerSa)
+                    _equalNameHeardOn = null;
                 LoseEqualNameContest(peerSa, peerName);
             }
             else
@@ -882,9 +889,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return;
         }
 
-        if (ClaimState != J1939ClaimState.Claimed || _addressStore < 0 || peerSa != (byte)_addressStore)
-            return;
-
+        // The pending claim did not match, and the only other caller is a contest of the
+        // address we hold. There is no remaining state in which this loss is someone else's.
         WriteAddress(null);
         RebindTransportOnLoop(J1939Pgn.NullAddress);
         SetClaimState(J1939ClaimState.CannotClaim, address: null,
@@ -1044,9 +1050,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void DropClaimEchoAt(int index)
     {
-        var echo = _claimEchoes[index];
-        echo.Grace?.Dispose();
-        echo.Grace = null;
+        // The grace stays armed. This echo already came back, and the callback finds the
+        // marker gone. Dispose cancels every grace still outstanding, taken or not.
         _claimEchoes.RemoveAt(index);
     }
 
@@ -1068,33 +1073,36 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Nothing left to linger in that case: the echo was ours.
         if (!_claimEchoes.Contains(echo)) return;
         echo.Lingering = true;
+        ArmClaimEchoGrace(echo);
+    }
+
+    private void ArmClaimEchoGrace(ClaimEcho echo)
+    {
         echo.Grace?.Dispose();
-        echo.Grace = _deadlines.Arm(ClaimEchoGrace, () => OnClaimEchoGraceElapsed(echo));
+        var grace = _deadlines.Arm(ClaimEchoGrace, () => OnClaimEchoGraceElapsed(echo));
+        echo.Grace = grace;
+        _claimEchoGraces.Add(grace);
     }
 
     private void OnClaimEchoGraceElapsed(ClaimEcho echo)
     {
-        if (_disposed != 0) return;
-        echo.Grace = null;
         if (!_claimEchoes.Contains(echo)) return;
         // A retry of the same frame is in flight. Retiring this marker now lets the late
         // echo spend the retry's, and the retry's own echo is then an equal-NAME peer.
         if (HasLiveClaimEcho(echo))
         {
-            echo.Grace = _deadlines.Arm(ClaimEchoGrace, () => OnClaimEchoGraceElapsed(echo));
+            ArmClaimEchoGrace(echo);
             return;
         }
+        echo.Grace = null;
         _claimEchoes.Remove(echo);
     }
 
     private bool HasLiveClaimEcho(ClaimEcho lingering)
     {
-        foreach (var other in _claimEchoes)
-        {
-            if (ReferenceEquals(other, lingering) || other.Lingering) continue;
-            if (ClaimEchoMatches(other, lingering.CanId, lingering.Payload)) return true;
-        }
-        return false;
+        return _claimEchoes
+            .Where(other => !ReferenceEquals(other, lingering) && !other.Lingering)
+            .Any(other => ClaimEchoMatches(other, lingering.CanId, lingering.Payload));
     }
 
     private void NoteUnconfirmedClaimEcho(ClaimEcho? echo, bool mayStillEcho)
@@ -1616,8 +1624,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 CompleteLostClaim();
                 while (_cannotClaimsAwaitingHandoff.Count > 0)
                     FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
-                foreach (var echo in _claimEchoes)
-                    echo.Grace?.Dispose();
+                foreach (var grace in _claimEchoGraces)
+                    grace.Dispose();
+                _claimEchoGraces.Clear();
                 _claimEchoes.Clear();
                 var pending = _pendingClaim;
                 if (pending is not null)
