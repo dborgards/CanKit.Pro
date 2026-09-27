@@ -612,13 +612,9 @@ internal sealed partial class CanOpenNode
     private void RaiseFlyingMaster(FlyingMasterSignal signal, byte? otherNodeId, ushort? otherPriority)
     {
         var args = new FlyingMasterChangedEventArgs(signal, _flyingMasterRole, otherNodeId, otherPriority);
-        // Same isolation as the other queued events: a subscriber throw is reported and the
-        // pump keeps delivering what was already accepted, including a timeout or an EMCY.
-        EnqueueEvent(() =>
-        {
-            try { FlyingMasterChanged?.Invoke(this, args); }
-            catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        // The dispatcher reports a subscriber throw and keeps going, so a timeout or an
+        // EMCY already queued is still delivered. A second catch here would only repeat that.
+        EnqueueEvent(() => FlyingMasterChanged?.Invoke(this, args));
     }
 
     private OdWriteDecision ValidateFlyingMasterTimingWrite(byte subindex, byte[] value)
