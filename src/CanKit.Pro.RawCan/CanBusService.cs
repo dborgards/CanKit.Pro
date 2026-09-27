@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -64,13 +63,32 @@ namespace CanKit.Pro.RawCan
 
         private int _disposed;
 
+        // Host arrival and transmit stamps. Production reads Stopwatch; a test passes the same
+        // counter the protocol window is measured on, so a frame and the deadline that admits it
+        // are not two clocks (#171).
+        private readonly Func<long> _hostTimestamp;
+
         /// <summary>
         /// Creates a service that demultiplexes <paramref name="bus"/>. Attaches to the bus's
         /// <see cref="ICanBus.FrameObserved"/> event immediately.
         /// </summary>
         public CanBusService(ICanBus bus)
+            : this(bus, hostTimestamp: null)
+        {
+        }
+
+        /// <summary>
+        /// As the public constructor, but <paramref name="hostTimestamp"/> supplies the host
+        /// arrival and transmit stamps. Null keeps <see cref="Stopwatch.GetTimestamp"/>.
+        /// </summary>
+        /// <remarks>
+        /// Internal on purpose. The stamps are facts about one clock, and the only caller that
+        /// needs to choose which clock is a test driving a functional window by hand (#171).
+        /// </remarks>
+        internal CanBusService(ICanBus bus, Func<long>? hostTimestamp)
         {
             _bus = bus ?? throw new ArgumentNullException(nameof(bus));
+            _hostTimestamp = hostTimestamp ?? Stopwatch.GetTimestamp;
             _bus.FrameObserved += OnFrameObserved;
             _bus.FaultOccurred += OnFaultOccurred;
         }
@@ -163,7 +181,7 @@ namespace CanKit.Pro.RawCan
             // per-subscription buffers below can hold a frame while their reader is descheduled.
             // Either would make a punctual frame look late to whoever is enforcing a deadline on
             // it (Codex on #112).
-            var hostArrival = Stopwatch.GetTimestamp();
+            var hostArrival = _hostTimestamp();
 
             // Independent of subscription dispatch below: echo frames must be checked against
             // outstanding SendConfirmed calls regardless of whether anyone also has a
@@ -321,13 +339,13 @@ namespace CanKit.Pro.RawCan
             // runs again, and a reading taken there starts a caller's response deadline late
             // (Codex on #112). ExecuteSynchronously is what observes completion closest; when the
             // runtime declines to inline it the reading is what it would have been anyway.
-            var stamp = new StrongBox<long>();
-            var handoffStart = Stopwatch.GetTimestamp();
+            var stamp = new HandoffStamp(_hostTimestamp);
+            var handoffStart = stamp.Now();
             var accepted = await _bus.TransmitAsync(frame, cancellationToken)
                 .ContinueWith(
                     static (completed, state) =>
                     {
-                        ((StrongBox<long>)state!).Value = Stopwatch.GetTimestamp();
+                        ((HandoffStamp)state!).Value = ((HandoffStamp)state!).Now();
 
                         // GetResult rather than .Result: it surfaces a driver fault or a
                         // cancellation as itself instead of wrapping it in an AggregateException,
@@ -387,7 +405,7 @@ namespace CanKit.Pro.RawCan
                     RegisterPending(pending);
                     // The other end of the driver call, inside the lock: a caller's cutoff for
                     // what can still be a response to this frame (Codex on #147).
-                    handoffStart = Stopwatch.GetTimestamp();
+                    handoffStart = _hostTimestamp();
                     accepted = _bus.Transmit(in frame);
 
                     // Taken here, inside the lock and immediately after the driver call returns:
@@ -396,7 +414,7 @@ namespace CanKit.Pro.RawCan
                     // for this very lock, which another send holds across its own Transmit -- and
                     // would start a caller's response deadline while the request was still
                     // queued behind it (Codex on #112).
-                    handoff = Stopwatch.GetTimestamp();
+                    handoff = _hostTimestamp();
                 }
             }
             catch
@@ -603,6 +621,21 @@ namespace CanKit.Pro.RawCan
                     FailureReason = TxConfirmFailureReason.BusOff,
                 });
             }
+        }
+
+        /// <summary>
+        /// The stamp taken on the thread that completes the driver's task. A static continuation
+        /// cannot close over the service, so the delegate travels with the box.
+        /// </summary>
+        private sealed class HandoffStamp
+        {
+            private readonly Func<long> _now;
+
+            public HandoffStamp(Func<long> now) => _now = now;
+
+            public long Value;
+
+            public long Now() => _now();
         }
     }
 }

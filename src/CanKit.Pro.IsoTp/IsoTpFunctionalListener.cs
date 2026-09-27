@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Pro.Actor;
 using CanKit.Pro.RawCan;
 
 namespace CanKit.Pro.IsoTp;
@@ -27,15 +28,19 @@ public sealed class IsoTpFunctionalListener : IDisposable
     private static readonly TimeSpan MaxWindow = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     private readonly ISubscription _subscription;
+    private readonly ProtocolActor? _clock;
+    private readonly ITimeSource _time;
     // Arrived after a collection's deadline but before its drain read the buffer: kept for the
     // next collection, whose window they are in (Codex on #150).
     private readonly Queue<IsoTpFunctionalResponse> _carried = new();
     private bool _ended;
     private int _disposed;
 
-    internal IsoTpFunctionalListener(ISubscription subscription)
+    internal IsoTpFunctionalListener(ISubscription subscription, ProtocolActor? clock = null)
     {
         _subscription = subscription;
+        _clock = clock;
+        _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
     }
 
     /// <summary>
@@ -68,7 +73,7 @@ public sealed class IsoTpFunctionalListener : IDisposable
         if (window > MaxWindow)
             throw new ArgumentOutOfRangeException(nameof(window), window,
                 "The collection window exceeds what a timer can measure (about 49 days).");
-        long now = Stopwatch.GetTimestamp();
+        long now = _time.GetTimestamp();
         var responses = new List<IsoTpFunctionalResponse>(_carried);
         _carried.Clear();
         if (window <= TimeSpan.Zero)
@@ -80,9 +85,9 @@ public sealed class IsoTpFunctionalListener : IDisposable
             TakeBuffered(responses, now);
             return responses.AsReadOnly();
         }
-        long deadline = now + (long)(window.TotalSeconds * Stopwatch.Frequency);
+        long deadline = now + (long)(window.TotalSeconds * _time.Frequency);
         using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        windowCts.CancelAfter(window);
+        using var windowTimer = FunctionalWindow.Arm(_clock, window, windowCts);
         try
         {
             // Ends when the window runs out, or when the subscription is completed underneath
@@ -109,7 +114,7 @@ public sealed class IsoTpFunctionalListener : IDisposable
     {
         while (_subscription.TryRead(out var frameEvent))
         {
-            if (!IsoTpFunctionalClient.TryParseFunctionalResponse(frameEvent, out var response)) continue;
+            if (!IsoTpFunctionalClient.TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)) continue;
             if (response!.HostArrivalTimestamp <= deadline) responses.Add(response);
             else _carried.Enqueue(response);
         }
@@ -120,5 +125,28 @@ public sealed class IsoTpFunctionalListener : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _subscription.Dispose();
+    }
+}
+
+/// <summary>
+/// Ends a functional collection window. Production uses <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/>.
+/// A test that injected an actor arms the same interval on that actor's clock instead, so the
+/// window follows the clock and not the runner (#171).
+/// </summary>
+internal static class FunctionalWindow
+{
+    public static IDisposable? Arm(ProtocolActor? actor, TimeSpan window, CancellationTokenSource windowCts)
+    {
+        if (actor is null)
+        {
+            windowCts.CancelAfter(window);
+            return null;
+        }
+
+        return actor.Schedule(window, () =>
+        {
+            try { windowCts.Cancel(); }
+            catch (ObjectDisposedException) { }
+        });
     }
 }
