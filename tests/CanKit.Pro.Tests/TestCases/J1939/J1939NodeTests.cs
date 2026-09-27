@@ -511,6 +511,193 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.Address.Should().BeNull();
     }
 
+    // SendConfirmed timing out is not the same as a reject: the frame may already be on the
+    // wire. Dropping its marker makes that late echo a remembered equal NAME, and the retry
+    // of the same address loses before anyone is actually contending. The echo has to be
+    // spent on the send that timed out. The peer after the retry is a real contest.
+    [Fact]
+    public async Task A_Timed_Out_Claim_Echo_Does_Not_Poison_The_Retry()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
+        var name = Name(1);
+        var nameBytes = name.ToBytes();
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+
+        var first = node.ClaimAddressAsync(0x11);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        scripted.Release(ScriptedClaimBus.ReleaseKind.Timeout);
+
+        Func<Task> failed = () => first.WithTimeout(ShortTimeout);
+        var thrown = await failed.Should().ThrowAsync<J1939NodeException>();
+        thrown.Which.Should().NotBeOfType<J1939CannotClaimException>();
+        node.ClaimState.Should().Be(J1939ClaimState.NotClaimed);
+
+        await DrainObservedAsync(node, bus, AddressClaim(sourceAddress: 0x11, nameBytes));
+
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be((byte)0x11);
+
+        var lost = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(e);
+        };
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, nameBytes), isEcho: false);
+        await lost.Task.AsTaskWithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+        node.Address.Should().BeNull();
+    }
+
+    // No echo follows the timeout. The marker has to leave on its own, or the retry's echo
+    // is spent on it and the next real peer is swallowed as the echo still outstanding.
+    [Fact]
+    public async Task A_Timed_Out_Claim_Marker_Expires_Without_Swallowing_The_Next_Peer()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var name = Name(1);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+
+        var first = node.ClaimAddressAsync(0x11);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        scripted.Release(ScriptedClaimBus.ReleaseKind.Timeout);
+        Func<Task> failed = () => first.WithTimeout(ShortTimeout);
+        await failed.Should().ThrowAsync<J1939NodeException>();
+
+        await clock.WaitUntilTimerArmedAsync(actor, J1939NodeImpl.ClaimEchoGrace, ShortTimeout);
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+
+        var retry = node.ClaimAddressAsync(0x11);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await retry.WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be((byte)0x11);
+
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(true);
+        };
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, name.ToBytes()), isEcho: false);
+        await lost.Task.AsTaskWithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+    }
+
+    // The grace elapses while the retry is still waiting for its own echo. Retiring the
+    // timed-out marker at that instant lets the predecessor's late echo take the retry's,
+    // and the parked echo is then an equal-NAME peer.
+    [Fact]
+    public async Task A_Retry_During_Claim_Echo_Grace_Is_Not_Stolen_By_The_Late_Echo()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var name = Name(1);
+        var nameBytes = name.ToBytes();
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+
+        var first = node.ClaimAddressAsync(0x11);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        scripted.Release(ScriptedClaimBus.ReleaseKind.Timeout);
+        Func<Task> failed = () => first.WithTimeout(ShortTimeout);
+        await failed.Should().ThrowAsync<J1939NodeException>();
+
+        var retry = node.ClaimAddressAsync(0x11);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, J1939NodeImpl.ClaimEchoGrace, ShortTimeout);
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+
+        await DrainObservedAsync(node, bus, AddressClaim(sourceAddress: 0x11, nameBytes));
+        bus.DeferredEchoes.ReleaseAll().Should().Be(1);
+
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await retry.WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be((byte)0x11);
+    }
+
+    // A re-announce whose confirm times out is the same kind of send. Its late echo is ours;
+    // treated as a peer, it would take the address the node already holds.
+    [Fact]
+    public async Task A_Timed_Out_Reannounce_Does_Not_Lose_To_Its_Own_Late_Echo()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.TimeoutAfterFirstClaim);
+        var name = Name(1);
+        var nameBytes = name.ToBytes();
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+
+        var timedOut = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, _) => timedOut.TrySetResult(true);
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, Name(0x000200).ToBytes()), isEcho: false);
+        await timedOut.Task.AsTaskWithTimeout(ShortTimeout);
+        await DrainActorAsync(node, bus);
+
+        await DrainObservedAsync(node, bus, AddressClaim(sourceAddress: 0x11, nameBytes));
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be((byte)0x11);
+
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(true);
+        };
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, nameBytes), isEcho: false);
+        await lost.Task.AsTaskWithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+    }
+
+    private static async Task DrainObservedAsync(IJ1939Node node, ControllableBus bus, CanFrame frame)
+    {
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        bus.RaiseObserved(frame, isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        await barrier;
+    }
+
+    private static async Task DrainActorAsync(IJ1939Node node, ControllableBus bus)
+    {
+        const uint barrierPgn = 0xFEF5u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        bus.RaiseObserved(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        await barrier;
+    }
+
     // Address-claim markers used to share the 64-entry application-frame ledger. More Request
     // for Address Claimed replies than that, sent before any echo is delivered, evict the
     // claim marker; its echo then looks like a peer with our NAME and the node Cannot Claims
@@ -3714,6 +3901,9 @@ public sealed class ScriptedClaimBus : ICanBusService
         ThrowOnClaims,
         RejectCannotClaim,
         ThrowOnCannotClaim,
+        // The first Address Claim is forwarded. Every later one returns Timeout without
+        // being transmitted, so a test can deliver that echo itself.
+        TimeoutAfterFirstClaim,
     }
 
     public enum ReleaseKind
@@ -3721,6 +3911,7 @@ public sealed class ScriptedClaimBus : ICanBusService
         Confirmed,
         Rejected,
         Throw,
+        Timeout,
     }
 
     private readonly ICanBusService _inner;
@@ -3831,6 +4022,8 @@ public sealed class ScriptedClaimBus : ICanBusService
                             return Accepted();
                         case ReleaseKind.Rejected:
                             return Rejected();
+                        case ReleaseKind.Timeout:
+                            return TimedOut();
                         default:
                             throw new InvalidOperationException("address claim transmit failed");
                     }
@@ -3838,6 +4031,7 @@ public sealed class ScriptedClaimBus : ICanBusService
                 if (outcome == ClaimOutcome.HoldThenForward)
                     await WaitForCannotHoldAsync().ConfigureAwait(false);
                 if (outcome == ClaimOutcome.Reject) return Rejected();
+                if (outcome == ClaimOutcome.Timeout) return TimedOut();
                 if (outcome == ClaimOutcome.Throw) throw new InvalidOperationException("address claim transmit failed");
             }
         }
@@ -3863,12 +4057,17 @@ public sealed class ScriptedClaimBus : ICanBusService
                 return sourceAddress == J1939Pgn.NullAddress ? ClaimOutcome.Reject : ClaimOutcome.Forward;
             case Script.ThrowOnCannotClaim:
                 return sourceAddress == J1939Pgn.NullAddress ? ClaimOutcome.Throw : ClaimOutcome.Forward;
+            case Script.TimeoutAfterFirstClaim:
+                if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
+                return Interlocked.Increment(ref _claimSends) == 1 ? ClaimOutcome.Forward : ClaimOutcome.Timeout;
             default:
                 return ClaimOutcome.Forward;
         }
     }
 
-    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw }
+    private int _claimSends;
+
+    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw, Timeout }
 
     private static TxConfirmation Accepted() => new TxConfirmation
     {
@@ -3884,6 +4083,14 @@ public sealed class ScriptedClaimBus : ICanBusService
         IsApproximated = false,
         Timestamp = DateTime.UtcNow,
         FailureReason = TxConfirmFailureReason.Rejected,
+    };
+
+    private static TxConfirmation TimedOut() => new TxConfirmation
+    {
+        Confirmed = false,
+        IsApproximated = false,
+        Timestamp = DateTime.UtcNow,
+        FailureReason = TxConfirmFailureReason.Timeout,
     };
 }
 

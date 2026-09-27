@@ -115,9 +115,17 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // only. Not capped and not shared with `_ownFrames`: a Request-for-Address-Claimed
     // burst has to be able to answer without pushing a claim marker out before its echo
     // comes back, or that echo is arbitrated as an equal-NAME peer and the node Cannot
-    // Claims itself (#180). Each marker is removed by its echo, or by the send that failed
-    // or timed out — that send's marker, not whichever identical one was recorded later.
+    // Claims itself (#180). Each marker is removed by its own echo. A send the driver
+    // rejected never echoes and drops its marker at once; a send that timed out may still
+    // echo, so its marker stays until that echo or until ClaimEchoGrace, and a retry's
+    // marker is not the one a content match spends on it.
     private readonly List<ClaimEcho> _claimEchoes = new();
+
+    // How long a timed-out claim's marker stays after SendConfirmed gives up. The frame was
+    // accepted, so the echo can still arrive and has to be recognised as ours; past this
+    // the marker is retired by identity. While a newer identical send is outstanding the
+    // retirement waits, or the late echo would take that newer marker (#180).
+    internal static readonly TimeSpan ClaimEchoGrace = TimeSpan.FromSeconds(1);
 
     /// <inheritdoc />
     public J1939Name Name => _name;
@@ -651,13 +659,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
             () => OnClaimAnnounceElapsed(preferredAddress));
     }
 
-    private void OnClaimAnnounceTxFailed(byte preferredAddress, Exception error, ClaimEcho? echo)
+    private void OnClaimAnnounceTxFailed(byte preferredAddress, Exception error, ClaimEcho? echo,
+        bool mayStillEcho)
     {
-        // The frame never went out, or its echo will not be the one this send recorded. Drop
-        // that marker even when a newer, identical claim is already outstanding — removing the
-        // first content match would take the newer one, and leaving this one would let the
-        // retry's echo spend it so a real peer is then swallowed as the echo (#180).
-        if (echo is not null) _claimEchoes.Remove(echo);
+        // Rejected: the driver never accepted the frame, so nothing will echo and the marker
+        // has to go now — a retry must not spend its echo on it. Timed out (or bus-off): the
+        // frame may already be on the wire. Dropping the marker here makes the late echo look
+        // like an equal-NAME peer, or lets it spend the retry's marker (#180).
+        ApplyClaimEchoFailure(echo, mayStillEcho);
 
         var pending = _pendingClaim;
         if (pending is null || pending.PreferredAddress != preferredAddress) return;
@@ -952,7 +961,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
             {
                 var ex = new J1939NodeException(
                     $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
-                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo)); }
+                var mayEcho = ClaimEchoMayFollow(confirmation.FailureReason);
+                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayEcho)); }
                 catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
                 return;
             }
@@ -962,7 +972,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
         catch (Exception ex)
         {
-            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo)); }
+            // SendConfirmed threw rather than returning a timeout: the scripted and driver
+            // failures that do this have not put the frame on the wire.
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
     }
@@ -1003,15 +1015,93 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private bool TryTakeClaimEcho(uint canId, byte[] payload)
     {
+        // A live send is still waiting for its echo. Prefer that marker over an older one
+        // whose confirm already timed out: otherwise the retry's echo is spent on the
+        // predecessor, and the predecessor's late echo — or the next real peer — is the
+        // frame with no marker left (#180). The timed-out marker is only the match when
+        // nothing live is waiting, which is the late echo arriving before the retry.
+        int lingering = -1;
         for (int i = 0; i < _claimEchoes.Count; i++)
         {
             var echo = _claimEchoes[i];
-            if (echo.CanId != canId || echo.Payload.Length != payload.Length) continue;
-            if (!echo.Payload.AsSpan().SequenceEqual(payload)) continue;
-            _claimEchoes.RemoveAt(i);
-            return true;
+            if (!ClaimEchoMatches(echo, canId, payload)) continue;
+            if (!echo.Lingering)
+            {
+                DropClaimEchoAt(i);
+                return true;
+            }
+            if (lingering < 0) lingering = i;
+        }
+        if (lingering < 0) return false;
+        DropClaimEchoAt(lingering);
+        return true;
+    }
+
+    private static bool ClaimEchoMatches(ClaimEcho echo, uint canId, byte[] payload)
+        => echo.CanId == canId
+           && echo.Payload.Length == payload.Length
+           && echo.Payload.AsSpan().SequenceEqual(payload);
+
+    private void DropClaimEchoAt(int index)
+    {
+        var echo = _claimEchoes[index];
+        echo.Grace?.Dispose();
+        echo.Grace = null;
+        _claimEchoes.RemoveAt(index);
+    }
+
+    // Rejected: nothing was handed to the driver. Anything else (timeout, bus-off) already
+    // was, and the echo can still show up after SendConfirmed has given up.
+    private static bool ClaimEchoMayFollow(TxConfirmFailureReason reason)
+        => reason != TxConfirmFailureReason.Rejected;
+
+    private void ApplyClaimEchoFailure(ClaimEcho? echo, bool mayStillEcho)
+    {
+        if (echo is null) return;
+        if (mayStillEcho) LingerClaimEcho(echo);
+        else _claimEchoes.Remove(echo);
+    }
+
+    private void LingerClaimEcho(ClaimEcho echo)
+    {
+        // The echo can win the race and take the marker before the timeout is posted back.
+        // Nothing left to linger in that case: the echo was ours.
+        if (!_claimEchoes.Contains(echo)) return;
+        echo.Lingering = true;
+        echo.Grace?.Dispose();
+        echo.Grace = _deadlines.Arm(ClaimEchoGrace, () => OnClaimEchoGraceElapsed(echo));
+    }
+
+    private void OnClaimEchoGraceElapsed(ClaimEcho echo)
+    {
+        if (_disposed != 0) return;
+        echo.Grace = null;
+        if (!_claimEchoes.Contains(echo)) return;
+        // A retry of the same frame is in flight. Retiring this marker now lets the late
+        // echo spend the retry's, and the retry's own echo is then an equal-NAME peer.
+        if (HasLiveClaimEcho(echo))
+        {
+            echo.Grace = _deadlines.Arm(ClaimEchoGrace, () => OnClaimEchoGraceElapsed(echo));
+            return;
+        }
+        _claimEchoes.Remove(echo);
+    }
+
+    private bool HasLiveClaimEcho(ClaimEcho lingering)
+    {
+        foreach (var other in _claimEchoes)
+        {
+            if (ReferenceEquals(other, lingering) || other.Lingering) continue;
+            if (ClaimEchoMatches(other, lingering.CanId, lingering.Payload)) return true;
         }
         return false;
+    }
+
+    private void NoteUnconfirmedClaimEcho(ClaimEcho? echo, bool mayStillEcho)
+    {
+        if (echo is null) return;
+        try { _actor.Post(() => ApplyClaimEchoFailure(echo, mayStillEcho)); }
+        catch (ObjectDisposedException) { /* the node was disposed: nothing will match it */ }
     }
 
     // The frames this node sent and has not seen come back. An echo is recognised by content —
@@ -1242,14 +1332,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
             var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
             if (!confirmation.Confirmed)
             {
-                RetireClaimEcho(echo);
+                NoteUnconfirmedClaimEcho(echo, ClaimEchoMayFollow(confirmation.FailureReason));
                 RaiseBackgroundException(new J1939NodeException(
                     $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
             }
         }
         catch (Exception ex)
         {
-            RetireClaimEcho(echo);
+            NoteUnconfirmedClaimEcho(echo, mayStillEcho: false);
             RaiseBackgroundException(ex);
         }
 
@@ -1526,6 +1616,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 CompleteLostClaim();
                 while (_cannotClaimsAwaitingHandoff.Count > 0)
                     FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
+                foreach (var echo in _claimEchoes)
+                    echo.Grace?.Dispose();
+                _claimEchoes.Clear();
                 var pending = _pendingClaim;
                 if (pending is not null)
                 {
@@ -1597,15 +1690,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         public TaskCompletionSource<object?> Tcs { get; }
     }
 
-    private void RetireClaimEcho(ClaimEcho? echo)
-    {
-        if (echo is null) return;
-        try { _actor.Post(() => _claimEchoes.Remove(echo)); }
-        catch (ObjectDisposedException) { /* the node was disposed: nothing will match it */ }
-    }
-
     // Identity, not content. Two claims of the same NAME and address are byte-identical; the
-    // one a failed send must drop is the one that send recorded.
+    // one a failed send must drop is the one that send recorded. Lingering is a send whose
+    // confirm timed out: the marker stays for ClaimEchoGrace so the late echo is still ours.
     private sealed class ClaimEcho
     {
         public ClaimEcho(uint canId, byte[] payload)
@@ -1616,6 +1703,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         public uint CanId { get; }
         public byte[] Payload { get; }
+        public bool Lingering { get; set; }
+        public IDeadline? Grace { get; set; }
     }
 
     private sealed class PendingClaim
