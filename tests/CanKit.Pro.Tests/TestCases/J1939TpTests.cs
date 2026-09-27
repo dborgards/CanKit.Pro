@@ -7,6 +7,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939Tp;
 using CanKit.Pro.RawCan;
@@ -2383,6 +2384,424 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await sender.SendBamAsync(0xFECAu, payload).WaitAsync(ShortTimeout);
         var datagram = await fromHandler.Task.WaitAsync(ShortTimeout);
         datagram.Payload.Should().Equal(payload);
+    }
+
+    // #171: the channel used to build its own actor on the wall clock, so a BAM spacing could
+    // only be waited out. An injected actor is the caller's, including when construction fails
+    // before the channel exists to be asked.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_Failed_Construction_Disposes_Its_Own_Actor_But_Never_An_Injected_One(bool inject)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var inner = new CanBusService(bus);
+
+        using var clock = new VirtualClock();
+        var injected = inject ? clock.NewActor() : null;
+        var failing = new ThrowingSubscribeService(inner, failOnCall: 1);
+        var loopsBefore = ProtocolActor.RunningLoopCount;
+
+        Action construct = () => new J1939TpChannel(failing, sourceAddress: 0x10,
+            new J1939TpOptions(), ownsService: false, injected);
+        construct.Should().Throw<InvalidOperationException>();
+
+        failing.SubscribeCalls.Should().Be(1);
+        inner.SubscriptionCount.Should().Be(0, "the subscription that threw was never installed");
+        if (injected is not null)
+        {
+            (await injected.PostAsync(() => 42).WaitAsync(ShortTimeout)).Should().Be(42,
+                "an injected actor belongs to the caller and must survive a construction that failed");
+        }
+        ProtocolActor.RunningLoopCount.Should().Be(loopsBefore,
+            inject
+                ? "the channel created no actor here, so it must not have ended one either"
+                : "the actor the channel created for itself must be gone once construction fails");
+    }
+
+    // The spacing timer starts the send; the frame is handed to the driver on the pool.
+    private static async Task WaitForTransmitCount(ControllableBus bus, int count)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (bus.TransmitCount < count)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"TransmitCount stayed at {bus.TransmitCount}; wanted {count}.");
+            await Task.Yield();
+        }
+    }
+
+    // #171: BAM packet spacing is an actor timer. With the clock frozen, wall time past the
+    // spacing must not release the next TP.DT; advancing the clock must.
+    [Fact]
+    public async Task Bam_Packet_Spacing_Follows_The_Injected_Actors_Clock()
+    {
+        var spacing = TimeSpan.FromMilliseconds(50);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
+
+        var send = sender.SendBamAsync(0xFECBu, RandomPayload(9, seed: 171));
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+
+        bus.TransmitCount.Should().Be(1, "only the BAM announce is out before the spacing elapses");
+        await Task.Delay(TimeSpan.FromMilliseconds(200));
+        await actor.PostAsync(() => 0);
+        bus.TransmitCount.Should().Be(1,
+            "wall time past the spacing must not release a TP.DT while the injected clock stands still");
+
+        await clock.AdvanceAsync(spacing);
+        // The timer only starts the send; the frame leaves on the pool, after the callback.
+        await WaitForTransmitCount(bus, 2);
+        bus.TransmitCount.Should().Be(2, "the first TP.DT goes out once the clock says the spacing elapsed");
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+        await clock.AdvanceAsync(spacing);
+        await send.WaitAsync(ShortTimeout);
+        bus.TransmitCount.Should().Be(3, "nine bytes are a BAM plus two TP.DT frames");
+
+        sender.Dispose();
+        (await actor.PostAsync(() => 7).WaitAsync(ShortTimeout)).Should().Be(7,
+            "disposing the channel must not dispose the actor it was given");
+    }
+
+    private static readonly TimeSpan InFlightSpacing = TimeSpan.FromMilliseconds(50);
+
+    private static J1939TpChannel BamSenderOn(ProtocolActor actor, ICanBusService service)
+        => new(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor);
+
+    // A BAM on a borrowed, frozen clock: the announce is out and the first TP.DT waits on the
+    // spacing timer, so the send is in flight until the channel is disposed. A second BAM to the
+    // same global destination waits in the queue behind it.
+    private static async Task<Task[]> SendBamsInFlight(VirtualClock clock, ProtocolActor actor, J1939TpChannel sender)
+    {
+        var first = sender.SendBamAsync(0xFECBu, RandomPayload(9, seed: 183));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var queued = sender.SendBamAsync(0xFECCu, RandomPayload(9, seed: 184));
+        await clock.SettleAsync();
+        first.IsCompleted.Should().BeFalse("the send waits on the spacing timer of a frozen clock");
+        queued.IsCompleted.Should().BeFalse("the second BAM waits for the first one's session slot");
+        return new[] { first, queued };
+    }
+
+    // Codex on #183: a borrowed actor is not drained by disposing it, so Dispose must wait for
+    // its session cleanup itself. With the actor busy on the caller's other work, a Dispose
+    // that only posted the cleanup would return with the send still in flight.
+    [Fact]
+    public async Task Disposing_On_A_Busy_Borrowed_Actor_Fails_The_Send_Before_It_Returns()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+        var sends = await SendBamsInFlight(clock, actor, sender);
+
+        // The caller's other work holds the actor for 100 ms, and releases it on its own: the
+        // assertion does not depend on how long that takes, only on Dispose's 2 s budget for
+        // the cleanup outlasting it. A Dispose that only posted the cleanup returns inside it.
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            Thread.Sleep(TimeSpan.FromMilliseconds(100));
+        });
+        await occupied.Task.WaitAsync(ShortTimeout);
+        var noneInFlight = await Task.Run(() =>
+        {
+            sender.Dispose();
+            return sends.All(t => t.IsCompleted);
+        }).WaitAsync(ShortTimeout);
+
+        noneInFlight.Should().BeTrue("Dispose returned, so no send may still be in flight");
+        await ShouldAllFailDisposed(sends);
+    }
+
+    // Disposed from the borrowed actor's own loop: a posted cleanup could only run after this
+    // work item, so the sessions are failed on the spot.
+    [Fact]
+    public async Task Disposing_From_The_Borrowed_Actors_Loop_Fails_The_Send_At_Once()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+        var sends = await SendBamsInFlight(clock, actor, sender);
+
+        var failedInside = await actor.PostAsync(() =>
+        {
+            sender.Dispose();
+            return sends.All(t => t.IsCompleted);
+        }).WaitAsync(ShortTimeout);
+
+        failedInside.Should().BeTrue("the loop that disposed the channel failed its sends itself");
+        await ShouldAllFailDisposed(sends);
+    }
+
+    // Bugbot on #183: a borrowed actor its owner disposed first took its sessions with it. They
+    // are actor state its loop may still be draining, so the channel's Dispose leaves them
+    // alone -- and does not throw for the actor being gone.
+    [Fact]
+    public async Task Disposing_After_The_Borrowed_Actor_Leaves_Its_Sessions_To_It()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+        var sends = await SendBamsInFlight(clock, actor, sender);
+
+        actor.Dispose();
+        sender.Invoking(c => c.Dispose()).Should().NotThrow();
+
+        sends.Should().OnlyContain(t => !t.IsCompleted,
+            "nothing on this thread touched the sessions of an actor that is gone");
+    }
+
+    // Codex on #183: a borrowed actor busy past Dispose's 2 s budget. Dispose returns and says
+    // so on BackgroundExceptionOccurred, and the service it owns is disposed only once the
+    // actor has run the cleanup, not underneath it.
+    [Fact]
+    public async Task Disposing_On_A_Borrowed_Actor_Stuck_Past_The_Budget_Defers_The_Service()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new DisposalRecordingBusService(new CanBusService(bus)); // the channel owns it; disposing twice is harmless
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: true, actor);
+        var sends = await SendBamsInFlight(clock, actor, sender);
+        var faults = new List<Exception>();
+        sender.BackgroundExceptionOccurred += (_, e) => { lock (faults) faults.Add(e); };
+
+        using var release = new ManualResetEventSlim();
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+        try
+        {
+            await occupied.Task.WaitAsync(ShortTimeout);
+            sender.Dispose();
+
+            lock (faults) faults.Should().ContainSingle().Which.Should().BeOfType<TimeoutException>();
+            service.Disposed.IsCompleted.Should().BeFalse("the cleanup has not run, so the service is still in use");
+            sends.Should().OnlyContain(t => !t.IsCompleted);
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        await ShouldAllFailDisposed(sends);
+        await service.Disposed.WaitAsync(ShortTimeout);
+    }
+
+    // Codex on #183: a reader that outlived its join could still hand frames to a borrowed actor
+    // after the session cleanup. Whenever the actor gets to them, frames handed over before or
+    // during Dispose are dropped: here a whole BAM waits behind the caller's work while the
+    // channel is disposed, and must not be delivered once the actor is free.
+    [Fact]
+    public async Task Frames_The_Actor_Reaches_After_Dispose_Began_Are_Dropped()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        using var receiver = new J1939TpChannel(service, sourceAddress: 0x10, new J1939TpOptions(),
+            ownsService: false, actor);
+        var delivered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.DatagramReceived += (_, _) => delivered.TrySetResult(true);
+        var receiving = receiver.ReceiveAsync();
+
+        using var release = new ManualResetEventSlim();
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+        Task disposing;
+        try
+        {
+            await occupied.Task.WaitAsync(ShortTimeout);
+
+            const byte peerSa = 0x20;
+            const uint pgn = 0xFECDu;
+            var payload = RandomPayload(9, seed: 185);
+            CanFrame FromPeer(uint framePgn, byte[] data) => CanFrame.Classic(
+                (int)J1939Id.ComposePgn(7, framePgn, peerSa, J1939Pgn.GlobalAddress), data, isExtendedFrame: true);
+            bus.RaiseObserved(FromPeer(J1939Pgn.TpCm, J1939TpFrames.BuildBam(9, 2, pgn)), isEcho: false);
+            bus.RaiseObserved(FromPeer(J1939Pgn.TpDt, J1939TpFrames.BuildDt(1, payload, 0)), isEcho: false);
+            bus.RaiseObserved(FromPeer(J1939Pgn.TpDt, J1939TpFrames.BuildDt(2, payload, 7)), isEcho: false);
+            // The reader asked for a fourth frame, so it has handed all three to the actor.
+            await service.WaitUntilConsumedAsync(3).WaitAsync(ShortTimeout);
+
+            disposing = Task.Run(receiver.Dispose);
+            // The inbox is completed right after Dispose marks the channel disposed.
+            await receiving.Invoking(t => t).Should().ThrowAsync<Exception>();
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        await disposing.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0).WaitAsync(ShortTimeout);
+        // The event is raised on the pool; a delivered BAM would have raised it by now.
+        (await Task.WhenAny(delivered.Task, Task.Delay(TimeSpan.FromMilliseconds(500))))
+            .Should().NotBeSameAs(delivered.Task, "a BAM the actor reached after Dispose began is not delivered");
+    }
+
+    private static async Task ShouldAllFailDisposed(Task[] sends)
+    {
+        foreach (var send in sends)
+            await send.Invoking(t => t).Should().ThrowAsync<ObjectDisposedException>();
+    }
+}
+
+/// <summary>
+/// Test double: forwards to an inner service it owns, and counts the frames each subscriber has
+/// finished with -- a frame counts once the subscriber asks for the next one, i.e. once the
+/// J1939-TP reader has handed it to the actor (#183).
+/// </summary>
+internal sealed class FrameConsumptionCountingBusService : ICanBusService
+{
+    private readonly ICanBusService _inner;
+    private readonly object _gate = new();
+    private int _consumed;
+    private readonly List<(int Count, TaskCompletionSource<bool> Reached)> _waiters = new();
+
+    public FrameConsumptionCountingBusService(ICanBusService inner) => _inner = inner;
+
+    public Task WaitUntilConsumedAsync(int count)
+    {
+        lock (_gate)
+        {
+            if (_consumed >= count) return Task.CompletedTask;
+            var reached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _waiters.Add((count, reached));
+            return reached.Task;
+        }
+    }
+
+    private void Consumed()
+    {
+        lock (_gate)
+        {
+            _consumed++;
+            foreach (var (count, reached) in _waiters)
+                if (_consumed >= count) reached.TrySetResult(true);
+        }
+    }
+
+    public ICanBus Bus => _inner.Bus;
+    public int SubscriptionCount => _inner.SubscriptionCount;
+
+    public event EventHandler<Exception>? BackgroundExceptionOccurred
+    {
+        add => _inner.BackgroundExceptionOccurred += value;
+        remove => _inner.BackgroundExceptionOccurred -= value;
+    }
+
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => new Counted(this, _inner.Subscribe(predicate, bufferCapacity, includeEcho));
+
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => new Counted(this, _inner.Subscribe(filter, bufferCapacity, includeEcho));
+
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+        => _inner.FindOverlappingFilterSubscriptions();
+
+    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+
+    public void Dispose() => _inner.Dispose();
+
+    private sealed class Counted : ISubscription
+    {
+        private readonly FrameConsumptionCountingBusService _owner;
+        private readonly ISubscription _inner;
+
+        public Counted(FrameConsumptionCountingBusService owner, ISubscription inner)
+        {
+            _owner = owner;
+            _inner = inner;
+        }
+
+        public IAsyncEnumerable<CanFrameEvent> Frames => Count();
+
+        private async IAsyncEnumerable<CanFrameEvent> Count(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await foreach (var frameEvent in _inner.Frames.WithCancellation(cancellationToken))
+            {
+                yield return frameEvent;
+                _owner.Consumed(); // runs when the subscriber asks for the next frame
+            }
+        }
+
+        public bool TryRead(out CanFrameEvent frameEvent) => _inner.TryRead(out frameEvent);
+
+        public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+            => _inner.WaitToReadAsync(cancellationToken);
+
+        public void Reconfigure(CanIdFilter filter) => _inner.Reconfigure(filter);
+
+        public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => _inner.Reconfigure(predicate);
+
+        public void Dispose() => _inner.Dispose();
+    }
+}
+
+/// <summary>
+/// Test double: forwards everything to an inner service it owns, and records when it is
+/// disposed, so a test can tell whether the channel disposed it and when (#183).
+/// </summary>
+internal sealed class DisposalRecordingBusService : ICanBusService
+{
+    private readonly ICanBusService _inner;
+    private readonly TaskCompletionSource<bool> _disposed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public DisposalRecordingBusService(ICanBusService inner) => _inner = inner;
+
+    /// <summary>Completes when <see cref="Dispose"/> has run.</summary>
+    public Task Disposed => _disposed.Task;
+
+    public ICanBus Bus => _inner.Bus;
+    public int SubscriptionCount => _inner.SubscriptionCount;
+
+    public event EventHandler<Exception>? BackgroundExceptionOccurred
+    {
+        add => _inner.BackgroundExceptionOccurred += value;
+        remove => _inner.BackgroundExceptionOccurred -= value;
+    }
+
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+        => _inner.FindOverlappingFilterSubscriptions();
+
+    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+
+    public void Dispose()
+    {
+        _inner.Dispose();
+        _disposed.TrySetResult(true);
     }
 }
 

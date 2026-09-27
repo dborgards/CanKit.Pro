@@ -25,6 +25,14 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CanKit.Pro.CANopen</_Parameter1>
     </AssemblyAttribute>
+    <!-- Functional ISO-TP collection windows and the UDS client that sits on them measure P2
+         and P2* on the same source, so a test can end the window by moving the clock (#171). -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.IsoTp</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Uds</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

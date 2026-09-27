@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
@@ -47,6 +48,69 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
     private static TimeSpan Between(long earlier, long later)
         => TimeSpan.FromSeconds((later - earlier) / (double)Stopwatch.Frequency);
+
+    /// <summary>
+    /// A functional client whose P2, P2* and collection windows run on <see cref="Clock"/>,
+    /// and a demux that stamps frames with that same clock. A zero stamp means "unstamped",
+    /// so the clock is nudged off zero before anything is sent (#171).
+    /// </summary>
+    private sealed class WindowClock : IDisposable
+    {
+        public VirtualClock Clock { get; } = new();
+        public ProtocolActor Actor { get; }
+
+        public WindowClock()
+        {
+            Actor = Clock.NewActor();
+            Clock.Advance(TimeSpan.FromMilliseconds(1));
+        }
+
+        public long Now => Actor.TimeSource.GetTimestamp();
+
+        public void Dispose() => Clock.Dispose();
+    }
+
+    private static UdsFunctionalClient OpenOnClock(ICanBus bus, WindowClock clock,
+        TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null,
+        IsoTpFunctionalOptions? options = null)
+        => OpenOnClock(new CanBusService(bus, clock.Actor.TimeSource.GetTimestamp), clock,
+            responseWindow, responsePendingWindow, options);
+
+    private static UdsFunctionalClient OpenOnClock(ICanBusService service, WindowClock clock,
+        TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null,
+        IsoTpFunctionalOptions? options = null)
+    {
+        var iso = new IsoTpFunctionalClient(service, FunctionalTxId, Ecu1, 0x7EF,
+            options ?? FastOptions(), ownsService: true, clock.Actor);
+        return UdsFunctionalClient.Create(iso, clock.Actor, ownsClient: true,
+            responseWindow: responseWindow, responsePendingWindow: responsePendingWindow);
+    }
+
+    private static async Task WaitUntilArmed(WindowClock clock, TimeSpan expected, TimeSpan? lateBy = null)
+        => await clock.Clock.WaitUntilTimerArmedAsync(clock.Actor, expected, ShortTimeout,
+            lateBy ?? TimeSpan.FromMilliseconds(5));
+
+    // Steps the clock until the call returns. One advance of the nominal window can stop a tick
+    // short of a ceiling, or land before the collection timer is armed, and the call then sits
+    // until the wall-clock budget cancels it.
+    private static async Task<T> RunCall<T>(WindowClock clock, Task<T> call)
+    {
+        await clock.Clock.RunUntilAsync(call, TimeSpan.FromMilliseconds(25), ShortTimeout);
+        return await call;
+    }
+
+    // While a collection outlasts P2 the listener keeps 20 ms slices. The call's task can
+    // complete with that slice still armed, and it is shorter than the next window, so the
+    // next window is not the earliest timer until the slice has elapsed and the listener retired.
+    private static async Task RetireInFlightSlices(WindowClock clock)
+    {
+        for (var i = 0; i < 4; i++)
+        {
+            var delay = await clock.Actor.NextTimerDelayAsync();
+            if (delay is null || delay > TimeSpan.FromMilliseconds(20)) return;
+            await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(21));
+        }
+    }
 
     private static CanFrame SingleFrameFrom(uint canId, byte[] pdu)
         => CanFrame.Classic(unchecked((int)canId),
@@ -232,6 +296,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Late_Negative_Answer_To_A_Suppressed_Send_Does_Not_Land_In_The_Next_Window()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -240,19 +305,25 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[2] == 0x80)
-                _ = Task.Run(async () => { await Task.Delay(100); busEcus.Transmit(negative); });
-            else
+            if (e.CanFrame.Data.Span[2] != 0x80)
                 busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
+        using var functional = OpenOnClock(busTester, clock, responseWindow: TimeSpan.FromMilliseconds(300));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.TesterPresentAsync(cancellationToken: cts.Token);
-        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(20));
+
+        // 100 ms into the 300 ms window. On the wall clock a loaded runner has stretched this
+        // past the window and the negative landed in the next call (macOS, run 36234735257).
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(100));
+        busEcus.Transmit(negative);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(201));
+
+        var second = functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
+        var responses = await RunCall(clock, second);
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the late negative answer belongs to the suppressed send and is not collected");
@@ -264,6 +335,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Late_Negative_Answer_To_A_Previous_Request_Does_Not_Land_In_The_Next_Window()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -272,20 +344,26 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] == 0x90)
-                _ = Task.Run(async () => { await Task.Delay(150); busEcus.Transmit(negative); });
-            else
+            if (e.CanFrame.Data.Span[3] != 0x90)
                 busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
+        using var functional = OpenOnClock(busTester, clock, responseWindow: TimeSpan.FromMilliseconds(300));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // A short collection window: the negative answer comes after it.
-        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token);
-        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        // A short collection window: the negative answer comes after it, and still inside P2.
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token);
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(30));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(31));
+        await first;
+
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(120)); // 151 ms from the request: after the collection, inside P2
+        busEcus.Transmit(negative);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(160)); // P2 of 300 ms is over
+
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
+        var responses = await RunCall(clock, second);
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "F190's late negative answer is the previous request's");
@@ -296,41 +374,49 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Cancelled_Collection_Still_Leaves_Its_Window_For_The_Next_Call()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
+        var sentAt = new List<long>();
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] == 0x90)
-                _ = Task.Run(async () => { await Task.Delay(150); busEcus.Transmit(negative); });
-            else
+            lock (sentAt) sentAt.Add(clock.Now);
+            if (e.CanFrame.Data.Span[3] != 0x90)
                 busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300));
-
-        var sentAt = new List<long>();
-        busEcus.FrameObserved += (_, e) => { if (e.CanFrame.ID == unchecked((int)FunctionalTxId)) lock (sentAt) sentAt.Add(Stopwatch.GetTimestamp()); };
+        using var functional = OpenOnClock(busTester, clock, responseWindow: TimeSpan.FromMilliseconds(300));
 
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
         Func<Task> cancelled = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
+        // The cancellation is the caller's, at 30 ms of wall time, while the clock has not moved.
+        // The negative belongs to the cancelled request: after that cancellation, inside its P2.
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(20));
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(150));
+        busEcus.Transmit(negative);
+
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        // Still inside the 300 ms window: the next request must not have gone out.
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
+        lock (sentAt) sentAt.Should().HaveCount(1, "the cancelled request's window is still open");
+
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(110)); // past P2
+        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
+        var responses = await RunCall(clock, second);
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the cancelled request's late negative answer is not the next call's");
-        // And the reason it is not: the second request waited the window out. A lower bound,
-        // which a loaded host only raises.
         long gap;
         lock (sentAt) gap = sentAt[1] - sentAt[0];
-        Between(0, gap).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(250),
-            "the cancelled request's window was kept for the next call");
+        TimeSpan.FromSeconds(gap / (double)clock.Actor.TimeSource.Frequency)
+            .Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(250),
+                "the cancelled request's window was kept for the next call");
     }
 
     // Codex on #150: WriteMemoryByAddress echoes the addressAndLengthFormatIdentifier and the
@@ -454,8 +540,8 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the count never decreases
+        bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
-        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
         (await second).Should().ContainSingle();
 
         long gap;
@@ -493,8 +579,8 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var startedAt = Stopwatch.GetTimestamp();
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
-        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
         (await second).Should().ContainSingle();
 
         long secondSentAt;
@@ -549,6 +635,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Pending_Answer_Collected_After_P2_Does_Not_Revive_The_Window()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -557,26 +644,29 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] == 0x90)
-                _ = Task.Run(async () => { await Task.Delay(250); busEcus.Transmit(pending); });
-            else busEcus.Transmit(positive);
+            if (e.CanFrame.Data.Span[3] != 0x90) busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(2000));
+        using var functional = OpenOnClock(busTester, clock,
+            responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(2000));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         // P2 = 100 ms; the 0x78 at 250 ms is inside the 400 ms collection but after P2.
-        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(400), cts.Token);
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(400), cts.Token);
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(20));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(250));
+        busEcus.Transmit(pending);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(151));
+        await first;
+        await RetireInFlightSlices(clock);
 
-        // Revived, the window would reach 2250 ms and this call would wait most of two
-        // seconds; a loaded host only makes the call slower, so the bound is wide.
-        var sw = Stopwatch.StartNew();
-        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
-        sw.Stop();
+        // Revived, the window would reach 250 + 2000 ms and this call would not go out after
+        // a 100 ms step. It goes out after P2, which is already over.
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(20));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(51));
+        var responses = await second;
         responses.Should().ContainSingle();
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the 0x78 from after P2 did not revive the window");
     }
 
     // Codex on #150: the listener's subscription is made before the send, but its worker may
@@ -586,6 +676,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Listener_Starting_After_The_Window_Still_Hears_What_It_Buffered()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -595,26 +686,31 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if ((e.CanFrame.Data.Span[2] & 0x80) != 0)
-            {
-                busEcus.Transmit(pending);
-                _ = Task.Run(async () => { await Task.Delay(250); busEcus.Transmit(negative); });
-            }
+            if ((e.CanFrame.Data.Span[2] & 0x80) != 0) busEcus.Transmit(pending);
             else busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
-        functional.ListenerStartDelay = TimeSpan.FromMilliseconds(150); // past the 100 ms window
+        using var functional = OpenOnClock(busTester, clock,
+            responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
+        functional.DelayListenerStart(TimeSpan.FromMilliseconds(150)); // past the 100 ms window
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.SendRawAsync(new byte[] { 0x10, 0x83 }, Window, cts.Token); // suppressed: the 0x78 is buffered before the worker runs
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(150), TimeSpan.FromMilliseconds(20));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(150)); // the worker starts, reads the buffered 0x78
+        functional.DelayListenerStart(TimeSpan.Zero); // the next call's listener is not the late one
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(1300), TimeSpan.FromMilliseconds(300));
 
-        var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
-        // P2* = 1500 ms: the negative answer's timer must fire before the second request goes
-        // out, with 1250 ms to spare (macOS CI on #150 exceeded 150). The same P2* in the
-        // three tests below, for the same reason.
+        // The second call waits the extended window out. The negative goes in while it is
+        // waiting, at 250 ms, and must not be collected as this call's answer.
+        var second = functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(100));
+        busEcus.Transmit(negative);
+        // Still P2* from the buffered 0x78, not this call's own collection: a window that was
+        // not extended would already be arming that shorter timer.
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(1200), TimeSpan.FromMilliseconds(200));
+        await clock.Clock.RunUntilAsync(second, TimeSpan.FromMilliseconds(50), ShortTimeout);
+        var responses = await second;
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the late worker read the buffered 0x78 and kept the window to 1500 ms, past the negative at 250");
     }
@@ -625,6 +721,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Cancelled_Collection_Does_Not_Lose_The_Pending_Answer_The_Listener_Heard()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -634,24 +731,32 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] == 0x90)
-            {
-                busEcus.Transmit(pending);
-                _ = Task.Run(async () => { await Task.Delay(250); busEcus.Transmit(negative); });
-            }
+            if (e.CanFrame.Data.Span[3] == 0x90) busEcus.Transmit(pending);
             else busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
+        using var functional = OpenOnClock(busTester, clock,
+            responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
 
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
         Func<Task> cancelled = () => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, early.Token);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
+        // The 0x78 went out with the request. Elapse P2 so the listener applies it, then put the
+        // negative inside the P2* that application opens.
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(30));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(101));
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(1300), TimeSpan.FromMilliseconds(300));
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(150));
+        busEcus.Transmit(negative);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1400));
+
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        // P2* has elapsed, so this call's own 100 ms window is what is armed. A revived
+        // 1500 ms window would still be the earliest timer, and this wait would not match.
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(40));
+        var responses = await RunCall(clock, second);
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the final negative answer at 250 ms belongs to the cancelled request, whose 0x78 the cancellation hid");
     }
@@ -662,6 +767,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Cancelled_Wait_Leaves_The_Listener_To_Hear_The_Pending_Answer()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -671,29 +777,31 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[2] == 0x80)
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(50); busEcus.Transmit(pending);
-                    await Task.Delay(200); busEcus.Transmit(negative);
-                });
-            else busEcus.Transmit(positive);
+            if (e.CanFrame.Data.Span[2] != 0x80) busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
+        using var functional = OpenOnClock(busTester, clock,
+            responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed; 0x78 at 50 ms, negative at 250 ms, window to 650 ms
+        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(20));
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(50));
+        busEcus.Transmit(pending); // 0x78 inside P2; the listener applies it when the slice ends
 
         using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
         Func<Task> cancelled = () => functional.TesterPresentAsync(suppressPositiveResponse: false, Window, early.Token);
         await cancelled.Should().ThrowAsync<OperationCanceledException>(); // cancelled while waiting; the 0x78 it heard is lost
 
-        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200)); // 250 ms: the negative, inside the extended window
+        busEcus.Transmit(negative);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1400)); // P2* from the 0x78 is over
+
+        var second = functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
+        var responses = await RunCall(clock, second);
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
-            "the negative at 250 ms belongs to the suppressed send; the window reaches to 650 ms");
+            "the negative at 250 ms belongs to the suppressed send; the window reaches past it");
     }
 
     // Codex on #150: between a suppressed send and the next call nobody was collecting, so a
@@ -703,6 +811,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Pending_Answer_In_The_Gap_After_A_Suppressed_Send_Is_Observed()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -712,24 +821,30 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[2] == 0x80)
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(100); busEcus.Transmit(pending);
-                    await Task.Delay(400); busEcus.Transmit(negative);
-                });
-            else busEcus.Transmit(positive);
+            if (e.CanFrame.Data.Span[2] != 0x80) busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
+        using var functional = OpenOnClock(busTester, clock,
+            responseWindow: TimeSpan.FromMilliseconds(300), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed; 0x78 at 100 ms, negative at 500 ms
-        await Task.Delay(200);                                              // nobody collecting: the gap
+        await functional.TesterPresentAsync(cancellationToken: cts.Token); // suppressed
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(300), TimeSpan.FromMilliseconds(20));
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(100));
+        busEcus.Transmit(pending); // 0x78 during the gap, inside P2
 
-        var responses = await functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        // The next call starts while that window is still open and blocks until the listener
+        // has applied the 0x78 and run P2* out. The negative at 500 ms lands in that wait.
+        var second = functional.TesterPresentAsync(suppressPositiveResponse: false, Window, cts.Token);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(201)); // the 300 ms slice ends; the 0x78 extends it
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(1200), TimeSpan.FromMilliseconds(200));
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(200)); // 500 ms: the negative, inside P2*
+        busEcus.Transmit(negative);
+        // The call is still waiting out P2*, so the earliest timer is that remainder, not the
+        // 300 ms collection it arms only once the extension has elapsed.
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(900), TimeSpan.FromMilliseconds(400));
+        await clock.Clock.RunUntilAsync(second, TimeSpan.FromMilliseconds(50), ShortTimeout);
+        var responses = await second;
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the 0x78 in the gap moved the window past the negative at 500 ms");
     }
@@ -807,8 +922,8 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         bus.DeferredEchoes.ReleaseNext(); // the other sender's confirmation
         await other;
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        bus.RaiseObserved(positive, isEcho: false); // after the handoff, inside the collection
         bus.DeferredEchoes.ReleaseNext(); // the request's
-        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
         var responses = await first;
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse("the 0x78 from before the handoff is not this request's");
 
@@ -930,8 +1045,8 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
-        _ = Task.Run(async () => { await Task.Delay(20); bus.RaiseObserved(positive, isEcho: false); });
         var responses = await second;
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
@@ -944,6 +1059,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Collection_That_Outlasts_The_Window_Does_Not_Leave_A_Zombie_Listener()
     {
         var session = NewSession();
+        using var clock = new WindowClock();
         using var busTester = OpenClassic(session, 0);
         using var busEcus = OpenClassic(session, 1);
 
@@ -953,22 +1069,30 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         busEcus.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            int n = Interlocked.Increment(ref seen);
-            if (n == 2) _ = Task.Run(async () => { await Task.Delay(150); busEcus.Transmit(negative); });
-            if (n == 3) busEcus.Transmit(positive);
+            if (Interlocked.Increment(ref seen) == 3) busEcus.Transmit(positive);
         };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(400));
+        using var functional = OpenOnClock(busTester, clock, responseWindow: TimeSpan.FromMilliseconds(400));
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         // A collection longer than the window: the pre-send listener retires; the anchor after
         // it is already over and must start nothing.
-        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(500), cts.Token);
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(500), cts.Token);
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(400), TimeSpan.FromMilliseconds(20));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(501));
+        await first;
+        await RetireInFlightSlices(clock);
         // A short collection; its late negative, at 150 ms, needs a living listener's window.
-        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(30), cts.Token);
-        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x92 }, Window, cts.Token);
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(30), cts.Token);
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(30));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(31));
+        await second;
+        clock.Clock.Advance(TimeSpan.FromMilliseconds(150));
+        busEcus.Transmit(negative);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(251)); // the 400 ms window is over
+        var third = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x92 }, Window, cts.Token);
+        await WaitUntilArmed(clock, Window, TimeSpan.FromMilliseconds(20));
+        var responses = await RunCall(clock, third);
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the second request's window was honoured by a real listener, not blocked by a zombie");
@@ -1044,5 +1168,79 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
 
         responses.Should().ContainSingle().Which.Response[1].Should().Be(0x03);
+    }
+
+    // #171: the listener start delay stands in for a late thread pool, and is moved by
+    // advancing an injected clock. On the wall clock it would be a sleep, so it is refused.
+    [Fact]
+    public void A_Listener_Start_Delay_Needs_An_Injected_Clock()
+    {
+        using var busTester = OpenClassic(NewSession(), 0);
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        Action delay = () => functional.DelayListenerStart(TimeSpan.FromMilliseconds(1));
+        delay.Should().Throw<InvalidOperationException>();
+    }
+
+    // Codex on #150: a suppressed send cancelled after the driver took the frame may still have
+    // put it on the bus, so the ECUs' P2 runs from the cancellation, not from before the send.
+    // The driver holds the echo while the clock moves 200 ms: the window ends at 500 ms, where
+    // the provisional one from before the send ended at 300.
+    [Fact]
+    public async Task A_Suppressed_Send_Cancelled_After_The_Driver_Took_It_Leaves_P2_From_The_Cancellation()
+    {
+        using var clock = new WindowClock();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = ShortTimeout };
+        using var functional = OpenOnClock(bus, clock, responseWindow: TimeSpan.FromMilliseconds(300), options: options);
+
+        using var cancel = new CancellationTokenSource();
+        var suppressed = functional.TesterPresentAsync(cancellationToken: cancel.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+        cancel.Cancel();
+        Func<Task> cancelled = () => suppressed;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        bus.EchoMode = EchoDelivery.Synchronous;
+
+        await NextCallWaitsUntil500(clock, functional, () => bus.TransmitCount);
+    }
+
+    // A driver that reports no transmit instant: the window runs from the confirmation. It
+    // takes 200 ms to come, so the window ends at 500 ms, not at the provisional 300.
+    [Fact]
+    public async Task A_Suppressed_Send_Without_A_Transmit_Stamp_Is_Anchored_At_Its_Confirmation()
+    {
+        using var clock = new WindowClock();
+        var service = new StarvedReaderBusService
+        {
+            OnSendConfirmed = () => clock.Clock.Advance(TimeSpan.FromMilliseconds(200)),
+        };
+        using var functional = OpenOnClock(service, clock, responseWindow: TimeSpan.FromMilliseconds(300));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.TesterPresentAsync(cancellationToken: cts.Token);
+        service.OnSendConfirmed = null;
+
+        await NextCallWaitsUntil500(clock, functional, () => service.Sent.Count);
+    }
+
+    // At 400 ms a window ending at 500 still holds the next call back, its listener collecting
+    // the 100 ms left. A window that ended at 300 would have let the call out, and the earliest
+    // timer would be its own 30 ms collection.
+    private static async Task NextCallWaitsUntil500(WindowClock clock, UdsFunctionalClient functional,
+        Func<int> transmitted)
+    {
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var next = functional.TesterPresentAsync(suppressPositiveResponse: false,
+            TimeSpan.FromMilliseconds(30), cts.Token);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(400) - clock.Clock.Elapsed
+            + TimeSpan.FromMilliseconds(1));
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100));
+        transmitted().Should().Be(1, "the next call is still waiting out the window");
+
+        (await RunCall(clock, next)).Should().BeEmpty();
+        transmitted().Should().Be(2);
     }
 }

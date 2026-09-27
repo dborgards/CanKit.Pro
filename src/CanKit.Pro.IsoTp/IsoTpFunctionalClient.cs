@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Pro.Actor;
 using CanKit.Pro.RawCan;
 
 namespace CanKit.Pro.IsoTp;
@@ -48,6 +49,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
     private readonly IsoTpFunctionalOptions _options;
+    private readonly ProtocolActor? _clock;
+    private readonly ITimeSource _time;
 
     // Endpoint used only for building the outbound SF payload (Normal addressing, no AE byte).
     private readonly IsoTpEndpoint _txEndpoint;
@@ -63,13 +66,21 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
     private int _disposed;
 
+    /// <summary>
+    /// A null <paramref name="clock"/> is production: windows end with
+    /// <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/> and deadlines are
+    /// <see cref="Stopwatch"/> readings. An injected actor is the test seam (#171). Its timers
+    /// and this client's deadlines share that actor's clock, so a test ends a window by
+    /// advancing the clock instead of sleeping. The actor stays the caller's to dispose.
+    /// </summary>
     internal IsoTpFunctionalClient(
         ICanBusService service,
         uint functionalTxCanId,
         uint responseRxCanIdRangeStart,
         uint responseRxCanIdRangeEnd,
         IsoTpFunctionalOptions options,
-        bool ownsService)
+        bool ownsService,
+        ProtocolActor? clock = null)
     {
         if (responseRxCanIdRangeEnd < responseRxCanIdRangeStart)
             throw new ArgumentOutOfRangeException(nameof(responseRxCanIdRangeEnd),
@@ -78,6 +89,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _ownsService = ownsService;
+        _clock = clock;
+        _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
 
         _txEndpoint = IsoTpEndpoint.Normal(functionalTxCanId, 0, options.IsExtendedCanId);
 
@@ -240,7 +253,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     public IsoTpFunctionalListener Listen()
     {
         ThrowIfDisposed();
-        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true));
+        return new IsoTpFunctionalListener(_service.Subscribe(_responseFilter, includeEcho: true), _clock);
     }
 
     /// <inheritdoc/>
@@ -302,7 +315,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         return new IsoTpTransmitStamps(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
     }
 
-    private static async Task<IReadOnlyList<IsoTpFunctionalResponse>> CollectFromSubscriptionAsync(
+    private async Task<IReadOnlyList<IsoTpFunctionalResponse>> CollectFromSubscriptionAsync(
         ISubscription sub, TimeSpan window, CancellationToken cancellationToken)
     {
         var responses = new List<IsoTpFunctionalResponse>();
@@ -311,16 +324,16 @@ public sealed class IsoTpFunctionalClient : IDisposable
         // The window's end is also held as an arrival stamp: the timer's callback and this
         // method's continuations are scheduling, and a frame that arrived after the deadline
         // but before they ran is not the window's (Codex on #150).
-        long deadline = Stopwatch.GetTimestamp() + (long)(window.TotalSeconds * Stopwatch.Frequency);
-        using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        windowCts.CancelAfter(window);
-        var windowToken = windowCts.Token;
+        long deadline = _time.GetTimestamp() + (long)(window.TotalSeconds * _time.Frequency);
+        using var windowEnd = new FunctionalWindow(_clock, window, cancellationToken);
+        var windowToken = windowEnd.Token;
 
         try
         {
             await foreach (var frameEvent in sub.Frames.WithCancellation(windowToken).ConfigureAwait(false))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response) && response!.HostArrivalTimestamp <= deadline)
+                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)
+                    && response!.HostArrivalTimestamp <= deadline)
                     responses.Add(response);
             }
         }
@@ -340,7 +353,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
             sub.Dispose();
             while (sub.TryRead(out var frameEvent))
             {
-                if (TryParseFunctionalResponse(frameEvent, out var response) && response!.HostArrivalTimestamp <= deadline)
+                if (TryParseFunctionalResponse(frameEvent, out var response, _time.GetTimestamp)
+                    && response!.HostArrivalTimestamp <= deadline)
                     responses.Add(response);
             }
         }
@@ -359,7 +373,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     }
 
     internal static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
-        out IsoTpFunctionalResponse? response)
+        out IsoTpFunctionalResponse? response, Func<long> now)
     {
         var frame = frameEvent.Frame;
         var payload = frame.Data.ToArray();
@@ -389,8 +403,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
-        // Stamped by the demux at arrival; "now" only for an event built without a stamp.
-        var arrival = frameEvent.HostArrivalTimestamp > 0 ? frameEvent.HostArrivalTimestamp : Stopwatch.GetTimestamp();
+        // Stamped by the demux at arrival; "now", on the collector's clock, only for an event
+        // built without a stamp.
+        var arrival = frameEvent.HostArrivalTimestamp > 0 ? frameEvent.HostArrivalTimestamp : now();
         response = new IsoTpFunctionalResponse((uint)frame.ID, pdu, arrival);
         return true;
     }

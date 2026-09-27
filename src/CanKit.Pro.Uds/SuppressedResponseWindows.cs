@@ -21,7 +21,18 @@ internal sealed class SuppressedResponseWindows
     /// <summary>Notes that a request for <paramref name="sid"/> went out at
     /// <paramref name="sentTimestamp"/> and may be answered for <paramref name="window"/>.</summary>
     public void Note(byte sid, long sentTimestamp, TimeSpan window)
-        => Extend(sid, sentTimestamp + (long)(window.TotalSeconds * Stopwatch.Frequency));
+        => Note(sid, sentTimestamp, window, Stopwatch.Frequency);
+
+    /// <summary>
+    /// As <see cref="Note(byte, long, TimeSpan)"/>, counting <paramref name="window"/> in
+    /// <paramref name="ticksPerSecond"/> so the deadline is on the same clock as
+    /// <paramref name="sentTimestamp"/> (#171).
+    /// </summary>
+    public void Note(byte sid, long sentTimestamp, TimeSpan window, long ticksPerSecond)
+        => Extend(sid, sentTimestamp + Ticks(window, ticksPerSecond));
+
+    internal static long Ticks(TimeSpan window, long ticksPerSecond)
+        => (long)(window.TotalSeconds * ticksPerSecond);
 
     /// <summary>Moves the window for <paramref name="sid"/> out to <paramref name="until"/>, if later.</summary>
     public void Extend(byte sid, long until)
@@ -76,8 +87,15 @@ internal sealed class SuppressedResponseWindows
 
     /// <summary>How long from now until <paramref name="until"/>, or zero if it has passed.</summary>
     public static TimeSpan Remaining(long until)
+        => Remaining(until, Stopwatch.GetTimestamp(), Stopwatch.Frequency);
+
+    /// <summary>
+    /// As <see cref="Remaining(long)"/>, measured from <paramref name="now"/> on a clock whose
+    /// frequency is <paramref name="ticksPerSecond"/>.
+    /// </summary>
+    public static TimeSpan Remaining(long until, long now, long ticksPerSecond)
     {
-        var ticks = until - Stopwatch.GetTimestamp();
-        return ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / Stopwatch.Frequency);
+        var ticks = until - now;
+        return ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / ticksPerSecond);
     }
 }

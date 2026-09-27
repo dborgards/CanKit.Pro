@@ -51,6 +51,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private readonly J1939TpOptions _options;
 
     private readonly ProtocolActor _actor;
+    private readonly bool _ownsActor;
     private readonly DeadlineScheduler _deadlines;
     private readonly ISubscription _subscription;
     private readonly Task _readerTask;
@@ -89,7 +90,22 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// <inheritdoc />
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 
-    internal J1939TpChannel(ICanBusService service, byte sourceAddress, J1939TpOptions options, bool ownsService)
+    /// <summary>
+    /// Builds a channel on <paramref name="service"/>. A null <paramref name="actor"/> -- the only
+    /// value production passes -- makes the channel create and own its own loop; an injected one
+    /// stays the caller's to dispose.
+    /// </summary>
+    /// <remarks>
+    /// A seam for tests, not a feature: substituting a loop built on a hand-driven monotonic
+    /// source is what lets T1..T4 and the BAM packet spacing be asserted without measuring
+    /// wall-clock gaps on a shared runner (#171). Every one of those intervals is armed through
+    /// <see cref="IProtocolActor.Schedule"/> or the <see cref="DeadlineScheduler"/> built on this
+    /// actor, and the clock is that actor's time source. The channel does not take one of its
+    /// own, so the loop and the timers cannot be given
+    /// different clocks -- the same rule <c>J1939NodeImpl</c> follows.
+    /// </remarks>
+    internal J1939TpChannel(ICanBusService service, byte sourceAddress, J1939TpOptions options, bool ownsService,
+        ProtocolActor? actor = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         if (sourceAddress == J1939Pgn.GlobalAddress)
@@ -108,7 +124,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         };
         _pduInbox = Channel.CreateBounded<RxInboxItem>(inboxOptions);
 
-        _actor = new ProtocolActor();
+        _ownsActor = actor is null;
+        _actor = actor ?? new ProtocolActor();
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
         _deadlines = new DeadlineScheduler(_actor);
 
@@ -142,7 +159,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
         catch
         {
-            _actor.Dispose();
+            _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
+            if (_ownsActor) _actor.Dispose();
             throw;
         }
 
@@ -300,39 +318,84 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // down the reader task.
         _pduInbox.Writer.TryComplete();
 
-        // Cancel every still-in-flight session on the actor so their TCSs get an
-        // ObjectDisposedException instead of hanging on the now-disposed inbox.
-        try
-        {
-            _actor.Post(() =>
-            {
-                foreach (var kv in _txSessions)
-                    kv.Value.Fail(new ObjectDisposedException(nameof(J1939TpChannel)));
-                _txSessions.Clear();
-                foreach (var kv in _txQueues)
-                {
-                    foreach (var pending in kv.Value)
-                        pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
-                }
-                _txQueues.Clear();
-                foreach (var kv in _rxSessions)
-                    kv.Value.Cancel();
-                _rxSessions.Clear();
-            });
-        }
-        catch (ObjectDisposedException)
-        {
-            // actor already gone; nothing more to do
-        }
-
-        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
-
+        // The reader is joined and the subscription closed before the sessions are failed: a
+        // frame the reader was still handing to the actor is then queued ahead of the cleanup,
+        // not behind it where it could open a session nobody fails (Bugbot on #183).
+        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch (AggregateException) { /* observed via task; not fatal */ }
         _subscription.Dispose();
-        _actor.Dispose();
+
+        // Cancel every still-in-flight session on the actor so their TCSs get an
+        // ObjectDisposedException instead of hanging on the now-disposed inbox. Disposed from
+        // the actor's own loop, the sessions are this thread's to fail, and a post would only
+        // run after this call returned (Codex on #183).
+        var cleanup = Task.CompletedTask;
+        if (_actor.IsOnCurrentActor)
+        {
+            FailSessionsOnDispose();
+        }
+        else
+        {
+            try
+            {
+                cleanup = _actor.PostAsync(FailSessionsOnDispose);
+            }
+            catch (ObjectDisposedException)
+            {
+                // An injected actor its owner already disposed took its sessions with it. They
+                // are actor state, and its loop may still be draining, so this thread leaves
+                // them alone (Bugbot on #183).
+            }
+        }
+
+        // An injected actor is not ours to dispose -- the caller may still be running other
+        // work on it -- but the handler is, so it comes off either way.
+        _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
         _readerCts.Dispose();
 
+        if (_ownsActor)
+        {
+            // Its loop runs the cleanup as it drains.
+            _actor.Dispose();
+            DisposeOwnedService();
+        }
+        else if (cleanup.Wait(TimeSpan.FromSeconds(2)))
+        {
+            // A borrowed actor keeps running, possibly busy with the caller's other work, so the
+            // cleanup is waited for: no session is left using the service (Codex on #183).
+            DisposeOwnedService();
+        }
+        else
+        {
+            // Still busy past the budget. Dispose does not block on the caller's work any longer,
+            // and says so where background faults go, as the actor's own Dispose does; the
+            // service outlives the cleanup rather than being torn down under it (Codex on #183).
+            RaiseBackgroundException(new TimeoutException(
+                "The injected actor did not run the channel's session cleanup within 2 s. Dispose returned; the sends still in flight fail, and an owned service is disposed, once the actor gets to it."));
+            _ = cleanup.ContinueWith(static (_, state) => ((J1939TpChannel)state!).DisposeOwnedService(), this,
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+    }
+
+    private void DisposeOwnedService()
+    {
         if (_ownsService)
             _service.Dispose();
+    }
+
+    private void FailSessionsOnDispose()
+    {
+        foreach (var kv in _txSessions)
+            kv.Value.Fail(new ObjectDisposedException(nameof(J1939TpChannel)));
+        _txSessions.Clear();
+        foreach (var kv in _txQueues)
+        {
+            foreach (var pending in kv.Value)
+                pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
+        }
+        _txQueues.Clear();
+        foreach (var kv in _rxSessions)
+            kv.Value.Cancel();
+        _rxSessions.Clear();
     }
 
     // -----------------------------------------------------------------------------------------
@@ -406,6 +469,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     private void HandleIncoming(uint pgn, byte sa, byte da, byte[] payload)
     {
+        // A frame the reader handed over is dropped once Dispose has begun, whenever the actor
+        // gets to it: a reader that outlived its join could otherwise post one behind the
+        // session cleanup and open a session nobody fails on a borrowed actor (Codex on #183).
+        if (Volatile.Read(ref _disposed) != 0) return;
         try
         {
             if (J1939Pgn.IsTransportCm(pgn))

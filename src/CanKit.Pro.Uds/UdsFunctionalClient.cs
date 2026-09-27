@@ -1,9 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
 
 namespace CanKit.Pro.Uds;
@@ -31,6 +31,11 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly bool _ownsClient;
     private readonly TimeSpan _responseWindow;
     private readonly TimeSpan _responsePendingWindow;
+    // Null in production: deadlines are Stopwatch readings and a listener delay is Task.Delay.
+    // A test injects the actor whose clock those readings and the functional collection windows
+    // already share, so the same advance ends both (#171). Not disposed here.
+    private readonly ProtocolActor? _clock;
+    private readonly ITimeSource _time;
     private readonly SuppressedResponseWindows _openWindows = new();
     // Per service: the standing subscription that hears the window out, and the task reading it.
     private readonly Dictionary<byte, (IsoTpFunctionalListener Ears, Task Run)> _listeners = new();
@@ -52,14 +57,21 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly CancellationTokenSource _lifetimeCts = new();
 
     // Test hook: how late the listener's worker starts reading its subscription, standing in
-    // for a thread pool that schedules it after the window has run out (Codex on #150).
-    internal TimeSpan ListenerStartDelay { get; set; }
+    // for a thread pool that schedules it after the window has run out (Codex on #150). Only
+    // on an injected clock: a wall-clock start delay is the kind of sleep #171 removes.
+    internal void DelayListenerStart(TimeSpan delay)
+        => _listenerStartDelay = _clock is not null
+            ? delay
+            : throw new InvalidOperationException("A listener start delay is measured on an injected clock (#171).");
+    private TimeSpan _listenerStartDelay;
     private int _disposed;
 
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan responseWindow,
-        TimeSpan responsePendingWindow)
+        TimeSpan responsePendingWindow, ProtocolActor? clock)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        _clock = clock;
+        _time = clock?.TimeSource ?? MonotonicTimeSource.Instance;
         // Bounded above as a collection window is: a listener collecting for longer than a
         // timer measures would fault, and the window it owned go unwaited (Codex on #150).
         if (responseWindow <= TimeSpan.Zero || responseWindow > MaxCollectionWindow)
@@ -84,8 +96,19 @@ public sealed class UdsFunctionalClient : IDisposable
     /// </summary>
     public static UdsFunctionalClient Create(IsoTpFunctionalClient client, bool ownsClient = false,
         TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
+        => Create(client, clock: null, ownsClient, responseWindow, responsePendingWindow);
+
+    /// <summary>
+    /// As <see cref="Create(IsoTpFunctionalClient, bool, TimeSpan?, TimeSpan?)"/>, measuring P2
+    /// and P2* on <paramref name="clock"/>; null is the wall clock, as the public overload uses.
+    /// The functional client underneath must have been opened on that same actor, and the demux
+    /// must stamp frames with its time source, or a deadline and an arrival are not comparable.
+    /// The actor is not disposed with this client.
+    /// </summary>
+    internal static UdsFunctionalClient Create(IsoTpFunctionalClient client, ProtocolActor? clock,
+        bool ownsClient = false, TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
         => new(client, ownsClient, responseWindow ?? UdsClientOptions.DefaultP2,
-            responsePendingWindow ?? UdsClientOptions.DefaultP2Star);
+            responsePendingWindow ?? UdsClientOptions.DefaultP2Star, clock);
 
     /// <summary>The underlying ISO-TP functional client.</summary>
     public IsoTpFunctionalClient Channel => _client;
@@ -148,7 +171,7 @@ public sealed class UdsFunctionalClient : IDisposable
             bool hadWindow;
             long previousUntil;
             lock (_listeners) hadWindow = _openWindows.TryGetDeadline(sid, out previousUntil);
-            StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
+            StartListening(sid, Now(), inFlight: true);
             IsoTpTransmitStamps stamps;
             try
             {
@@ -163,7 +186,7 @@ public sealed class UdsFunctionalClient : IDisposable
             }
             catch
             {
-                StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
+                StartListening(sid, Now(), inFlight: false);
                 throw;
             }
             // Through StartListening again: the window is moved out to the transmission -- the
@@ -200,7 +223,7 @@ public sealed class UdsFunctionalClient : IDisposable
         bool hadWindowBefore;
         long previousUntilBefore;
         lock (_listeners) hadWindowBefore = _openWindows.TryGetDeadline(sid, out previousUntilBefore);
-        StartListening(sid, Stopwatch.GetTimestamp(), inFlight: true);
+        StartListening(sid, Now(), inFlight: true);
         IsoTpFunctionalCollection collected;
         try
         {
@@ -219,7 +242,7 @@ public sealed class UdsFunctionalClient : IDisposable
             // the request on the bus; the ECUs' P2 from the transmission is at most P2 from
             // now, so that window is noted before the exception leaves, and the listener,
             // kept through the send, has heard any 0x78 the collection lost (Codex on #150).
-            StartListening(sid, Stopwatch.GetTimestamp(), inFlight: false);
+            StartListening(sid, Now(), inFlight: false);
             throw;
         }
         var req = request.Span;
@@ -239,7 +262,7 @@ public sealed class UdsFunctionalClient : IDisposable
         long cutoff = collected.TransmitStamps.LastFrameHandoffTimestamp;
         long transmitted = collected.TransmitStamps.LastFrameTransmitTimestamp > 0
             ? collected.TransmitStamps.LastFrameTransmitTimestamp
-            : Stopwatch.GetTimestamp() - Ticks(window);
+            : Now() - Ticks(window);
         lock (_listeners) NoteAnchored(sid, transmitted, cutoff);
         var responses = new List<UdsFunctionalResponse>(raw.Count);
         foreach (var r in raw)
@@ -286,7 +309,7 @@ public sealed class UdsFunctionalClient : IDisposable
             if (inFlight)
             {
                 _inFlight[sid] = new List<long>();
-                _openWindows.Note(sid, from, _responseWindow);
+                _openWindows.Note(sid, from, _responseWindow, _time.Frequency);
             }
             else
             {
@@ -296,8 +319,8 @@ public sealed class UdsFunctionalClient : IDisposable
         }
     }
 
-    private static long TransmittedAt(IsoTpTransmitStamps stamps)
-        => stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Stopwatch.GetTimestamp();
+    private long TransmittedAt(IsoTpTransmitStamps stamps)
+        => stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Now();
 
     // The functional client refuses a request before transmitting it -- oversized for a Single
     // Frame, an argument error -- or because it is disposed; a cancellation or a transport fault
@@ -326,7 +349,7 @@ public sealed class UdsFunctionalClient : IDisposable
     // out, one from after P2 does not (Codex on #150).
     private void NoteAnchored(byte sid, long from, long cutoff)
     {
-        _openWindows.Note(sid, from, _responseWindow);
+        _openWindows.Note(sid, from, _responseWindow, _time.Frequency);
         if (cutoff > 0) _cutoffs[sid] = cutoff; else _cutoffs.Remove(sid);
         if (!_inFlight.TryGetValue(sid, out var heard)) return;
         _inFlight.Remove(sid);
@@ -348,7 +371,7 @@ public sealed class UdsFunctionalClient : IDisposable
     {
         if (_listeners.ContainsKey(sid)) return;
         if (!_openWindows.TryGetDeadline(sid, out var until)
-            || SuppressedResponseWindows.Remaining(until) <= TimeSpan.Zero)
+            || RemainingUntil(until) <= TimeSpan.Zero)
         {
             _openWindows.Forget(sid);
             return;
@@ -375,8 +398,8 @@ public sealed class UdsFunctionalClient : IDisposable
     {
         try
         {
-            if (ListenerStartDelay > TimeSpan.Zero)
-                await Task.Delay(ListenerStartDelay, _lifetimeCts.Token).ConfigureAwait(false);
+            if (_listenerStartDelay > TimeSpan.Zero)
+                await WaitOnClockAsync(_clock!, _listenerStartDelay, _lifetimeCts.Token).ConfigureAwait(false);
             bool drained = false;
             while (true)
             {
@@ -387,7 +410,7 @@ public sealed class UdsFunctionalClient : IDisposable
                     // and the entry goes with it: a note after this reads no listener and
                     // starts one, a note before it moved the deadline this reads.
                     if (!_openWindows.TryGetDeadline(sid, out var until)
-                        || (remaining = SuppressedResponseWindows.Remaining(until)) <= TimeSpan.Zero)
+                        || (remaining = RemainingUntil(until)) <= TimeSpan.Zero)
                     {
                         if (_inFlight.ContainsKey(sid))
                         {
@@ -561,7 +584,23 @@ public sealed class UdsFunctionalClient : IDisposable
         return true;
     }
 
-    private static long Ticks(TimeSpan span) => (long)(span.TotalSeconds * Stopwatch.Frequency);
+    private long Now() => _time.GetTimestamp();
+
+    private TimeSpan RemainingUntil(long until)
+        => SuppressedResponseWindows.Remaining(until, Now(), _time.Frequency);
+
+    private long Ticks(TimeSpan span) => SuppressedResponseWindows.Ticks(span, _time.Frequency);
+
+    // The listener's start delay, on the injected actor's clock: a test moves it by advancing
+    // that clock instead of sleeping (#171).
+    private static async Task WaitOnClockAsync(ProtocolActor clock, TimeSpan delay, CancellationToken cancellationToken)
+    {
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(static state =>
+            ((TaskCompletionSource<bool>)state!).TrySetCanceled(), done);
+        using var handle = clock.Schedule(delay, () => done.TrySetResult(true));
+        await done.Task.ConfigureAwait(false);
+    }
 
     private static bool IsResponsePending(byte[] data, byte sid)
         => IsResponsePending(data) && data[1] == sid;
