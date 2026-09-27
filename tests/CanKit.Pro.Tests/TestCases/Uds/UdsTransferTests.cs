@@ -596,10 +596,25 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
         var (client, ecu, dispose) = BuildPair(e => { });
         using (dispose)
         {
+            var impl = (UdsClientImpl)client;
+            // The race this test wants is "both TesterPresent calls have actually reached
+            // _requestLock while the download holds it", not "some number of milliseconds have
+            // passed" -- a width in milliseconds only ever gives a racer *a chance* to slip in,
+            // whereas the two contentions are the fact of the attempt (#171). Both are held on
+            // one signal so a spurious extra contention (there should be exactly two) does not
+            // let this open before either has actually queued.
+            var bothContended = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            int contentions = 0;
+            impl.RequestLockContended += () =>
+            {
+                if (Interlocked.Increment(ref contentions) >= 2) bothContended.TrySetResult(true);
+            };
+
             // Record every SID as the ECU sees it — we assert that no 0x3E appears between
             // 0x34 and 0x37 (i.e. TesterPresent is not interleaved with the download).
             var seenSids = new System.Collections.Concurrent.ConcurrentQueue<byte>();
 
+            int blockIndex = 0;
             ecu.On(0x34, req =>
             {
                 seenSids.Enqueue(0x34);
@@ -609,9 +624,11 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
             ecu.On(0x36, req =>
             {
                 seenSids.Enqueue(0x36);
-                // Small artificial delay per block so a concurrent 3E has a real chance to
-                // slip in if the lock were not held.
-                Thread.Sleep(2);
+                // Only the first block waits: both racers must have genuinely reached the lock
+                // while the download still holds it, or the lock is not proven exclusive at
+                // all. Waiting on every block would only re-check what the first already showed.
+                if (Interlocked.Increment(ref blockIndex) == 1)
+                    bothContended.Task.Wait(ShortTimeout);
                 return new byte[] { req[1] };
             });
             ecu.On(0x37, req => { seenSids.Enqueue(0x37); return Array.Empty<byte>(); });
@@ -628,7 +645,6 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
             // Fire concurrent TesterPresent calls (both the fire-and-forget suppressed form
             // and the request/response form) as soon as the download begins. The request
             // lock must serialise them all after the download finishes.
-            await Task.Yield();
             var tp1 = client.TesterPresentAsync(suppressPositiveResponse: true,
                 new CancellationTokenSource(ShortTimeout).Token);
             var tp2 = client.TesterPresentAsync(suppressPositiveResponse: false,
@@ -636,6 +652,10 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
 
             await Task.WhenAll(downloadTask, tp1, tp2);
 
+            // The first block's wait is bounded; had it run out, the racers were never proven
+            // to have queued behind the download, and the order below would prove nothing.
+            bothContended.Task.IsCompleted.Should().BeTrue(
+                "both TesterPresent calls must have queued on the lock while the download held it");
             var order = seenSids.ToArray();
             // First frame must be the RequestDownload (0x34) — no earlier 0x3E.
             order[0].Should().Be(0x34);

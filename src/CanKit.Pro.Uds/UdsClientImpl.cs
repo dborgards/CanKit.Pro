@@ -53,6 +53,37 @@ internal sealed class UdsClientImpl : IUdsClient
     private readonly SemaphoreSlim _requestLock = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCts = new();
 
+    // Test hook: fires whenever a caller finds _requestLock already held and starts waiting on
+    // it -- the observable a queued call is waiting on, standing in for a wall-clock sleep
+    // timed to land while an earlier call holds the lock (#171). No-op in production; a test
+    // subscribes to learn the wait has begun rather than guessing how long the holder needs.
+    internal event Action? RequestLockContended;
+
+    // Test hook: fires once _requestLock has actually been taken -- contended or not -- so a
+    // test driving a holder that then blocks on something else (a gated channel double) knows
+    // the lock is held without guessing how long the acquisition itself takes (#171).
+    internal event Action? RequestLockAcquired;
+
+    /// <summary>
+    /// Acquires <see cref="_requestLock"/>, raising <see cref="RequestLockContended"/> first if
+    /// it is already held. The non-blocking probe
+    /// (<see cref="SemaphoreSlim.Wait(int, CancellationToken)"/> with a zero timeout) keeps the
+    /// common uncontended path free of the event's cost and, more to the point, is what makes
+    /// the signal mean "a holder is in the way" rather than "a wait was requested" -- the latter
+    /// would fire on every call, contended or not (#171). The probe takes the token too, so a
+    /// call cancelled before it starts throws rather than taking a free lock, as the plain
+    /// <see cref="SemaphoreSlim.WaitAsync(CancellationToken)"/> it replaced did.
+    /// </summary>
+    private async Task AcquireRequestLockAsync(CancellationToken cancellationToken)
+    {
+        if (!_requestLock.Wait(0, cancellationToken))
+        {
+            RequestLockContended?.Invoke();
+            await _requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        RequestLockAcquired?.Invoke();
+    }
+
     private byte _currentSession = (byte)UdsSessionType.Default;
     private TesterPresentKeepAlive? _keepAlive;
     private int _disposed;
@@ -322,7 +353,7 @@ internal sealed class UdsClientImpl : IUdsClient
         // Hold the request lock across seed + sendKey so TesterPresent keep-alive (or another
         // UDS call) cannot interleave and break the ISO 14229-1 security-access sequence
         // (NRC requestSequenceError on real ECUs).
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             var seedRequest = new byte[] { (byte)UdsServiceId.SecurityAccess, requestSeedLevel };
@@ -437,7 +468,7 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             // The stale-reply discard the answered path runs before its send, here too: a late
@@ -611,7 +642,7 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             return await RequestTransferSetupCoreAsync(
@@ -641,7 +672,7 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             return await RequestTransferSetupCoreAsync(
@@ -729,7 +760,7 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             return await TransferDataCoreAsync(blockSequenceCounter, data, linkedToken)
@@ -779,7 +810,7 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             await RequestTransferExitCoreAsync(transferRequestParameterRecord, linkedToken)
@@ -864,7 +895,7 @@ internal sealed class UdsClientImpl : IUdsClient
         // SecurityAccessAsync: acquire the lock once, then call the *Core helpers that assume
         // the lock is held. The public RequestDownload/TransferData/RequestTransferExit APIs
         // remain unchanged for single-step callers.
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             var download = await RequestTransferSetupCoreAsync(
@@ -932,7 +963,7 @@ internal sealed class UdsClientImpl : IUdsClient
 
         // Same lock discipline as DownloadAsync: one continuous 0x35 → 0x36…0x36 → 0x37
         // sequence, so keep-alive traffic cannot desynchronise the ECU's block-sequence counter.
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             _ = await RequestTransferSetupCoreAsync(
@@ -989,7 +1020,7 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             return await ExecuteCoreAsync(serviceId, request, linkedToken).ConfigureAwait(false);
