@@ -2543,10 +2543,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await ShouldAllFailDisposed(sends);
     }
 
-    // A borrowed actor disposed before the channel runs no loop any more: the channel fails its
-    // sessions itself rather than leaving the send hanging on a timer that will never fire.
+    // Bugbot on #183: a borrowed actor its owner disposed first took its sessions with it. They
+    // are actor state its loop may still be draining, so the channel's Dispose leaves them
+    // alone -- and does not throw for the actor being gone.
     [Fact]
-    public async Task Disposing_After_The_Borrowed_Actor_Still_Fails_The_Send()
+    public async Task Disposing_After_The_Borrowed_Actor_Leaves_Its_Sessions_To_It()
     {
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
@@ -2558,14 +2559,98 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         actor.Dispose();
         sender.Invoking(c => c.Dispose()).Should().NotThrow();
 
-        sends.Should().OnlyContain(t => t.IsCompleted);
+        sends.Should().OnlyContain(t => !t.IsCompleted,
+            "nothing on this thread touched the sessions of an actor that is gone");
+    }
+
+    // Codex on #183: a borrowed actor busy past Dispose's 2 s budget. Dispose returns and says
+    // so on BackgroundExceptionOccurred, and the service it owns is disposed only once the
+    // actor has run the cleanup, not underneath it.
+    [Fact]
+    public async Task Disposing_On_A_Borrowed_Actor_Stuck_Past_The_Budget_Defers_The_Service()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        var service = new DisposalRecordingBusService(new CanBusService(bus));
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: true, actor);
+        var sends = await SendBamsInFlight(clock, actor, sender);
+        var faults = new List<Exception>();
+        sender.BackgroundExceptionOccurred += (_, e) => { lock (faults) faults.Add(e); };
+
+        using var release = new ManualResetEventSlim();
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            release.Wait(TimeSpan.FromSeconds(30));
+        });
+        try
+        {
+            await occupied.Task.WaitAsync(ShortTimeout);
+            sender.Dispose();
+
+            lock (faults) faults.Should().ContainSingle().Which.Should().BeOfType<TimeoutException>();
+            service.Disposed.IsCompleted.Should().BeFalse("the cleanup has not run, so the service is still in use");
+            sends.Should().OnlyContain(t => !t.IsCompleted);
+        }
+        finally
+        {
+            release.Set();
+        }
+
         await ShouldAllFailDisposed(sends);
+        await service.Disposed.WaitAsync(ShortTimeout);
     }
 
     private static async Task ShouldAllFailDisposed(Task[] sends)
     {
         foreach (var send in sends)
             await send.Invoking(t => t).Should().ThrowAsync<ObjectDisposedException>();
+    }
+}
+
+/// <summary>
+/// Test double: forwards everything to an inner service it owns, and records when it is
+/// disposed, so a test can tell whether the channel disposed it and when (#183).
+/// </summary>
+internal sealed class DisposalRecordingBusService : ICanBusService
+{
+    private readonly ICanBusService _inner;
+    private readonly TaskCompletionSource<bool> _disposed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public DisposalRecordingBusService(ICanBusService inner) => _inner = inner;
+
+    /// <summary>Completes when <see cref="Dispose"/> has run.</summary>
+    public Task Disposed => _disposed.Task;
+
+    public ICanBus Bus => _inner.Bus;
+    public int SubscriptionCount => _inner.SubscriptionCount;
+
+    public event EventHandler<Exception>? BackgroundExceptionOccurred
+    {
+        add => _inner.BackgroundExceptionOccurred += value;
+        remove => _inner.BackgroundExceptionOccurred -= value;
+    }
+
+    public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+    public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+        => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+    public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+        => _inner.FindOverlappingFilterSubscriptions();
+
+    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        CancellationToken cancellationToken = default)
+        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+
+    public void Dispose()
+    {
+        _inner.Dispose();
+        _disposed.TrySetResult(true);
     }
 }
 
