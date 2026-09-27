@@ -19,10 +19,14 @@
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
 
-  <!-- The tests drive the wire format directly, injecting synthetic control frames. -->
+  <!-- The tests drive the wire format directly, injecting synthetic control frames.
+       The bus-scan sample uses the passive heartbeat observer without taking a node-id. -->
   <ItemGroup>
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CanKit.Pro.Tests</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.Sample.CanOpenBusScan</_Parameter1>
     </AssemblyAttribute>
   </ItemGroup>
 
