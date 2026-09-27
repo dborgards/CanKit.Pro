@@ -1570,12 +1570,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         const byte contended = 0x62;
 
         int cannotClaims = 0;
+        using var cannotClaimSeen = new SemaphoreSlim(0);
         busB.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+            {
+                Interlocked.Increment(ref cannotClaims);
+                cannotClaimSeen.Release();
+            }
         };
+        // The actor's decision is settled by the clock, but the frame it sends still crosses the
+        // service and the hub on their own threads (Codex on #185): a positive is awaited from the
+        // observer, and each negative gets this much wall time for a frame already on its way.
+        var wireWindow = TimeSpan.FromMilliseconds(200);
 
         var announce = TimeSpan.FromMilliseconds(80);
         var backoff = TimeSpan.FromMilliseconds(153); // this NAME's §4.4.4.3 backoff
@@ -1614,11 +1623,12 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var epsilon = TimeSpan.FromMilliseconds(1);
         await clock.AdvanceAsync(backoff - epsilon);
         await clock.SettleAsync();
-        Volatile.Read(ref cannotClaims).Should().Be(0, "the request did not shortcut the backoff");
+        (await cannotClaimSeen.WaitAsync(wireWindow)).Should().BeFalse("the request did not shortcut the backoff");
 
         await clock.AdvanceAsync(epsilon);
         await clock.SettleAsync();
-        Volatile.Read(ref cannotClaims).Should().Be(1, "the backoff has now elapsed and the answer is on the bus");
+        (await cannotClaimSeen.WaitAsync(ShortTimeout)).Should().BeTrue("the backoff has now elapsed and the answer is on the bus");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
 
         Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
         await awaitLost.Should().ThrowAsync<J1939CannotClaimException>();
@@ -1626,7 +1636,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // With room for a second copy to show up: the request must not have queued a duplicate.
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
         await clock.SettleAsync();
-        Volatile.Read(ref cannotClaims).Should().Be(1, "the answer already waiting is the answer to the request");
+        (await cannotClaimSeen.WaitAsync(wireWindow)).Should().BeFalse("the answer already waiting is the answer to the request");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
     }
 
     // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
@@ -3286,13 +3297,20 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             }
         }
 
-        // Post-dispose: no additional frames after two quiet periods.
+        // Post-dispose. Every emission above was waited out to completion, so nothing is in
+        // flight: the schedule must have left no tick armed, and period after period -- one at a
+        // time, since a single jump would let a live schedule coalesce its ticks into one --
+        // must add no frame (Codex on #185).
         var countAtDispose = Count();
-        await clock.AdvanceAsync(period + period);
-        await clock.SettleAsync();
-        Count().Should().BeLessOrEqualTo(countAtDispose + 1,
-            "disposing the handle must stop the periodic loop so at most an already-in-flight " +
-            "SendAsync may still land after Dispose returns");
+        (await senderActor.NextTimerDelayAsync()).Should().BeNull(
+            "disposing the handle cancels the schedule's tick");
+        for (var quiet = 0; quiet < 3; quiet++)
+        {
+            await clock.AdvanceAsync(period);
+            await clock.SettleAsync();
+        }
+        sender.PeriodicEmissionsCompleted.Should().Be(requiredEmissions, "no tick started a send after Dispose");
+        Count().Should().Be(countAtDispose, "disposing the handle must stop the periodic loop");
 
         List<TimeSpan> snapshot;
         lock (stampsLock) snapshot = new List<TimeSpan>(stamps);

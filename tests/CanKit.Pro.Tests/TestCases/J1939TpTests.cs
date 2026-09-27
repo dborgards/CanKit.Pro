@@ -2768,6 +2768,19 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
 
     public FrameConsumptionCountingBusService(ICanBusService inner) => _inner = inner;
 
+    /// <summary>Runs once, right after the next subscription is created and before it is returned.</summary>
+    public Action? OnNextSubscribe { get; set; }
+
+    private ISubscription Subscribed(ISubscription inner)
+    {
+        var hook = Interlocked.Exchange(ref _onNextSubscribeTaken, 1) == 0 ? OnNextSubscribe : null;
+        var counted = new Counted(this, inner);
+        hook?.Invoke();
+        return counted;
+    }
+
+    private int _onNextSubscribeTaken;
+
     public Task WaitUntilConsumedAsync(int count)
     {
         lock (_gate)
@@ -2812,10 +2825,10 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
     }
 
     public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
-        => new Counted(this, _inner.Subscribe(predicate, bufferCapacity, includeEcho));
+        => Subscribed(_inner.Subscribe(predicate, bufferCapacity, includeEcho));
 
     public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
-        => new Counted(this, _inner.Subscribe(filter, bufferCapacity, includeEcho));
+        => Subscribed(_inner.Subscribe(filter, bufferCapacity, includeEcho));
 
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();

@@ -275,32 +275,22 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             unchecked((int)EcuResponseId),
             IsoTpFrameCodec.BuildSingleFrame(realEp, realPdu, isCanFd: false, padding: true));
 
-        using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, RangeStart, RangeEnd,
-            FastOptions());
+        // #171: this used to send the stale frame and sleep 50 ms, which left open whether it
+        // landed before the subscription (never seen) or inside it. The hook below puts it
+        // where the drain matters: into the collection's own subscription, after that
+        // subscription exists and before SendAndCollectAsync drains it and sends (Codex on #185).
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(busA))
+        {
+            OnNextSubscribe = () => busB.Transmit(staleFrame),
+        };
+        using var client = new IsoTpFunctionalClient(service, FunctionalTxId, RangeStart, RangeEnd,
+            FastOptions(), ownsService: false);
 
         busB.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID == unchecked((int)FunctionalTxId))
                 busB.Transmit(realFrame);
         };
-
-        // #171: "give the virtual hub a moment to route it" was a Task.Delay(50). staleArrived
-        // is a frame on the wire -- the tester's own bus, busA -- which is what the comment
-        // below actually needs: the stale frame must have reached busA before
-        // SendAndCollectAsync's internal Subscribe runs, so it lands in the "before Subscribe"
-        // case rather than possibly inside the collection window itself, where it would be
-        // counted as a genuine (if spurious) response and break the HaveCount(1) assertion.
-        var staleArrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        busA.FrameObserved += (_, e) =>
-        {
-            if (e.CanFrame.ID == unchecked((int)StaleEcuResponseId)) staleArrived.TrySetResult(true);
-        };
-
-        // Blast the stale SF into the pipe. If it lands after SendAndCollectAsync's internal
-        // Subscribe, DrainBuffered must drop it; if it lands before Subscribe (guaranteed by the
-        // wait below), the subscription never sees it. Either way the assertion below must hold.
-        busB.Transmit(staleFrame);
-        await staleArrived.Task.WaitAsync(ShortTimeout);
 
         byte[] request = { 0x22, 0xF1, 0x90 };
         var responses = await client.SendAndCollectAsync(request, CollectionWindow)
