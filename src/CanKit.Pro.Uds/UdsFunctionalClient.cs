@@ -66,6 +66,21 @@ public sealed class UdsFunctionalClient : IDisposable
     private TimeSpan _listenerStartDelay;
     private int _disposed;
 
+    // Test hook: fires whenever a call finds _requestLock already held and starts waiting on
+    // it -- the observable a call queued behind another is waiting on, standing in for a
+    // wall-clock sleep timed to land while the earlier call's window is still open (#171).
+    // No-op in production.
+    internal event Action? RequestLockContended;
+
+    private async Task AcquireRequestLockAsync(CancellationToken cancellationToken)
+    {
+        if (!_requestLock.Wait(0, cancellationToken))
+        {
+            RequestLockContended?.Invoke();
+            await _requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan responseWindow,
         TimeSpan responsePendingWindow, ProtocolActor? clock)
     {
@@ -140,7 +155,7 @@ public sealed class UdsFunctionalClient : IDisposable
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
-        await _requestLock.WaitAsync(linkedToken).ConfigureAwait(false);
+        await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
             // Disposed while queued behind another call: the lock is released, not used.

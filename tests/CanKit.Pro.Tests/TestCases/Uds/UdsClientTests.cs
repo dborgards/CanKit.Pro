@@ -490,6 +490,22 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // A contended lock with nobody subscribed to RequestLockContended is the production shape
+    // of every request lock acquisition: the event is a test hook and normally has no listener
+    // (#171).
+    [Fact]
+    public async Task A_Contended_Lock_Needs_No_Subscriber()
+    {
+        var (client, _, dispose) = BuildPair(e => e.On(0x22, req => new byte[] { req[1], req[2] }));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var first = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+            var second = client.ReadDataByIdentifierAsync(0xF191, cts.Token);
+            await Task.WhenAll(first, second);
+        }
+    }
+
     // Codex on #150: a suppressed send may still draw a negative response, up to P2 after it.
     // The next request for the same service waits that window out rather than taking the
     // negative response as its own.
@@ -1190,6 +1206,16 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using (dispose)
         {
+            var impl = (UdsClientImpl)client;
+            // The property is that a keep-alive tick queued behind SecurityAccess does not
+            // transmit until the lock is released -- proven by observing at least one tick
+            // actually contend for the lock while computeKey blocks, not by guessing how many
+            // 30 ms periods a fixed wait covers (#171). Stronger than the counted-periods guess
+            // it replaces: that could pass with zero ticks ever firing.
+            var keepAliveContended = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            impl.RequestLockContended += () => keepAliveContended.TrySetResult(true);
+
             using var keepAlive = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
 
             var unlock = client.SecurityAccessAsync(
@@ -1198,14 +1224,14 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 {
                     keyStarted.TrySetResult(true);
                     // Block inside computeKey (still under the request lock) long enough that
-                    // several keep-alive ticks fire; they must not transmit until unlock ends.
+                    // a keep-alive tick contends for it; it must not transmit until unlock ends.
                     releaseKey.Task.Wait(ShortTimeout);
                     return s.Select(b => (byte)(b ^ 0x55)).ToArray();
                 },
                 cancellationToken: new CancellationTokenSource(ShortTimeout).Token);
 
             await keyStarted.Task.WaitAsync(ShortTimeout);
-            await Task.Delay(120); // several keep-alive periods while lock is held
+            await keepAliveContended.Task.WaitAsync(ShortTimeout); // a keep-alive tick queued behind SecurityAccess
             releaseKey.TrySetResult(true);
             await unlock;
 
@@ -1677,9 +1703,15 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 P2StarClientMax = TimeSpan.FromSeconds(5),
             });
         using var teardown = dispose;
+        var impl = (UdsClientImpl)client;
+        // The ECU never answers (EcuSilent), so once the lock is held the request stays parked
+        // in the receive: the observable is the lock, not a guess at how long entering the
+        // receive on top of it takes (#171).
+        var lockHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        impl.RequestLockAcquired += () => lockHeld.TrySetResult(true);
         var inFlight = client.ReadDataByIdentifierAsync(0xF190,
             new CancellationTokenSource(ShortTimeout).Token);
-        await Task.Delay(50); // enter ReceiveWithTimeout under the request lock
+        await lockHeld.Task; // holds _requestLock, parked in ReceiveWithTimeout
 
         Action act = () => client.Dispose();
         act.Should().NotThrow(
@@ -1705,15 +1737,20 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 P2StarClientMax = TimeSpan.FromSeconds(5),
             });
         using var teardown = dispose;
+        var impl = (UdsClientImpl)client;
         // Hold the request lock with a silent ECU read so suppress TesterPresent blocks
         // in WaitAsync rather than racing through Send.
+        var readHoldsLock = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        impl.RequestLockAcquired += () => readHoldsLock.TrySetResult(true);
         var inFlight = client.ReadDataByIdentifierAsync(0xF190,
             new CancellationTokenSource(ShortTimeout).Token);
-        await Task.Delay(50);
+        await readHoldsLock.Task;
 
+        var testerPresentQueued = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        impl.RequestLockContended += () => testerPresentQueued.TrySetResult(true);
         var testerPresent = client.TesterPresentAsync(suppressPositiveResponse: true,
             new CancellationTokenSource(ShortTimeout).Token);
-        await Task.Delay(30); // park on _requestLock.WaitAsync
+        await testerPresentQueued.Task; // parked on _requestLock.WaitAsync
 
         Action act = () => client.Dispose();
         act.Should().NotThrow();
@@ -1724,6 +1761,26 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> waitRead = () => inFlight;
         await waitRead.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #171 — the uncontended fast path of the request lock must honour a token that is
+    // already cancelled, as the plain WaitAsync it replaced did: a call cancelled before it
+    // starts never takes the lock.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task An_Already_Cancelled_Call_Does_Not_Take_A_Free_Request_Lock()
+    {
+        var (client, _, dispose) = BuildPair(e => e.On(0x22, _ => new byte[] { 0xF1, 0x90, 0x01 }));
+        using var teardown = dispose;
+        var impl = (UdsClientImpl)client;
+        var acquired = false;
+        impl.RequestLockAcquired += () => acquired = true;
+
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, new CancellationToken(canceled: true));
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        acquired.Should().BeFalse("a call cancelled before it starts must not take the request lock");
     }
 
     /// <summary>

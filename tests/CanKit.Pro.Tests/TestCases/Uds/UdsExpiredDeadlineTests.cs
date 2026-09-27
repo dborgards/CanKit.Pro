@@ -368,10 +368,16 @@ public class UdsExpiredDeadlineTests
             stampArrivalAtDelivery: true)
         { Gate = gate };
         using var client = NewClient(channel); // a second Dispose is idempotent
-        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(100);
+        var impl = (UdsClientImpl)client;
+        impl.DisposeLockTimeout = TimeSpan.FromMilliseconds(100);
 
+        // The request is gated indefinitely on `gate` (set below), so once it holds the lock it
+        // stays blocked in the receive: an observable that the lock was taken is enough, with
+        // no need to also observe the receive itself (#171).
+        var lockHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        impl.RequestLockAcquired += () => lockHeld.TrySetResult(true);
         var inFlight = client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
-        await Task.Delay(50); // let the request take the lock and block in the receive
+        await lockHeld.Task; // the request holds _requestLock and is blocked in the receive
 
         client.Dispose(); // returns after its 100 ms wait, the holder still inside
 

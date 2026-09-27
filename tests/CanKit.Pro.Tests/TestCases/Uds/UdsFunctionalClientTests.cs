@@ -225,10 +225,16 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var functional = UdsFunctionalClient.Create( // a second Dispose is idempotent
             IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
 
+        // The observable a queued call is waiting on: the second SendRawAsync finds
+        // _requestLock already held by the first (its collection window still open) and starts
+        // waiting on it, rather than a guess at how long the first's window needs (#171).
+        var secondQueued = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        functional.RequestLockContended += () => secondQueued.TrySetResult(true);
+
         using var cts = new CancellationTokenSource(ShortTimeout);
         var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(300), cts.Token);
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(300), cts.Token);
-        await Task.Delay(50); // the first is in its window, the second queued behind it
+        await secondQueued.Task; // the first is in its window, the second queued behind it
 
         functional.Dispose();
 
@@ -976,6 +982,8 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var window = windowMilliseconds == long.MaxValue ? TimeSpan.MaxValue : TimeSpan.FromMilliseconds(windowMilliseconds);
         Func<Task> act = () => functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, window);
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        // A negative check on another bus: a frame sent by a regression that validated after
+        // the send would reach busEcus asynchronously, so this keeps its wall window (#171).
         await Task.Delay(50);
         seen.Should().Be(0, "nothing was transmitted");
     }
