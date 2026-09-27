@@ -537,6 +537,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
     // Bugbot 3596183535: BAM announce TX rejection must fail SendBamAsync (not only raise
     // BackgroundExceptionOccurred) and must not proceed to TP.DT after Th.
+    //
+    // #171: "give Th a chance to fire" used to be a wall-clock sleep. The actor is now the
+    // caller's and its clock is frozen: instead of hoping 80 ms was enough (or, on a live actor,
+    // long enough that a wrongly-armed spacing timer could have already fired and been trimmed
+    // before the check ran), the test reads the actor's own timer list once the send has
+    // faulted, on a clock nothing can advance out from under it -- a rejected announce must have
+    // armed nothing at all, and a clock that never moves cannot hide a timer that was.
     [Fact]
     public async Task Bam_AnnounceTxRejected_FailsSendAndDoesNotEmitDt()
     {
@@ -547,7 +554,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var inner = new CanBusService(busA);
         using var rejecting = new RejectTpCmBusService(inner);
         var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
-        using var sender = J1939TpFactory.Open(rejecting, sourceAddress: 0x51, options: opts, leaveOpen: true);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(rejecting, sourceAddress: 0x51, opts, ownsService: false, actor);
 
         var dtSeen = 0;
         busB.FrameObserved += (_, e) =>
@@ -565,13 +574,23 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             .WithTimeout(ShortTimeout);
         await act.Should().ThrowAsync<J1939TpSendRejectedException>();
 
-        // Give Th a chance to fire if DT were incorrectly scheduled after a rejected BAM.
-        await Task.Delay(80);
+        // The send has already faulted on the actor loop; settle it once more so any work the
+        // fault path itself posted has also run, then read the timer list directly instead of
+        // waiting out a spacing period on the wall clock.
+        await actor.PostAsync(() => 0);
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "a rejected BAM announce must leave no timer armed -- not the spacing timer, not anything else");
         Volatile.Read(ref dtSeen).Should().Be(0, "rejected BAM announce must not schedule TP.DT");
         Volatile.Read(ref bgSeen).Should().Be(0, "CM TX failure must fail the send TCS, not only BackgroundExceptionOccurred");
     }
 
     // Bugbot 3596025915: canceling before BeginTxOnLoop runs must not emit TP.CM/TP.DT.
+    //
+    // #171: SendCmAsync registers the cancellation and posts BeginTxOnLoop to the actor before
+    // it ever returns, both on this thread and in that order, so a token already canceled means
+    // the work item is already sitting in the actor's mailbox by the time the send throws. One
+    // round trip on the same, injected actor is therefore an exact barrier -- not a guess at how
+    // long draining it might take.
     [Fact]
     public async Task SendCm_CanceledBeforeStart_DoesNotTransmit()
     {
@@ -579,7 +598,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x61);
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(new CanBusService(busA), sourceAddress: 0x61,
+            new J1939TpOptions(), ownsService: true, actor);
         using var _ = J1939TpFactory.Open(busB, sourceAddress: 0x62);
 
         var seen = 0;
@@ -599,8 +620,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             RandomPayload(50, seed: 61), cts.Token);
         await act.Should().ThrowAsync<OperationCanceledException>();
 
-        // Give the actor a beat to drain any incorrectly queued BeginTx work.
-        await Task.Delay(100);
+        // BeginTxOnLoop was already enqueued behind us; this drains it -- the actor's decision
+        // not to start a session is now certain. What is not covered by the round trip is the
+        // wire itself: a start it should not have made still transmits through a fire-and-forget
+        // Task.Run outside the actor's mailbox (SendControlFrame), so a short, deliberately
+        // small residual window follows the deterministic half instead of standing in for it.
+        await actor.PostAsync(() => 0);
+        await Task.Delay(30);
         Volatile.Read(ref seen).Should().Be(0, "canceled send must not emit TP.CM/TP.DT");
     }
 
@@ -994,6 +1020,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
     // Bugbot 3596489078: EOM totals that disagree with the session must fail SendCmAsync
     // (not complete successfully with only a BackgroundExceptionOccurred).
+    //
+    // #171: the frame that reaches the peer's wire is not proof OnCmDtConfirmed has run on the
+    // sender's own actor -- that confirmation comes back through the sender's own TX-confirm
+    // path, on the sender's own loop, and is what arms WaitEom's T3. Waiting for that timer to
+    // be armed replaces the 20 ms guess.
     [Fact]
     public async Task Cm_Sender_EomSizeMismatch_FailsSend()
     {
@@ -1006,7 +1037,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const uint pgn = 0xFE93u;
         var payload = RandomPayload(14, seed: 93); // 2 packets
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+        var options = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            options, ownsService: true, actor);
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var lastDtSeen = new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1033,8 +1068,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         peerBus.Transmit(CanFrame.Classic((int)cmId, cts, isExtendedFrame: true));
 
         await lastDtSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        // Small settle so OnCmDtConfirmed arms WaitEom before we inject the bad EOM.
-        await Task.Delay(20);
+        // OnCmDtConfirmed arms T3 on the move to WaitEom; wait for that arm instead of guessing
+        // how long the sender's own confirmation takes to come back.
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
 
         var badEom = J1939TpFrames.BuildEomAck(payload.Length, J1939TpFrames.TotalPackets(payload.Length), pgn);
         badEom[1] = (byte)(payload.Length + 1); // mismatch totals vs session
@@ -1906,6 +1942,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // #31 — the window from the receiver's CTS to the first TP.DT is T2 (1250 ms), not Tr
     // (200 ms): Tr is the time a node has to *send* a response it owes. A conforming but slow
     // originator that needs 300 ms to get its first DT out must not be rejected.
+    //
+    // #171: 300 ms used to be a wall-clock lower bound -- a loaded host only ever widened the
+    // gap, up to T2's margin. On the receiver's own injected, virtual clock the gap is exact:
+    // arm-before-advance (wait for T2 itself to be armed, not just for the CTS to be on the
+    // wire) and then advance by exactly 300 ms, strictly inside T2's 1250 ms.
     // -----------------------------------------------------------------------------------
     [Fact]
     public async Task Cm_Receiver_Survives_A_First_Dt_That_Arrives_300ms_After_Cts()
@@ -1918,10 +1959,14 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0xB2;
         const uint pgn = 0xFEB1u;
         var payload = RandomPayload(14, seed: 177); // 2 packets
+        var gap = TimeSpan.FromMilliseconds(300);
 
-        // Defaults: T2 = 1250 ms is the timer under test. The 300 ms below is a lower bound on
-        // the delay, so a loaded host only widens the gap it must survive, up to T2's margin.
-        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa);
+        // Defaults: T2 = 1250 ms is the timer under test; 300 ms < T2 is the bracket.
+        var options = new J1939TpOptions();
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var receiver = new J1939TpChannel(new CanBusService(receiverBus), sourceAddress: receiverSa,
+            options, ownsService: true, actor);
 
         var ctsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         peerBus.FrameObserved += (_, e) =>
@@ -1940,7 +1985,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         peerBus.Transmit(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, receiverSa), rts, isExtendedFrame: true));
         await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
 
-        await Task.Delay(300);
+        // The CTS on the wire is not proof T2 is armed yet -- ArmT2 runs after the CTS is sent,
+        // on the receiver's own actor. Wait for the arm itself before moving the clock.
+        await clock.WaitUntilTimerArmedAsync(actor, options.T2, ShortTimeout);
+        await clock.AdvanceAsync(gap);
 
         var dtId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, receiverSa);
         peerBus.Transmit(CanFrame.Classic(dtId, J1939TpFrames.BuildDt(sn: 1, pdu: payload, offset: 0), isExtendedFrame: true));
@@ -2081,6 +2129,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // #58: a PDU1 PGN with its low byte set is not a PGN -- the destination is the address
     // argument -- and is refused before anything goes out, as J1939Id.ComposePgn refuses it
     // (#55); the session is keyed on what the peer names in its CTS.
+    //
+    // #171: the 50 ms "chance for a wrongly-scheduled transmit to show up" was never needed.
+    // ValidateSendPayload runs synchronously, before either method ever posts to the actor, so
+    // by the time both awaits below have returned there is no work in flight to wait out --
+    // nothing was ever queued that could still transmit.
     [Fact]
     public async Task A_Pdu1_Pgn_With_A_Low_Byte_Is_Refused_Before_Anything_Goes_Out()
     {
@@ -2094,8 +2147,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await cm.Should().ThrowAsync<ArgumentOutOfRangeException>().WithParameterName("pgn");
         Func<Task> bam = () => sender.SendBamAsync(0xEE8Du, RandomPayload(14, seed: 1));
         await bam.Should().ThrowAsync<ArgumentOutOfRangeException>().WithParameterName("pgn");
-        await Task.Delay(50);
-        transmitted.Should().Be(0, "nothing was transmitted");
+        transmitted.Should().Be(0,
+            "validation throws before either call ever posts to the actor, so nothing was ever queued to transmit");
     }
 
     // #58: an RTS that allows no packet per CTS can never be served -- every CTS would be a
@@ -2186,6 +2239,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // Codex on #152: a retransmit request that arrives while a block is still draining takes
     // effect as soon as the outstanding DT is confirmed -- the receiver is missing a packet,
     // and every later one it gets meanwhile is out of sequence to it -- not after the block.
+    //
+    // #171: "the CTS is on the actor before the confirmation is released" was a 50 ms sleep
+    // standing in for an arm barrier that does not exist here -- the CTS reaches the actor
+    // through the reader task's own background post, not through anything this thread enqueues.
+    // What the injected actor gives instead: two round trips on it, after the frame has been
+    // handed to the subscription, put far more real scheduling time between "posted" and
+    // "settled" than a dedicated-thread post can need to catch up, without naming a duration.
     [Fact]
     public async Task A_Retransmit_Request_Mid_Block_Takes_Effect_After_The_Outstanding_Packet()
     {
@@ -2194,7 +2254,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC6u;
         var payload = RandomPayload(21, seed: 7); // three packets
-        using var sender = J1939TpFactory.Open(service, sourceAddress: subjectSa);
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
 
         var dtSns = new List<byte>();
         bus.OnTransmitting = f =>
@@ -2214,7 +2276,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         // Packet 1 asked for again while DT 1 is still outstanding.
         bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
-        await Task.Delay(50); // the CTS is on the actor before the confirmation is released
+        await actor.PostAsync(() => 0);
+        await actor.PostAsync(() => 0);
         bus.DeferredEchoes.ReleaseNext();
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the next DT
 
@@ -2231,6 +2294,14 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // Codex on #152: while a block drains, "already sent" reaches only up to the outstanding
     // packet; a CTS for a later packet of the grant would skip the ones between, and is a
     // sequence error (table 7, code 7), not a retransmit.
+    //
+    // #171: the trailing 50 ms was doing two jobs at once -- giving the one expected abort time
+    // to actually reach the wire (AbortTx sets the fault and fires the transmit through a
+    // fire-and-forget Task.Run, outside the actor's mailbox, so the fault and the wire are not
+    // the same instant) and giving a wrongly-triggered second abort a window to show up after
+    // the now-orphaned DT 1 confirmation is released. Split into what each half actually needs:
+    // a wait for the abort that must arrive, then a settle plus a short residual window for the
+    // one that must not.
     [Fact]
     public async Task A_Cts_For_An_Unsent_Packet_Of_The_Block_Is_A_Sequence_Error_Not_A_Retransmit()
     {
@@ -2239,14 +2310,21 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC7u;
         var payload = RandomPayload(21, seed: 8); // three packets
-        using var sender = J1939TpFactory.Open(service, sourceAddress: subjectSa);
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
 
         var aborts = new List<byte[]>();
+        var firstAbort = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         bus.OnTransmitting = f =>
         {
             var fields = J1939Id.Decompose((uint)f.ID);
             if (J1939Pgn.IsTransportCm(fields.Pgn) && f.Data.Span[0] == J1939TpFrames.ControlAbort)
-                lock (aborts) aborts.Add(f.Data.ToArray());
+            {
+                var frame = f.Data.ToArray();
+                lock (aborts) aborts.Add(frame);
+                firstAbort.TrySetResult(frame);
+            }
         };
         static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
             => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
@@ -2263,8 +2341,16 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> failed = () => send;
         var ex = await failed.Should().ThrowAsync<J1939TpAbortException>();
         ex.Which.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
+        await firstAbort.Task.AsTaskWithTimeout(ShortTimeout); // the one expected abort, actually on the wire
+
         bus.DeferredEchoes.ReleaseNext();
-        await Task.Delay(50);
+        // The stale DT 1 confirmation is now on the actor; settle it, then a short residual
+        // window covers whatever it might still fire onto the wire through the same
+        // fire-and-forget path -- the settle alone cannot see that, only shrinks how much of
+        // the old sleep's span the window has to cover.
+        await actor.PostAsync(() => 0);
+        await actor.PostAsync(() => 0);
+        await Task.Delay(30);
         lock (aborts) aborts.Should().ContainSingle().Which[1].Should().Be((byte)J1939TpAbortReason.BadSequenceNumber);
     }
 
