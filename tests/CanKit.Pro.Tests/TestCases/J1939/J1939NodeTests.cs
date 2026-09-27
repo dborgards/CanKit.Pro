@@ -1320,13 +1320,20 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex and Bugbot on #153: a loser that claims again before its delayed Cannot Claim went
     // out does not have it go out -- the new claim's announcement is the newer word on the bus.
+    //
+    // #171: the loser's actor runs on a VirtualClock so "past the backoff, with room" no longer
+    // trusts a wall-clock sleep to have outrun a ~153 ms pseudo-random backoff -- it moves the
+    // clock past it deterministically instead.
     [Fact]
     public async Task A_Delayed_Cannot_Claim_Is_Dropped_Once_A_New_Claim_Has_Started()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator
+        using var serviceB = new CanBusService(busB);
+        var loserActor = clock.NewActor();
 
         int cannotClaims = 0;
         busC.FrameObserved += (_, e) =>
@@ -1336,8 +1343,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
         };
 
-        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
-        using var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 150 ms
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        using var loser = new J1939NodeImpl(serviceB, new J1939NodeOptions(Name(0x000158))
+        { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor); // backoff 150 ms
         await winner.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
 
         var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1345,14 +1354,22 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         // The claim faults only once its Cannot Claim is on the bus, so the loss is awaited
         // through the state change here -- the exception would come too late to claim inside
-        // the backoff it is waiting for.
+        // the backoff it is waiting for. The loss itself is a real wire round trip with
+        // `winner` (a wall-clock node), not something blocked on the frozen clock, so it is
+        // awaited on the wall clock -- advancing the virtual clock here instead would race
+        // ahead of winner's real defensive re-announce and let the loser think it is
+        // uncontested. Only the second claim's own completion is blocked on the loser's clock.
         var lost = loser.ClaimAddressAsync(0x60);
         await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        await loser.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout); // within the backoff, and through the new arbitration
+        var second = loser.ClaimAddressAsync(0x61); // within the backoff, and through the new arbitration
+        await clock.RunUntilAsync(second, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
 
         Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
         await awaitLost.Should().ThrowAsync<J1939CannotClaimException>("dropping the Cannot Claim settles the loss that owed it");
-        await Task.Delay(300); // past the backoff, with room
+
+        // Past the backoff, with room: the dropped Cannot Claim must never appear.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        await clock.SettleAsync();
         Volatile.Read(ref cannotClaims).Should().Be(0, "the Cannot Claim was overtaken by the new claim");
         loser.Address.Should().Be(0x61);
     }
@@ -1426,21 +1443,28 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // Codex on #153: a round waiting its backoff has announced nothing, and answers a Request
     // for Address Claimed by starting -- one announcement, now -- rather than by an
     // announcement of its own with the round's to follow.
+    //
+    // #171: node's actor runs on a VirtualClock so "past the backoff" is a deterministic advance
+    // rather than a 300 ms wall-clock sleep racing a ~153 ms pseudo-random backoff.
     [Fact]
     public async Task A_Request_During_The_Backoff_Starts_The_Round_With_A_Single_Announcement()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var serviceA = new CanBusService(busA);
+        var nodeActor = clock.NewActor();
         const byte contended = 0x81;
 
-        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        using var node = new J1939NodeImpl(serviceA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            ClaimAnnounceTimeout = announce,
             EnableArbitraryAddressClaiming = true,
-        });
+        }, ownsService: false, nodeActor);
 
         int candidateClaims = 0;
         busB.FrameObserved += (_, e) =>
@@ -1452,15 +1476,22 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true); };
 
+        // The initial loss is a real wire round trip with `winner` (a wall-clock node), not
+        // something blocked on the frozen clock -- advancing the virtual clock while waiting for
+        // it would race ahead of winner's real defensive re-announce. Only the request-driven
+        // claim that follows is blocked on node's own clock.
         var claim = node.ClaimAddressAsync(contended);
         await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
         busB.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
             new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
 
-        await claim.WithTimeout(ShortTimeout);
+        await clock.RunUntilAsync(claim, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
         node.Address.Should().Be((byte)(contended + 1));
-        await Task.Delay(300); // past the backoff: a round that still fired would announce again
+
+        // Past the backoff: a round that still fired would announce again.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        await clock.SettleAsync();
         Volatile.Read(ref candidateClaims).Should().Be(1, "the request started the round, whose announcement is the answer, and nothing announced twice");
     }
 
@@ -1469,13 +1500,20 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // frame the loss owed the bus was then never sent at all. ClaimAddressAsync now faults
     // once the frame has gone out, so the loser here disposes as soon as it can and the
     // spectator still sees it.
+    //
+    // #171: the loser's actor runs on a VirtualClock (the actor is caller-injected, so disposing
+    // the node does not dispose it) so "a backoff that survived the dispose would have fired by
+    // now" is a deterministic advance instead of a 300 ms wall-clock sleep.
     [Fact]
     public async Task A_Lost_Claim_Faults_Only_Once_Its_Cannot_Claim_Is_On_The_Bus()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator: it outlives the loser
+        using var serviceB = new CanBusService(busB);
+        var loserActor = clock.NewActor();
 
         int cannotClaims = 0;
         busC.FrameObserved += (_, e) =>
@@ -1485,15 +1523,28 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
         };
 
-        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
-        using (var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) })) // backoff 153 ms
+        using (var loser = new J1939NodeImpl(serviceB, new J1939NodeOptions(Name(0x00015D))
+               { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor)) // backoff 153 ms
         {
-            Func<Task> act = () => loser.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+            var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            loser.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lossSeen.TrySetResult(true); };
+
+            // The loss is a real wire round trip with `winner` (a wall-clock node), not
+            // something blocked on the frozen clock -- advancing the virtual clock while
+            // waiting for it would race ahead of winner's real defensive re-announce. Only the
+            // Cannot Claim that follows the loss is blocked on the loser's own backoff timer.
+            var claim = loser.ClaimAddressAsync(0x63);
+            await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
+            Func<Task> act = () => clock.RunUntilAsync(claim, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
             await act.Should().ThrowAsync<J1939CannotClaimException>();
         } // the using a caller ends on the exception
 
-        await Task.Delay(300); // a backoff that survived the dispose would have fired by now
+        // A backoff that survived the dispose would have fired by now.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        await clock.SettleAsync();
         Volatile.Read(ref cannotClaims).Should().Be(1,
             "the claim faulted only after its Cannot Claim went out, so disposing on the exception cannot suppress it");
     }
@@ -1503,53 +1554,71 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // different NAMEs on the bus. The answer a losing node owes therefore waits the same
     // §4.4.4.3 backoff as the Cannot Claim of the loss itself -- and a request arriving inside
     // that backoff is answered by that one frame, not by an immediate second copy.
+    //
+    // #171: the loser's actor runs on a VirtualClock. Rather than inferring "the request did not
+    // shortcut the backoff" from a Stopwatch delta after the fact, the backoff is bracketed from
+    // both sides directly: not yet due one tick short of it, due on the tick itself.
     [Fact]
     public async Task A_Request_During_The_Cannot_Claim_Backoff_Is_Answered_By_That_One_Frame()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var serviceA = new CanBusService(busA);
+        var loserActor = clock.NewActor();
         const byte contended = 0x62;
 
         int cannotClaims = 0;
-        long firstCannotClaimAt = 0;
         busB.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (!J1939Pgn.IsAddressClaim(fields.Pgn) || fields.SourceAddress != J1939Pgn.NullAddress) return;
-            Interlocked.CompareExchange(ref firstCannotClaimAt, Stopwatch.GetTimestamp(), 0);
-            Interlocked.Increment(ref cannotClaims);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
         };
 
-        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(153); // this NAME's §4.4.4.3 backoff
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        using var loser = J1939Node.Open(busA, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 153 ms
+        using var loser = new J1939NodeImpl(serviceA, new J1939NodeOptions(Name(0x00015D))
+        { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor);
 
-        long lostAt = 0;
         var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        loser.AddressClaimChanged += (_, e) =>
-        {
-            if (e.State != J1939ClaimState.CannotClaim) return;
-            Interlocked.CompareExchange(ref lostAt, Stopwatch.GetTimestamp(), 0);
-            lossSeen.TrySetResult(true);
-        };
+        loser.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lossSeen.TrySetResult(true); };
 
         // The claim's exception arrives with the Cannot Claim itself, so the request has to be
-        // sent from the loss, which is the instant the backoff starts.
+        // sent from the loss, which is the instant the backoff starts. The loss is a real wire
+        // round trip with `winner` (a wall-clock node), not something blocked on the frozen
+        // clock -- advancing the virtual clock while waiting for it would race ahead of
+        // winner's real defensive re-announce.
         var lost = loser.ClaimAddressAsync(contended);
         await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        // Arm before you advance: prove the Cannot Claim really is scheduled for this NAME's
+        // backoff before the request is allowed to race it.
+        await clock.WaitUntilTimerArmedAsync(loserActor, backoff, ShortTimeout);
+
         busB.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
             new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
 
+        // Bracket the backoff from both sides: the request must not shortcut it.
+        var epsilon = TimeSpan.FromMilliseconds(1);
+        await clock.AdvanceAsync(backoff - epsilon);
+        await clock.SettleAsync();
+        Volatile.Read(ref cannotClaims).Should().Be(0, "the request did not shortcut the backoff");
+
+        await clock.AdvanceAsync(epsilon);
+        await clock.SettleAsync();
+        Volatile.Read(ref cannotClaims).Should().Be(1, "the backoff has now elapsed and the answer is on the bus");
+
         Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
         await awaitLost.Should().ThrowAsync<J1939CannotClaimException>();
-        await Task.Delay(500); // past the backoff, with room for a second copy to show up
+
+        // With room for a second copy to show up: the request must not have queued a duplicate.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+        await clock.SettleAsync();
         Volatile.Read(ref cannotClaims).Should().Be(1, "the answer already waiting is the answer to the request");
-        var waited = TimeSpan.FromSeconds((Interlocked.Read(ref firstCannotClaimAt) - Interlocked.Read(ref lostAt)) / (double)Stopwatch.Frequency);
-        waited.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(100),
-            "the request did not shortcut the backoff -- a lower bound on the 153 ms a loaded host only lengthens");
     }
 
     // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
