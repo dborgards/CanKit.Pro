@@ -259,7 +259,20 @@ public interface IUdsClient : IDisposable
     /// RequestDownload, then loops <see cref="TransferDataAsync"/> with an automatically-managed
     /// block sequence counter (starts at <c>0x01</c>, increments per block, wraps
     /// <c>0xFF → 0x00</c>), and finally calls <see cref="RequestTransferExitAsync"/>.
+    /// When <paramref name="dataFormatIdentifier"/> is <c>0x00</c> (no compression / no
+    /// encryption), <paramref name="memorySize"/> is the big-endian byte count sent in
+    /// RequestDownload and must equal the length of <paramref name="data"/>; a mismatch is
+    /// rejected before RequestDownload. When compression or encryption is selected,
+    /// <paramref name="memorySize"/> is the decoded target memory range and
+    /// <paramref name="data"/> is the encoded payload this client forwards unchanged, so
+    /// their lengths are not compared.
     /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="dataFormatIdentifier"/> is
+    /// <c>0x00</c> and <paramref name="memorySize"/> does not decode to the length of
+    /// <paramref name="data"/>.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="dataFormatIdentifier"/>
+    /// is <c>0x00</c> and <paramref name="memorySize"/> has nonzero high-order bytes beyond
+    /// what a <see cref="ulong"/> can represent.</exception>
     /// <exception cref="UdsProtocolException">The ECU reported a
     /// <c>maxNumberOfBlockLength</c> of <c>0</c> or <c>1</c> so no payload byte would fit in a
     /// TransferData request, or a chunk validation failed.</exception>

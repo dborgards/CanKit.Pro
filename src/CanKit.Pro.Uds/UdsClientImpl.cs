@@ -822,6 +822,42 @@ internal sealed class UdsClientImpl : IUdsClient
             cancellationToken, _lifetimeCts.Token);
         var linkedToken = linked.Token;
 
+        // Local hardening for the common uncompressed/unencrypted case (DFI 0x00):
+        // memorySize is the big-endian count RequestDownload tells the ECU, and it has to
+        // match the number of bytes the following TransferData blocks will actually carry.
+        // When DFI selects compression or encryption, memorySize describes the decoded
+        // target memory range while data holds the encoded bytes this client forwards
+        // unchanged, so their lengths normally differ — skip decode and equality then.
+        // RequestTransferSetupCoreAsync still forwards the original ALFI-width bytes.
+        // This client cites ISO 14229-1 §14.3 for the block-sequence counter only; the
+        // length check is ours. Reject before RequestDownload so the ECU is never given a
+        // count we will not send, and refuse sizes that do not fit in ulong so a truncated
+        // decode cannot let a mismatch through.
+        if (dataFormatIdentifier == 0x00)
+        {
+            ReadOnlySpan<byte> sizeSpan = memorySize.Span;
+            if (sizeSpan.Length > 8)
+            {
+                for (int i = 0; i < sizeSpan.Length - 8; i++)
+                {
+                    if (sizeSpan[i] != 0)
+                        throw new ArgumentOutOfRangeException(
+                            nameof(memorySize),
+                            "memorySize exceeds what a ulong can represent (nonzero high-order bytes).");
+                }
+                sizeSpan = sizeSpan.Slice(sizeSpan.Length - 8);
+            }
+
+            ulong totalBytes = 0;
+            for (int i = 0; i < sizeSpan.Length; i++)
+                totalBytes = (totalBytes << 8) | sizeSpan[i];
+
+            if (totalBytes != (ulong)data.Length)
+                throw new ArgumentException(
+                    $"memorySize ({totalBytes}) does not match data.Length ({data.Length}).",
+                    nameof(memorySize));
+        }
+
         // Hold the request lock across the entire 0x34 → 0x36…0x36 → 0x37 sequence so
         // TesterPresent keep-alive (or any other UDS call) cannot interleave mid-download and
         // desynchronise the ECU's block-sequence counter (ISO 14229-1 §14.3). Mirror of
