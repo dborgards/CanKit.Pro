@@ -712,16 +712,12 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var expectedShortPayload = new byte[8];
         Buffer.BlockCopy(shortPattern, 0, expectedShortPayload, 0, shortPattern.Length);
         var expectedLongPayload = longPattern;
-        // Written only once the writer has stopped, for the TPDO that flushes the consumer's
-        // RPDO event pump below: the one payload nothing else emits, so its delivery is that
-        // TPDO's own and not a queued earlier one's.
-        var flushPattern = Enumerable.Repeat((byte)0xCC, 8).ToArray();
 
         int observedCount = 0;
         int tornCount = 0;
         consumer.RpdoReceived += (_, e) =>
         {
-            if (e.CobId != producerCobId || e.Payload.SequenceEqual(flushPattern)) return;
+            if (e.CobId != producerCobId) return;
             Interlocked.Increment(ref observedCount);
             if (!e.Payload.SequenceEqual(expectedShortPayload)
                 && !e.Payload.SequenceEqual(expectedLongPayload))
@@ -755,32 +751,14 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
             catch (Exception) { Interlocked.Increment(ref emitCrashes); }
         }
 
+        // Give the RPDO event pump time to drain before we sample counts. A wall window on
+        // purpose, not a flush barrier (#171): every WriteRaw above also emits a change-of-state
+        // TPDO, so how many frames are still in flight is unknown, and EmitTpdo sends each one
+        // through its own Task.Run, so a later TPDO can overtake an earlier one on the wire
+        // (Codex on #188). Nothing that is sent can mark "everything before me has arrived".
+        await Task.Delay(200);
         cts.Cancel();
         await writer;
-
-        // Flush the consumer's RPDO event pump before sampling counts: one more deterministic
-        // TPDO, and wait for ITS delivery. The pump is a single reader that delivers events in
-        // enqueue order (RunEventPumpAsync), so this one's arrival proves every event the 2000
-        // emissions above queued has already been delivered too — not a guess at how long that
-        // drain takes. It is recognised by its payload: an event still queued from the loop
-        // above is raised to every handler subscribed when it runs, this one included (Codex
-        // on #188).
-        producer.ObjectDictionary.WriteRaw(0x2A00, 0x00, flushPattern);
-        var flushed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        void OnFlush(object? _, RpdoReceivedEventArgs e)
-        {
-            if (e.CobId == producerCobId && e.Payload.SequenceEqual(flushPattern)) flushed.TrySetResult(true);
-        }
-        consumer.RpdoReceived += OnFlush;
-        try
-        {
-            await producer.TriggerTpdoAsync(1);
-            await flushed.Task.WithTimeoutAsync(ShortTimeout);
-        }
-        finally
-        {
-            consumer.RpdoReceived -= OnFlush;
-        }
 
         observedCount.Should().BeGreaterThan(0,
             "the consumer must have observed at least one TPDO frame to make the tear check meaningful");
