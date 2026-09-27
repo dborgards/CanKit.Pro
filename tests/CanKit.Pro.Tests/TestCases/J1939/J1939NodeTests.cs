@@ -28,6 +28,9 @@ namespace CanKit.Pro.Tests.TestCases.J1939;
 public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
+    // A frame the node's actor has sent still crosses the service and the virtual hub on their
+    // own threads; a negative check on the wire waits this long for one already on its way.
+    private static readonly TimeSpan WireWindow = TimeSpan.FromMilliseconds(200);
 
     private static string NewSession() => $"j1939-{Guid.NewGuid():N}";
 
@@ -1367,9 +1370,12 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
         await awaitLost.Should().ThrowAsync<J1939CannotClaimException>("dropping the Cannot Claim settles the loss that owed it");
 
-        // Past the backoff, with room: the dropped Cannot Claim must never appear.
+        // Past the backoff, with room: the dropped Cannot Claim must never appear. A frame the
+        // actor did send still crosses the service and the hub on their own threads, so the
+        // negative gets a wall window for it (Bugbot on #185).
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
         await clock.SettleAsync();
+        await Task.Delay(WireWindow);
         Volatile.Read(ref cannotClaims).Should().Be(0, "the Cannot Claim was overtaken by the new claim");
         loser.Address.Should().Be(0x61);
     }
@@ -1453,7 +1459,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
-        using var serviceA = new CanBusService(busA);
+        using var serviceA = new FrameConsumptionCountingBusService(new CanBusService(busA));
         var nodeActor = clock.NewActor();
         const byte contended = 0x81;
 
@@ -1482,16 +1488,25 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // claim that follows is blocked on node's own clock.
         var claim = node.ClaimAddressAsync(contended);
         await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        // The request must reach the node's actor before the clock moves, or the claim can
+        // finish on its original backoff and prove nothing about the request path (Bugbot on
+        // #185): the node's reader hands it over, and a round trip behind that post has run it.
+        var requestTaken = serviceA.WaitUntilConsumedAsync(e =>
+            J1939Id.Decompose((uint)e.Frame.ID).Pgn == J1939Pgn.Request);
         busB.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
             new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        await requestTaken.WaitAsync(ShortTimeout);
+        await nodeActor.PostAsync(() => 0);
 
         await clock.RunUntilAsync(claim, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
         node.Address.Should().Be((byte)(contended + 1));
 
-        // Past the backoff: a round that still fired would announce again.
+        // Past the backoff: a round that still fired would announce again, and its frame would
+        // still be crossing the hub when the actor settles, hence the wall window.
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
         await clock.SettleAsync();
+        await Task.Delay(WireWindow);
         Volatile.Read(ref candidateClaims).Should().Be(1, "the request started the round, whose announcement is the answer, and nothing announced twice");
     }
 
@@ -1557,7 +1572,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // hub crossing, as a wall window after the clock has moved.
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
         await clock.SettleAsync();
-        (await cannotClaimSeen.WaitAsync(TimeSpan.FromMilliseconds(200))).Should().BeFalse(
+        (await cannotClaimSeen.WaitAsync(WireWindow)).Should().BeFalse(
             "a disposed node's backoff must not send a second Cannot Claim");
         Volatile.Read(ref cannotClaims).Should().Be(1);
     }
@@ -1596,8 +1611,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         };
         // The actor's decision is settled by the clock, but the frame it sends still crosses the
         // service and the hub on their own threads (Codex on #185): a positive is awaited from the
-        // observer, and each negative gets this much wall time for a frame already on its way.
-        var wireWindow = TimeSpan.FromMilliseconds(200);
+        // observer, and each negative gets WireWindow for a frame already on its way.
 
         var announce = TimeSpan.FromMilliseconds(80);
         var backoff = TimeSpan.FromMilliseconds(153); // this NAME's §4.4.4.3 backoff
@@ -1636,7 +1650,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var epsilon = TimeSpan.FromMilliseconds(1);
         await clock.AdvanceAsync(backoff - epsilon);
         await clock.SettleAsync();
-        (await cannotClaimSeen.WaitAsync(wireWindow)).Should().BeFalse("the request did not shortcut the backoff");
+        (await cannotClaimSeen.WaitAsync(WireWindow)).Should().BeFalse("the request did not shortcut the backoff");
 
         await clock.AdvanceAsync(epsilon);
         await clock.SettleAsync();
@@ -1649,7 +1663,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // With room for a second copy to show up: the request must not have queued a duplicate.
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
         await clock.SettleAsync();
-        (await cannotClaimSeen.WaitAsync(wireWindow)).Should().BeFalse("the answer already waiting is the answer to the request");
+        (await cannotClaimSeen.WaitAsync(WireWindow)).Should().BeFalse("the answer already waiting is the answer to the request");
         Volatile.Read(ref cannotClaims).Should().Be(1);
     }
 
@@ -4147,6 +4161,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             await clock.AdvanceAsync(period);
             await WaitForAnnouncesAsync(() => owner.PeriodicEmissionsCompleted, completedBeforeQuiet + i + 1);
         }
+        // A completed send has handed its frame to the driver; the hub still delivers it on its
+        // own thread, so the count gets a wall window before it is read (Bugbot on #185).
+        await Task.Delay(WireWindow);
         var countAfterQuiet = Volatile.Read(ref count);
 
         // We tolerate at most one already-in-flight emission slipping past the state
