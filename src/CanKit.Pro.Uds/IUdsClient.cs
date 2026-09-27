@@ -270,8 +270,9 @@ public interface IUdsClient : IDisposable
     /// <exception cref="ArgumentException"><paramref name="dataFormatIdentifier"/> is
     /// <c>0x00</c> and <paramref name="memorySize"/> does not decode to the length of
     /// <paramref name="data"/>.</exception>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="memorySize"/> has
-    /// nonzero high-order bytes beyond what a <see cref="ulong"/> can represent.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="dataFormatIdentifier"/>
+    /// is <c>0x00</c> and <paramref name="memorySize"/> has nonzero high-order bytes beyond
+    /// what a <see cref="ulong"/> can represent.</exception>
     /// <exception cref="UdsProtocolException">The ECU reported a
     /// <c>maxNumberOfBlockLength</c> of <c>0</c> or <c>1</c> so no payload byte would fit in a
     /// TransferData request, or a chunk validation failed.</exception>

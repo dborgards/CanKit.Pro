@@ -481,6 +481,81 @@ public class UdsTransferTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // A wider-than-8 memorySize whose high-order bytes are zero must still decode and
+    // pass the equality check (covers the Slice path after the leading-zero scan).
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task DownloadAsync_Accepts_Wide_MemorySize_With_Leading_Zero_Bytes()
+    {
+        var capture = new List<byte>();
+        var (client, ecu, dispose) = BuildPair(e => { });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var payload = new byte[] { 1, 2, 3, 4 };
+            // 9-byte size: eight leading zeros then 0x04.
+            var wideSize = new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04 };
+            ecu.On(0x34, _ => new byte[] { 0x10, 0x10 });
+            ecu.On(0x36, req =>
+            {
+                capture.AddRange(req.Skip(2));
+                return new byte[] { req[1] };
+            });
+            ecu.On(0x37, _ => Array.Empty<byte>());
+
+            await client.DownloadAsync(
+                dataFormatIdentifier: 0x00,
+                addressAndLengthFormatIdentifier: 0x91, // size width 9, addr width 1
+                memoryAddress: new byte[] { 0x10 },
+                memorySize: wideSize,
+                data: payload,
+                cancellationToken: cts.Token);
+
+            capture.Should().Equal(payload);
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Encoded DFI must not reject a wide memorySize with nonzero high-order bytes —
+    // RequestTransferSetupCoreAsync forwards the ALFI-width bytes unchanged.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task DownloadAsync_Allows_Wide_MemorySize_When_Dfi_Encodes()
+    {
+        var capture = new List<byte>();
+        var (client, ecu, dispose) = BuildPair(e => { });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            var encoded = new byte[] { 0xDE, 0xAD };
+            // 9-byte size with nonzero high byte — would be rejected on DFI 0x00.
+            var wideSize = new byte[] { 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+            ecu.On(0x34, req =>
+            {
+                req[1].Should().Be(0x10);
+                return new byte[] { 0x10, 0x10 };
+            });
+            ecu.On(0x36, req =>
+            {
+                capture.AddRange(req.Skip(2));
+                return new byte[] { req[1] };
+            });
+            ecu.On(0x37, _ => Array.Empty<byte>());
+
+            await client.DownloadAsync(
+                dataFormatIdentifier: 0x10,
+                addressAndLengthFormatIdentifier: 0x91,
+                memoryAddress: new byte[] { 0x10 },
+                memorySize: wideSize,
+                data: encoded,
+                cancellationToken: cts.Token);
+
+            capture.Should().Equal(encoded);
+        }
+    }
+
+
+    // -----------------------------------------------------------------------------------
     // The client must reject a mismatched addressAndLengthFormatIdentifier before touching
     // the wire (defensive contract check, so callers see the error at their call site).
     // -----------------------------------------------------------------------------------
