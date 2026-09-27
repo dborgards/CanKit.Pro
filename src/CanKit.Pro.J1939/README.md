@@ -20,7 +20,9 @@ FR-J1939-001..006 (Must) and FR-J1939-007 (Should).
   address to a higher-priority NAME — during the arbitration or after the
   claim had succeeded — the node scans the arbitrary address field
   (0x80..0xF7, wrapping once) and only broadcasts **Cannot Claim** (PGN
-  0xEE00 from SA = 0xFE) when the field is exhausted. Governed by
+  0xEE00 from SA = 0xFE) when the field is exhausted. An equal NAME on that
+  address is not a win for either CA (SAE J1939-81 §4.4.3.3) and ends in
+  Cannot Claim without that scan. Governed by
   `J1939NodeOptions.EnableArbitraryAddressClaiming` (default: derived from
   the NAME's Arbitrary Address Capable bit). A move after a successful claim
   is announced through `AddressClaimChanged`; nobody awaits it. The Cannot

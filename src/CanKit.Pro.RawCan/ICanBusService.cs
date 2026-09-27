@@ -52,9 +52,10 @@ namespace CanKit.Pro.RawCan
     /// </para>
     /// <para>
     /// How far each layer takes that is a per-layer decision, not a guarantee this interface
-    /// makes. The J1939 transport rejects its own source address; the J1939 node rejects its own
-    /// NAME on an Address Claim and its own source address on an application PGN; CANopen rejects
-    /// its own node id on an EMCY or a heartbeat.
+    /// makes. The J1939 transport rejects its own source address; the J1939 node recognises an
+    /// Address Claim it transmitted when the bus echoes one, and treats another CA's claim — the
+    /// same NAME included — as a contest; it rejects its own source address on an application
+    /// PGN. CANopen rejects its own node id on an EMCY or a heartbeat.
     /// </para>
     /// <para>
     /// None is a blanket self-filter, and each exception is deliberate. A J1939 frame addressed to

@@ -74,10 +74,12 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     ///     node's NAME.</description></item>
     ///   <item><description>Listen for contending claims within
     ///     <see cref="J1939NodeOptions.ClaimAnnounceTimeout"/> (default 250 ms).</description></item>
-    ///   <item><description>On a losing contest (peer's NAME numerically lower), transition
+    ///   <item><description>On a losing contest (peer's NAME numerically lower, or equal —
+    ///     SAE J1939-81 §4.4.3.3 gives the address only to the lower NAME), transition
     ///     to <see cref="J1939ClaimState.CannotClaim"/>, broadcast Cannot Claim (SA = 0xFE)
     ///     per SAE J1939-81 §4.4.3.4 and throw
-    ///     <see cref="J1939CannotClaimException"/> (SRS FR-J1939-004).</description></item>
+    ///     <see cref="J1939CannotClaimException"/> (SRS FR-J1939-004). An equal NAME does not
+    ///     scan for another address.</description></item>
     /// </list>
     /// The Cannot Claim, and an arbitrary-address node's next claim after losing, go out after
     /// the pseudo-random 0..153 ms backoff of SAE J1939-81 §4.4.4.3 -- the low byte of the
@@ -87,7 +89,8 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     /// claim started before it drops the Cannot Claim and faults this one at once.
     /// </summary>
     /// <exception cref="J1939CannotClaimException">The preferred address was lost to a
-    /// higher-priority NAME and no fallback was available.</exception>
+    /// higher-priority NAME and no fallback was available, or to a peer with this node's
+    /// own NAME (SAE J1939-81 §4.4.3).</exception>
     /// <exception cref="InvalidOperationException">A claim is still in arbitration: it is
     /// not silently replaced -- await it, or cancel it, before claiming again (#58).</exception>
     Task ClaimAddressAsync(byte preferredAddress, CancellationToken cancellationToken = default);
