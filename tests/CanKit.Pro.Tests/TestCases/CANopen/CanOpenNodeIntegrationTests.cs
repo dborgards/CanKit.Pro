@@ -45,12 +45,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var deadline = DateTime.UtcNow + ShortTimeout;
         while (true)
         {
-            var allOperational = true;
-            foreach (var node in nodes)
-            {
-                if (node.State != NmtState.Operational) { allOperational = false; break; }
-            }
-            if (allOperational) return;
+            if (nodes.All(node => node.State == NmtState.Operational)) return;
             if (DateTime.UtcNow >= deadline)
                 throw new TimeoutException($"Node(s) did not reach Operational within {ShortTimeout}.");
             await Task.Delay(5);
