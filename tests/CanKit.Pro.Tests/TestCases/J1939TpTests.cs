@@ -1085,6 +1085,74 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         datagram.Payload.Should().Equal(payload);
     }
 
+    // #169 / J1939-21 §5.10.3: one BAM per source. A second valid BAM from the same
+    // source aborts the one in progress. The waiter on the first must see that abort
+    // (AbortRx, as on T1), and the replacement must still reassemble afterwards.
+    [Fact]
+    public async Task Bam_Receiver_NewBamFromSameSource_FaultsPreviousReceiveAsync()
+    {
+        var session = NewSession();
+        using var receiverBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte receiverSa = 0xA1;
+        const byte peerSa = 0xA2;
+        const uint firstPgn = 0xFEA1u;
+        const uint secondPgn = 0xFEA2u;
+        var firstPayload = RandomPayload(14, seed: 169);
+        var secondPayload = RandomPayload(9, seed: 170);
+
+        // Long T1 so a missing AbortRx fails as a hung ReceiveAsync, not as a timeout.
+        var opts = new J1939TpOptions().With(t1: TimeSpan.FromSeconds(30));
+        using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
+
+        var bgAbort = new TaskCompletionSource<J1939TpAbortException>(TaskCreationOptions.RunContinuationsAsynchronously);
+        receiver.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is J1939TpAbortException abort) bgAbort.TrySetResult(abort);
+        };
+
+        var recvTask = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+
+        var bamId = J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, J1939Pgn.GlobalAddress);
+        var dtId = J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa, J1939Pgn.GlobalAddress);
+        peerBus.Transmit(CanFrame.Classic((int)bamId,
+            J1939TpFrames.BuildBam(totalBytes: 14, totalPackets: 2, dataPgn: firstPgn),
+            isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic((int)dtId,
+            J1939TpFrames.BuildDt(sn: 1, pdu: firstPayload, offset: 0),
+            isExtendedFrame: true));
+
+        // Same source, different PGN: the in-progress BAM is aborted and this one takes the slot.
+        peerBus.Transmit(CanFrame.Classic((int)bamId,
+            J1939TpFrames.BuildBam(totalBytes: 9, totalPackets: 2, dataPgn: secondPgn),
+            isExtendedFrame: true));
+
+        Func<Task> act = () => recvTask;
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+        ex.Pgn.Should().Be(firstPgn);
+        ex.Message.Should().Contain("5.10.3");
+
+        var bg = await bgAbort.Task.AsTaskWithTimeout(ShortTimeout);
+        bg.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+        bg.Pgn.Should().Be(firstPgn);
+
+        var recv2 = receiver.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        peerBus.Transmit(CanFrame.Classic((int)dtId,
+            J1939TpFrames.BuildDt(sn: 1, pdu: secondPayload, offset: 0),
+            isExtendedFrame: true));
+        peerBus.Transmit(CanFrame.Classic((int)dtId,
+            J1939TpFrames.BuildDt(sn: 2, pdu: secondPayload, offset: 7),
+            isExtendedFrame: true));
+
+        var datagram = await recv2;
+        datagram.Kind.Should().Be(J1939TpKind.Bam);
+        datagram.Pgn.Should().Be(secondPgn);
+        datagram.SourceAddress.Should().Be(peerSa);
+        datagram.Payload.Should().Equal(secondPayload);
+    }
+
     private static async Task<List<J1939TpDatagram>> CollectAsync(IJ1939TpChannel channel, int count, TimeSpan timeout)
     {
         var list = new List<J1939TpDatagram>();

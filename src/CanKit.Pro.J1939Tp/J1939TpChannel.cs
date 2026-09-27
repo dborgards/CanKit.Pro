@@ -26,8 +26,9 @@ namespace CanKit.Pro.J1939Tp;
 /// might wish for. J1939-21 §5.10.3 explicitly restricts a receiver to a single active TP.CM
 /// connection per (source, destination) pair and treats BAM as a per-source broadcast: a
 /// second concurrent connection of the same kind from the same peer is a protocol error to be
-/// refused (RTS → Abort, code 1/7), and a new BAM implicitly supersedes any previous BAM from
-/// the same source per §5.10.3 ("new BAM aborts previous"). TP.DT frames carry no PGN, so we
+/// refused (RTS → Abort, code 1/7), and a new BAM from the same source aborts the previous
+/// one per §5.10.3 and faults a blocked receive before the replacement is installed.
+/// TP.DT frames carry no PGN, so we
 /// literally cannot demultiplex two overlapping RX sessions from one source even if we wanted
 /// to -- the DT frame's only routing keys are (SA, DA), and DA==0xFF vs SA distinguishes
 /// broadcast (BAM) from directed (CM). We therefore key <see cref="_rxSessions"/> on
@@ -57,7 +58,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     // Bounded receive inbox for consumers. Drop-oldest so a stalled reader never stalls the RX
     // state machine (mirrors the L2 subscription policy). Items are either a fully reassembled
-    // datagram or a reassembly-abort fault (bad DT SN / T1·T2 timeout / peer Abort) so a blocked
+    // datagram or a reassembly-abort fault (bad DT SN / T1·T2 timeout / peer Abort /
+    // a new BAM replacing the previous one per J1939-21 §5.10.3) so a blocked
     // ReceiveAsync completes instead of hanging — the FailTx analogue on the RX side (mirrors
     // IsoTpChannel.AbortRx / Bugbot 3596396508).
     private readonly Channel<RxInboxItem> _pduInbox;
@@ -449,13 +451,22 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     if (!IsValidTotals(totalBytes, totalPackets))
                         return;
 
-                    // §5.10.3: at most one BAM per source at any time. A fresh *valid* BAM from
-                    // the same sender implicitly supersedes any previous (possibly half-built)
-                    // one -- there is no ack channel to reject the new one on.
+                    // J1939-21 §5.10.3: at most one BAM per source. A fresh valid BAM from
+                    // the same sender aborts any previous (possibly half-built) one. BAM has
+                    // no ack channel, so nothing goes on the wire; the old session is faulted
+                    // through AbortRx *before* the replacement is installed, the same path a
+                    // T1 timeout uses, so a blocked ReceiveAsync sees the abort instead of
+                    // waiting on a transfer that will never finish. Reason 2 is the closest
+                    // table-7 code for "this session was terminated because another one
+                    // needed the slot" (as CancelTxOnLoop); it is local only.
                     if (_rxSessions.TryGetValue(bamKey, out var existing))
                     {
+                        uint abortedPgn = existing.Pgn;
                         existing.Cancel();
                         _rxSessions.Remove(bamKey);
+                        AbortRx(new J1939TpAbortException(
+                            J1939TpAbortReason.NoResourcesAvailable, abortedPgn,
+                            $"J1939-TP BAM RX session aborted: a new BAM from 0x{sa:X2} replaced the one for PGN 0x{abortedPgn:X} (J1939-21 §5.10.3)."));
                     }
                     var session = RxSession.NewBam(sa, dataPgn, totalBytes, totalPackets, _deadlines, _options, OnRxT1Expired);
                     _rxSessions[bamKey] = session;
