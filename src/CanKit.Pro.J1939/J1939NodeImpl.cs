@@ -99,15 +99,25 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // most recently committed value; writes happen only on the actor loop.
     private int _addressStore = -1;
 
-    // The frames this node has transmitted and not yet seen come back: single-frame application
-    // PGNs, and Address Claim / Cannot Claim. A received frame equal to one of them is this
-    // node's own echo, whatever address the node holds when the echo is finally processed
-    // (#121, #168). Bounded, oldest out: an entry only matters while the echo could still
-    // arrive, and a bus that never echoes would otherwise grow it without end. Written from
-    // the send path, read and pruned on the actor loop.
+    // Single-frame application PGNs this node has transmitted and not yet seen come back.
+    // A received frame equal to one of them is this node's own echo, whatever address the
+    // node holds when the echo is finally processed (#121). Bounded, oldest out: an entry
+    // only matters while the echo could still arrive, and a bus that never echoes would
+    // otherwise grow it without end. Written from the send path, read and pruned on the
+    // actor loop. Address Claim / Cannot Claim do not live here: a burst of ordinary sends
+    // would evict one, and the next echo of our own claim would look like a peer with our
+    // NAME (#180).
     private readonly List<(uint CanId, byte[] Payload)> _ownFrames = new();
     private readonly object _ownFramesGate = new();
     private const int OwnFramesCapacity = 64;
+
+    // Outstanding Address Claim / Cannot Claim transmits, one object per send. Actor loop
+    // only. Not capped and not shared with `_ownFrames`: a Request-for-Address-Claimed
+    // burst has to be able to answer without pushing a claim marker out before its echo
+    // comes back, or that echo is arbitrated as an equal-NAME peer and the node Cannot
+    // Claims itself (#180). Each marker is removed by its echo, or by the send that failed
+    // or timed out — that send's marker, not whichever identical one was recorded later.
+    private readonly List<ClaimEcho> _claimEchoes = new();
 
     /// <inheritdoc />
     public J1939Name Name => _name;
@@ -503,6 +513,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Publish Claiming *before* the (potentially long) transport rebind so observers never
         // see ClaimState==Claimed with Address==null during a re-claim (Bugbot 3600717316).
         SetClaimState(J1939ClaimState.Claiming, preferredAddress, contendingSa: null, contendingName: null);
+
+        // An equal NAME heard on some other address was the race with a claim queued behind
+        // that frame. This round is a different address, so the observation is over: keeping
+        // it would make a later claim of the remembered address lose with no one still on it
+        // (#180). A match stays; it is consumed once the announce below has gone out.
+        if (_equalNameHeardOn is byte heardOn && heardOn != preferredAddress)
+            _equalNameHeardOn = null;
         // Unbind the transport from any prior claimed address so we do not accept directed
         // TP.CM for the old address during the new arbitration window. Placeholder 0xFE still
         // receives broadcast TP.BAM traffic.
@@ -634,8 +651,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
             () => OnClaimAnnounceElapsed(preferredAddress));
     }
 
-    private void OnClaimAnnounceTxFailed(byte preferredAddress, Exception error)
+    private void OnClaimAnnounceTxFailed(byte preferredAddress, Exception error, ClaimEcho? echo)
     {
+        // The frame never went out, or its echo will not be the one this send recorded. Drop
+        // that marker even when a newer, identical claim is already outstanding — removing the
+        // first content match would take the newer one, and leaving this one would let the
+        // retry's echo spend it so a real peer is then swallowed as the echo (#180).
+        if (echo is not null) _claimEchoes.Remove(echo);
+
         var pending = _pendingClaim;
         if (pending is null || pending.PreferredAddress != preferredAddress) return;
 
@@ -668,12 +691,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // other bus the frame is another CA, even when the eight bytes match ours — swallowing it
         // as the echo we are still waiting for is how both stayed Claimed (#168).
         //
-        // The match is the frame we put on the wire, the same way an application PGN is known
-        // (#121). The subscription opts into echoes — the flag marks the host, not the node, so
-        // filtering on it would swallow a sibling node's claim (#23). One identical frame still
-        // outstanding is the echo; the next one is the peer. Do not go back to dropping every
-        // equal NAME on the assumption that the echo gate covers this.
-        if (BusEchoesOwnTransmits && TryTakeOwnFrame(canId, payload)) return;
+        // The match is the claim frame we put on the wire, one marker per send, not the
+        // application-PGN ledger (#121, #180). The subscription opts into echoes — the flag
+        // marks the host, not the node, so filtering on it would swallow a sibling node's
+        // claim (#23). One identical frame still outstanding is the echo; the next one is the
+        // peer. Do not go back to dropping every equal NAME on the assumption that the echo
+        // gate covers this.
+        if (BusEchoesOwnTransmits && TryTakeClaimEcho(canId, payload)) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
         // are in the middle of claiming — in which case a Cannot-Claim cannot contest us
@@ -808,7 +832,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     // Set when an Address Claimed carrying our NAME arrives for an SA we are not claiming or
-    // holding. Actor-only. Consumed by the claim that then tries that SA.
+    // holding, so a claim already queued behind that frame also loses — the other CA will not
+    // retransmit an equal NAME. Actor-only. It belongs to that queued race: an unrelated round
+    // drops it on the way in, and any round that ends drops whatever arrived during it, so a
+    // later claim of the remembered address is not lost to a contender who has gone (#180).
     private byte? _equalNameHeardOn;
 
     // WorkMode.Echo is what makes the adapter deliver our own transmit (VirtualBusHub).
@@ -906,15 +933,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // echo is how HandleIncomingAddressClaim tells our claim from a peer with the same NAME.
         // A bus that does not echo never delivers this frame; recording it would leave an entry
         // that later swallows the peer's identical claim (#168).
-        if (BusEchoesOwnTransmits) RecordOwnFrame(canId, payload);
+        var echo = RecordClaimEcho(canId, payload);
         // Called directly rather than through Task.Run: SendConfirmed's synchronous part is
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
         // address scan is 240 of them (#58).
-        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress);
+        _ = TransmitAddressClaimConfirmedAsync(canId, payload, sourceAddress, echo);
     }
 
-    private async Task TransmitAddressClaimConfirmedAsync(uint canId, byte[] payload, byte preferred)
+    private async Task TransmitAddressClaimConfirmedAsync(uint canId, byte[] payload, byte preferred,
+        ClaimEcho? echo)
     {
         try
         {
@@ -924,7 +952,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             {
                 var ex = new J1939NodeException(
                     $"J1939 address claim TX failed (id=0x{canId:X8}): {confirmation.FailureReason}.");
-                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
+                try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo)); }
                 catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
                 return;
             }
@@ -934,7 +962,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
         catch (Exception ex)
         {
-            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex)); }
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
     }
@@ -942,6 +970,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
         J1939Name? contendingName)
     {
+        // Claiming is the round the observation might still belong to. Every other transition
+        // ends a round, and an equal NAME heard during it must not outlive it (#180).
+        if (state != J1939ClaimState.Claiming)
+            _equalNameHeardOn = null;
+
         Volatile.Write(ref _claimStateStore, (int)state);
         var args = new J1939ClaimEventArgs(state, address, contendingSa, contendingName);
         try
@@ -956,6 +989,30 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void WriteAddress(byte? address)
         => Volatile.Write(ref _addressStore, address.HasValue ? address.Value : -1);
+
+    // One Address Claim / Cannot Claim transmit on an echo-mode bus. Null when the bus does
+    // not echo: there is nothing to filter, and a recorded marker would later swallow the
+    // other CA's identical claim (#168). Actor loop only, same as the list it is added to.
+    private ClaimEcho? RecordClaimEcho(uint canId, byte[] payload)
+    {
+        if (!BusEchoesOwnTransmits) return null;
+        var echo = new ClaimEcho(canId, payload);
+        _claimEchoes.Add(echo);
+        return echo;
+    }
+
+    private bool TryTakeClaimEcho(uint canId, byte[] payload)
+    {
+        for (int i = 0; i < _claimEchoes.Count; i++)
+        {
+            var echo = _claimEchoes[i];
+            if (echo.CanId != canId || echo.Payload.Length != payload.Length) continue;
+            if (!echo.Payload.AsSpan().SequenceEqual(payload)) continue;
+            _claimEchoes.RemoveAt(i);
+            return true;
+        }
+        return false;
+    }
 
     // The frames this node sent and has not seen come back. An echo is recognised by content —
     // the frame itself is the tag — so it is recognised whenever it arrives, and a frame this
@@ -1171,23 +1228,28 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // with the rest of the CanKit.Pro stack. No Task.Run hop in front of it (#58).
         // Recorded first, as in SendCoreAsync: a re-announce's echo is this frame coming back,
         // and it must not be arbitrated as a peer that shares our NAME (#168). Same gate as
-        // the initial claim — no echo, no entry.
-        if (BusEchoesOwnTransmits) RecordOwnFrame(canId, payload);
-        _ = TransmitFrameAsync(canId, payload, afterHandoff);
+        // the initial claim — no echo, no entry — and the same per-send marker, so a burst of
+        // these cannot evict one another or the claim they answer (#180).
+        var echo = RecordClaimEcho(canId, payload);
+        _ = TransmitFrameAsync(canId, payload, echo, afterHandoff);
     }
 
-    private async Task TransmitFrameAsync(uint canId, byte[] payload, Action? afterHandoff)
+    private async Task TransmitFrameAsync(uint canId, byte[] payload, ClaimEcho? echo, Action? afterHandoff)
     {
         try
         {
             using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
             var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
             if (!confirmation.Confirmed)
+            {
+                RetireClaimEcho(echo);
                 RaiseBackgroundException(new J1939NodeException(
                     $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
+            }
         }
         catch (Exception ex)
         {
+            RetireClaimEcho(echo);
             RaiseBackgroundException(ex);
         }
 
@@ -1533,6 +1595,27 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         public J1939NodeImpl Node { get; }
         public TaskCompletionSource<object?> Tcs { get; }
+    }
+
+    private void RetireClaimEcho(ClaimEcho? echo)
+    {
+        if (echo is null) return;
+        try { _actor.Post(() => _claimEchoes.Remove(echo)); }
+        catch (ObjectDisposedException) { /* the node was disposed: nothing will match it */ }
+    }
+
+    // Identity, not content. Two claims of the same NAME and address are byte-identical; the
+    // one a failed send must drop is the one that send recorded.
+    private sealed class ClaimEcho
+    {
+        public ClaimEcho(uint canId, byte[] payload)
+        {
+            CanId = canId;
+            Payload = payload;
+        }
+
+        public uint CanId { get; }
+        public byte[] Payload { get; }
     }
 
     private sealed class PendingClaim
