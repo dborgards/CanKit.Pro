@@ -1189,12 +1189,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = () => sendTask.WaitAsync(ShortTimeout);
         await act.Should().ThrowAsync<OperationCanceledException>();
 
-        // #171: "give any straggling actor work time to hit the wire" was a Task.Delay(100).
-        // Under the bug the errant transmit is itself dispatched from inside the actor's
-        // processing of [begin, cleanup] (SendConfirmed transmits synchronously before it parks
-        // on confirmation -- see the DelayingConfirmService doubles below), so a round-trip on
-        // the very actor we parked and released proves that work has run, whichever way it went.
+        // #171: "give any straggling actor work time to hit the wire" was a Task.Delay(100). A
+        // round-trip on the actor we parked and released proves [begin, cleanup] has run. An
+        // errant transmit would still leave through SendFrameOnBus's Task.Run, which the
+        // round-trip cannot see, so the original window follows it.
         await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        await Task.Delay(100);
         framesToPeer.Should().Be(0,
             "a send cancelled before the actor delivers BeginSendOnLoop must never put a frame on the bus");
 

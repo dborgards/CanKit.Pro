@@ -623,10 +623,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // BeginTxOnLoop was already enqueued behind us; this drains it -- the actor's decision
         // not to start a session is now certain. What is not covered by the round trip is the
         // wire itself: a start it should not have made still transmits through a fire-and-forget
-        // Task.Run outside the actor's mailbox (SendControlFrame), so a short, deliberately
-        // small residual window follows the deterministic half instead of standing in for it.
+        // Task.Run outside the actor's mailbox (SendControlFrame), so the original 100 ms window
+        // follows the deterministic half; shortening it would only weaken the negative.
         await actor.PostAsync(() => 0);
-        await Task.Delay(30);
+        await Task.Delay(100);
         Volatile.Read(ref seen).Should().Be(0, "canceled send must not emit TP.CM/TP.DT");
     }
 
@@ -2240,17 +2240,14 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // effect as soon as the outstanding DT is confirmed -- the receiver is missing a packet,
     // and every later one it gets meanwhile is out of sequence to it -- not after the block.
     //
-    // #171: "the CTS is on the actor before the confirmation is released" was a 50 ms sleep
-    // standing in for an arm barrier that does not exist here -- the CTS reaches the actor
-    // through the reader task's own background post, not through anything this thread enqueues.
-    // What the injected actor gives instead: two round trips on it, after the frame has been
-    // handed to the subscription, put far more real scheduling time between "posted" and
-    // "settled" than a dedicated-thread post can need to catch up, without naming a duration.
+    // #171: "the CTS is on the actor before the confirmation is released" was a 50 ms sleep.
+    // The CTS reaches the actor through the reader task's own post, so the test waits for the
+    // reader to have handed that frame over, then for one round trip on the injected actor.
     [Fact]
     public async Task A_Retransmit_Request_Mid_Block_Takes_Effect_After_The_Outstanding_Packet()
     {
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new CanBusService(bus);
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC6u;
         var payload = RandomPayload(21, seed: 7); // three packets
@@ -2274,9 +2271,14 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
 
-        // Packet 1 asked for again while DT 1 is still outstanding.
-        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
-        await actor.PostAsync(() => 0);
+        // Packet 1 asked for again while DT 1 is still outstanding. The CTS must be on the actor
+        // before the confirmation is released: the reader hands it over (the counting
+        // subscription sees the reader ask for the next frame), and a round trip behind that post
+        // has run it.
+        var retransmit = J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(retransmit));
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, retransmit), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
         await actor.PostAsync(() => 0);
         bus.DeferredEchoes.ReleaseNext();
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the next DT
@@ -2300,7 +2302,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // fire-and-forget Task.Run, outside the actor's mailbox, so the fault and the wire are not
     // the same instant) and giving a wrongly-triggered second abort a window to show up after
     // the now-orphaned DT 1 confirmation is released. Split into what each half actually needs:
-    // a wait for the abort that must arrive, then a settle plus a short residual window for the
+    // a wait for the abort that must arrive, then a settle plus the original window for the
     // one that must not.
     [Fact]
     public async Task A_Cts_For_An_Unsent_Packet_Of_The_Block_Is_A_Sequence_Error_Not_A_Retransmit()
@@ -2344,13 +2346,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await firstAbort.Task.AsTaskWithTimeout(ShortTimeout); // the one expected abort, actually on the wire
 
         bus.DeferredEchoes.ReleaseNext();
-        // The stale DT 1 confirmation is now on the actor; settle it, then a short residual
+        // The stale DT 1 confirmation is now on the actor; settle it, then the original 50 ms
         // window covers whatever it might still fire onto the wire through the same
-        // fire-and-forget path -- the settle alone cannot see that, only shrinks how much of
-        // the old sleep's span the window has to cover.
+        // fire-and-forget path, which the settle cannot see.
         await actor.PostAsync(() => 0);
-        await actor.PostAsync(() => 0);
-        await Task.Delay(30);
+        await Task.Delay(50);
         lock (aborts) aborts.Should().ContainSingle().Which[1].Should().Be((byte)J1939TpAbortReason.BadSequenceNumber);
     }
 
@@ -2764,6 +2764,7 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
     private readonly object _gate = new();
     private int _consumed;
     private readonly List<(int Count, TaskCompletionSource<bool> Reached)> _waiters = new();
+    private readonly List<(Func<CanFrameEvent, bool> Match, TaskCompletionSource<bool> Seen)> _matchers = new();
 
     public FrameConsumptionCountingBusService(ICanBusService inner) => _inner = inner;
 
@@ -2778,13 +2779,26 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
         }
     }
 
-    private void Consumed()
+    /// <summary>
+    /// Completes once a subscriber has finished with a frame matching <paramref name="match"/>
+    /// -- for the J1939-TP reader, once it has handed that frame to the actor.
+    /// </summary>
+    public Task WaitUntilConsumedAsync(Func<CanFrameEvent, bool> match)
+    {
+        var seen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate) _matchers.Add((match, seen));
+        return seen.Task;
+    }
+
+    private void Consumed(CanFrameEvent frameEvent)
     {
         lock (_gate)
         {
             _consumed++;
             foreach (var (count, reached) in _waiters)
                 if (_consumed >= count) reached.TrySetResult(true);
+            foreach (var (match, seen) in _matchers)
+                if (match(frameEvent)) seen.TrySetResult(true);
         }
     }
 
@@ -2831,7 +2845,7 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
             await foreach (var frameEvent in _inner.Frames.WithCancellation(cancellationToken))
             {
                 yield return frameEvent;
-                _owner.Consumed(); // runs when the subscriber asks for the next frame
+                _owner.Consumed(frameEvent); // runs when the subscriber asks for the next frame
             }
         }
 
