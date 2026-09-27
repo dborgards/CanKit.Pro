@@ -275,21 +275,35 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             unchecked((int)EcuResponseId),
             IsoTpFrameCodec.BuildSingleFrame(realEp, realPdu, isCanFd: false, padding: true));
 
-        using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, RangeStart, RangeEnd,
-            FastOptions());
+        // #171: this used to send the stale frame and sleep 50 ms, which left open whether it
+        // landed before the subscription (never seen) or inside it. The hook below puts it
+        // where the drain matters: into the collection's own subscription, after that
+        // subscription exists and before SendAndCollectAsync drains it and sends (Codex on #185).
+        // The hook returns only once busA has raised the stale frame. The service attaches to
+        // busA when it is created, before the handler below, so by the time that handler runs
+        // the service has dispatched the frame into the new subscription, where the drain has
+        // to find it (Codex on #185).
+        using var staleBuffered = new ManualResetEventSlim();
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(busA))
+        {
+            OnNextSubscribe = () =>
+            {
+                busB.Transmit(staleFrame);
+                staleBuffered.Wait(ShortTimeout).Should().BeTrue("the stale frame must reach the tester's bus");
+            },
+        };
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID == unchecked((int)StaleEcuResponseId)) staleBuffered.Set();
+        };
+        using var client = new IsoTpFunctionalClient(service, FunctionalTxId, RangeStart, RangeEnd,
+            FastOptions(), ownsService: false);
 
         busB.FrameObserved += (_, e) =>
         {
             if (e.CanFrame.ID == unchecked((int)FunctionalTxId))
                 busB.Transmit(realFrame);
         };
-
-        // Blast the stale SF into the pipe. Give the virtual hub a moment to route it —
-        // if it lands after SendAndCollectAsync's internal Subscribe, DrainBuffered must
-        // drop it; if it lands before Subscribe, the subscription never sees it. Either
-        // way the assertion below must hold.
-        busB.Transmit(staleFrame);
-        await Task.Delay(50);
 
         byte[] request = { 0x22, 0xF1, 0x90 };
         var responses = await client.SendAndCollectAsync(request, CollectionWindow)
@@ -420,8 +434,17 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Functional_Collect_Does_Not_Accept_Frames_After_Window_Expiry()
     {
-        // Bugbot 3604785766: after ResponseTimeout, disposing the subscription before the
-        // TryRead drain must prevent a post-window frame from being admitted.
+        // Bugbot 3604785766: a frame that arrives after the collection window must not be
+        // admitted, however late the collector gets to it.
+        //
+        // #171: this used to wait out the window on the wall clock and inject afterwards, by
+        // which time the collection had usually returned and never saw the frame. On the
+        // injected clock the late frame is put where the guard matters: the clock is moved past
+        // the deadline without waking the actor, so the window's timer has not fired yet, and
+        // the frame -- stamped past the deadline by the same clock -- reaches a collection that
+        // is still reading. The counting subscription shows the collector has taken it; only
+        // then is the window's timer allowed to fire. The window is 10 s so the actor's own wait
+        // cannot run out before that (Bugbot on #185).
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
@@ -429,31 +452,32 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         const uint FunctionalTxId = 0x7DF;
         const uint EcuResponseId = 0x7E8;
 
-        using var client = IsoTpFactory.OpenFunctional(busA, FunctionalTxId, 0x7E8, 0x7EF,
-            FastOptions());
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var service = new FrameConsumptionCountingBusService(
+            new CanBusService(busA, actor.TimeSource.GetTimestamp));
+        using var client = new IsoTpFunctionalClient(service, FunctionalTxId, 0x7E8, 0x7EF,
+            FastOptions(), ownsService: true, actor);
 
-        // Collect with a bounded window and no ECU reply during it. The window has to be
-        // long enough that the delay below is unambiguously past its end: CollectResponsesAsync
-        // arms the window on a continuation, so on a loaded runner the window can start tens of
-        // milliseconds after the call — with a 40 ms window and an 80 ms wait, that alone was
-        // enough to inject the frame while the window was still open and fail this test on
-        // macOS. The property under test is unchanged; only the margin is.
-        var window = TimeSpan.FromMilliseconds(200);
+        var window = TimeSpan.FromSeconds(10);
         var collectTask = client.CollectResponsesAsync(window);
-        await Task.Delay(TimeSpan.FromMilliseconds(window.TotalMilliseconds * 2));
+        await clock.WaitUntilTimerArmedAsync(actor, window, ShortTimeout);
+        clock.Advance(window + TimeSpan.FromMilliseconds(1)); // past the deadline; the timer has not run
 
-        // Inject a late SF after the window has expired — must not appear in the result.
+        var taken = service.WaitUntilConsumedAsync(e => e.Frame.ID == unchecked((int)EcuResponseId));
         var ep = IsoTpEndpoint.Normal(EcuResponseId, 0);
         byte[] latePdu = { 0x50, 0x01 };
         busB.Transmit(CanFrame.Classic(
             unchecked((int)EcuResponseId),
             IsoTpFrameCodec.BuildSingleFrame(ep, latePdu, isCanFd: false, padding: true)));
-        await Task.Delay(60);
+        await taken.WaitAsync(ShortTimeout);
+        collectTask.IsCompleted.Should().BeFalse("the window's timer has not fired, so the collection was still reading");
 
+        await clock.SettleAsync(); // the window's timer fires now
         var responses = await collectTask.WaitAsync(ShortTimeout);
         responses.Should().BeEmpty(
-            "a frame that arrives after the collection window must not be admitted " +
-            "(Bugbot 3604785766: dispose-before-drain)");
+            "a frame stamped after the collection window must not be admitted " +
+            "(Bugbot 3604785766)");
     }
 
     // ─────────────────────────────────────────────────────────────────────────────────────────

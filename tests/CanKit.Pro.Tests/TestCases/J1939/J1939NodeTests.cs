@@ -28,6 +28,9 @@ namespace CanKit.Pro.Tests.TestCases.J1939;
 public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
+    // A frame the node's actor has sent still crosses the service and the virtual hub on their
+    // own threads; a negative check on the wire waits this long for one already on its way.
+    private static readonly TimeSpan WireWindow = TimeSpan.FromMilliseconds(200);
 
     private static string NewSession() => $"j1939-{Guid.NewGuid():N}";
 
@@ -1320,13 +1323,20 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex and Bugbot on #153: a loser that claims again before its delayed Cannot Claim went
     // out does not have it go out -- the new claim's announcement is the newer word on the bus.
+    //
+    // #171: the loser's actor runs on a VirtualClock so "past the backoff, with room" no longer
+    // trusts a wall-clock sleep to have outrun a ~153 ms pseudo-random backoff -- it moves the
+    // clock past it deterministically instead.
     [Fact]
     public async Task A_Delayed_Cannot_Claim_Is_Dropped_Once_A_New_Claim_Has_Started()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator
+        using var serviceB = new CanBusService(busB);
+        var loserActor = clock.NewActor();
 
         int cannotClaims = 0;
         busC.FrameObserved += (_, e) =>
@@ -1336,8 +1346,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
         };
 
-        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
-        using var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000158)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 150 ms
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        using var loser = new J1939NodeImpl(serviceB, new J1939NodeOptions(Name(0x000158))
+        { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor); // backoff 150 ms
         await winner.ClaimAddressAsync(0x60).WithTimeout(ShortTimeout);
 
         var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1345,14 +1357,25 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         // The claim faults only once its Cannot Claim is on the bus, so the loss is awaited
         // through the state change here -- the exception would come too late to claim inside
-        // the backoff it is waiting for.
+        // the backoff it is waiting for. The loss itself is a real wire round trip with
+        // `winner` (a wall-clock node), not something blocked on the frozen clock, so it is
+        // awaited on the wall clock -- advancing the virtual clock here instead would race
+        // ahead of winner's real defensive re-announce and let the loser think it is
+        // uncontested. Only the second claim's own completion is blocked on the loser's clock.
         var lost = loser.ClaimAddressAsync(0x60);
         await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        await loser.ClaimAddressAsync(0x61).WithTimeout(ShortTimeout); // within the backoff, and through the new arbitration
+        var second = loser.ClaimAddressAsync(0x61); // within the backoff, and through the new arbitration
+        await clock.RunUntilAsync(second, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
 
         Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
         await awaitLost.Should().ThrowAsync<J1939CannotClaimException>("dropping the Cannot Claim settles the loss that owed it");
-        await Task.Delay(300); // past the backoff, with room
+
+        // Past the backoff, with room: the dropped Cannot Claim must never appear. A frame the
+        // actor did send still crosses the service and the hub on their own threads, so the
+        // negative gets a wall window for it (Bugbot on #185).
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        await clock.SettleAsync();
+        await Task.Delay(WireWindow);
         Volatile.Read(ref cannotClaims).Should().Be(0, "the Cannot Claim was overtaken by the new claim");
         loser.Address.Should().Be(0x61);
     }
@@ -1426,21 +1449,28 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // Codex on #153: a round waiting its backoff has announced nothing, and answers a Request
     // for Address Claimed by starting -- one announcement, now -- rather than by an
     // announcement of its own with the round's to follow.
+    //
+    // #171: node's actor runs on a VirtualClock so "past the backoff" is a deterministic advance
+    // rather than a 300 ms wall-clock sleep racing a ~153 ms pseudo-random backoff.
     [Fact]
     public async Task A_Request_During_The_Backoff_Starts_The_Round_With_A_Single_Announcement()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var serviceA = new FrameConsumptionCountingBusService(new CanBusService(busA));
+        var nodeActor = clock.NewActor();
         const byte contended = 0x81;
 
-        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        using var node = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        using var node = new J1939NodeImpl(serviceA, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            ClaimAnnounceTimeout = announce,
             EnableArbitraryAddressClaiming = true,
-        });
+        }, ownsService: false, nodeActor);
 
         int candidateClaims = 0;
         busB.FrameObserved += (_, e) =>
@@ -1452,15 +1482,31 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var backingOff = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == contended + 1) backingOff.TrySetResult(true); };
 
+        // The initial loss is a real wire round trip with `winner` (a wall-clock node), not
+        // something blocked on the frozen clock -- advancing the virtual clock while waiting for
+        // it would race ahead of winner's real defensive re-announce. Only the request-driven
+        // claim that follows is blocked on node's own clock.
         var claim = node.ClaimAddressAsync(contended);
         await backingOff.Task.AsTaskWithTimeout(ShortTimeout);
+        // The request must reach the node's actor before the clock moves, or the claim can
+        // finish on its original backoff and prove nothing about the request path (Bugbot on
+        // #185): the node's reader hands it over, and a round trip behind that post has run it.
+        var requestTaken = serviceA.WaitUntilConsumedAsync(e =>
+            J1939Id.Decompose((uint)e.Frame.ID).Pgn == J1939Pgn.Request);
         busB.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
             new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        await requestTaken.WaitAsync(ShortTimeout);
+        await nodeActor.PostAsync(() => 0);
 
-        await claim.WithTimeout(ShortTimeout);
+        await clock.RunUntilAsync(claim, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
         node.Address.Should().Be((byte)(contended + 1));
-        await Task.Delay(300); // past the backoff: a round that still fired would announce again
+
+        // Past the backoff: a round that still fired would announce again, and its frame would
+        // still be crossing the hub when the actor settles, hence the wall window.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        await clock.SettleAsync();
+        await Task.Delay(WireWindow);
         Volatile.Read(ref candidateClaims).Should().Be(1, "the request started the round, whose announcement is the answer, and nothing announced twice");
     }
 
@@ -1469,33 +1515,66 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // frame the loss owed the bus was then never sent at all. ClaimAddressAsync now faults
     // once the frame has gone out, so the loser here disposes as soon as it can and the
     // spectator still sees it.
+    //
+    // #171: the loser's actor runs on a VirtualClock (the actor is caller-injected, so disposing
+    // the node does not dispose it) so "a backoff that survived the dispose would have fired by
+    // now" is a deterministic advance instead of a 300 ms wall-clock sleep.
     [Fact]
     public async Task A_Lost_Claim_Faults_Only_Once_Its_Cannot_Claim_Is_On_The_Bus()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator: it outlives the loser
+        using var serviceB = new CanBusService(busB);
+        var loserActor = clock.NewActor();
 
         int cannotClaims = 0;
+        using var cannotClaimSeen = new SemaphoreSlim(0);
         busC.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+            {
+                Interlocked.Increment(ref cannotClaims);
+                cannotClaimSeen.Release();
+            }
         };
 
-        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var winner = J1939Node.Open(busA, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
-        using (var loser = J1939Node.Open(busB, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) })) // backoff 153 ms
+        using (var loser = new J1939NodeImpl(serviceB, new J1939NodeOptions(Name(0x00015D))
+        { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor)) // backoff 153 ms
         {
-            Func<Task> act = () => loser.ClaimAddressAsync(0x63).WithTimeout(ShortTimeout);
+            var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            loser.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lossSeen.TrySetResult(true); };
+
+            // The loss is a real wire round trip with `winner` (a wall-clock node), not
+            // something blocked on the frozen clock -- advancing the virtual clock while
+            // waiting for it would race ahead of winner's real defensive re-announce. Only the
+            // Cannot Claim that follows the loss is blocked on the loser's own backoff timer.
+            var claim = loser.ClaimAddressAsync(0x63);
+            await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
+            Func<Task> act = () => clock.RunUntilAsync(claim, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
             await act.Should().ThrowAsync<J1939CannotClaimException>();
         } // the using a caller ends on the exception
 
-        await Task.Delay(300); // a backoff that survived the dispose would have fired by now
-        Volatile.Read(ref cannotClaims).Should().Be(1,
+        // The claim faulted once its Cannot Claim was handed to the driver; the spectator's copy
+        // still crosses the hub on its own thread, so it is awaited from the observer (Codex on
+        // #185).
+        (await cannotClaimSeen.WaitAsync(ShortTimeout)).Should().BeTrue(
             "the claim faulted only after its Cannot Claim went out, so disposing on the exception cannot suppress it");
+
+        // A backoff that survived the dispose would have fired by now; its frame gets the same
+        // hub crossing, as a wall window after the clock has moved.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        await clock.SettleAsync();
+        (await cannotClaimSeen.WaitAsync(WireWindow)).Should().BeFalse(
+            "a disposed node's backoff must not send a second Cannot Claim");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
     }
 
     // Codex on #153: a Cannot Claim carries the null address, so two nodes answering the same
@@ -1503,53 +1582,89 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // different NAMEs on the bus. The answer a losing node owes therefore waits the same
     // §4.4.4.3 backoff as the Cannot Claim of the loss itself -- and a request arriving inside
     // that backoff is answered by that one frame, not by an immediate second copy.
+    //
+    // #171: the loser's actor runs on a VirtualClock. Rather than inferring "the request did not
+    // shortcut the backoff" from a Stopwatch delta after the fact, the backoff is bracketed from
+    // both sides directly: not yet due one tick short of it, due on the tick itself.
     [Fact]
     public async Task A_Request_During_The_Cannot_Claim_Backoff_Is_Answered_By_That_One_Frame()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var serviceA = new FrameConsumptionCountingBusService(new CanBusService(busA));
+        var loserActor = clock.NewActor();
         const byte contended = 0x62;
 
         int cannotClaims = 0;
-        long firstCannotClaimAt = 0;
+        using var cannotClaimSeen = new SemaphoreSlim(0);
         busB.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (!J1939Pgn.IsAddressClaim(fields.Pgn) || fields.SourceAddress != J1939Pgn.NullAddress) return;
-            Interlocked.CompareExchange(ref firstCannotClaimAt, Stopwatch.GetTimestamp(), 0);
-            Interlocked.Increment(ref cannotClaims);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+            {
+                Interlocked.Increment(ref cannotClaims);
+                cannotClaimSeen.Release();
+            }
         };
+        // The actor's decision is settled by the clock, but the frame it sends still crosses the
+        // service and the hub on their own threads (Codex on #185): a positive is awaited from the
+        // observer, and each negative gets WireWindow for a frame already on its way.
 
-        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(153); // this NAME's §4.4.4.3 backoff
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
         await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
-        using var loser = J1939Node.Open(busA, new J1939NodeOptions(Name(0x00015D)) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) }); // backoff 153 ms
+        using var loser = new J1939NodeImpl(serviceA, new J1939NodeOptions(Name(0x00015D))
+        { ClaimAnnounceTimeout = announce }, ownsService: false, loserActor);
 
-        long lostAt = 0;
         var lossSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        loser.AddressClaimChanged += (_, e) =>
-        {
-            if (e.State != J1939ClaimState.CannotClaim) return;
-            Interlocked.CompareExchange(ref lostAt, Stopwatch.GetTimestamp(), 0);
-            lossSeen.TrySetResult(true);
-        };
+        loser.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lossSeen.TrySetResult(true); };
 
         // The claim's exception arrives with the Cannot Claim itself, so the request has to be
-        // sent from the loss, which is the instant the backoff starts.
+        // sent from the loss, which is the instant the backoff starts. The loss is a real wire
+        // round trip with `winner` (a wall-clock node), not something blocked on the frozen
+        // clock -- advancing the virtual clock while waiting for it would race ahead of
+        // winner's real defensive re-announce.
         var lost = loser.ClaimAddressAsync(contended);
         await lossSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        // Arm before you advance: prove the Cannot Claim really is scheduled for this NAME's
+        // backoff before the request is allowed to race it.
+        await clock.WaitUntilTimerArmedAsync(loserActor, backoff, ShortTimeout);
+
+        // The request must be on the loser's actor before the clock moves, or it could be
+        // handled after the Cannot Claim and prove nothing (Bugbot on #185): the node's reader
+        // hands it over, which the counting subscription sees, and a round trip behind that
+        // post has run it.
+        var requestTaken = serviceA.WaitUntilConsumedAsync(e =>
+            J1939Id.Decompose((uint)e.Frame.ID).Pgn == J1939Pgn.Request);
         busB.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
             new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        await requestTaken.WaitAsync(ShortTimeout);
+        await loserActor.PostAsync(() => 0);
+
+        // Bracket the backoff from both sides: the request must not shortcut it.
+        var epsilon = TimeSpan.FromMilliseconds(1);
+        await clock.AdvanceAsync(backoff - epsilon);
+        await clock.SettleAsync();
+        (await cannotClaimSeen.WaitAsync(WireWindow)).Should().BeFalse("the request did not shortcut the backoff");
+
+        await clock.AdvanceAsync(epsilon);
+        await clock.SettleAsync();
+        (await cannotClaimSeen.WaitAsync(ShortTimeout)).Should().BeTrue("the backoff has now elapsed and the answer is on the bus");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
 
         Func<Task> awaitLost = () => lost.WithTimeout(ShortTimeout);
         await awaitLost.Should().ThrowAsync<J1939CannotClaimException>();
-        await Task.Delay(500); // past the backoff, with room for a second copy to show up
-        Volatile.Read(ref cannotClaims).Should().Be(1, "the answer already waiting is the answer to the request");
-        var waited = TimeSpan.FromSeconds((Interlocked.Read(ref firstCannotClaimAt) - Interlocked.Read(ref lostAt)) / (double)Stopwatch.Frequency);
-        waited.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(100),
-            "the request did not shortcut the backoff -- a lower bound on the 153 ms a loaded host only lengthens");
+
+        // With room for a second copy to show up: the request must not have queued a duplicate.
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+        await clock.SettleAsync();
+        (await cannotClaimSeen.WaitAsync(WireWindow)).Should().BeFalse("the answer already waiting is the answer to the request");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
     }
 
     // #58: a second ClaimAddressAsync while one is in arbitration faults instead of silently
@@ -2638,21 +2753,27 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // Verified by restoring the regression (dropping both the teardown post and the
     // already-completed guard in OnClaimAnnounceElapsed): this test fails, as the version
     // before the timing rework did.
+    //
+    // #171: node's actor runs on a VirtualClock, so "wait past the original arbitration window"
+    // is a deterministic advance rather than a 700 ms wall-clock sleep racing a 500 ms window.
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task ClaimAddressAsync_CancelDuringArbitration_TearsDownPendingClaim()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1); // spectator: sees the announcement on the wire
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
 
-        // Long arbitration window so the test can cancel comfortably in the middle. 500 ms is
-        // well above the actor scheduling jitter we need to observe.
+        // Long arbitration window so the test can cancel comfortably in the middle.
+        var announceTimeout = TimeSpan.FromMilliseconds(500);
         var opts = new J1939NodeOptions(Name(1))
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(500),
+            ClaimAnnounceTimeout = announceTimeout,
         };
-        using var node = J1939Node.Open(busA, opts);
+        using var node = new J1939NodeImpl(service, opts, ownsService: false, actor);
 
         // The announcement leaving the bus is the signal that the arbitration window is about
         // to be armed -- see the note above on why the Claiming transition is too early and a
@@ -2672,6 +2793,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             var claimTask = node.ClaimAddressAsync(0x33, cts.Token);
 
             await announced.Task.WithTimeout(ShortTimeout);
+            // Arm before you advance: prove the arbitration deadline really is scheduled before
+            // the cancel is allowed to race it.
+            await clock.WaitUntilTimerArmedAsync(actor, announceTimeout, ShortTimeout);
 
             cts.Cancel();
 
@@ -2681,9 +2805,10 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             Func<Task> awaitClaim = () => claimTask.WithTimeout(ShortTimeout);
             await awaitClaim.Should().ThrowAsync<TaskCanceledException>();
 
-            // Wait past the original arbitration window so any surviving timer would have
-            // fired.
-            await Task.Delay(700);
+            // Move the clock past the original arbitration window so any surviving timer would
+            // have fired.
+            await clock.AdvanceAsync(announceTimeout + TimeSpan.FromMilliseconds(200));
+            await clock.SettleAsync();
 
             // NotClaimed specifically, not merely "not Claimed": a missing teardown leaves the
             // node wedged in Claiming, which NotBe(Claimed) would wave through. This is the
@@ -2692,7 +2817,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             node.Address.Should().BeNull();
 
             // A fresh claim must still work (i.e. teardown left the state machine consistent).
-            await node.ClaimAddressAsync(0x44).WithTimeout(ShortTimeout);
+            var fresh = node.ClaimAddressAsync(0x44);
+            await clock.RunUntilAsync(fresh, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
             node.ClaimState.Should().Be(J1939ClaimState.Claimed);
             node.Address.Should().Be((byte)0x44);
         }
@@ -3104,164 +3230,129 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // FR-J1939-007: periodic single-frame PGN send. Every periodic PGN flows through the
     // node's SendAsync / actor loop (L2 scheduling) — the previous dual `IPeriodicTx` path
     // was collapsed to a single implementation (PR #33) so error handling and claim-gate
-    // semantics are uniform across payload sizes. The test collects a run of frames on a
-    // spectator bus and asserts the two rate properties that survive a loaded runner.
+    // semantics are uniform across payload sizes.
     //
-    // What this test deliberately does NOT assert is grid alignment, and the reason is
-    // measurement resolution rather than modesty. PeriodicSchedule skips a tick whose
-    // previous emission is still in flight and coalesces the ticks that fell behind by
-    // advancing the anchor whole periods at a time, so under load it emits at 2 x period, or
-    // 3 x, *by design*. Checking that those gaps land on the grid means resolving them to
-    // better than half a period -- and these stamps are taken on a spectator bus, where an
-    // emission observed late next to one observed on time already moves a gap by ~50 ms.
-    // Against a 120 ms period that is 40 % of the grid spacing, so the check cannot separate
-    // a drifting scheduler from a busy host no matter how the tolerance is set. Measured, not
-    // assumed: under an 8x CPU overload the observed gaps scatter across 130..410 ms.
-    //
-    // The anti-drift property is real and is tested -- by the multi-frame sibling below,
-    // which earns the resolution by deriving its period from a measured send time so that one
-    // period is several times the jitter. Asserting it twice, once where it cannot be
-    // measured, bought a standing red leg on macOS (#92) and no coverage.
-    //
-    // So, the two properties that hold regardless of host load:
-    //
-    //   * No bursting -- every gap rounds to at least one slot. Coalescing must advance the
-    //     anchor, never queue the ticks it skipped and release them back to back. Jitter
-    //     cannot fake this: half a period separates a real emission from slot zero.
-    //   * Never faster than requested -- the mean gap is at least one period. Dropped ticks
-    //     only ever make it longer, so this bound is one-sided in the direction load pushes
-    //     and cannot be tripped by a slow runner.
-    //
-    // The collection loop above closes the other side: requiring requiredSamples emissions
-    // inside ShortTimeout bounds the mean gap from above too, loosely but honestly.
+    // #171 (audit "still tight" budget): this test used to run on the wall clock, deliberately
+    // NOT asserting grid alignment because the required measurement resolution was not
+    // achievable there -- see StartPeriodicSend_MultiFrame_Emits_On_An_Exact_Grid_On_A_Clock_
+    // The_Test_Drives's doc comment for why. The exact-grid pattern that sibling test earns
+    // through a measured per-frame send cost applies just as well to a single frame, whose
+    // emission is one CAN frame rather than a TP session: on a clock this test drives, "on the
+    // grid" is exact, so this is now the same, stronger assertion the multi-frame sibling
+    // makes, rather than a weaker mean-gap heuristic sized against a 10.56 s wall-clock budget
+    // a 3x-loaded runner could still exhaust (the property the audit flagged).
     // ---------------------------------------------------------------------------------------
     [Fact]
     public async Task StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod()
     {
-        var session = NewSession();
-        using var busA = Open(session, 0);
-        using var busB = Open(session, 1); // spectator: samples arrival times
+        var period = TimeSpan.FromMilliseconds(120);
+        const int requiredEmissions = 6;
 
-        using var sender = J1939Node.Open(busA, new J1939NodeOptions(Name(1)));
-        await sender.ClaimAddressAsync(0xC1).WithTimeout(ShortTimeout);
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var senderActor = clock.NewActor();
+        using var sender = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, senderActor);
 
-        // The stamp collection is protected by its own lock; the FrameObserved handler runs
-        // on the bus's dispatch thread and multiple readers might in principle observe the
-        // frame concurrently on some adapters.
-        // Stopwatch ticks, not DateTime.UtcNow: these samples are only ever subtracted from
-        // each other, and a wall clock can step under them mid-run. Same monotonic basis the
-        // actor measures its own deadlines on.
-        var stamps = new List<long>();
-        var stampsLock = new object();
+        // The claim waits out its contention window on the same clock, so it needs the clock
+        // moved before it can succeed -- it is a precondition here, not the subject.
+        await clock.RunUntilAsync(sender.ClaimAddressAsync(0xC1),
+            step: TimeSpan.FromMilliseconds(50), giveUpAfter: ShortTimeout);
+
+        // A send costs virtual time from here on, as in the multi-frame sibling: on a clock
+        // where sending is free, a send-then-delay loop lands on the same grid as an anchored
+        // schedule and the slot assertions below could not tell them apart (Bugbot on #185).
+        var perFrameCost = TimeSpan.FromMilliseconds(1);
+        bus.OnTransmitting = _ => clock.Advance(perFrameCost);
+
         const uint targetPgn = 0xFEE5u; // PDU2, PS=0xE5 (arbitrary), well-known-ish
-        busB.FrameObserved += (_, e) =>
+        var stamps = new List<TimeSpan>();
+        var stampsLock = new object();
+        bus.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
             if (fields.SourceAddress != 0xC1) return;
             if (fields.Pgn != targetPgn) return;
-            lock (stampsLock) stamps.Add(Stopwatch.GetTimestamp());
+            lock (stampsLock) stamps.Add(clock.Elapsed);
         };
 
-        // 120 ms period is comfortably above both the ~1 ms virtual-loopback latency and the
-        // ~15.6 ms default timer granularity on Windows, and short enough to gather the
-        // samples in under two seconds.
-        var period = TimeSpan.FromMilliseconds(120);
-        // 22, not 10. The bound below is undercut by however late the run's first emission was,
-        // divided by the number of *measured* gaps -- see the assertion for why that is the error
-        // term that matters. Note the two subtractions: 22 emissions give 21 gaps, and trimming
-        // the warm-up leaves 20. Ten samples would divide a 240 ms cold start by nine and lose
-        // 27 ms of a 120 ms period; twenty measured gaps divide it by twenty, which is what the
-        // 10 % allowance below is worth. This is the knob that makes the assertion sound, so it
-        // is not a free parameter.
-        const int requiredSamples = 22;
+        int Count() { lock (stampsLock) return stamps.Count; }
+
         var payload = new byte[] { 0x11, 0x22, 0x33, 0x44 };
         var message = new J1939Message(targetPgn, payload, priority: 6, destinationAddress: 0xFF);
 
+        // The virtual resolution the period is bracketed to.
+        var Step = TimeSpan.FromMilliseconds(1);
+
+        var startedAt = clock.Elapsed;
         using (var handle = sender.StartPeriodicSend(message, period))
         {
             handle.Should().NotBeNull();
 
-            // Collect until we have enough samples for a stable mean, or bail out with a
-            // clear failure message if the schedule never fires.
-            // Not ShortTimeout: 21 samples at 120 ms need 2.5 s even when nothing is dropped, and
-            // a loaded runner coalescing to 2x or 3x the period needs several times that. Four
-            // times the nominal run is generous enough not to fail for being slow, and still
-            // bounds the rate from above -- the one direction the assertion below does not cover.
-            var collectBudget = TimeSpan.FromMilliseconds(period.TotalMilliseconds * requiredSamples * 4);
-            var deadline = Stopwatch.GetTimestamp() + (long)(collectBudget.TotalSeconds * Stopwatch.Frequency);
-            while (true)
+            for (var slot = 1; slot <= requiredEmissions; slot++)
             {
-                int count;
-                lock (stampsLock) count = stamps.Count;
-                if (count >= requiredSamples) break;
-                if (Stopwatch.GetTimestamp() >= deadline)
-                    throw new TimeoutException(
-                        $"Expected at least {requiredSamples} periodic emissions within " +
-                        $"{collectBudget.TotalSeconds:F1}s; observed {count}.");
-                await Task.Delay(20);
+                var slotPoint = startedAt + TimeSpan.FromTicks(period.Ticks * slot);
+
+                // Which period the schedule is actually on is decided here, by asking the actor
+                // which instant its next tick is armed for -- see the multi-frame sibling's doc
+                // comment for why the wire cannot answer it and a jump straight to the slot is
+                // not sufficient on its own.
+                var remaining = slotPoint - clock.Elapsed;
+                await clock.WaitUntilTimerArmedAsync(senderActor, remaining, ShortTimeout, Step);
+                var armed = await senderActor.NextTimerDelayAsync();
+                var lateBy = armed is { } delay && delay > remaining ? delay - remaining : TimeSpan.Zero;
+
+                // One tick short of the slot: corroboration on the wire that the tick armed
+                // above has not fired early. It is the barrier, not this, that pins the period.
+                await clock.AdvanceToAsync(slotPoint - Step);
+                await clock.SettleAsync();
+                Count().Should().Be(slot - 1,
+                    "the clock is one tick short of slot {0}, so that emission is not due yet",
+                    slot);
+
+                await clock.AdvanceToAsync(slotPoint);
+                if (lateBy > TimeSpan.Zero)
+                    await clock.AdvanceAsync(lateBy);
+                await WaitForAnnouncesAsync(Count, slot);
+
+                // The frame on the wire is not the end of the emission: OnTick drops a tick
+                // whose predecessor is still in flight, and that state clears on the node's own
+                // loop. Waiting for the node to say so is what keeps the next slot's assertion
+                // about the grid rather than about a race.
+                await WaitForAnnouncesAsync(() => sender.PeriodicEmissionsCompleted, slot);
             }
         }
 
-        // Post-Dispose: no additional frames should arrive after a settle window.
-        int countAtDispose;
-        lock (stampsLock) countAtDispose = stamps.Count;
-        await Task.Delay(period + period); // wait 2 periods
-        int countAfterSettle;
-        lock (stampsLock) countAfterSettle = stamps.Count;
+        // Post-dispose. Every emission above was waited out to completion, so nothing is in
+        // flight: the schedule must have left no tick armed, and period after period -- one at a
+        // time, since a single jump would let a live schedule coalesce its ticks into one --
+        // must add no frame (Codex on #185).
+        var countAtDispose = Count();
+        (await senderActor.NextTimerDelayAsync()).Should().BeNull(
+            "disposing the handle cancels the schedule's tick");
+        for (var quiet = 0; quiet < 3; quiet++)
+        {
+            await clock.AdvanceAsync(period);
+            await clock.SettleAsync();
+        }
+        sender.PeriodicEmissionsCompleted.Should().Be(requiredEmissions, "no tick started a send after Dispose");
+        Count().Should().Be(countAtDispose, "disposing the handle must stop the periodic loop");
 
-        countAfterSettle.Should().BeLessOrEqualTo(countAtDispose + 1,
-            "disposing the handle must stop the periodic loop so at most an already-in-flight " +
-            "SendAsync may still land after Dispose returns");
+        List<TimeSpan> snapshot;
+        lock (stampsLock) snapshot = new List<TimeSpan>(stamps);
+        snapshot.Count.Should().BeGreaterOrEqualTo(requiredEmissions);
 
-        List<long> snapshot;
-        lock (stampsLock) snapshot = new List<long>(stamps);
-        snapshot.Count.Should().BeGreaterOrEqualTo(requiredSamples);
-
-        double targetMs = period.TotalMilliseconds;
-        var gaps = new List<double>(snapshot.Count - 1);
-        for (int i = 1; i < snapshot.Count; i++)
-            gaps.Add((snapshot[i] - snapshot[i - 1]) * 1000d / Stopwatch.Frequency);
-
-        // Never faster than requested, as the mean gap over a warm-up-trimmed sample.
-        //
-        // Three statistics have been tried here and the first two were chosen by intuition; this
-        // one is chosen by its error term, which is the only way to size it honestly.
-        //
-        // Every emission lands on its own grid slot, late by however long the host stalled:
-        // t(i) = slot(i) * period + late(i). Summing the gaps telescopes, so
-        //
-        //     mean gap = (slots spanned / gaps) * period + (late(last) - late(first)) / gaps
-        //
-        // The first term is at least the period, because slots are distinct. The second is the
-        // whole problem, and it is bounded by the *number of gaps* -- nothing else. That rules
-        // out both earlier attempts:
-        //
-        //   * The plain mean over nine gaps divides a cold start by nine. A first tick 239 ms
-        //     late leaves a mean of 106.8 ms against this bound, from a scheduler doing exactly
-        //     what it documents.
-        //   * The median has no such error term to shrink, which looked like an advantage and is
-        //     not: it is sensitive to the shape of the jitter instead of its size. On a real
-        //     macOS runner the gaps came out 83, 132, 73, 173, 67, 188, 62, 105, 185 -- mean
-        //     118.7 ms, so the rate was right to within 1 % -- and the median was 105 ms, because
-        //     an odd number of alternating gaps has one more short than long. It failed a
-        //     perfectly good run.
-        //
-        // So: trim the first gap, which is the only one measured from a cold schedule, and take
-        // the mean of the rest. Twenty measured gaps hold the residual endpoint term under a
-        // tenth of a period for any swing below 20 x 12 ms = 240 ms between the second emission's
-        // lateness and the last one's -- which is exactly the worst cold start observed here, and
-        // an order of magnitude beyond the jitter a loaded runner has otherwise produced.
-        // Oscillation cancels in a mean by construction, so the case above passes.
-        var measured = gaps.GetRange(1, gaps.Count - 1);
-        var meanGap = measured.Sum() / measured.Count;
-
-        // One-sided on purpose: load can only lengthen gaps, so there is no honest upper bound to
-        // pair with this one. The collection loop bounds the rate from above instead.
-        meanGap.Should().BeGreaterOrEqualTo(targetMs * 0.9,
-            $"mean gap over {measured.Count} samples ({meanGap:F0} ms, first gap discarded as "
-            + $"warm-up) must not undercut the configured period ({targetMs:F0} ms); "
-            + "observed gaps: " + string.Join(", ", gaps.ConvertAll(g => $"{g:F0}")));
+        // Every emission sits on its slot -- no earlier, and not on a later one either (which a
+        // schedule that restarted its period after each send would have drifted onto).
+        for (var i = 0; i < requiredEmissions; i++)
+        {
+            var slotPoint = startedAt + TimeSpan.FromTicks(period.Ticks * (i + 1));
+            snapshot[i].Should().BeGreaterThanOrEqualTo(slotPoint,
+                "emission {0} is triggered by the clock reaching its slot", i + 1);
+            snapshot[i].Should().BeLessThan(slotPoint + period,
+                "emission {0} belongs to slot {0} and not to a later one", i + 1);
+        }
     }
 
     /// <summary>
@@ -3975,30 +4066,33 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // SendAsync's pre-flight claim gate throws J1939NoAddressException on every subsequent
     // tick, so no CAN frame is emitted while the node is un-claimed. Assert the wire goes
     // quiet after unseating.
+    //
+    // #171: owner's actor runs on a VirtualClock, so both "the schedule really was running"
+    // and "~2 periods of quiet after the loss" are deterministic advances instead of
+    // wall-clock polling and a 130 ms sleep.
     [Fact]
     public async Task StartPeriodicSend_SingleFrame_StopsAfterAddressLoss()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
         using var busC = Open(session, 2); // spectator: counts periodic emissions
+        using var serviceA = new CanBusService(busA);
+        var ownerActor = clock.NewActor();
 
         // Owner has a HIGHER numeric NAME → lower priority → will be unseated when the
         // peer with a lower NAME claims the same SA per SAE J1939-81 §4.4.3.2.
-        var ownerOpts = new J1939NodeOptions(Name(0x000200))
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
-        };
-        var peerOpts = new J1939NodeOptions(Name(0x000010))
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
-        };
+        var announce = TimeSpan.FromMilliseconds(80);
+        var ownerOpts = new J1939NodeOptions(Name(0x000200)) { ClaimAnnounceTimeout = announce };
+        var peerOpts = new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce };
 
-        using var owner = J1939Node.Open(busA, ownerOpts);
+        using var owner = new J1939NodeImpl(serviceA, ownerOpts, ownsService: false, ownerActor);
         using var peer = J1939Node.Open(busB, peerOpts);
 
         const byte contendedSa = 0x50;
-        await owner.ClaimAddressAsync(contendedSa).WithTimeout(ShortTimeout);
+        await clock.RunUntilAsync(owner.ClaimAddressAsync(contendedSa),
+            step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
         owner.ClaimState.Should().Be(J1939ClaimState.Claimed);
         owner.Address.Should().Be(contendedSa);
 
@@ -4006,15 +4100,14 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // assertion is independent of the owner node's internal state and matches what
         // downstream ECUs actually observe.
         const uint targetPgn = 0xFEE7u;
-        var stamps = new List<DateTime>();
-        var stampsLock = new object();
+        var count = 0;
         busC.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
             if (fields.Pgn != targetPgn) return;
             if (fields.SourceAddress != contendedSa) return;
-            lock (stampsLock) stamps.Add(DateTime.UtcNow);
+            Interlocked.Increment(ref count);
         };
 
         var period = TimeSpan.FromMilliseconds(40);
@@ -4022,17 +4115,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             destinationAddress: 0xFF);
         using var handle = owner.StartPeriodicSend(message, period);
 
-        // Wait until the schedule has actually put a few frames on the wire so the
-        // "stop" assertion below is meaningful (the schedule really was running).
-        var readyDeadline = DateTime.UtcNow + ShortTimeout;
-        while (true)
+        // Move the clock through three ticks so the "stop" assertion below is meaningful (the
+        // schedule really was running), each one proven armed before the clock advances past it.
+        for (var i = 0; i < 3; i++)
         {
-            int c;
-            lock (stampsLock) c = stamps.Count;
-            if (c >= 3) break;
-            if (DateTime.UtcNow >= readyDeadline)
-                throw new TimeoutException("Expected ≥3 periodic frames from owner before contest.");
-            await Task.Delay(10);
+            await clock.WaitUntilTimerArmedAsync(ownerActor, period, ShortTimeout, TimeSpan.FromMilliseconds(2));
+            await clock.AdvanceAsync(period);
+            await WaitForAnnouncesAsync(() => Volatile.Read(ref count), i + 1);
         }
 
         // Peer with lower NAME claims the same SA. HandleIncomingAddressClaim's
@@ -4042,23 +4131,40 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await peer.ClaimAddressAsync(contendedSa).WithTimeout(ShortTimeout);
         peer.Address.Should().Be(contendedSa);
 
-        // Wait for the owner's state machine to observe the contest.
+        // Wait for the owner's state machine to observe the contest. This is a real wire round
+        // trip with `peer` (a wall-clock node) landing on the owner's actor loop, not something
+        // blocked on the frozen clock, so it stays a category-1 poll on the wall clock.
         var lossDeadline = DateTime.UtcNow + ShortTimeout;
         while (owner.ClaimState == J1939ClaimState.Claimed && DateTime.UtcNow < lossDeadline)
             await Task.Delay(10);
         owner.ClaimState.Should().NotBe(J1939ClaimState.Claimed);
         owner.Address.Should().BeNull();
 
-        // Give the schedule ~2 periods to observe the state transition and let the
-        // in-flight SendAsync (if any) drain. Peer traffic on `contendedSa` is filtered by
-        // NAME (owner's Name(0x200) ≠ peer's Name(0x010)), so any frames on `contendedSa`
-        // that arrive here originate from the owner's periodic loop *not yet stopping* —
-        // that is exactly the bug we are guarding against.
-        int countAfterLoss;
-        lock (stampsLock) countAfterLoss = stamps.Count;
-        await Task.Delay(period + period + TimeSpan.FromMilliseconds(50));
-        int countAfterQuiet;
-        lock (stampsLock) countAfterQuiet = stamps.Count;
+        // Give the schedule a few more ticks to observe the state transition and let each
+        // dispatched SendAsync (successful or gated) drain. Peer traffic on `contendedSa` is
+        // filtered by NAME (owner's Name(0x200) ≠ peer's Name(0x010)), so any frames on
+        // `contendedSa` that arrive here originate from the owner's periodic loop *not yet
+        // stopping* -- that is exactly the bug we are guarding against.
+        //
+        // PeriodicEmissionsCompleted increments whether SendAsync succeeded or was gated (it
+        // is bumped in OnTick's finally), so waiting for it here -- rather than merely settling
+        // the actor -- is what proves each tick's send has actually run its course on the
+        // thread pool before the wire count below is sampled.
+        // Not armed-checked: the loss also schedules its own Cannot Claim backoff, which can
+        // legitimately be the actor's nearer timer now, so "the periodic tick is the next
+        // thing due" is no longer a safe assumption to check for -- only that enough ticks of
+        // it have gone by.
+        var countAfterLoss = Volatile.Read(ref count);
+        var completedBeforeQuiet = owner.PeriodicEmissionsCompleted;
+        for (var i = 0; i < 3; i++)
+        {
+            await clock.AdvanceAsync(period);
+            await WaitForAnnouncesAsync(() => owner.PeriodicEmissionsCompleted, completedBeforeQuiet + i + 1);
+        }
+        // A completed send has handed its frame to the driver; the hub still delivers it on its
+        // own thread, so the count gets a wall window before it is read (Bugbot on #185).
+        await Task.Delay(WireWindow);
+        var countAfterQuiet = Volatile.Read(ref count);
 
         // We tolerate at most one already-in-flight emission slipping past the state
         // transition. Anything more means the loop kept sending under a stale SA.
