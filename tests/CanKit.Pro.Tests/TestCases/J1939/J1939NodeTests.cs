@@ -1565,7 +1565,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
-        using var serviceA = new CanBusService(busA);
+        using var serviceA = new FrameConsumptionCountingBusService(new CanBusService(busA));
         var loserActor = clock.NewActor();
         const byte contended = 0x62;
 
@@ -1598,9 +1598,17 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // backoff before the request is allowed to race it.
         await clock.WaitUntilTimerArmedAsync(loserActor, backoff, ShortTimeout);
 
+        // The request must be on the loser's actor before the clock moves, or it could be
+        // handled after the Cannot Claim and prove nothing (Bugbot on #185): the node's reader
+        // hands it over, which the counting subscription sees, and a round trip behind that
+        // post has run it.
+        var requestTaken = serviceA.WaitUntilConsumedAsync(e =>
+            J1939Id.Decompose((uint)e.Frame.ID).Pgn == J1939Pgn.Request);
         busB.Transmit(CanFrame.Classic(
             (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: J1939Pgn.GlobalAddress),
             new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+        await requestTaken.WaitAsync(ShortTimeout);
+        await loserActor.PostAsync(() => 0);
 
         // Bracket the backoff from both sides: the request must not shortcut it.
         var epsilon = TimeSpan.FromMilliseconds(1);
@@ -3212,6 +3220,12 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // moved before it can succeed -- it is a precondition here, not the subject.
         await clock.RunUntilAsync(sender.ClaimAddressAsync(0xC1),
             step: TimeSpan.FromMilliseconds(50), giveUpAfter: ShortTimeout);
+
+        // A send costs virtual time from here on, as in the multi-frame sibling: on a clock
+        // where sending is free, a send-then-delay loop lands on the same grid as an anchored
+        // schedule and the slot assertions below could not tell them apart (Bugbot on #185).
+        var perFrameCost = TimeSpan.FromMilliseconds(1);
+        bus.OnTransmitting = _ => clock.Advance(perFrameCost);
 
         const uint targetPgn = 0xFEE5u; // PDU2, PS=0xE5 (arbitrary), well-known-ish
         var stamps = new List<TimeSpan>();

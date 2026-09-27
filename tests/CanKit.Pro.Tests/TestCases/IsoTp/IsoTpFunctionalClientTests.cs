@@ -431,19 +431,17 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Functional_Collect_Does_Not_Accept_Frames_After_Window_Expiry()
     {
-        // Bugbot 3604785766: after ResponseTimeout, disposing the subscription before the
-        // TryRead drain must prevent a post-window frame from being admitted.
+        // Bugbot 3604785766: a frame that arrives after the collection window must not be
+        // admitted, however late the collector gets to it.
         //
-        // #171: this used to be a Task.Delay(window * 2) followed by a Task.Delay(60), both
-        // guessing at wall-clock margins around the window -- the comment they replaced records
-        // that a 40 ms window and an 80 ms wait had already failed once on macOS for want of
-        // that margin. IsoTpFunctionalClient takes an injected ProtocolActor clock exactly for
-        // this (its constructor doc cites this issue); CanBusService(bus, actor.TimeSource.
-        // GetTimestamp) puts frame arrival stamps on that same clock. Once the clock has been
-        // advanced past the deadline, any frame delivered from here on is stamped past it too
-        // -- CollectFromSubscriptionAsync compares HostArrivalTimestamp against a deadline taken
-        // from the same clock -- so the property holds regardless of whether the late frame
-        // lands before or after the window's own dispose-then-drain runs.
+        // #171: this used to wait out the window on the wall clock and inject afterwards, by
+        // which time the collection had usually returned and never saw the frame. On the
+        // injected clock the late frame is put where the guard matters: the clock is moved past
+        // the deadline without waking the actor, so the window's timer has not fired yet, and
+        // the frame -- stamped past the deadline by the same clock -- reaches a collection that
+        // is still reading. The counting subscription shows the collector has taken it; only
+        // then is the window's timer allowed to fire. The window is 10 s so the actor's own wait
+        // cannot run out before that (Bugbot on #185).
         var session = NewSession();
         using var busA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
@@ -453,27 +451,30 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
-        using var service = new CanBusService(busA, actor.TimeSource.GetTimestamp);
+        using var service = new FrameConsumptionCountingBusService(
+            new CanBusService(busA, actor.TimeSource.GetTimestamp));
         using var client = new IsoTpFunctionalClient(service, FunctionalTxId, 0x7E8, 0x7EF,
             FastOptions(), ownsService: true, actor);
 
-        // Collect with a bounded window and no ECU reply during it.
-        var window = TimeSpan.FromMilliseconds(200);
+        var window = TimeSpan.FromSeconds(10);
         var collectTask = client.CollectResponsesAsync(window);
         await clock.WaitUntilTimerArmedAsync(actor, window, ShortTimeout);
-        await clock.AdvanceAsync(window + TimeSpan.FromMilliseconds(1));
+        clock.Advance(window + TimeSpan.FromMilliseconds(1)); // past the deadline; the timer has not run
 
-        // Inject a late SF after the window has expired — must not appear in the result.
+        var taken = service.WaitUntilConsumedAsync(e => e.Frame.ID == unchecked((int)EcuResponseId));
         var ep = IsoTpEndpoint.Normal(EcuResponseId, 0);
         byte[] latePdu = { 0x50, 0x01 };
         busB.Transmit(CanFrame.Classic(
             unchecked((int)EcuResponseId),
             IsoTpFrameCodec.BuildSingleFrame(ep, latePdu, isCanFd: false, padding: true)));
+        await taken.WaitAsync(ShortTimeout);
+        collectTask.IsCompleted.Should().BeFalse("the window's timer has not fired, so the collection was still reading");
 
+        await clock.SettleAsync(); // the window's timer fires now
         var responses = await collectTask.WaitAsync(ShortTimeout);
         responses.Should().BeEmpty(
-            "a frame that arrives after the collection window must not be admitted " +
-            "(Bugbot 3604785766: dispose-before-drain)");
+            "a frame stamped after the collection window must not be admitted " +
+            "(Bugbot 3604785766)");
     }
 
     // ─────────────────────────────────────────────────────────────────────────────────────────
