@@ -136,30 +136,37 @@ public sealed class IsoTpFunctionalListener : IDisposable
 internal sealed class FunctionalWindow : IDisposable
 {
     private readonly CancellationTokenSource _linked;
+    private readonly ProtocolActor? _actor;
     private readonly IDisposable? _timer;
 
     public FunctionalWindow(ProtocolActor? actor, TimeSpan window, CancellationToken cancellationToken)
     {
+        _linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (actor is null)
         {
-            _linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _linked.CancelAfter(window);
             return;
         }
 
-        // The actor's callback cancels a source of its own, which is never disposed -- it holds
-        // no timer and no wait handle -- so a callback already running when the window is
-        // disposed cannot meet a disposed source. Disposing the linked source unhooks it.
-        var end = new CancellationTokenSource();
-        _linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, end.Token);
-        _timer = actor.Schedule(window, end.Cancel);
+        _actor = actor;
+        _timer = actor.Schedule(window, _linked.Cancel);
     }
 
     public CancellationToken Token => _linked.Token;
 
     public void Dispose()
     {
-        _timer?.Dispose();
-        _linked.Dispose();
+        if (_actor is null)
+        {
+            _linked.Dispose();
+            return;
+        }
+
+        // Cancelling the timer only flags it: a callback the loop has already taken still runs.
+        // It runs on the actor, so the source is disposed there too, after it -- a window
+        // disposed while its timer fires never cancels a disposed source. The actor is the
+        // caller's and outlives the collections on it.
+        _timer!.Dispose();
+        _actor.Post(_linked.Dispose);
     }
 }
