@@ -147,6 +147,67 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
     }
 
     [Fact]
+    public async Task A_Throwing_Queued_Callback_Does_Not_Drop_A_Later_Heartbeat_Timeout()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-throw"));
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true, clock);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var heartbeats = new List<HeartbeatTimeoutEventArgs>();
+        Exception? background = null;
+
+        node.SyncReceived += (_, _) =>
+        {
+            entered.TrySetResult(true);
+            release.Task.GetAwaiter().GetResult();
+        };
+        node.HeartbeatTimeout += (_, e) => { lock (heartbeats) heartbeats.Add(e); };
+        node.BackgroundExceptionOccurred += (_, ex) => background ??= ex;
+
+        try
+        {
+            Settle(node);
+            node.AddHeartbeatConsumer(HeartbeatProducer, GuardWindow);
+            Settle(node);
+
+            // Hold the pump inside the first callback so the throw and the timeout are both
+            // queued behind it. The throw is a raw queued delegate, the same shape as a
+            // callback that does not catch its own subscriber.
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+            node.SubmitEventForTests(() => throw new InvalidOperationException("subscriber failed"));
+            Advance(clock, node, GuardWindow);
+            release.TrySetResult(true);
+
+            var deadline = DateTime.UtcNow + ShortTimeout;
+            while (true)
+            {
+                int seen;
+                lock (heartbeats) seen = heartbeats.Count;
+                if (seen > 0 && background is not null) break;
+                if (DateTime.UtcNow > deadline)
+                    throw new TimeoutException(
+                        $"Heartbeat timeouts delivered: {seen}; background exception: {background?.GetType().Name ?? "none"}.");
+                await Task.Delay(1);
+            }
+
+            background.Should().BeOfType<InvalidOperationException>();
+            lock (heartbeats)
+            {
+                heartbeats.Should().ContainSingle();
+                heartbeats[0].ProducerNodeId.Should().Be(HeartbeatProducer);
+                heartbeats[0].Timeout.Should().Be(GuardWindow);
+            }
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
+    [Fact]
     public void Constructor_Stops_The_Event_Pump_When_Subscribe_Fails()
     {
         using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-ctor"));

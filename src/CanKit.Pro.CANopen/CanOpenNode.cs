@@ -718,11 +718,20 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         while (true)
         {
             await _eventWake.WaitAsync().ConfigureAwait(false);
-            // One signal covers every event queued by the time we look. Handlers already
-            // catch their own subscriber exceptions and report them; a failure here is a
-            // bug in that delegate, not something to swallow and keep dispatching past.
+            // One signal covers every event queued by the time we look. A subscriber that
+            // throws is reported and the loop continues: a timeout or EMCY already waiting
+            // must still be delivered. Anything outside the delegate is still a bug in the pump.
             while (TryDequeueEvent() is { } raise)
-                raise();
+            {
+                try
+                {
+                    raise();
+                }
+                catch (Exception ex)
+                {
+                    RaiseBackgroundException(ex);
+                }
+            }
             // The queue was just drained. Closure is the completed flag alone: an event
             // accepted before completion is still in the list and was delivered above, and
             // one accepted after completion never enters the list.
