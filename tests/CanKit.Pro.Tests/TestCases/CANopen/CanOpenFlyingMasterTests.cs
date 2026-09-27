@@ -150,6 +150,47 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
     }
 
     [Fact]
+    public async Task A_Throwing_FlyingMaster_Subscriber_Does_Not_Stop_Later_Events()
+    {
+        var session = NewSession();
+        using var nodeBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClockedNode(nodeBus, LeftId, clock);
+        var witness = new ActorWitness(node, peerBus, WitnessForLeft);
+        Exception? background = null;
+        var syncs = 0;
+        node.FlyingMasterChanged += (_, _) => throw new InvalidOperationException("subscriber failed");
+        node.BackgroundExceptionOccurred += (_, ex) => background ??= ex;
+        node.SyncReceived += (_, _) => Interlocked.Increment(ref syncs);
+
+        Tighten(node);
+        node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(clock, witness, null,
+            () => node.FlyingMasterRole == FlyingMasterRole.Active, 800,
+            "the only master becomes active");
+
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (background is null)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("The throwing flying-master subscriber was not reported.");
+            await Task.Delay(1);
+        }
+        background.Should().BeOfType<InvalidOperationException>();
+
+        peerBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.Sync), Array.Empty<byte>()));
+        deadline = DateTime.UtcNow + ShortTimeout;
+        while (Volatile.Read(ref syncs) == 0)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("SYNC was not delivered after the flying-master subscriber threw.");
+            await Task.Delay(1);
+        }
+        Volatile.Read(ref syncs).Should().Be(1);
+    }
+
+    [Fact]
     public async Task A_Worse_Priority_Yields_And_Does_Not_Force_A_New_Election()
     {
         using var pair = OpenPair();

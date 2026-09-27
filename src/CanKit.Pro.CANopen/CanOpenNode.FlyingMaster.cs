@@ -612,9 +612,13 @@ internal sealed partial class CanOpenNode
     private void RaiseFlyingMaster(FlyingMasterSignal signal, byte? otherNodeId, ushort? otherPriority)
     {
         var args = new FlyingMasterChangedEventArgs(signal, _flyingMasterRole, otherNodeId, otherPriority);
-        // The event pump already reports a subscriber exception. A second catch here is the
-        // generic handler CodeQL flags, and it does not change where the exception goes.
-        EnqueueEvent(() => FlyingMasterChanged?.Invoke(this, args));
+        // Same isolation as the other queued events: a subscriber throw is reported and the
+        // pump keeps delivering what was already accepted, including a timeout or an EMCY.
+        EnqueueEvent(() =>
+        {
+            try { FlyingMasterChanged?.Invoke(this, args); }
+            catch (Exception ex) { RaiseBackgroundException(ex); }
+        });
     }
 
     private OdWriteDecision ValidateFlyingMasterTimingWrite(byte subindex, byte[] value)
