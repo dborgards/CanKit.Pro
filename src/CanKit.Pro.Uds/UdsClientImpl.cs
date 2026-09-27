@@ -1471,24 +1471,16 @@ internal sealed class UdsClientImpl : IUdsClient
     private ClockTimeout CancelAfter(TimeSpan delay) => new(_clock, delay);
 
     // A wait of delay on _time, as CancelAfter measures it.
-    private async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+    private Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        => _clock is null ? Task.Delay(delay, cancellationToken) : WaitOnClockAsync(_clock, delay, cancellationToken);
+
+    private static async Task WaitOnClockAsync(ProtocolActor clock, TimeSpan delay, CancellationToken cancellationToken)
     {
-        if (_clock is null)
-        {
-            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-        using var timeout = CancelAfter(delay);
-        using var combined = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
-        try
-        {
-            await Task.Delay(Timeout.Infinite, combined.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (timeout.IsCancellationRequested
-                                                 && !cancellationToken.IsCancellationRequested)
-        {
-            // the delay ran out
-        }
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var registration = cancellationToken.Register(static state =>
+            ((TaskCompletionSource<bool>)state!).TrySetCanceled(), done);
+        using var handle = clock.Schedule(delay, () => done.TrySetResult(true));
+        await done.Task.ConfigureAwait(false);
     }
 
     private sealed class ClockTimeout : IDisposable
@@ -1505,20 +1497,20 @@ internal sealed class UdsClientImpl : IUdsClient
             }
             _cts = new CancellationTokenSource();
             _timer = clock.Schedule(delay, () => ThreadPool.QueueUserWorkItem(static state =>
-            {
-                try { ((CancellationTokenSource)state!).Cancel(); }
-                catch (ObjectDisposedException) { /* the wait ended first */ }
-            }, _cts));
+                ((CancellationTokenSource)state!).Cancel(), _cts));
         }
 
         public CancellationToken Token => _cts.Token;
 
         public bool IsCancellationRequested => _cts.IsCancellationRequested;
 
+        // On the actor's clock only the timer is released: a source without a timer of its own
+        // holds nothing that needs it, and one whose cancellation the timer has already handed
+        // to the thread pool must stay cancellable rather than throw there.
         public void Dispose()
         {
-            _timer?.Dispose();
-            _cts.Dispose();
+            if (_timer is null) _cts.Dispose();
+            else _timer.Dispose();
         }
     }
 
