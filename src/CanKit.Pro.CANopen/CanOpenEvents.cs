@@ -240,3 +240,33 @@ public sealed class LifeGuardingEventArgs : EventArgs
         LifeTimeFactor = lifeTimeFactor;
     }
 }
+
+/// <summary>Arguments of <see cref="ICanOpenNode.FlyingMasterChanged"/>.</summary>
+public sealed class FlyingMasterChangedEventArgs : EventArgs
+{
+    /// <summary>What changed.</summary>
+    public FlyingMasterSignal Signal { get; }
+
+    /// <summary>Role after the change.</summary>
+    public FlyingMasterRole Role { get; }
+
+    /// <summary>
+    /// The other master this signal is about: the winner when this node stands by, the master
+    /// whose heartbeat was lost, or the node whose claim forced a new election. Null when this
+    /// node itself became the active master.
+    /// </summary>
+    public byte? OtherNodeId { get; }
+
+    /// <summary>Priority level carried with <see cref="OtherNodeId"/>, when that claim had one.</summary>
+    public ushort? OtherPriority { get; }
+
+    /// <summary>Constructs a new event.</summary>
+    public FlyingMasterChangedEventArgs(FlyingMasterSignal signal, FlyingMasterRole role,
+        byte? otherNodeId, ushort? otherPriority)
+    {
+        Signal = signal;
+        Role = role;
+        OtherNodeId = otherNodeId;
+        OtherPriority = otherPriority;
+    }
+}

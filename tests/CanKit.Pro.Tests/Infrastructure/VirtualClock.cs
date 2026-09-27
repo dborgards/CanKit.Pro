@@ -172,18 +172,44 @@ internal sealed class VirtualClock : IDisposable
     /// armed" would accept the wrong timer, and a wire-side check cannot see an interval at all.
     /// Polling here can be slow but cannot be wrong.
     /// </remarks>
+    public Task WaitUntilTimerArmedAsync(ProtocolActor actor, TimeSpan expected, TimeSpan giveUpAfter)
+        => WaitUntilTimerArmedAsync(actor, expected, giveUpAfter, TimeSpan.Zero);
+
+    /// <summary>
+    /// As <see cref="WaitUntilTimerArmedAsync(ProtocolActor, TimeSpan, TimeSpan)"/>, but accepts a
+    /// timer up to <paramref name="lateBy"/> later than <paramref name="expected"/>. A timer that
+    /// is early still does not match: the check exists to reject a shorter interval.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="lateBy"/> is for a schedule whose due instant is computed from one clock
+    /// reading and stamped from a second. A send that costs one virtual step between those reads
+    /// leaves the armed delay one step past the slot the test subtracted. macOS CI has reported
+    /// that as 191 ms where the slot distance was 190 ms. Callers that pass
+    /// <see cref="TimeSpan.Zero"/> keep the exact comparison.
+    /// </remarks>
     public async Task WaitUntilTimerArmedAsync(ProtocolActor actor, TimeSpan expected,
-        TimeSpan giveUpAfter)
+        TimeSpan giveUpAfter, TimeSpan lateBy)
     {
+        if (lateBy < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(lateBy), lateBy, "A late tolerance cannot be negative.");
+
         var deadline = DateTime.UtcNow + giveUpAfter;
         TimeSpan? seen;
-        while ((seen = await actor.NextTimerDelayAsync().ConfigureAwait(false)) != expected)
+        while (!TimerArmedAsExpected(seen = await actor.NextTimerDelayAsync().ConfigureAwait(false),
+                   expected, lateBy))
         {
             if (DateTime.UtcNow > deadline)
                 throw new TimeoutException(
                     $"Expected a timer armed {expected} away; the earliest is {seen?.ToString() ?? "none"}.");
             await Task.Yield();
         }
+    }
+
+    private static bool TimerArmedAsExpected(TimeSpan? seen, TimeSpan expected, TimeSpan lateBy)
+    {
+        if (seen is not { } delay) return false;
+        if (delay < expected) return false;
+        return delay - expected <= lateBy;
     }
 
     /// <summary>
