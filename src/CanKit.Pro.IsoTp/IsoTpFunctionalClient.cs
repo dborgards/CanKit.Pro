@@ -325,9 +325,8 @@ public sealed class IsoTpFunctionalClient : IDisposable
         // method's continuations are scheduling, and a frame that arrived after the deadline
         // but before they ran is not the window's (Codex on #150).
         long deadline = _time.GetTimestamp() + (long)(window.TotalSeconds * _time.Frequency);
-        using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var windowTimer = FunctionalWindow.Arm(_clock, window, windowCts);
-        var windowToken = windowCts.Token;
+        using var windowEnd = new FunctionalWindow(_clock, window, cancellationToken);
+        var windowToken = windowEnd.Token;
 
         try
         {
@@ -374,7 +373,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     }
 
     internal static bool TryParseFunctionalResponse(in CanFrameEvent frameEvent,
-        out IsoTpFunctionalResponse? response, Func<long>? now = null)
+        out IsoTpFunctionalResponse? response, Func<long> now)
     {
         var frame = frameEvent.Frame;
         var payload = frame.Data.ToArray();
@@ -404,10 +403,9 @@ public sealed class IsoTpFunctionalClient : IDisposable
 
         var pdu = new byte[pci.Length];
         Array.Copy(payload, pci.DataOffset, pdu, 0, pci.Length);
-        // Stamped by the demux at arrival; "now" only for an event built without a stamp.
-        var arrival = frameEvent.HostArrivalTimestamp > 0
-            ? frameEvent.HostArrivalTimestamp
-            : (now ?? Stopwatch.GetTimestamp)();
+        // Stamped by the demux at arrival; "now", on the collector's clock, only for an event
+        // built without a stamp.
+        var arrival = frameEvent.HostArrivalTimestamp > 0 ? frameEvent.HostArrivalTimestamp : now();
         response = new IsoTpFunctionalResponse((uint)frame.ID, pdu, arrival);
         return true;
     }

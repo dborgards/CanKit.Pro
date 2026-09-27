@@ -86,15 +86,14 @@ public sealed class IsoTpFunctionalListener : IDisposable
             return responses.AsReadOnly();
         }
         long deadline = now + (long)(window.TotalSeconds * _time.Frequency);
-        using var windowCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var windowTimer = FunctionalWindow.Arm(_clock, window, windowCts);
+        using var windowEnd = new FunctionalWindow(_clock, window, cancellationToken);
         try
         {
             // Ends when the window runs out, or when the subscription is completed underneath
             // -- the service disposed -- in which case what is buffered is still read, and
             // the next collection throws rather than return empty at once: a loop that
             // collects while a deadline lasts would otherwise spin on it (Bugbot on #150).
-            while (await _subscription.WaitToReadAsync(windowCts.Token).ConfigureAwait(false))
+            while (await _subscription.WaitToReadAsync(windowEnd.Token).ConfigureAwait(false))
                 TakeBuffered(responses, deadline);
             _ended = true;
         }
@@ -129,28 +128,38 @@ public sealed class IsoTpFunctionalListener : IDisposable
 }
 
 /// <summary>
-/// Ends a functional collection window. Production uses <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/>.
+/// A functional collection window: its token is cancelled by the caller's token or when the
+/// window ends. Production ends it with <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/>.
 /// A test that injected an actor arms the same interval on that actor's clock instead, so the
 /// window follows the clock and not the runner (#171).
 /// </summary>
-internal static class FunctionalWindow
+internal sealed class FunctionalWindow : IDisposable
 {
-    public static IDisposable? Arm(ProtocolActor? actor, TimeSpan window, CancellationTokenSource windowCts)
+    private readonly CancellationTokenSource _linked;
+    private readonly IDisposable? _timer;
+
+    public FunctionalWindow(ProtocolActor? actor, TimeSpan window, CancellationToken cancellationToken)
     {
         if (actor is null)
         {
-            windowCts.CancelAfter(window);
-            return null;
+            _linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _linked.CancelAfter(window);
+            return;
         }
 
-        return actor.Schedule(window, () =>
-        {
-            try { windowCts.Cancel(); }
-            catch (ObjectDisposedException)
-            {
-                // Expected race: the collection may have been disposed before this scheduled callback fires.
-                // Cancellation is best-effort here, so a disposed CTS can be safely ignored.
-            }
-        });
+        // The actor's callback cancels a source of its own, which is never disposed -- it holds
+        // no timer and no wait handle -- so a callback already running when the window is
+        // disposed cannot meet a disposed source. Disposing the linked source unhooks it.
+        var end = new CancellationTokenSource();
+        _linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, end.Token);
+        _timer = actor.Schedule(window, end.Cancel);
+    }
+
+    public CancellationToken Token => _linked.Token;
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+        _linked.Dispose();
     }
 }

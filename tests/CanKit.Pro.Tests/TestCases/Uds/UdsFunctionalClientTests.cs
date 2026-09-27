@@ -73,8 +73,13 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     private static UdsFunctionalClient OpenOnClock(ICanBus bus, WindowClock clock,
         TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null,
         IsoTpFunctionalOptions? options = null)
+        => OpenOnClock(new CanBusService(bus, clock.Actor.TimeSource.GetTimestamp), clock,
+            responseWindow, responsePendingWindow, options);
+
+    private static UdsFunctionalClient OpenOnClock(ICanBusService service, WindowClock clock,
+        TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null,
+        IsoTpFunctionalOptions? options = null)
     {
-        var service = new CanBusService(bus, clock.Actor.TimeSource.GetTimestamp);
         var iso = new IsoTpFunctionalClient(service, FunctionalTxId, Ecu1, 0x7EF,
             options ?? FastOptions(), ownsService: true, clock.Actor);
         return UdsFunctionalClient.Create(iso, clock.Actor, ownsClient: true,
@@ -687,13 +692,13 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var functional = OpenOnClock(busTester, clock,
             responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1500));
-        functional.ListenerStartDelay = TimeSpan.FromMilliseconds(150); // past the 100 ms window
+        functional.DelayListenerStart(TimeSpan.FromMilliseconds(150)); // past the 100 ms window
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await functional.SendRawAsync(new byte[] { 0x10, 0x83 }, Window, cts.Token); // suppressed: the 0x78 is buffered before the worker runs
         await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(150), TimeSpan.FromMilliseconds(20));
         await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(150)); // the worker starts, reads the buffered 0x78
-        functional.ListenerStartDelay = TimeSpan.Zero; // the next call's listener is not the late one
+        functional.DelayListenerStart(TimeSpan.Zero); // the next call's listener is not the late one
         await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(1300), TimeSpan.FromMilliseconds(300));
 
         // The second call waits the extended window out. The negative goes in while it is
@@ -1163,5 +1168,79 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var responses = await functional.DiagnosticSessionControlAsync(UdsSessionType.Extended, Window, cts.Token);
 
         responses.Should().ContainSingle().Which.Response[1].Should().Be(0x03);
+    }
+
+    // #171: the listener start delay stands in for a late thread pool, and is moved by
+    // advancing an injected clock. On the wall clock it would be a sleep, so it is refused.
+    [Fact]
+    public void A_Listener_Start_Delay_Needs_An_Injected_Clock()
+    {
+        using var busTester = OpenClassic(NewSession(), 0);
+        using var functional = UdsFunctionalClient.Create(
+            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()), ownsClient: true);
+
+        Action delay = () => functional.DelayListenerStart(TimeSpan.FromMilliseconds(1));
+        delay.Should().Throw<InvalidOperationException>();
+    }
+
+    // Codex on #150: a suppressed send cancelled after the driver took the frame may still have
+    // put it on the bus, so the ECUs' P2 runs from the cancellation, not from before the send.
+    // The driver holds the echo while the clock moves 200 ms: the window ends at 500 ms, where
+    // the provisional one from before the send ended at 300.
+    [Fact]
+    public async Task A_Suppressed_Send_Cancelled_After_The_Driver_Took_It_Leaves_P2_From_The_Cancellation()
+    {
+        using var clock = new WindowClock();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = ShortTimeout };
+        using var functional = OpenOnClock(bus, clock, responseWindow: TimeSpan.FromMilliseconds(300), options: options);
+
+        using var cancel = new CancellationTokenSource();
+        var suppressed = functional.TesterPresentAsync(cancellationToken: cancel.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+        cancel.Cancel();
+        Func<Task> cancelled = () => suppressed;
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        bus.EchoMode = EchoDelivery.Synchronous;
+
+        await NextCallWaitsUntil500(clock, functional, () => bus.TransmitCount);
+    }
+
+    // A driver that reports no transmit instant: the window runs from the confirmation. It
+    // takes 200 ms to come, so the window ends at 500 ms, not at the provisional 300.
+    [Fact]
+    public async Task A_Suppressed_Send_Without_A_Transmit_Stamp_Is_Anchored_At_Its_Confirmation()
+    {
+        using var clock = new WindowClock();
+        var service = new StarvedReaderBusService
+        {
+            OnSendConfirmed = () => clock.Clock.Advance(TimeSpan.FromMilliseconds(200)),
+        };
+        using var functional = OpenOnClock(service, clock, responseWindow: TimeSpan.FromMilliseconds(300));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await functional.TesterPresentAsync(cancellationToken: cts.Token);
+        service.OnSendConfirmed = null;
+
+        await NextCallWaitsUntil500(clock, functional, () => service.Sent.Count);
+    }
+
+    // At 400 ms a window ending at 500 still holds the next call back, its listener collecting
+    // the 100 ms left. A window that ended at 300 would have let the call out, and the earliest
+    // timer would be its own 30 ms collection.
+    private static async Task NextCallWaitsUntil500(WindowClock clock, UdsFunctionalClient functional,
+        Func<int> transmitted)
+    {
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var next = functional.TesterPresentAsync(suppressPositiveResponse: false,
+            TimeSpan.FromMilliseconds(30), cts.Token);
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(400) - clock.Clock.Elapsed
+            + TimeSpan.FromMilliseconds(1));
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100));
+        transmitted().Should().Be(1, "the next call is still waiting out the window");
+
+        (await RunCall(clock, next)).Should().BeEmpty();
+        transmitted().Should().Be(2);
     }
 }

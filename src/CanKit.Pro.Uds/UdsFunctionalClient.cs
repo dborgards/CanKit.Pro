@@ -57,8 +57,13 @@ public sealed class UdsFunctionalClient : IDisposable
     private readonly CancellationTokenSource _lifetimeCts = new();
 
     // Test hook: how late the listener's worker starts reading its subscription, standing in
-    // for a thread pool that schedules it after the window has run out (Codex on #150).
-    internal TimeSpan ListenerStartDelay { get; set; }
+    // for a thread pool that schedules it after the window has run out (Codex on #150). Only
+    // on an injected clock: a wall-clock start delay is the kind of sleep #171 removes.
+    internal void DelayListenerStart(TimeSpan delay)
+        => _listenerStartDelay = _clock is not null
+            ? delay
+            : throw new InvalidOperationException("A listener start delay is measured on an injected clock (#171).");
+    private TimeSpan _listenerStartDelay;
     private int _disposed;
 
     private UdsFunctionalClient(IsoTpFunctionalClient client, bool ownsClient, TimeSpan responseWindow,
@@ -91,16 +96,16 @@ public sealed class UdsFunctionalClient : IDisposable
     /// </summary>
     public static UdsFunctionalClient Create(IsoTpFunctionalClient client, bool ownsClient = false,
         TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
-        => new(client, ownsClient, responseWindow ?? UdsClientOptions.DefaultP2,
-            responsePendingWindow ?? UdsClientOptions.DefaultP2Star, clock: null);
+        => Create(client, clock: null, ownsClient, responseWindow, responsePendingWindow);
 
     /// <summary>
     /// As <see cref="Create(IsoTpFunctionalClient, bool, TimeSpan?, TimeSpan?)"/>, measuring P2
-    /// and P2* on <paramref name="clock"/>. The functional client underneath must have been
-    /// opened on that same actor, and the demux must stamp frames with its time source, or a
-    /// deadline and an arrival are not comparable. The actor is not disposed with this client.
+    /// and P2* on <paramref name="clock"/>; null is the wall clock, as the public overload uses.
+    /// The functional client underneath must have been opened on that same actor, and the demux
+    /// must stamp frames with its time source, or a deadline and an arrival are not comparable.
+    /// The actor is not disposed with this client.
     /// </summary>
-    internal static UdsFunctionalClient Create(IsoTpFunctionalClient client, ProtocolActor clock,
+    internal static UdsFunctionalClient Create(IsoTpFunctionalClient client, ProtocolActor? clock,
         bool ownsClient = false, TimeSpan? responseWindow = null, TimeSpan? responsePendingWindow = null)
         => new(client, ownsClient, responseWindow ?? UdsClientOptions.DefaultP2,
             responsePendingWindow ?? UdsClientOptions.DefaultP2Star, clock);
@@ -393,8 +398,8 @@ public sealed class UdsFunctionalClient : IDisposable
     {
         try
         {
-            if (ListenerStartDelay > TimeSpan.Zero)
-                await WaitOnClockAsync(ListenerStartDelay, _lifetimeCts.Token).ConfigureAwait(false);
+            if (_listenerStartDelay > TimeSpan.Zero)
+                await WaitOnClockAsync(_clock!, _listenerStartDelay, _lifetimeCts.Token).ConfigureAwait(false);
             bool drained = false;
             while (true)
             {
@@ -586,21 +591,14 @@ public sealed class UdsFunctionalClient : IDisposable
 
     private long Ticks(TimeSpan span) => SuppressedResponseWindows.Ticks(span, _time.Frequency);
 
-    // Production waits on the wall clock. An injected actor waits on its own, which is what
-    // lets a test move ListenerStartDelay without sleeping (#171).
-    private async Task WaitOnClockAsync(TimeSpan delay, CancellationToken cancellationToken)
+    // The listener's start delay, on the injected actor's clock: a test moves it by advancing
+    // that clock instead of sleeping (#171).
+    private static async Task WaitOnClockAsync(ProtocolActor clock, TimeSpan delay, CancellationToken cancellationToken)
     {
-        if (_clock is null)
-        {
-            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        if (delay <= TimeSpan.Zero) return;
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var registration = cancellationToken.Register(static state =>
             ((TaskCompletionSource<bool>)state!).TrySetCanceled(), done);
-        using var handle = _clock.Schedule(delay, () => done.TrySetResult(true));
+        using var handle = clock.Schedule(delay, () => done.TrySetResult(true));
         await done.Task.ConfigureAwait(false);
     }
 

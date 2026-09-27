@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -29,6 +30,13 @@ internal sealed class StarvedReaderBusService : ICanBusService
     public void Deliver(CanFrameView frame, long hostArrivalTimestamp = 0) => _frames.Writer.TryWrite(
         new CanFrameEvent(frame, isEcho: false, TimeSpan.Zero, hostArrivalTimestamp));
 
+    /// <summary>
+    /// Whether the subscription's <c>Frames</c> enumeration yields nothing until it is cancelled,
+    /// so what <see cref="Deliver"/> buffered is left for a <c>TryRead</c> drain -- the state a
+    /// collection window can end in when its reader was descheduled (#171).
+    /// </summary>
+    public bool HoldFrames { get; set; }
+
     /// <summary>Lets the reader task's wait complete once; every later wait stays pending.</summary>
     public void WakeReader() => _wake.TrySetResult(true);
 
@@ -55,6 +63,12 @@ internal sealed class StarvedReaderBusService : ICanBusService
         bool includeEcho = false)
         => new Sub(this);
 
+    /// <summary>
+    /// Runs inside <see cref="SendConfirmed"/> before it confirms: the time a driver takes to
+    /// confirm, modelled by moving a virtual clock (#171).
+    /// </summary>
+    public Action? OnSendConfirmed { get; set; }
+
     /// <summary>Every frame the channel put on the wire, in order.</summary>
     public List<byte[]> Sent { get; } = new();
 
@@ -62,6 +76,7 @@ internal sealed class StarvedReaderBusService : ICanBusService
         CancellationToken cancellationToken = default)
     {
         lock (Sent) Sent.Add(frame.Data.ToArray());
+        OnSendConfirmed?.Invoke();
         return Task.FromResult(new TxConfirmation { Confirmed = true });
     }
 
@@ -75,7 +90,15 @@ internal sealed class StarvedReaderBusService : ICanBusService
         private readonly StarvedReaderBusService _owner;
         public Sub(StarvedReaderBusService owner) => _owner = owner;
 
-        public IAsyncEnumerable<CanFrameEvent> Frames => _owner._frames.Reader.ReadAllAsync();
+        public IAsyncEnumerable<CanFrameEvent> Frames
+            => _owner.HoldFrames ? Held() : _owner._frames.Reader.ReadAllAsync();
+
+        private static async IAsyncEnumerable<CanFrameEvent> Held(
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            yield break;
+        }
 
         public bool TryRead(out CanFrameEvent frameEvent)
         {

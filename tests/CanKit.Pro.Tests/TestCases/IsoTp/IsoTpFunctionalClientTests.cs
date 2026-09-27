@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
@@ -659,5 +660,54 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => listener.CollectAsync(TimeSpan.FromMilliseconds(10));
         await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    private static CanFrameView SingleFrameView(uint canId, byte[] pdu)
+        => new(CanFrameType.Can20, unchecked((int)canId),
+            IsoTpFrameCodec.BuildSingleFrame(IsoTpEndpoint.Normal(canId, 0), pdu, isCanFd: false, padding: true),
+            FrameFlags.None);
+
+    // #171: on an injected clock the window ends when that clock says so, and what its reader
+    // had not yet taken is drained by arrival stamp against the same clock's deadline. The
+    // subscription yields nothing, so the drain is the only way a frame is collected; the
+    // three frames sit at the deadline, one tick past it, and unstamped -- stamped at the
+    // drain, after the clock has left the window.
+    [Fact]
+    public async Task Functional_Collect_On_An_Injected_Clock_Drains_By_That_Clocks_Deadline()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        clock.Advance(TimeSpan.FromMilliseconds(1)); // a zero stamp reads as "unstamped"
+        var service = new StarvedReaderBusService { HoldFrames = true };
+        using var client = new IsoTpFunctionalClient(service, 0x7DF, 0x7E8, 0x7EF, FastOptions(),
+            ownsService: true, actor);
+
+        var window = TimeSpan.FromMilliseconds(100);
+        var call = client.SendAndCollectAsync(new byte[] { 0x22, 0xF1, 0x90 }, window);
+        await clock.WaitUntilTimerArmedAsync(actor, window, ShortTimeout);
+        // The clock has not moved since the collection read it, so its deadline is this.
+        long deadline = actor.TimeSource.GetTimestamp()
+            + (long)(window.TotalSeconds * actor.TimeSource.Frequency);
+        service.Deliver(SingleFrameView(0x7E8, new byte[] { 0x62, 0xF1, 0x90, 0x01 }), deadline);
+        service.Deliver(SingleFrameView(0x7E9, new byte[] { 0x62, 0xF1, 0x90, 0x02 }), deadline + 1);
+        service.Deliver(SingleFrameView(0x7EA, new byte[] { 0x62, 0xF1, 0x90, 0x03 }));
+        await clock.AdvanceAsync(window + TimeSpan.FromMilliseconds(1));
+
+        var responses = await call.WaitAsync(ShortTimeout);
+        responses.Should().ContainSingle().Which.SourceCanId.Should().Be(0x7E8u,
+            "only the frame stamped inside the window, on the window's own clock, is this collection's");
+    }
+
+    // #171: a frame event built without a host stamp is stamped from the collector's clock,
+    // not from Stopwatch, or it could not be compared with a deadline on an injected clock.
+    [Fact]
+    public void An_Unstamped_Functional_Response_Is_Stamped_From_The_Collectors_Clock()
+    {
+        var unstamped = new CanFrameEvent(SingleFrameView(0x7E8, new byte[] { 0x7E, 0x00 }),
+            isEcho: false, TimeSpan.Zero);
+
+        IsoTpFunctionalClient.TryParseFunctionalResponse(unstamped, out var response, () => 42)
+            .Should().BeTrue();
+        response!.HostArrivalTimestamp.Should().Be(42);
     }
 }
