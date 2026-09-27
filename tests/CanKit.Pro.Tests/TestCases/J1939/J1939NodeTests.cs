@@ -263,16 +263,17 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         loser.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
     }
 
-    // The NAME check is the Address Claim half of the self-traffic gap (#94). The subscription
-    // opts into echoes — the flag marks the host, not the node, or a sibling's claim would
-    // vanish — so this node's own claim comes back on both kinds of echo bus, and only the
-    // flagging one sets IsEcho. Equal NAME fails HasHigherClaimPriorityThan in both directions,
-    // so without the check the node takes the "peer loses, re-announce" branch against itself
-    // and re-announces for as long as the echo keeps arriving.
+    // The transmit ledger is the Address Claim half of the self-traffic gap (#94, #168). The
+    // subscription opts into echoes — the flag marks the host, not the node, or a sibling's
+    // claim would vanish — so this node's own claim comes back on both kinds of echo bus, and
+    // only the flagging one sets IsEcho. Equal NAME fails HasHigherClaimPriorityThan in both
+    // directions, so a node that treated its own echo as a peer would take the "peer loses,
+    // re-announce" branch against itself and re-announce for as long as the echo kept arriving.
     //
     // The two-node test above only shows that a *different* NAME is still arbitration input. It
-    // says nothing about our own. Both worlds, because deleting the check as "the echo gate
-    // covers it" is green on a flagging bus and a re-announce loop on Virtual.
+    // says nothing about our own. Both worlds, because deleting the ledger match as "the echo
+    // gate covers it" is green on a flagging bus and a re-announce loop on Virtual. A peer that
+    // really does share this NAME is the next test: that one must not be dropped with the echo.
     [Theory]
     [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
     public async Task A_Node_Does_Not_Arbitrate_Against_Its_Own_Name(EchoWorld world)
@@ -312,25 +313,13 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref ownClaims).Should().Be(1,
             "the node's own Address Claim comes back as an echo and must not be re-announced");
 
-        // A second node configured with this NAME is the same early return. It is not our
-        // transmit, so the observation count goes up by the injected frame alone.
-        const uint afterSameName = 0xFEF5u;
-        var sameNameSeen = WaitForMessageAsync(node, m => m.Pgn == afterSameName, ShortTimeout);
-        echo.InjectPeerFrame(AddressClaim(sourceAddress: 0x11, nameBytes));
-        echo.InjectPeerFrame(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, afterSameName, sourceAddress: 0x33),
-            new byte[] { 2 }, isExtendedFrame: true));
-        await sameNameSeen;
-        Volatile.Read(ref ownClaims).Should().Be(2,
-            "a claim carrying our NAME is ignored, whether it is our echo or a peer's");
-
-        // And the check is not "ignore every claim". A worse NAME on our address still loses,
+        // And the ledger is not "ignore every claim". A worse NAME on our address still loses,
         // and we re-announce exactly once. The re-announce is a transmit, so it is counted when
         // it hits the wire; the following barrier is what says the reader has been through it.
         var worse = Name(0x000200).ToBytes();
         echo.InjectPeerFrame(AddressClaim(sourceAddress: 0x11, worse));
         var until = DateTime.UtcNow + ShortTimeout;
-        while (Volatile.Read(ref ownClaims) < 3 && DateTime.UtcNow < until)
+        while (Volatile.Read(ref ownClaims) < 2 && DateTime.UtcNow < until)
             await Task.Delay(5);
         const uint afterWorse = 0xFEF6u;
         var worseSeen = WaitForMessageAsync(node, m => m.Pgn == afterWorse, ShortTimeout);
@@ -338,8 +327,179 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             (int)J1939Id.ComposePgn(6, afterWorse, sourceAddress: 0x33),
             new byte[] { 3 }, isExtendedFrame: true));
         await worseSeen;
-        Volatile.Read(ref ownClaims).Should().Be(3,
+        Volatile.Read(ref ownClaims).Should().Be(2,
             "a contending peer with a worse NAME is answered with one re-announcement, not a loop");
+    }
+
+    // #168. SAE J1939-81 §4.4.3.3 keeps the address only for the numerically lower NAME, by
+    // retransmitting Address Claimed. An equal NAME is not lower for either CA, so that
+    // retransmission would never stop, and the old "drop every frame that carries our NAME"
+    // filter — the echo check — let both devices finish Claimed. The echo is the frame this
+    // node sent; a second device with the same NAME is a contest, and the contest ends in
+    // Cannot Claim. Both echo worlds: on a flagging bus the peer is not an echo, on Virtual
+    // nothing is flagged and only the transmit ledger can tell them apart.
+    //
+    // Arbitrary addressing is on so a scan of 0x80..0xF7 would be visible. §4.4.3.3 offers
+    // that recovery to the CA whose NAME lost, not to a tie, and a different address would
+    // not make the NAME unique.
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task Equal_Name_On_The_Same_Address_Goes_To_Cannot_Claim(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        var name = Name(1);
+        var nameBytes = name.ToBytes();
+        using var node = J1939Node.Open(echo.Bus, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+
+        int claimsAtOurAddress = 0;
+        var cannotClaim = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        echo.Bus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 8) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == J1939Pgn.NullAddress
+                && e.CanFrame.Data.ToArray().SequenceEqual(nameBytes))
+            {
+                cannotClaim.TrySetResult(true);
+                return;
+            }
+            if (fields.SourceAddress == 0x11 && e.CanFrame.Data.ToArray().SequenceEqual(nameBytes))
+                Interlocked.Increment(ref claimsAtOurAddress);
+        };
+
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        node.Address.Should().Be((byte)0x11);
+
+        // The claim's echo has to leave the transmit ledger before the peer frame, or the peer
+        // is the one frame we still owe ourselves and the real echo is what looks like the contest.
+        // Either order ends in Cannot Claim; the barrier just makes the count below mean
+        // "the inject, and no re-announce" rather than depending on which frame was swallowed.
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        echo.InjectPeerFrame(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true));
+        await barrier;
+        Volatile.Read(ref claimsAtOurAddress).Should().Be(1);
+
+        var lost = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(e);
+        };
+        echo.InjectPeerFrame(AddressClaim(sourceAddress: 0x11, nameBytes));
+        var transition = await lost.Task.AsTaskWithTimeout(ShortTimeout);
+
+        transition.ContendingSourceAddress.Should().Be((byte)0x11);
+        transition.ContendingName.Should().Be(name);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+        node.Address.Should().BeNull("an equal NAME is not sent off to the arbitrary-address field");
+
+        await cannotClaim.Task.AsTaskWithTimeout(ShortTimeout);
+        Volatile.Read(ref claimsAtOurAddress).Should().Be(2,
+            "the peer's claim is on the bus, and we did not re-announce ours at them");
+    }
+
+    // Two CAs, one NAME, one SA (#168). The single-node inject above cannot see the case the
+    // early return was papering over: each side's claim is the other's peer, and each side's
+    // echo — when the bus has one — is its own. Neither NAME wins §4.4.3.3, so both finish
+    // Cannot Claim rather than re-announcing.
+    [Fact]
+    public async Task AddressClaim_TwoNodes_SameAddress_EqualName_CannotClaim()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+
+        var name = Name(identity: 0x0000AA);
+        var optsA = new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
+            EnableArbitraryAddressClaiming = true,
+        };
+        var optsB = new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
+            EnableArbitraryAddressClaiming = true,
+        };
+
+        using var nodeA = J1939Node.Open(busA, optsA);
+        using var nodeB = J1939Node.Open(busB, optsB);
+
+        var taskA = nodeA.ClaimAddressAsync(0x50);
+        var taskB = nodeB.ClaimAddressAsync(0x50);
+
+        AssertEqualNameContest(nodeA, await ObserveClaim(taskA));
+        AssertEqualNameContest(nodeB, await ObserveClaim(taskB));
+    }
+
+    // Same contest on one service. On a flagging adapter every frame either node sends is
+    // marked IsEcho, because the flag identifies the host and not the node — the reason the
+    // echo cannot be filtered out by that bit, and the reason equal NAME used to be dropped
+    // along with it (#23, #168).
+    [Fact]
+    public async Task Two_Nodes_Sharing_One_Service_Equal_Name_Cannot_Claim()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var name = Name(identity: 0x0000AA);
+        var optsA = new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
+            EnableArbitraryAddressClaiming = true,
+        };
+        var optsB = new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
+            EnableArbitraryAddressClaiming = true,
+        };
+
+        using var nodeA = J1939Node.Open(service, optsA);
+        using var nodeB = J1939Node.Open(service, optsB);
+
+        var taskA = nodeA.ClaimAddressAsync(0x50);
+        var taskB = nodeB.ClaimAddressAsync(0x50);
+        AssertEqualNameContest(nodeA, await ObserveClaim(taskA));
+        AssertEqualNameContest(nodeB, await ObserveClaim(taskB));
+    }
+
+    private static async Task<Exception?> ObserveClaim(Task claim)
+    {
+        try
+        {
+            await claim.WithTimeout(ShortTimeout);
+            return null;
+        }
+        catch (Exception ex) when (ex is not TimeoutException)
+        {
+            return ex;
+        }
+    }
+
+    // Neither CA wins an equal NAME (§4.4.3.3), so the claim faults and the address is empty.
+    // A scanned fallback (0x80..) would show up as Claimed at some other SA.
+    private static void AssertEqualNameContest(IJ1939Node node, Exception? outcome)
+    {
+        // The claim task faults when the tie is seen during the window. A CA that already
+        // finished Claimed and is then unseated has nothing left to fault; the state is the
+        // result either way. A scanned fallback would be Claimed at some other SA.
+        if (outcome is not null)
+        {
+            outcome.Should().BeOfType<J1939CannotClaimException>();
+            ((J1939CannotClaimException)outcome).PreferredAddress.Should().Be((byte)0x50);
+        }
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim,
+            outcome is null
+                ? "the claim completed, so the tie had to unseat it afterwards"
+                : "the claim lost the tie");
+        node.Address.Should().BeNull();
     }
 
     private static CanFrame AddressClaim(byte sourceAddress, byte[] nameBytes) =>

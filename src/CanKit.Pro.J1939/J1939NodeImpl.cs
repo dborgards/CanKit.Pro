@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common;
+using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939Tp;
@@ -98,11 +99,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // most recently committed value; writes happen only on the actor loop.
     private int _addressStore = -1;
 
-    // The single-frame application PGNs this node has transmitted and not yet seen come back:
-    // a received frame equal to one of them is this node's own echo, whatever address the node
-    // holds when the echo is finally processed (#121). Bounded, oldest out: an entry only matters
-    // while the echo could still arrive, and a bus that never echoes would otherwise grow it
-    // without end. Written from the send path, read and pruned on the actor loop.
+    // The frames this node has transmitted and not yet seen come back: single-frame application
+    // PGNs, and Address Claim / Cannot Claim. A received frame equal to one of them is this
+    // node's own echo, whatever address the node holds when the echo is finally processed
+    // (#121, #168). Bounded, oldest out: an entry only matters while the echo could still
+    // arrive, and a bus that never echoes would otherwise grow it without end. Written from
+    // the send path, read and pruned on the actor loop.
     private readonly List<(uint CanId, byte[] Payload)> _ownFrames = new();
     private readonly object _ownFramesGate = new();
     private const int OwnFramesCapacity = 64;
@@ -194,8 +196,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // drop a sibling node's Address Claim, so two local nodes contending for the same
             // address would both believe they had won it without ever arbitrating their NAMEs.
             //
-            // Self-identification stays where it can actually be done -- at the node, by NAME,
-            // in HandleIncomingAddressClaim.
+            // Self-identification stays where it can actually be done -- at the node, by the
+            // frame this node transmitted, in HandleIncomingAddressClaim. Equal NAME is another
+            // CA (SAE J1939-81 §4.4.2, #168).
             _subscription = _service.Subscribe(f => f.Frame.IsExtendedFrame, includeEcho: true);
         }
         catch
@@ -514,6 +517,16 @@ internal sealed class J1939NodeImpl : IJ1939Node
             ArbitraryScanStart = scanStart,
         };
         TransmitAddressClaimConfirmed(sourceAddress: preferredAddress);
+
+        // The peer's claim may already have been through this loop, before the claim was
+        // pending. Their NAME is not lower than ours, so §4.4.3.3 does not have them
+        // retransmit it — this round would otherwise finish uncontested. The announce above
+        // is what unseats them; the loss here is ours.
+        if (_equalNameHeardOn == preferredAddress)
+        {
+            _equalNameHeardOn = null;
+            LoseEqualNameContest(preferredAddress, _name);
+        }
     }
 
     // J1939-81 §4.5: the arbitrary address field spans 0x80..0xF7.
@@ -644,31 +657,53 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 $"J1939 address claim TX failed for SA 0x{preferredAddress:X2}.", error));
     }
 
-    private void HandleIncomingAddressClaim(byte peerSa, byte[] payload)
+    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload)
     {
         if (payload.Length < 8) return; // malformed
         var peerName = J1939Name.FromBytes(payload); // the wire order, not the host's (#55)
 
-        // A frame carrying our own NAME cannot be a claim we have to arbitrate against: equal
-        // NAME fails HasHigherClaimPriorityThan in both directions, so both parties would take
-        // the "peer loses, re-announce" branch below and re-announce at each other forever.
+        // SAE J1939-81 §4.4.2: a CA that receives what it transmits has to tell its own Address
+        // Claimed from another CA's, or a duplicate address cannot be detected. Only an echo-mode
+        // bus hands the transmit back (VirtualBusHub delivers it to the sender only then). On any
+        // other bus the frame is another CA, even when the eight bytes match ours — swallowing it
+        // as the echo we are still waiting for is how both stayed Claimed (#168).
         //
-        // It also remains this node's local-TX filter, and #23 did not change that. The
-        // subscription opts into echoes (it must -- the echo bit marks the host, not the node, so
-        // filtering on it would swallow a sibling node's claim), which means this node's own
-        // Address Claim still arrives here on a flagging adapter. NAME equality is what stops it
-        // being arbitrated against (#23, Bugbot 3600783801).
-        //
-        // So one line covers two cases: our own claim coming back, and two nodes genuinely
-        // configured with the same NAME, which SAE J1939-81 §4.4.3 does not permit. We cannot win
-        // against such a peer and must not fight it, so the claim is ignored either way. Do not
-        // remove this on the assumption that the echo gate handles the first case.
-        if (peerName.Value == _name.Value) return;
+        // The match is the frame we put on the wire, the same way an application PGN is known
+        // (#121). The subscription opts into echoes — the flag marks the host, not the node, so
+        // filtering on it would swallow a sibling node's claim (#23). One identical frame still
+        // outstanding is the echo; the next one is the peer. Do not go back to dropping every
+        // equal NAME on the assumption that the echo gate covers this.
+        if (BusEchoesOwnTransmits && TryTakeOwnFrame(canId, payload)) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
         // are in the middle of claiming — in which case a Cannot-Claim cannot contest us
         // (that peer has already lost).
         if (peerSa == J1939Pgn.NullAddress) return;
+
+        // SAE J1939-81 §4.4.3.3: only the numerically lower NAME keeps the address, and it does
+        // so by transmitting Address Claimed again. An equal NAME is not lower for either CA, so
+        // HasHigherClaimPriorityThan is false both ways and the "peer loses, re-announce" branch
+        // below would answer forever. §4.4.3 does not name a winner for that tie, and it does
+        // not say to claim a different address — that sentence is for the CA whose NAME is
+        // higher. The address cannot be kept: Cannot Claim (§4.4.3.4), with no further scan.
+        if (peerName.Value == _name.Value)
+        {
+            if (ContestsOurAddress(peerSa))
+            {
+                // This observation is the contest. A claim we have not started yet must not
+                // also lose on the strength of a frame we are answering right now.
+                if (_equalNameHeardOn == peerSa) _equalNameHeardOn = null;
+                LoseEqualNameContest(peerSa, peerName);
+            }
+            else
+            {
+                // Heard before this CA was claiming or holding peerSa — BeginClaim may still
+                // be queued behind this frame (#168). Remember the address so that claim loses
+                // too; §4.4.3.3 will not make the other CA retransmit an equal NAME for us.
+                _equalNameHeardOn = peerSa;
+            }
+            return;
+        }
 
         var pending = _pendingClaim;
         if (pending is not null && peerSa == pending.PreferredAddress)
@@ -717,7 +752,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 return;
             }
 
-            // Peer's NAME is >= ours: they lose. Re-announce our own claim so they hear it,
+            // Peer's NAME is numerically greater: they lose. Equal NAME never reaches here
+            // (§4.4.3.3, #168). Re-announce our own claim so they hear it,
             // then keep waiting on our deadline. A round still waiting its backoff has nothing
             // to re-announce yet: it starts now, and its announcement is the answer (Codex on
             // #153).
@@ -771,6 +807,55 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
     }
 
+    // Set when an Address Claimed carrying our NAME arrives for an SA we are not claiming or
+    // holding. Actor-only. Consumed by the claim that then tries that SA.
+    private byte? _equalNameHeardOn;
+
+    // WorkMode.Echo is what makes the adapter deliver our own transmit (VirtualBusHub).
+    // Without it there is no echo to filter, and an identical frame is the other CA.
+    private bool BusEchoesOwnTransmits =>
+        _service.Bus.Options.WorkMode == ChannelWorkMode.Echo;
+
+    // The address we are claiming, or the one we hold. A peer on any other SA is not this contest.
+    private bool ContestsOurAddress(byte peerSa)
+    {
+        var pending = _pendingClaim;
+        if (pending is not null && peerSa == pending.PreferredAddress)
+            return true;
+        return ClaimState == J1939ClaimState.Claimed && _addressStore >= 0 && peerSa == (byte)_addressStore;
+    }
+
+    // Equal NAME on our address. The pending-loss and unseated-loss paths below, without the
+    // arbitrary-address scan: a different address would not make the NAME unique, and §4.4.3.3
+    // does not grant that recovery to a tie (#168).
+    private void LoseEqualNameContest(byte peerSa, J1939Name peerName)
+    {
+        var pending = _pendingClaim;
+        if (pending is not null && peerSa == pending.PreferredAddress)
+        {
+            pending.Deadline?.Dispose();
+            pending.Deadline = null;
+            pending.StartRound = null;
+            _pendingClaim = null;
+            WriteAddress(null);
+            RebindTransportOnLoop(J1939Pgn.NullAddress);
+            SetClaimState(J1939ClaimState.CannotClaim, address: null,
+                contendingSa: peerSa, contendingName: peerName);
+            _lostClaim = pending;
+            ScheduleCannotClaim();
+            return;
+        }
+
+        if (ClaimState != J1939ClaimState.Claimed || _addressStore < 0 || peerSa != (byte)_addressStore)
+            return;
+
+        WriteAddress(null);
+        RebindTransportOnLoop(J1939Pgn.NullAddress);
+        SetClaimState(J1939ClaimState.CannotClaim, address: null,
+            contendingSa: peerSa, contendingName: peerName);
+        ScheduleCannotClaim();
+    }
+
     private void AnswerRequestForAddressClaimed()
     {
         switch ((J1939ClaimState)Volatile.Read(ref _claimStateStore))
@@ -817,6 +902,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
             destinationAddress: J1939Pgn.GlobalAddress);
+        // Before it is on the wire: the echo may be back before SendConfirmed returns, and that
+        // echo is how HandleIncomingAddressClaim tells our claim from a peer with the same NAME.
+        // A bus that does not echo never delivers this frame; recording it would leave an entry
+        // that later swallows the peer's identical claim (#168).
+        if (BusEchoesOwnTransmits) RecordOwnFrame(canId, payload);
         // Called directly rather than through Task.Run: SendConfirmed's synchronous part is
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
@@ -1079,6 +1169,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Fire-and-forget: address-claim traffic doesn't need a task, but we still want a
         // background exception if the driver rejects it. SendConfirmed is used consistently
         // with the rest of the CanKit.Pro stack. No Task.Run hop in front of it (#58).
+        // Recorded first, as in SendCoreAsync: a re-announce's echo is this frame coming back,
+        // and it must not be arbitrated as a peer that shares our NAME (#168). Same gate as
+        // the initial claim — no echo, no entry.
+        if (BusEchoesOwnTransmits) RecordOwnFrame(canId, payload);
         _ = TransmitFrameAsync(canId, payload, afterHandoff);
     }
 
@@ -1120,7 +1214,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // needs to see even from a peer wrongly using our address, and a frame addressed
                 // to this node -- are only distinguishable after the id is decomposed. So the
                 // self-traffic drop lives in HandleIncomingFrame, past the Address Claim branch,
-                // and Address Claim filters by NAME instead (#95).
+                // and Address Claim tells this node's own frame from a peer's by the transmit
+                // ledger, not by NAME (#95, #168).
                 var frame = frameEvent.Frame;
                 if (!frame.IsExtendedFrame) continue;
                 var fields = J1939Id.Decompose((uint)frame.ID);
@@ -1263,7 +1358,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // Address Claim (PGN 0xEE00): drive the state machine and stop; not an application PGN.
             if (J1939Pgn.IsAddressClaim(pgn))
             {
-                HandleIncomingAddressClaim(sa, payload);
+                HandleIncomingAddressClaim(canId, sa, payload);
                 return;
             }
 
