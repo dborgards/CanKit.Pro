@@ -1449,6 +1449,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         byte[] pdu = Enumerable.Range(0, 20).Select(i => (byte)(i + 1)).ToArray();
         var sendTask = sender.SendAsync(pdu);
 
+        // The FC answering the FF comes first -- CF1 is not sent without it -- and is not one of
+        // the deferred FCs below; its permit is taken here so each wait in the loop is for the FC
+        // the peer sent while that CF's confirmation was parked (Codex on #185).
+        (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue("the sender's bus must see the FC answering the FF");
+
         // Two block-ending CFs (CF1 then CF2): for each, wait until confirm is parked (FC already
         // sent by the peer handler above), then release so deferred FC is applied.
         for (int i = 0; i < 2; i++)

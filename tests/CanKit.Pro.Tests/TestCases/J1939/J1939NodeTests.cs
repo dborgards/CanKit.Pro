@@ -1516,11 +1516,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var loserActor = clock.NewActor();
 
         int cannotClaims = 0;
+        using var cannotClaimSeen = new SemaphoreSlim(0);
         busC.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress) Interlocked.Increment(ref cannotClaims);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+            {
+                Interlocked.Increment(ref cannotClaims);
+                cannotClaimSeen.Release();
+            }
         };
 
         var announce = TimeSpan.FromMilliseconds(80);
@@ -1542,11 +1547,19 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             await act.Should().ThrowAsync<J1939CannotClaimException>();
         } // the using a caller ends on the exception
 
-        // A backoff that survived the dispose would have fired by now.
+        // The claim faulted once its Cannot Claim was handed to the driver; the spectator's copy
+        // still crosses the hub on its own thread, so it is awaited from the observer (Codex on
+        // #185).
+        (await cannotClaimSeen.WaitAsync(ShortTimeout)).Should().BeTrue(
+            "the claim faulted only after its Cannot Claim went out, so disposing on the exception cannot suppress it");
+
+        // A backoff that survived the dispose would have fired by now; its frame gets the same
+        // hub crossing, as a wall window after the clock has moved.
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
         await clock.SettleAsync();
-        Volatile.Read(ref cannotClaims).Should().Be(1,
-            "the claim faulted only after its Cannot Claim went out, so disposing on the exception cannot suppress it");
+        (await cannotClaimSeen.WaitAsync(TimeSpan.FromMilliseconds(200))).Should().BeFalse(
+            "a disposed node's backoff must not send a second Cannot Claim");
+        Volatile.Read(ref cannotClaims).Should().Be(1);
     }
 
     // Codex on #153: a Cannot Claim carries the null address, so two nodes answering the same
