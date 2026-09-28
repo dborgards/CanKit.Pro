@@ -3304,9 +3304,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = Open(NewSession(), 0);
         using var service = new CanBusService(bus);
-        var actor = new ProtocolActor();
+        using var actor = new ProtocolActor(); // disposed early below, on purpose; Dispose is idempotent
         var (node, channels, emitted) = NodeOnScriptedTransport(service, actor);
-        using var _node = node; // disposed again below, on purpose; Dispose is idempotent
+        using var _node = node; // likewise
         var reported = new List<Exception>();
         node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
 
@@ -3330,10 +3330,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = Open(NewSession(), 0);
         using var service = new CanBusService(bus);
-        var actor = new ProtocolActor();
+        using var actor = new ProtocolActor();
         var (node, channels, emitted) = NodeOnScriptedTransport(service, actor);
         using var _node = node;
-        using var _actor = actor;
 
         var placeholder = channels.Single();
         await placeholder.WaitForRequestAsync(1, ShortTimeout);
@@ -3360,10 +3359,9 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = Open(NewSession(), 0);
         using var service = new CanBusService(bus);
-        var actor = new ProtocolActor();
+        using var actor = new ProtocolActor();
         var (node, channels, emitted) = NodeOnScriptedTransport(service, actor);
         using var _node = node;
-        using var _actor = actor;
 
         await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
         ScriptedTpChannel claimed;
