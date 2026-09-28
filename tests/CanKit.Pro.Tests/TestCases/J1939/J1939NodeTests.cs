@@ -2914,42 +2914,46 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task ReClaim_RejectsSendUntilNewClaimSucceeds()
     {
+        // On a virtual clock (#171): the re-claim's arbitration window only ends when the test
+        // moves the clock, so the mid-claim send below is inside it however slowly the host
+        // gets there -- on the wall clock it had to land within 500 ms. What the spectator
+        // saw is awaited as a frame, not read after a 50 ms sleep.
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1); // spectator: watches which SAs appear on the wire
+        using var serviceA = new CanBusService(busA);
+        var actor = clock.NewActor();
 
-        // Give the arbitration window enough room that we can observe the mid-claim gap even on
-        // a fast Virtual bus. 500 ms is well above CI jitter but short enough to keep the test
-        // fast.
-        var opts = new J1939NodeOptions(Name(1))
+        var announce = TimeSpan.FromMilliseconds(500);
+        using var node = new J1939NodeImpl(serviceA, new J1939NodeOptions(Name(1))
         {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(500),
-        };
-        using var node = J1939Node.Open(busA, opts);
+            ClaimAnnounceTimeout = announce,
+        }, ownsService: false, actor);
 
-        // Initial claim -> we hold 0x11.
-        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
-        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
-
-        // A send with the initial claim succeeds; SA on the wire must be 0x11.
-        byte? observedSa = null;
+        var seen = new System.Collections.Concurrent.ConcurrentDictionary<uint, TaskCompletionSource<byte>>();
+        Task<byte> SourceOf(uint pgn)
+            => seen.GetOrAdd(pgn, _ => new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
         busB.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (fields.Pgn == 0xFEF3u) observedSa = fields.SourceAddress;
+            if (seen.TryGetValue(fields.Pgn, out var source)) source.TrySetResult(fields.SourceAddress);
         };
+
+        // Initial claim -> we hold 0x11.
+        await clock.RunUntilAsync(node.ClaimAddressAsync(0x11), step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+
+        // A send with the initial claim succeeds; SA on the wire must be 0x11.
+        var first = SourceOf(0xFEF3u);
         await node.SendAsync(new J1939Message(0xFEF3u, new byte[] { 1, 2, 3 })).WithTimeout(ShortTimeout);
-        await Task.Delay(50);
-        observedSa.Should().Be((byte)0x11);
+        (await first.AsTaskWithTimeout(ShortTimeout)).Should().Be((byte)0x11);
 
-        // Start a re-claim to a different preferred SA — do NOT await yet so we can inspect
-        // the mid-claim behavior. The state must transition out of Claimed immediately.
+        // Start a re-claim to a different preferred SA -- do NOT await yet so we can inspect
+        // the mid-claim behavior. Its arbitration window armed means BeginClaim has run.
         var reclaimTask = node.ClaimAddressAsync(0x22);
-
-        // Give the actor a beat to process BeginClaim.
-        for (int i = 0; i < 20 && node.ClaimState == J1939ClaimState.Claimed; i++)
-            await Task.Delay(10);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
         node.ClaimState.Should().NotBe(J1939ClaimState.Claimed,
             "starting a new claim must clear the previous Claimed state so old-SA traffic is gated off");
         node.Address.Should().BeNull(
@@ -2962,21 +2966,15 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await sendMidClaim.Should().ThrowAsync<J1939NoAddressException>();
 
         // Once the new claim completes, application traffic MUST resume on the new SA.
+        await clock.AdvanceAsync(announce);
         await reclaimTask.WithTimeout(ShortTimeout);
         node.ClaimState.Should().Be(J1939ClaimState.Claimed);
         node.Address.Should().Be((byte)0x22);
 
-        byte? postSa = null;
-        busB.FrameObserved += (_, e) =>
-        {
-            if (!e.CanFrame.IsExtendedFrame) return;
-            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (fields.Pgn == 0xFEF5u) postSa = fields.SourceAddress;
-        };
+        var post = SourceOf(0xFEF5u);
         await node.SendAsync(new J1939Message(0xFEF5u, new byte[] { 7, 8, 9 }))
             .WithTimeout(ShortTimeout);
-        await Task.Delay(50);
-        postSa.Should().Be((byte)0x22);
+        (await post.AsTaskWithTimeout(ShortTimeout)).Should().Be((byte)0x22);
     }
 
     // ---------------------------------------------------------------------------------------
