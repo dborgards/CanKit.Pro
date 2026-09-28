@@ -3252,6 +3252,140 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // ---------------------------------------------------------------------------------------
+    // #195: the transport reader's remaining exits, each driven by a scripted TP channel (the
+    // node's openTransport seam) so the datagram arrives exactly where the path is -- the
+    // real channel only gets there by a race.
+    // ---------------------------------------------------------------------------------------
+
+    private static (J1939NodeImpl Node, List<ScriptedTpChannel> Channels, List<uint> Emitted) NodeOnScriptedTransport(
+        ICanBusService service, ProtocolActor? actor = null)
+    {
+        var channels = new List<ScriptedTpChannel>();
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false, actor, openTransport: sa =>
+        {
+            var channel = new ScriptedTpChannel(sa);
+            lock (channels) channels.Add(channel);
+            return channel;
+        });
+        var emitted = new List<uint>();
+        node.MessageReceived += (_, m) => { lock (emitted) emitted.Add(m.Pgn); };
+        return (node, channels, emitted);
+    }
+
+    // A fault that is not a reassembly abort is not one peer's transfer ending: the reader
+    // reports it and stops, as it did before the abort got its own path.
+    [Fact]
+    public async Task A_Transport_Fault_That_Is_Not_An_Abort_Is_Reported()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var (node, channels, _) = NodeOnScriptedTransport(service);
+        using var _node = node;
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        var transport = channels.Single();
+        await transport.WaitForRequestAsync(1, ShortTimeout);
+        var fault = new InvalidOperationException("the channel broke");
+        transport.Fail(fault);
+
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(fault);
+        await transport.Ended.Task.AsTaskWithTimeout(ShortTimeout);
+    }
+
+    // The actor is gone while the reader has a datagram in hand: the post throws, and that is
+    // the reader's end -- quietly, as the single-frame reader stops posting after dispose. Not
+    // a background exception: nothing went wrong but the timing.
+    [Fact]
+    public async Task A_Datagram_In_Hand_When_The_Actor_Is_Gone_Ends_The_Reader_Quietly()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var actor = new ProtocolActor();
+        var (node, channels, emitted) = NodeOnScriptedTransport(service, actor);
+        using var _node = node; // disposed again below, on purpose; Dispose is idempotent
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var transport = channels.Single();
+        await transport.WaitForRequestAsync(1, ShortTimeout);
+        actor.Dispose();
+        transport.Deliver(0xFED5u);
+
+        await transport.Ended.Task.AsTaskWithTimeout(ShortTimeout);
+        // The enumeration ends before the reader's handler runs; disposing the node waits for
+        // the reader itself, so whatever it was going to report has been reported by then.
+        node.Dispose();
+        lock (reported) reported.Should().BeEmpty("a node disposed under its reader is not a fault");
+        lock (emitted) emitted.Should().BeEmpty();
+    }
+
+    // A datagram still queued on a channel the node has already replaced: the reader drops it
+    // and stops reading that channel, rather than draining it to the end.
+    [Fact]
+    public async Task A_Datagram_Queued_On_A_Replaced_Channel_Is_Dropped_And_Ends_Its_Reader()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var actor = new ProtocolActor();
+        var (node, channels, emitted) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        using var _actor = actor;
+
+        var placeholder = channels.Single();
+        await placeholder.WaitForRequestAsync(1, ShortTimeout);
+        // Queued, but not read before the claim replaces the channel.
+        placeholder.Pause();
+        placeholder.Deliver(0xFED6u);
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+        lock (channels) channels.Should().HaveCount(2, "the claim rebinds the transport to 0x31");
+        placeholder.Resume();
+
+        // The reader lets go at that datagram: it does not come back for another. (The channel
+        // is completed by the rebind, so draining it would end the reader too, one request
+        // later -- the post's own check would still drop what it read.)
+        await placeholder.Ended.Task.AsTaskWithTimeout(ShortTimeout);
+        placeholder.Requests.Should().Be(1, "the reader stops at the first datagram from a replaced channel");
+        await actor.PostAsync(() => { });
+        lock (emitted) emitted.Should().BeEmpty("the datagram came from a channel the node no longer uses");
+    }
+
+    // The emit is already posted when a rebind overtakes it on the actor: the post sees the
+    // channel replaced and drops the datagram.
+    [Fact]
+    public async Task A_Datagram_Whose_Emit_Is_Overtaken_By_A_Rebind_Is_Dropped()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var actor = new ProtocolActor();
+        var (node, channels, emitted) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        using var _actor = actor;
+
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+        ScriptedTpChannel claimed;
+        lock (channels) claimed = channels.Last();
+        claimed.SourceAddress.Should().Be(0x31);
+        await claimed.WaitForRequestAsync(1, ShortTimeout);
+
+        // Hold the actor, and queue the re-claim -- which rebinds to 0xFE first -- ahead of
+        // the emit the datagram below posts.
+        using var holding = new ManualResetEventSlim();
+        actor.Post(() => holding.Wait());
+        var reclaim = node.ClaimAddressAsync(0x32);
+        claimed.Deliver(0xFED7u);
+        await claimed.WaitForRequestAsync(2, ShortTimeout); // the emit is posted: the reader is back for more
+        holding.Set();
+
+        await reclaim.WithTimeout(ShortTimeout);
+        await actor.PostAsync(() => { });
+        lock (emitted) emitted.Should().BeEmpty("the rebind ran first; the datagram is from the replaced channel");
+    }
+
+    // ---------------------------------------------------------------------------------------
     // Bugbot 3600591980 regression: SendCoreAsync checks ClaimState/address once before
     // awaiting the wire I/O. A concurrent ClaimAddressAsync running on the actor loop can
     // clear or move the SA mid-flight, and before the fix the send task completed
@@ -4394,6 +4528,89 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref newSaStamps).Should().BeGreaterOrEqualTo(3,
             "the schedule must resume under the reclaimed SA so downstream ECUs continue " +
             "to observe the PGN under the new (correct) source address");
+    }
+    /// <summary>
+    /// A TP channel the test feeds by hand (#195): what <see cref="ReceiveAllAsync"/> yields,
+    /// and when, is the test's to decide. It can be held after an item has arrived and before it
+    /// is read -- a datagram queued on a channel -- and it reports each time its reader comes
+    /// back for more, and when that reader has let go.
+    /// </summary>
+    private sealed class ScriptedTpChannel : IJ1939TpChannel
+    {
+        private readonly Channel<object> _items = Channel.CreateUnbounded<object>();
+        private TaskCompletionSource<bool>? _paused;
+        private int _requests;
+
+        public ScriptedTpChannel(byte sourceAddress) => SourceAddress = sourceAddress;
+
+        public byte SourceAddress { get; }
+        public J1939TpOptions Options { get; } = new();
+
+        /// <summary>Completes when the reader stops enumerating this channel.</summary>
+        public TaskCompletionSource<bool> Ended { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>How often the reader has asked for an item.</summary>
+        public int Requests => Volatile.Read(ref _requests);
+
+        public void Deliver(uint pgn)
+            => _items.Writer.TryWrite(new J1939TpDatagram(pgn, 0x77, J1939Pgn.GlobalAddress, J1939TpKind.Bam, new byte[9]));
+
+        public void Fail(Exception error) => _items.Writer.TryWrite(error);
+
+        public void Pause() => Volatile.Write(ref _paused, new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously));
+
+        public void Resume() => Volatile.Read(ref _paused)?.TrySetResult(true);
+
+        /// <summary>Waits until the reader has asked for an item <paramref name="count"/> times.</summary>
+        public async Task WaitForRequestAsync(int count, TimeSpan timeout)
+        {
+            var deadline = DateTime.UtcNow + timeout;
+            while (Volatile.Read(ref _requests) < count)
+            {
+                if (DateTime.UtcNow > deadline)
+                    throw new TimeoutException($"The reader asked {Volatile.Read(ref _requests)} times, not {count}.");
+                await Task.Delay(1);
+            }
+        }
+
+        public async IAsyncEnumerable<J1939TpDatagram> ReceiveAllAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            try
+            {
+                while (true)
+                {
+                    Interlocked.Increment(ref _requests);
+                    if (!await _items.Reader.WaitToReadAsync(cancellationToken)) yield break;
+                    // Held here: the item has arrived, and is not read until the test says so.
+                    var paused = Volatile.Read(ref _paused);
+                    if (paused is not null) await paused.Task.WaitAsync(cancellationToken);
+                    if (!_items.Reader.TryRead(out var item)) continue;
+                    if (item is Exception error) throw error;
+                    yield return (J1939TpDatagram)item;
+                }
+            }
+            finally
+            {
+                Ended.TrySetResult(true);
+            }
+        }
+
+        public Task<J1939TpDatagram> ReceiveAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task SendBamAsync(uint pgn, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task SendCmAsync(uint pgn, byte destinationAddress, ReadOnlyMemory<byte> payload,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public event EventHandler<J1939TpDatagram>? DatagramReceived { add { } remove { } }
+        public event EventHandler<Exception>? BackgroundExceptionOccurred { add { } remove { } }
+
+        // As the real channel: the inbox is completed, what is queued in it can still be read.
+        public void Dispose() => _items.Writer.TryComplete();
     }
 }
 
