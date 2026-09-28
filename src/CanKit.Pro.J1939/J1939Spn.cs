@@ -101,25 +101,28 @@ public static class J1939Spn
     /// sign bit clear: <c>0x7B</c>, <c>0x7C</c>..<c>0x7D</c>, <c>0x7E</c>, <c>0x7F</c>.
     /// </para>
     /// <para>
-    /// Sub-byte parameters use the same code pattern scaled to the field: the leading nibble for
-    /// 4..7 bits (<c>0xB</c>, <c>0xC</c>..<c>0xD</c>, <c>0xE</c>, <c>0xF</c>) and the leading two
-    /// bits for 2..3 bits (<c>0b10</c> error, <c>0b11</c> not available), matching the 4-bit and
-    /// 2-bit tables in §5.1.1. Widths the standard does not tabulate (3, 5..7, and anything that
-    /// is not 8/16/32 above a byte) are handled by that same leading-group rule. A 1-bit field
-    /// has no room for an indicator and is always <see cref="J1939SpnValueKind.Valid"/>, as is a
-    /// signed field narrower than a byte — J1939-71 defines no indicator codes there, and
-    /// inventing some would report real measurements as missing.
+    /// Sub-byte parameters carry the codes as <b>individual values at the top of the field</b>
+    /// ("terminal codes"), matching the 4-bit and 2-bit tables in §5.1.1: 4 bits reads
+    /// <c>0xB</c> parameter-specific, <c>0xC</c>..<c>0xD</c> reserved, <c>0xE</c> error and
+    /// <c>0xF</c> not available; 2 bits reads <c>0b10</c> error and <c>0b11</c> not available.
+    /// The widths the standard does not tabulate keep that shape, scaled to the field top rather
+    /// than to a leading group: 5..7 bits take all five codes (5 bits: 27 parameter-specific,
+    /// 28..29 reserved, 30 error, 31 not available), and 3 bits takes the two of the 2-bit table
+    /// (<c>0b110</c> error, <c>0b111</c> not available). Above a byte, widths other than
+    /// 8/16/32 use the leading byte like the tabulated ones. A 1-bit field has no room for an
+    /// indicator and is always <see cref="J1939SpnValueKind.Valid"/>, as is a signed field
+    /// narrower than a byte — J1939-71 defines no indicator codes there, and inventing some would
+    /// report real measurements as missing.
     /// </para>
     /// <para>
-    /// Because the leading group is a fixed size per width class, the indicator <em>fraction</em>
-    /// of the range is whatever the tabulated width of that class already spends: about 2% for a
-    /// byte or wider, five sixteenths for 4..7 bits, and one half for 2..3 bits. That last one is
-    /// the widest reading here — a <b>3-bit</b> field classifies raw 4..7 as indicators, so a
-    /// parameter genuinely carrying eight states would see half of them reported as "no reading".
-    /// Scaling by value instead of by leading group would cost such a field two states rather
-    /// than four; J1939-71 tabulates neither, and the choice is open as issue #99. Every width
-    /// above, inferred ones included, is pinned by known-answer tests so it cannot drift
-    /// silently.
+    /// The terminal reading for the untabulated sub-byte widths is taken from how real SPNs of
+    /// those widths are defined, not from the tables (issue #99). SPN 527 "Cruise Control
+    /// States" (CCVS1, PGN 65265) is a 3-bit field whose raw 4 and 5 are Resume and Set; the
+    /// leading-group reading this replaced reported them as errors. SPN 527 also defines raw 6
+    /// as a state (<c>AccelOverride</c>), which this reading reports as an error — a rule by
+    /// width cannot know a parameter's own table, and a caller that has it should decode such a
+    /// field from <see cref="ExtractRaw"/> instead. Every width above is pinned by known-answer
+    /// tests so it cannot drift silently.
     /// </para>
     /// </remarks>
     public static J1939SpnValueKind Classify(ulong raw, int bitLength, bool isSigned = false)
@@ -129,17 +132,23 @@ public static class J1939Spn
         // No indicator codes are defined for these, so every bit pattern is a measurement.
         if (bitLength == 1 || (isSigned && bitLength < 8)) return J1939SpnValueKind.Valid;
 
-        int leadBits = bitLength >= 8 ? 8 : (bitLength >= 4 ? 4 : 2);
-        ulong lead = raw >> (bitLength - leadBits);
+        // Below a byte the codes are single values at the top of the field; a 2- or 3-bit field
+        // has room for the 2-bit table's two only.
+        if (bitLength < 8) return Band(raw, (1UL << bitLength) - 1UL, allFiveCodes: bitLength >= 4);
 
-        // The codes are the top five of the leading group; for a signed parameter the group's
-        // top is the largest positive value, so the sign bit is clear and every code halves.
-        ulong top = (1UL << (leadBits - (isSigned ? 1 : 0))) - 1UL;   // 0xFF / 0x7F / 0xF / 0x3
-        if (lead == top) return J1939SpnValueKind.NotAvailable;
-        if (leadBits == 2) return lead == top - 1 ? J1939SpnValueKind.Error : J1939SpnValueKind.Valid;
-        if (lead == top - 1) return J1939SpnValueKind.Error;
-        if (lead == top - 2 || lead == top - 3) return J1939SpnValueKind.Reserved;
-        if (lead == top - 4) return J1939SpnValueKind.ParameterSpecific;
+        // A byte or wider: the codes are the top five values of the leading byte. For a signed
+        // parameter the byte's top is the largest positive value, so the sign bit is clear.
+        ulong lead = raw >> (bitLength - 8);
+        return Band(lead, isSigned ? 0x7FUL : 0xFFUL, allFiveCodes: true);
+    }
+
+    private static J1939SpnValueKind Band(ulong value, ulong top, bool allFiveCodes)
+    {
+        if (value == top) return J1939SpnValueKind.NotAvailable;
+        if (value == top - 1) return J1939SpnValueKind.Error;
+        if (!allFiveCodes) return J1939SpnValueKind.Valid;
+        if (value == top - 2 || value == top - 3) return J1939SpnValueKind.Reserved;
+        if (value == top - 4) return J1939SpnValueKind.ParameterSpecific;
         return J1939SpnValueKind.Valid;
     }
 
