@@ -10,11 +10,13 @@ builds can be different code, so the package version alone does not identify one
 | Version you see | What it is |
 | --- | --- |
 | `X.Y.Z` | A release. The `vX.Y.Z` tag is the code. |
-| `0.0.0` | A local build (or a source archive) with no version passed in. |
+| `0.0.0` | A local build (or a build from a source archive) with no version passed in. |
 | `0.0.0-unversioned.<n>` | A CI build where GitVersion could not name the commit; `<n>` is the workflow run number. |
 
-Both `0.0.0` forms still identify their code: the commit is recorded in the assembly and in the
-package.
+Both `0.0.0` forms built from a git checkout still identify their commit: it is recorded in the
+assembly and in the package. A build from a downloaded source archive has no `.git` directory, so
+neither carries a commit (the informational version is a bare `0.0.0`); say where the archive came
+from instead, for example the release tag or commit it was downloaded for.
 
 ### Read the commit from the assembly
 
@@ -48,4 +50,6 @@ A `.nupkg` is a zip file. Its `.nuspec` names the commit the package was packed 
 For a release, the package version is enough. For any `0.0.0` build, also give the informational
 version (the `+<sha>` part) from above, and say whether the build was your own or a CI artifact.
 The commit decides which code the report is about; without it a `0.0.0` report cannot be
-reproduced.
+reproduced. The commit is the checkout's `HEAD`, not the working tree: if the build had
+uncommitted changes, say so and attach the diff (or push a commit containing them), because two
+different local builds of one `HEAD` carry the same string.
