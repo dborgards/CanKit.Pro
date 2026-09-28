@@ -503,6 +503,106 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
+    // The two timeout kinds for one node do not say anything about each other, so neither keeps
+    // the other from folding: a node watched by heartbeat and by node guarding would otherwise
+    // bring the unbounded backlog back.
+    [Fact]
+    public async Task Heartbeat_And_Guarding_Timeouts_Of_One_Node_Do_Not_Keep_Each_Other_Apart()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-two-kinds"));
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true, clock);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int heartbeats = 0, guardings = 0, syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.HeartbeatTimeout += (_, _) => Interlocked.Increment(ref heartbeats);
+        node.NodeGuardingTimeout += (_, _) => Interlocked.Increment(ref guardings);
+
+        try
+        {
+            Settle(node);
+            node.AddHeartbeatConsumer(GuardedNode, GuardWindow);
+            node.StartNodeGuardingConsumer(GuardedNode, GuardWindow, lifeTimeFactor: 1);
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            const int Expiries = 4;
+            for (int i = 0; i < Expiries; i++) Advance(clock, node, GuardWindow);
+
+            node.QueuedEventCount.Should().Be(2, "one timeout of each kind waits, however often they expired");
+            node.CoalescedEventCount.Should().Be(2 * (Expiries - 1));
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => Volatile.Read(ref heartbeats) == 1 && Volatile.Read(ref guardings) == 1);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
+    // The dropped heartbeat was not the only thing said about the producer: an EMCY reset is
+    // still waiting, so that is what an identical EMCY is measured against, not nothing.
+    [Fact]
+    public async Task Dropping_A_Heartbeat_Falls_Back_To_The_Newest_Event_Still_Waiting_For_The_Producer()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-hb-dropped-emcy"));
+        var options = new CanOpenNodeOptions { EventQueueCapacity = 3 };
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, options, ownsService: true);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var codes = new List<ushort>();
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.EmcyReceived += (_, e) => { lock (codes) codes.Add(e.Message.ErrorCode); };
+
+        try
+        {
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            RaiseEmcy(bus, EmcyProducer, 0x8110, 0x11, manufacturer: 0);   // error
+            RaiseEmcy(bus, EmcyProducer, 0x0000, 0x00, manufacturer: 0);   // error reset
+            long submitted = node.SubmittedEventCount;
+            bus.RaiseObserved(
+                CanFrame.Classic(unchecked((int)(0x700u + EmcyProducer)), new byte[] { 0x05 }),
+                isEcho: false);                                            // alive: the oldest ordinary event
+            for (int i = 0; i < 3; i++) RaiseSync(bus);                    // the third evicts the heartbeat
+            await WaitForSubmittedAsync(node, submitted + 4);
+
+            RaiseEmcy(bus, EmcyProducer, 0x8110, 0x11, manufacturer: 0);   // the error again, after the reset
+            await WaitUntilAsync(() => node.QueuedEventCount == 2 + 3 + 1);
+            node.CoalescedEventCount.Should().Be(0, "the reset is still waiting between the two errors");
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => { lock (codes) return codes.Count == 3; });
+            lock (codes) codes.Should().Equal(new ushort[] { 0x8110, 0x0000, 0x8110 });
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
     [Fact]
     public async Task A_Throwing_Queued_Callback_Does_Not_Drop_A_Later_Heartbeat_Timeout()
     {

@@ -77,12 +77,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private int _pendingNonCritical;
     private long _submittedEventCount;
     private readonly Dictionary<EventKey, LinkedListNode<PendingEvent>> _pendingKeyed = new();
-    // Per producer node-id: the last event still waiting that concerns it. A waiting critical
-    // event absorbs an identical one only while it is that last event, i.e. nothing else about
-    // the same producer is waiting behind it, so "error, reset, error" reaches the handler as
-    // three events and not as two. An event that was dropped to make room is no longer waiting
-    // and does not count: the handler will never see it (#201).
+    // Per producer node-id: the last event still waiting that says something about the producer's
+    // state -- a heartbeat or guarding response, an EMCY, but not a timeout. A waiting critical
+    // event absorbs an identical one only while no such event was queued behind it, so "error,
+    // reset, error" and "silent, alive, silent" reach the handler as three events and not as two,
+    // while a heartbeat timeout and a node-guarding timeout for the same node do not keep each
+    // other apart. An event that was dropped to make room is no longer waiting and does not count:
+    // the handler will never see it (#201).
     private readonly LinkedListNode<PendingEvent>?[] _lastForProducer = new LinkedListNode<PendingEvent>?[256];
+    private long _enqueueOrdinal;
     private readonly int[] _pendingEmcyPerProducer = new int[256];
     private readonly bool[] _emcyOverflowReported = new bool[256];
     private long _coalescedEventCount;
@@ -789,7 +792,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                         && ReferenceEquals(_lastForProducer[dropped], drop))
                         _lastForProducer[dropped] = LastWaitingFor(dropped);
                 }
-                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false, key: null, emcyProducer: -1, producer));
+                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false, key: null, emcyProducer: -1, producer, ++_enqueueOrdinal));
                 _oldestNonCritical ??= added;
                 _pendingNonCritical++;
                 if (producer >= 0) _lastForProducer[producer] = added;
@@ -800,7 +803,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // it could learn from a second copy is lost (#201).
                 if (key is { } k && producer >= 0
                     && _pendingKeyed.TryGetValue(k, out var waiting)
-                    && ReferenceEquals(_lastForProducer[producer], waiting))
+                    && (_lastForProducer[producer] is not { } newest || newest.Value.Ordinal <= waiting.Value.Ordinal))
                 {
                     _coalescedEventCount++;
                     return;
@@ -824,9 +827,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 }
                 if (!discarded)
                 {
-                    var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer, producer));
+                    // A timeout is looked up by producer but does not itself say anything new about
+                    // the producer's state, so it is not recorded against it.
+                    int tracked = key is { IsTimeout: true } ? -1 : producer;
+                    var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer, tracked, ++_enqueueOrdinal));
                     if (key is { } keyed) _pendingKeyed[keyed] = queued;
-                    if (producer >= 0) _lastForProducer[producer] = queued;
+                    if (tracked >= 0) _lastForProducer[tracked] = queued;
                 }
             }
             if (!discarded)
@@ -943,13 +949,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
     private readonly struct PendingEvent
     {
-        public PendingEvent(Action raise, bool critical, EventKey? key, int emcyProducer, int producer)
+        public PendingEvent(Action raise, bool critical, EventKey? key, int emcyProducer, int producer, long ordinal)
         {
             Raise = raise;
             Critical = critical;
             Key = key;
             EmcyProducer = emcyProducer;
             Producer = producer;
+            Ordinal = ordinal;
         }
 
         public Action Raise { get; }
@@ -957,6 +964,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public EventKey? Key { get; }
         public int EmcyProducer { get; }
         public int Producer { get; }
+        public long Ordinal { get; }
     }
 
     /// <summary>Identity of a critical event for coalescing: what it is, who raised it and, for
@@ -974,6 +982,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             _payload = payload;
         }
 
+        public bool IsTimeout => _kind is 1 or 2;
+
         public static EventKey HeartbeatTimeout(byte producer) => new(1, producer, 0);
         public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
 
@@ -987,12 +997,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
 
         public bool Equals(EventKey other)
-            => _kind == other._kind && _producer == other._producer && _payload == other._payload;
+            => (_kind, _producer, _payload).Equals((other._kind, other._producer, other._payload));
 
         public override bool Equals(object? obj) => obj is EventKey other && Equals(other);
 
-        public override int GetHashCode()
-            => unchecked((((_kind * 397) ^ _producer) * 397) ^ _payload.GetHashCode());
+        public override int GetHashCode() => (_kind, _producer, _payload).GetHashCode();
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
@@ -1334,8 +1343,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (!SdoFrames.SegmentIsComplete(wireLength, cs))
             {
                 SendSdoServerAbort(dl.Index, dl.Subindex, SdoAbortCode.DataTypeLengthMismatch);
-                _sdoServer?.Deadline?.Dispose();
-                _sdoServer = null;
                 return;
             }
             HandleServerDownloadSegment(dl, data);
