@@ -22,7 +22,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// Observing a PDO that belongs to another node (#163): the COB-ID and the mapping are read
 /// from the peer over SDO when the peer-SDO gate allows the pair. The file is used when that
 /// read aborts, times out, or is refused. The bytes go to the caller's sink. This node's
-/// object dictionary is left alone, and a frame that is not one of its RPDOs still is.
+/// object dictionary is left alone, and a frame that is not one of its RPDOs still is
+/// (FR-CO-030).
 /// </summary>
 public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture>
 {
