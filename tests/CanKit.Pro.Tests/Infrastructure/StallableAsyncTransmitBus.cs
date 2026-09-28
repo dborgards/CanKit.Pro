@@ -27,7 +27,7 @@ public class StallableAsyncTransmitBus : DispatchProxy
     public static ICanBus Wrap(ICanBus inner, out StallableAsyncTransmitBus control)
     {
         var proxy = Create<ICanBus, StallableAsyncTransmitBus>();
-        control = (StallableAsyncTransmitBus)(object)proxy;
+        control = (StallableAsyncTransmitBus)proxy;
         control._inner = inner;
         return proxy;
     }

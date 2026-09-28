@@ -2676,8 +2676,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bus = OpenClassic(NewSession(), 0);
         using var service = new CanBusService(bus);
-        var actor = new ProtocolActor();
-        var channel = new IsoTpChannel(service,
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
             IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
         service.SubscriptionCount.Should().Be(1);
 
@@ -2700,7 +2700,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
         using var service = new StarvedReaderBusService();
         using var actor = new ProtocolActor();
-        var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
         var raised = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         channel.DatagramReceived += (_, _) => raised.TrySetResult(true);
 
