@@ -119,7 +119,7 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
         heard.Keys.Should().BeEquivalentTo(new byte[] { 0x11, 0x12, 0x13 });
         heard[0x11].Should().Be((CanOpenPresenceEvidence.Heartbeat, (NmtState?)NmtState.Operational));
         heard[0x12].Should().Be((CanOpenPresenceEvidence.Heartbeat, (NmtState?)NmtState.PreOperational));
-        heard[0x13].Should().Be((CanOpenPresenceEvidence.BootUp, (NmtState?)null));
+        heard[0x13].Should().Be((CanOpenPresenceEvidence.BootUp, null));
 
         // A boot-up after a heartbeat adds the flag and keeps the state the heartbeat gave.
         CanOpenDiscovery.Record(heard, View(0x711, 0x00));
