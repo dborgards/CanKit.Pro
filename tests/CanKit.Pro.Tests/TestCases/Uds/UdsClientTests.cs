@@ -530,6 +530,48 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // The same repeat without an injected clock, where the delay is a real Task.Delay: the
+    // request goes out again and succeeds. No timing is asserted -- how long the delay lasts is
+    // what the clock test below proves; this only runs the wall-clock path end to end.
+    [Fact]
+    public async Task A_Busy_Repeat_With_A_Delay_Repeats_On_The_Wall_Clock()
+    {
+        var calls = 0;
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, req => Interlocked.Increment(ref calls) == 1
+                ? throw new EcuNegativeResponse(0x21)
+                : new byte[] { 0xF1, 0x90, 0xAA }),
+            options: new UdsClientOptions { BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(10) });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            (await client.ReadDataByIdentifierAsync(0xF190, cts.Token)).Should().Equal(0xAA);
+            Volatile.Read(ref calls).Should().Be(2);
+        }
+    }
+
+    // The clock-injecting overload (#171) guards its channel as the public one does.
+    [Fact]
+    public void Create_On_A_Clock_Rejects_A_Null_Channel()
+    {
+        using var clock = new VirtualClock();
+        Action act = () => UdsClient.Create(null!, clock.NewActor());
+        act.Should().Throw<ArgumentNullException>().WithParameterName("channel");
+    }
+
+    // Omitted options default as the public overload's do.
+    [Fact]
+    public void Create_On_A_Clock_Defaults_Omitted_Options()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var service = new StarvedReaderBusService();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            FastIsoTp(useCanFd: false), ownsService: false, actor);
+        using var client = UdsClient.Create(channel, actor);
+        client.Options.P2ClientMax.Should().Be(new UdsClientOptions().P2ClientMax);
+    }
+
     // #57 on a virtual clock (#171): NRC 0x21 repeats the request after BusyRepeatRequestDelay,
     // measured on the client's clock like its P2 -- the repeat goes out only once the test has
     // moved the clock past the delay.
