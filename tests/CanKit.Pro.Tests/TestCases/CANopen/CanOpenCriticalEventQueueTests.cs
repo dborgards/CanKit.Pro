@@ -448,6 +448,61 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
+    // A heartbeat that was dropped to make room never reaches the handler, so it cannot separate
+    // two timeouts: without this, a flapping peer plus a flood of ordinary events would keep every
+    // timeout from folding and the critical backlog would grow again.
+    [Fact]
+    public async Task A_Heartbeat_That_Was_Dropped_Does_Not_Keep_Two_Timeouts_Apart()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-hb-dropped"));
+        var clock = new ManualTimeSource();
+        var options = new CanOpenNodeOptions { EventQueueCapacity = 1 };
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, options, ownsService: true, clock);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timeouts = 0;
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.HeartbeatTimeout += (_, _) => Interlocked.Increment(ref timeouts);
+
+        try
+        {
+            Settle(node);
+            node.AddHeartbeatConsumer(HeartbeatProducer, GuardWindow);
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            Advance(clock, node, GuardWindow);                     // first timeout waits
+            long submitted = node.SubmittedEventCount;
+            bus.RaiseObserved(
+                CanFrame.Classic(unchecked((int)(0x700u + HeartbeatProducer)), new byte[] { 0x05 }),
+                isEcho: false);                                    // alive: the only ordinary slot
+            await WaitForSubmittedAsync(node, submitted + 1);
+            RaiseSync(bus);                                        // takes that slot: the heartbeat is dropped
+            await WaitForSubmittedAsync(node, submitted + 2);
+
+            Advance(clock, node, GuardWindow);                     // silent again
+            node.CoalescedEventCount.Should().Be(1, "no heartbeat is waiting any more, so nothing separates the two timeouts");
+            node.QueuedEventCount.Should().Be(2, "the first timeout and the SYNC that took the heartbeat's place");
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => Volatile.Read(ref timeouts) == 1 && node.QueuedEventCount == 0);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
     [Fact]
     public async Task A_Throwing_Queued_Callback_Does_Not_Drop_A_Later_Heartbeat_Timeout()
     {

@@ -76,13 +76,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private LinkedListNode<PendingEvent>? _oldestNonCritical;
     private int _pendingNonCritical;
     private long _submittedEventCount;
-    private readonly Dictionary<EventKey, KeyedEntry> _pendingKeyed = new();
-    // Per producer node-id: the sequence number of the last event queued that concerns it. A
-    // waiting critical event absorbs an identical one only while nothing else about the same
-    // producer has been queued since, so "error, reset, error" reaches the handler as three
-    // events and not as two (#201).
-    private readonly long[] _producerSeq = new long[256];
-    private long _eventSeq;
+    private readonly Dictionary<EventKey, LinkedListNode<PendingEvent>> _pendingKeyed = new();
+    // Per producer node-id: the last event still waiting that concerns it. A waiting critical
+    // event absorbs an identical one only while it is that last event, i.e. nothing else about
+    // the same producer is waiting behind it, so "error, reset, error" reaches the handler as
+    // three events and not as two. An event that was dropped to make room is no longer waiting
+    // and does not count: the handler will never see it (#201).
+    private readonly LinkedListNode<PendingEvent>?[] _lastForProducer = new LinkedListNode<PendingEvent>?[256];
     private readonly int[] _pendingEmcyPerProducer = new int[256];
     private readonly bool[] _emcyOverflowReported = new bool[256];
     private long _coalescedEventCount;
@@ -777,7 +777,6 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (_eventPumpCompleted) return;
             if (!critical)
             {
-                if (producer >= 0) _producerSeq[producer] = ++_eventSeq;
                 // Drop the oldest ordinary event, never a timeout or an EMCY sitting in front
                 // of it. The newcomer still takes a slot, so the ordinary count stays at the cap.
                 if (_pendingNonCritical >= _options.EventQueueCapacity && _oldestNonCritical is { } drop)
@@ -786,22 +785,26 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     _pendingEvents.Remove(drop);
                     _pendingNonCritical--;
                     _oldestNonCritical = next;
+                    if (drop.Value.Producer is >= 0 and var dropped
+                        && ReferenceEquals(_lastForProducer[dropped], drop))
+                        _lastForProducer[dropped] = LastWaitingFor(dropped);
                 }
-                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false, key: null, emcyProducer: -1));
+                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false, key: null, emcyProducer: -1, producer));
                 _oldestNonCritical ??= added;
                 _pendingNonCritical++;
+                if (producer >= 0) _lastForProducer[producer] = added;
             }
             else
             {
                 // An identical event is already waiting: the handler will see it, and nothing
                 // it could learn from a second copy is lost (#201).
                 if (key is { } k && producer >= 0
-                    && _pendingKeyed.TryGetValue(k, out var waiting) && waiting.Seq == _producerSeq[producer])
+                    && _pendingKeyed.TryGetValue(k, out var waiting)
+                    && ReferenceEquals(_lastForProducer[producer], waiting))
                 {
                     _coalescedEventCount++;
                     return;
                 }
-                long seq = producer >= 0 ? (_producerSeq[producer] = ++_eventSeq) : 0;
                 if (emcyProducer >= 0)
                 {
                     if (_pendingEmcyPerProducer[emcyProducer] >= _options.EventQueueCapacity)
@@ -821,8 +824,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 }
                 if (!discarded)
                 {
-                    var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer));
-                    if (key is { } keyed) _pendingKeyed[keyed] = new KeyedEntry(queued, seq);
+                    var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer, producer));
+                    if (key is { } keyed) _pendingKeyed[keyed] = queued;
+                    if (producer >= 0) _lastForProducer[producer] = queued;
                 }
             }
             if (!discarded)
@@ -863,8 +867,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             _pendingEvents.RemoveFirst();
             // A newer identical event may have replaced this one's entry; only remove our own.
             if (node.Value.Key is { } key && _pendingKeyed.TryGetValue(key, out var entry)
-                && ReferenceEquals(entry.Node, node))
+                && ReferenceEquals(entry, node))
                 _pendingKeyed.Remove(key);
+            if (node.Value.Producer is >= 0 and var about && ReferenceEquals(_lastForProducer[about], node))
+                _lastForProducer[about] = null;
             if (node.Value.EmcyProducer is >= 0 and var producer
                 && --_pendingEmcyPerProducer[producer] == 0)
                 _emcyOverflowReported[producer] = false;
@@ -877,6 +883,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             return node.Value.Raise;
         }
+    }
+
+    /// <summary>The newest event still waiting that concerns <paramref name="producer"/>. Called
+    /// under <see cref="_eventLock"/> when the one that was the newest has just been dropped.</summary>
+    private LinkedListNode<PendingEvent>? LastWaitingFor(int producer)
+    {
+        for (var node = _pendingEvents.Last; node is not null; node = node.Previous)
+            if (node.Value.Producer == producer) return node;
+        return null;
     }
 
     private static LinkedListNode<PendingEvent>? NextNonCritical(LinkedListNode<PendingEvent>? node)
@@ -926,32 +941,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         get { lock (_eventLock) return _emcyOverflowCount; }
     }
 
-    private readonly struct KeyedEntry
-    {
-        public KeyedEntry(LinkedListNode<PendingEvent> node, long seq)
-        {
-            Node = node;
-            Seq = seq;
-        }
-
-        public LinkedListNode<PendingEvent> Node { get; }
-        public long Seq { get; }
-    }
-
     private readonly struct PendingEvent
     {
-        public PendingEvent(Action raise, bool critical, EventKey? key, int emcyProducer)
+        public PendingEvent(Action raise, bool critical, EventKey? key, int emcyProducer, int producer)
         {
             Raise = raise;
             Critical = critical;
             Key = key;
             EmcyProducer = emcyProducer;
+            Producer = producer;
         }
 
         public Action Raise { get; }
         public bool Critical { get; }
         public EventKey? Key { get; }
         public int EmcyProducer { get; }
+        public int Producer { get; }
     }
 
     /// <summary>Identity of a critical event for coalescing: what it is, who raised it and, for
