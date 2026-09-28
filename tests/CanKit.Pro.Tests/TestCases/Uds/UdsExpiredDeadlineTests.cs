@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
+using CanKit.Pro.Tests.Infrastructure;
 using CanKit.Pro.Uds;
 using FluentAssertions;
 using Xunit;
@@ -31,6 +33,52 @@ public class UdsExpiredDeadlineTests
             P2ClientMax = Budget,
             P2StarClientMax = Budget,
         });
+
+    // The same client on a virtual clock (#171): its deadlines and waits, and the stub's stamps
+    // and delays, all on one actor's clock, which moves only when the test steps it.
+    private static IUdsClient NewClient(StubChannel channel, ProtocolActor clock, TimeSpan? p2Star = null)
+        => UdsClient.Create(channel, clock, new UdsClientOptions
+        {
+            P2ClientMax = Budget,
+            P2StarClientMax = p2Star ?? Budget,
+        });
+
+    // Steps the clock a millisecond at a time until the operation completes. A request's send is
+    // stamped when the client gets round to it, which on a loaded host can be steps later than the
+    // instant its window closed -- later, never earlier, so a lower bound on the gap between two
+    // sends is a property of the client, not of the host.
+    private static Task RunAsync(VirtualClock clock, Task operation)
+        => clock.RunUntilAsync(operation, TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(30));
+
+    // A clock off zero by more than any stamp the stub dates back from "now", so none is zero.
+    private static VirtualClock NewClock()
+    {
+        var clock = new VirtualClock();
+        clock.Advance(TimeSpan.FromMilliseconds(10));
+        return clock;
+    }
+
+    private static async Task WaitUntilSentAsync(StubChannel channel, int count)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (true)
+        {
+            lock (channel.Sent)
+                if (channel.Sent.Count >= count) return;
+            if (DateTime.UtcNow > deadline) throw new TimeoutException($"Fewer than {count} sends began.");
+            await Task.Delay(1);
+        }
+    }
+
+    private static TimeSpan Gap(StubChannel channel, ProtocolActor clock, int from, int to)
+    {
+        lock (channel.Sent)
+        {
+            channel.Sent.Should().HaveCountGreaterThan(to);
+            return TimeSpan.FromSeconds(
+                (channel.Sent[to].StartedAt - channel.Sent[from].StartedAt) / (double)clock.TimeSource.Frequency);
+        }
+    }
 
     /// <summary>
     /// The response arrives after the budget, and the wait is completed by its arrival rather
@@ -395,6 +443,8 @@ public class UdsExpiredDeadlineTests
     [Fact]
     public async Task O_A_Suppressed_Send_Cancelled_Before_Confirmation_Still_Opens_Its_Window()
     {
+        using var clock = NewClock();
+        var actor = clock.NewActor();
         using var channel = new StubChannel(
             deliverAfter: TimeSpan.FromSeconds(5),
             stampArrivalAtDelivery: true)
@@ -402,29 +452,28 @@ public class UdsExpiredDeadlineTests
             TransmissionTime = TimeSpan.FromSeconds(5), // held until the cancellation, so nothing races it
             CancellableSend = true,
             HonorCancellation = true,
+            Clock = actor,
         };
-        using var client = NewClient(channel);
+        using var client = NewClient(channel, actor);
 
-        using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
-        Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
-        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        using var early = new CancellationTokenSource();
+        var cancelled = client.SendRawAsync(new byte[] { 0x3E, 0x80 }, early.Token);
+        await WaitUntilSentAsync(channel, 1);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(30));
+        early.Cancel(); // at 30 ms, the send still held
+        Func<Task> cancel = () => cancelled;
+        await cancel.Should().ThrowAsync<OperationCanceledException>();
 
         // The next TesterPresent must wait the suppressed send's window (P2 = 80 ms from the
-        // note, taken just before the first send began) before it sends.
-        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
-        Func<Task> next = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-        await next.Should().ThrowAsync<Exception>(); // the stub never answers; what matters is when it sent
+        // note, taken at the instant the first send began) before it sends. The stub never
+        // answers; what matters is when it sent.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var next = client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        Func<Task> run = () => RunAsync(clock, next);
+        await run.Should().ThrowAsync<UdsTimeoutException>();
 
-        long gapTicks;
-        lock (channel.Sent)
-        {
-            channel.Sent.Should().HaveCount(2);
-            gapTicks = channel.Sent[1].StartedAt - channel.Sent[0].StartedAt;
-        }
-        // The cancelled send started at ~0 ms and was cancelled at 30 ms; without the window the
-        // second would start right then. 80 ms less a margin for the note preceding the send.
-        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
-            Budget - TimeSpan.FromMilliseconds(5),
+        // Without the window the second send would start at 30 ms, right after the cancellation.
+        Gap(channel, actor, 0, 1).Should().BeGreaterThanOrEqualTo(Budget,
             "the second send waited out the window the cancelled send opened");
     }
 
@@ -516,6 +565,8 @@ public class UdsExpiredDeadlineTests
     [Fact]
     public async Task Q_A_Stray_Pending_From_Before_The_Handoff_Still_Moves_Its_Services_Window()
     {
+        using var clock = NewClock();
+        var actor = clock.NewActor();
         using var channel = new StubChannel(
             deliverAfter: TimeSpan.FromMilliseconds(5),
             stampArrivalAtDelivery: false)
@@ -523,32 +574,26 @@ public class UdsExpiredDeadlineTests
             StrayPendingBeforeHandoffFor = 0x3E,
             ResponseArrivalOffsetFromTransmit = TimeSpan.FromMilliseconds(1),
             LastFrameHandoffBeforeTransmit = TimeSpan.FromMilliseconds(1),
+            Clock = actor,
         };
         // P2* well apart from P2, so which of the two the third send waited is measurable.
         var pendingBudget = TimeSpan.FromMilliseconds(300);
-        using var client = UdsClient.Create(channel, new UdsClientOptions
-        {
-            P2ClientMax = Budget,
-            P2StarClientMax = pendingBudget,
-        });
+        using var client = NewClient(channel, actor, pendingBudget);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: opens the window, P2 from the send
-        await client.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, cts.Token); // its stray is the 0x78, stamped before its handoff
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await RunAsync(clock, client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token)); // suppressed: opens the window, P2 from the send
+        await RunAsync(clock, client.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, cts.Token)); // its stray is the 0x78, stamped before its handoff
 
         // The next TesterPresent waits the window out: P2* from the 0x78 if it was routed, else
-        // P2 from the first send -- which the second send followed within a few milliseconds.
-        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
-        await next.Should().ThrowAsync<UdsTimeoutException>(); // never answered; what matters is when it sent
+        // P2 from the first send. Never answered; what matters is when it sent.
+        var next = client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        Func<Task> run = () => RunAsync(clock, next);
+        await run.Should().ThrowAsync<UdsTimeoutException>();
 
-        long gapTicks;
-        lock (channel.Sent)
-        {
-            channel.Sent.Should().HaveCount(3);
-            gapTicks = channel.Sent[2].StartedAt - channel.Sent[1].StartedAt;
-        }
-        TimeSpan.FromSeconds((double)gapTicks / Stopwatch.Frequency).Should().BeGreaterThanOrEqualTo(
-            pendingBudget - TimeSpan.FromMilliseconds(5),
+        // The 0x78 is stamped 2 ms before the second send's wire instant, so its P2* ends 298 ms
+        // after that send at the earliest.
+        Gap(channel, actor, 1, 2).Should().BeGreaterThanOrEqualTo(
+            pendingBudget - TimeSpan.FromMilliseconds(2),
             "the 0x78 heard before the second request's handoff moved the suppressed send's window out by P2*");
     }
 
@@ -608,6 +653,28 @@ public class UdsExpiredDeadlineTests
         private bool _delivered;
         private long? _deliverAt;
 
+        /// <summary>
+        /// The actor whose clock this double stamps and waits on, as the client it serves does
+        /// (#171); null is the wall clock. With it, every instant the double reports and every
+        /// delay it models is virtual, and only moves when the test moves the clock.
+        /// </summary>
+        public ProtocolActor? Clock { get; init; }
+
+        private long Now() => Clock?.TimeSource.GetTimestamp() ?? Stopwatch.GetTimestamp();
+
+        private long Frequency => Clock?.TimeSource.Frequency ?? Stopwatch.Frequency;
+
+        private Task Delay(TimeSpan delay, CancellationToken cancellationToken)
+            => Clock is null ? Task.Delay(delay, cancellationToken) : DelayOnClockAsync(Clock, delay, cancellationToken);
+
+        private static async Task DelayOnClockAsync(ProtocolActor clock, TimeSpan delay, CancellationToken cancellationToken)
+        {
+            var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(() => done.TrySetCanceled(cancellationToken));
+            using var timer = clock.Schedule(delay, () => done.TrySetResult(true));
+            await done.Task.ConfigureAwait(false);
+        }
+
         public StubChannel(TimeSpan deliverAfter, bool stampArrivalAtDelivery)
         {
             _deliverAfter = deliverAfter;
@@ -645,18 +712,18 @@ public class UdsExpiredDeadlineTests
         public async Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu,
             CancellationToken cancellationToken = default)
         {
-            lock (Sent) Sent.Add((pdu.ToArray(), Stopwatch.GetTimestamp()));
+            lock (Sent) Sent.Add((pdu.ToArray(), Now()));
             _sent = true;
             if (TransmissionTime > TimeSpan.Zero)
-                await Task.Delay(TransmissionTime, CancellableSend ? cancellationToken : CancellationToken.None).ConfigureAwait(false);
+                await Delay(TransmissionTime, CancellableSend ? cancellationToken : CancellationToken.None).ConfigureAwait(false);
 
             // The wire instant. Everything the client is entitled to measure is relative to this
             // and to nothing else; arrival is "now" for the punctual case, inside the budget and
             // long before delivery.
-            _arrivalStamp = Stopwatch.GetTimestamp();
+            _arrivalStamp = Now();
 
             if (SendObservationDelay > TimeSpan.Zero)
-                await Task.Delay(SendObservationDelay, CancellationToken.None).ConfigureAwait(false);
+                await Delay(SendObservationDelay, CancellationToken.None).ConfigureAwait(false);
 
             if (ReportNoTransmitStamp) return default;
             return new IsoTpTransmitStamps(_arrivalStamp - Ticks(LastFrameHandoffBeforeTransmit), _arrivalStamp);
@@ -691,18 +758,18 @@ public class UdsExpiredDeadlineTests
             if (RespondPendingFirst && !_pendingSent)
             {
                 _pendingSent = true;
-                await Task.Delay(ObservationDelayAfterPending, CancellationToken.None)
+                await Delay(ObservationDelayAfterPending, CancellationToken.None)
                     .ConfigureAwait(false);
                 return new IsoTpReceivedPdu(Pending, _arrivalStamp);
             }
 
             // Delivery is an instant, not a duration per call: a caller that waits in slices
             // and comes back is still waiting for the same delivery.
-            _deliverAt ??= Stopwatch.GetTimestamp() + Ticks(_deliverAfter);
+            _deliverAt ??= Now() + Ticks(_deliverAfter);
             var remaining = TimeSpan.FromSeconds(
-                (_deliverAt.Value - Stopwatch.GetTimestamp()) / (double)Stopwatch.Frequency);
+                (_deliverAt.Value - Now()) / (double)Frequency);
             if (remaining > TimeSpan.Zero)
-                await Task.Delay(remaining,
+                await Delay(remaining,
                     HonorCancellation ? cancellationToken : CancellationToken.None)
                     .ConfigureAwait(false);
 
@@ -710,7 +777,7 @@ public class UdsExpiredDeadlineTests
                 return new IsoTpReceivedPdu(Response, FinalArrivalStamp());
 
             var stamp = _stampArrivalAtDelivery
-                ? Stopwatch.GetTimestamp()
+                ? Now()
                 : _arrivalStamp + Ticks(ResponseArrivalOffsetFromTransmit);
             _delivered = true;
             return new IsoTpReceivedPdu(Response, stamp, FirstFrameStamp() ?? stamp);
@@ -773,8 +840,8 @@ public class UdsExpiredDeadlineTests
 
         private long FinalArrivalStamp() => _arrivalStamp + Ticks(PendingToFinalArrivalGap);
 
-        private static long Ticks(TimeSpan span)
-            => (long)(span.TotalSeconds * Stopwatch.Frequency);
+        private long Ticks(TimeSpan span)
+            => (long)(span.TotalSeconds * Frequency);
 
         public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
             => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;
