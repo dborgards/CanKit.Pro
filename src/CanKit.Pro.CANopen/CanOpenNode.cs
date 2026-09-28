@@ -2075,7 +2075,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                         var failure = new CanOpenTransportException(
                             $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
                         RaiseBackgroundException(failure);
-                        onSendFailure?.Invoke(failure);
+                        if (onSendFailure is not null)
+                        {
+                            // The transfer these frames belong to is failed now. Its remaining
+                            // frames would reach the peer after the caller may already have
+                            // started the next transfer with it, and corrupt that one (#197).
+                            onSendFailure(failure);
+                            return;
+                        }
                     }
                 }
                 catch (Exception ex)
