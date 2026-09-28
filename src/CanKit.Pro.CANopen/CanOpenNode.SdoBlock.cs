@@ -467,17 +467,17 @@ internal sealed partial class CanOpenNode
             return true;
         }
 
+        // The server streams segments without the client sending in between. Any segment of
+        // this sub-block -- in sequence or not -- answers the start or the last sub-block ack,
+        // so their outcomes may no longer decide the upload (#197).
+        if (session.LatestSendPending)
+        {
+            session.LatestSendId++;
+            session.LatestSendPending = false;
+        }
+
         if (!session.SubBlockDamaged && seq == session.NextExpectedSeq)
         {
-            // The server streams segments without the client sending in between: an accepted
-            // segment answers the start or the last sub-block ack, so their outcomes may no
-            // longer decide the upload (#197).
-            if (session.LatestSendPending)
-            {
-                session.LatestSendId++;
-                session.LatestSendPending = false;
-            }
-
             // Same boundary rule as HandleBlockDownloadServerSegment (#59): the cap is on the
             // data, the last segment's data length is unknown until the end frame's "n"
             // (CiA 301 §7.2.4.3.15), so a segment is refused only when the cap is already full,
