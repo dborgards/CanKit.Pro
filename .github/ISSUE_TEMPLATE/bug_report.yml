@@ -31,6 +31,9 @@ body:
     id: version
     attributes:
       label: Package version
+      description: >
+        For a local or CI build that says 0.0.0, also give the informational version with the
+        commit (`0.0.0+<sha>`) — see the Troubleshooting page of the documentation.
       placeholder: "1.2.3"
     validations:
       required: true
