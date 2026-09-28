@@ -39,15 +39,23 @@ public class StallableAsyncTransmitBus : DispatchProxy
         set => Interlocked.Exchange(ref _stall, value ? new(TaskCreationOptions.RunContinuationsAsynchronously) : null);
     }
 
+    private readonly TaskCompletionSource<CanFrame> _firstTransmit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes with the frame the first <c>TransmitAsync</c> call was handed.</summary>
+    public Task<CanFrame> FirstTransmit => _firstTransmit.Task;
+
     /// <summary>Completes every stalled transmit as accepted and stops stalling.</summary>
     public void Release() => Interlocked.Exchange(ref _stall, null)?.TrySetResult(1);
 
     /// <inheritdoc />
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
     {
-        if (targetMethod!.Name == nameof(ICanBus.TransmitAsync)
-            && args![0] is CanFrame && Volatile.Read(ref _stall) is { } stall)
-            return stall.Task;
+        if (targetMethod!.Name == nameof(ICanBus.TransmitAsync) && args![0] is CanFrame handed)
+        {
+            _firstTransmit.TrySetResult(handed);
+            if (Volatile.Read(ref _stall) is { } stall)
+                return stall.Task;
+        }
         try
         {
             return targetMethod.Invoke(_inner, args);

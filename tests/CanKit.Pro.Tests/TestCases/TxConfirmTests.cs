@@ -343,6 +343,65 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         control.Release();
     }
 
+    // Codex and Bugbot on #216: when the timeout wins, the driver's operation may still be running
+    // while the caller -- entitled to, once SendConfirmed completes -- disposes its TX lease. The
+    // driver must have been handed a frame that does not depend on that lease.
+    [Fact]
+    public async Task A_Timed_Out_Approximated_Send_Leaves_The_Driver_A_Frame_Independent_Of_The_Callers_Lease()
+    {
+        using var inner = OpenPlain();
+        var bus = StallableAsyncTransmitBus.Wrap(inner, out var control);
+        control.Stalled = true;
+        using var service = new CanBusService(bus);
+
+        var payload = new byte[] { 1, 2, 3, 4 };
+        var owner = new ScrubbedOwner((byte[])payload.Clone());
+        var lease = CanFrame.Classic(0x123, owner);
+
+        var result = await service.SendConfirmed(lease, TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        lease.Dispose(); // what the caller may now do
+
+        owner.Disposed.Should().BeTrue("the caller's lease is released");
+        var handed = await control.FirstTransmit.WaitAsync(ShortTimeout);
+        handed.Data.ToArray().Should().Equal(payload, "the driver's copy survives the caller's release");
+        control.Release();
+    }
+
+    private sealed class ScrubbedOwner : System.Buffers.IMemoryOwner<byte>
+    {
+        private readonly byte[] _buffer;
+        public ScrubbedOwner(byte[] buffer) => _buffer = buffer;
+        public bool Disposed { get; private set; }
+        public Memory<byte> Memory => _buffer;
+        public void Dispose()
+        {
+            Disposed = true;
+            Array.Fill(_buffer, (byte)0xFF); // a returned pool buffer gets reused
+        }
+    }
+
+    // Bugbot on #216: cancelling a stalled send is a cancellation, immediately -- not a timeout
+    // reported after the full timeout has run out. The timeout here is far beyond ShortTimeout,
+    // so a send that waited for it would trip the hang bound instead of completing.
+    [Fact]
+    public async Task Cancelling_A_Stalled_Approximated_Send_Cancels_It_Instead_Of_Waiting_For_The_Timeout()
+    {
+        using var inner = OpenPlain();
+        var bus = StallableAsyncTransmitBus.Wrap(inner, out var control);
+        control.Stalled = true;
+        using var service = new CanBusService(bus);
+        using var cts = new CancellationTokenSource();
+
+        var send = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMinutes(5), cts.Token);
+        await control.FirstTransmit.WaitAsync(ShortTimeout);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        send.IsCanceled.Should().BeTrue();
+        control.Release();
+    }
+
     // #202: the bound must not turn an asynchronous but timely acceptance into a timeout.
     [Fact]
     public async Task NonEcho_Bus_Confirms_When_An_Asynchronous_TransmitAsync_Completes_In_Time()

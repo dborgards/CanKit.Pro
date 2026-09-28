@@ -341,7 +341,19 @@ namespace CanKit.Pro.RawCan
             // runtime declines to inline it the reading is what it would have been anyway.
             var stamp = new HandoffStamp(_hostTimestamp);
             var handoffStart = stamp.Now();
-            var transmit = _bus.TransmitAsync(frame, cancellationToken)
+            //
+            // The driver is handed a private copy, never the caller's frame (Codex and Bugbot on
+            // #216): the contract lets the caller dispose its TX lease as soon as this call
+            // completes, and when the timeout below wins the driver's asynchronous operation may
+            // still be running -- reading a buffer that has meanwhile been released or reused. The
+            // copy is a few bytes; the echo path is unaffected (its Transmit is synchronous).
+            var copy = frame.Data.ToArray();
+            var detached = frame.FrameKind == CanFrameType.CanFd
+                ? CanFrame.Fd(frame.ID, copy, BRS: frame.BitRateSwitch, ESI: frame.ErrorStateIndicator,
+                    isExtendedFrame: frame.IsExtendedFrame, isErrorFrame: frame.IsErrorFrame)
+                : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
+                    isRemoteFrame: frame.IsRemoteFrame, isErrorFrame: frame.IsErrorFrame);
+            var transmit = _bus.TransmitAsync(detached, cancellationToken)
                 .ContinueWith(
                     static (completed, state) =>
                     {
@@ -371,8 +383,15 @@ namespace CanKit.Pro.RawCan
             }
             else
             {
-                using var timeoutCts = new CancellationTokenSource();
-                var winner = await Task.WhenAny(transmit, Task.Delay(timeout, timeoutCts.Token)).ConfigureAwait(false);
+                // Ends on the timeout or on the caller's own cancellation, whichever is first: a
+                // caller who cancels a stalled send must not have to wait the timeout out and then
+                // be told "timed out" (Bugbot on #216).
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                waitCts.CancelAfter(timeout);
+                var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var registration = waitCts.Token.Register(
+                    static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), expired);
+                var winner = await Task.WhenAny(transmit, expired.Task).ConfigureAwait(false);
                 if (!ReferenceEquals(winner, transmit))
                 {
                     // Nobody will await the abandoned task; observe its fault so a late driver
@@ -382,10 +401,10 @@ namespace CanKit.Pro.RawCan
                         CancellationToken.None,
                         TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                         TaskScheduler.Default);
+                    cancellationToken.ThrowIfCancellationRequested();
                     return new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Timeout };
                 }
 
-                timeoutCts.Cancel();
                 accepted = await transmit.ConfigureAwait(false);
             }
 

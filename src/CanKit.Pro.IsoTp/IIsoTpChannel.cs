@@ -181,8 +181,9 @@ public interface IIsoTpChannel : IDisposable
     /// Each PDU gets its own thread-pool work item, so handlers for successive PDUs may run
     /// concurrently and not necessarily in the order the PDUs completed;
     /// <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/> keep that order. No new
-    /// invocation starts once <see cref="IDisposable.Dispose"/> has begun, but one already
-    /// running is not waited for.
+    /// PDU is raised for a frame handled after <see cref="IDisposable.Dispose"/> has begun, but a
+    /// handler already queued, or starting at that moment, may still run: <c>Dispose</c> does not
+    /// wait for handlers, and a handler may itself call it.
     /// </para>
     /// </summary>
     event EventHandler<IsoTpDatagramReceivedEventArgs>? DatagramReceived;
