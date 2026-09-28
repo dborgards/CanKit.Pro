@@ -266,7 +266,11 @@ wire, no answer can come, and a timeout would look like a silent server. The sam
 raised on `BackgroundExceptionOccurred`. If `SdoTimeout` elapses while a request is still waiting for its
 confirmation, the confirmation decides. A failed send ends the transfer with
 `CanOpenTransportException`. A confirmed one lets the timeout stand, which then completes up to
-the confirmation window (`CanBusService.DefaultConfirmTimeout`) later than `SdoTimeout`.
+the confirmation window (`CanBusService.DefaultConfirmTimeout`) later than `SdoTimeout`. Only the latest request of a transfer can decide it this way. The client sends again only
+after the server has answered, and that answer proves the earlier request reached the server.
+A later failed confirmation of the earlier request means a lost echo, not a lost frame, and is
+only raised on `BackgroundExceptionOccurred`. A send that is cancelled because the service was
+disposed counts as failed.
 
 ## Observing a peer PDO
 

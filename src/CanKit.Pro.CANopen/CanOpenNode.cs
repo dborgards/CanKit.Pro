@@ -1714,7 +1714,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private void OnSdoClientTimeout(byte serverNodeId)
     {
         if (!_sdoClients.TryGetValue(serverNodeId, out var session)) return;
-        if (session.PendingSends > 0)
+        if (session.LatestSendPending)
         {
             // A request is still unconfirmed. If it fails, nothing ever reached the server and
             // the transfer must end with that failure, not a timeout that reads as a silent
@@ -2002,8 +2002,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     RaiseBackgroundException(failure);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException oce)
             {
+                // A cancellation this caller did not ask for -- the service was disposed under a
+                // pending send -- means the frame was not sent, and an SDO transfer must hear
+                // that as a transport failure rather than as a confirmed send (#197).
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    failure = new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} was cancelled before it was confirmed.", oce);
+                }
+
                 // Propagate so SendNmtCommandAsync / SendSyncAsync / SendEmcyAsync (and any
                 // other awaiters of this Task) observe cancellation instead of a silent
                 // success (Bugbot 3600845875).
@@ -2030,20 +2039,29 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// read as a silent server (#197). While the send is still unconfirmed, the SDO timeout does
     /// not decide the transfer either (<see cref="OnSdoClientTimeout"/>).
     /// </summary>
+    /// <remarks>
+    /// Only the latest send can decide. SDO is request and response: the client sends again
+    /// only after the server has answered, and an answer proves the request before it reached
+    /// the server, whatever its confirmation later says -- a lost echo, not a lost frame.
+    /// </remarks>
     private void SendSdoClientRequest(SdoClientSession session, byte[] payload)
     {
-        session.PendingSends++;
+        var sendId = ++session.LatestSendId;
+        session.LatestSendPending = true;
         _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
-            onSendCompleted: failure => PostSdoClientSendOutcome(() => OnSdoClientSendCompleted(session, failure)));
+            onSendCompleted: failure => PostSdoClientSendOutcome(
+                () => OnSdoClientSendCompleted(session, sendId, failure)));
     }
 
-    /// <summary>Actor side of <see cref="SendSdoClientRequest"/>: one send of
-    /// <paramref name="session"/> has ended, with <paramref name="failure"/> or confirmed.</summary>
-    private void OnSdoClientSendCompleted(SdoClientSession session, CanOpenTransportException? failure)
+    /// <summary>Actor side of <see cref="SendSdoClientRequest"/>: send
+    /// <paramref name="sendId"/> of <paramref name="session"/> has ended, with
+    /// <paramref name="failure"/> or confirmed.</summary>
+    private void OnSdoClientSendCompleted(SdoClientSession session, int sendId, CanOpenTransportException? failure)
     {
         if (!_sdoClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
             return;
-        session.PendingSends--;
+        if (sendId != session.LatestSendId) return; // answered since: it reached the server
+        session.LatestSendPending = false;
         if (failure is not null)
         {
             _sdoClients.Remove(session.ServerNodeId);
@@ -2052,25 +2070,29 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return;
         }
 
-        if (session.TimedOut && session.PendingSends == 0) CompleteSdoClientTimeout(session);
+        if (session.TimedOut) CompleteSdoClientTimeout(session);
     }
 
     /// <summary>As <see cref="SendSdoClientRequest"/>, for a block transfer.</summary>
     private void SendSdoBlockClientRequest(SdoBlockClientSession session, byte[] payload)
-    {
-        session.PendingSends++;
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
-            onSendCompleted: SdoBlockClientSendCompleted(session));
-    }
+        => _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
+            onSendCompleted: TrackSdoBlockClientSend(session));
 
-    /// <summary>The send-outcome reaction for <paramref name="session"/>, for a caller that has
-    /// already counted the send in its pending sends.</summary>
-    private Action<CanOpenTransportException?> SdoBlockClientSendCompleted(SdoBlockClientSession session)
-        => failure => PostSdoClientSendOutcome(() =>
+    /// <summary>
+    /// Makes the send about to start the latest one of <paramref name="session"/> and returns
+    /// the reaction to its outcome. As in <see cref="SendSdoClientRequest"/>, only the latest
+    /// send decides: the block client, too, sends again only after the server has answered.
+    /// </summary>
+    private Action<CanOpenTransportException?> TrackSdoBlockClientSend(SdoBlockClientSession session)
+    {
+        var sendId = ++session.LatestSendId;
+        session.LatestSendPending = true;
+        return failure => PostSdoClientSendOutcome(() =>
         {
             if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
                 return;
-            session.PendingSends--;
+            if (sendId != session.LatestSendId) return; // answered since: it reached the server
+            session.LatestSendPending = false;
             if (failure is not null)
             {
                 _sdoBlockClients.Remove(session.ServerNodeId);
@@ -2079,8 +2101,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 return;
             }
 
-            if (session.TimedOut && session.PendingSends == 0) CompleteSdoBlockClientTimeout(session);
+            if (session.TimedOut) CompleteSdoBlockClientTimeout(session);
         });
+    }
 
     /// <summary>
     /// Runs a send-outcome reaction on the actor, where the session tables live. After disposal
@@ -2300,8 +2323,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public int Offset { get; set; }
         public bool Toggle { get; set; }
 
-        /// <summary>Requests of this transfer whose send has not ended yet (#197).</summary>
-        public int PendingSends { get; set; }
+        /// <summary>Numbers this transfer's sends; only the latest can still decide it (#197).</summary>
+        public int LatestSendId { get; set; }
+
+        /// <summary>The latest send has not ended yet.</summary>
+        public bool LatestSendPending { get; set; }
 
         /// <summary>The SDO timeout elapsed while a request was still unconfirmed; the
         /// transfer ends when that send does.</summary>

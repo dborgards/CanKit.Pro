@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using FluentAssertions;
 using Xunit;
@@ -170,6 +172,139 @@ public class CanOpenSdoClientSendFailureTests
 
         await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<ObjectDisposedException>("disposal completed the transfer, and nothing else reports it");
+    }
+
+    [Fact]
+    public async Task A_Service_Disposed_Under_A_Pending_Send_Fails_The_Transfer()
+    {
+        // Disposing the shared service cancels the pending send: the frame was not confirmed,
+        // and the transfer must hear that rather than wait for its SDO timeout.
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-service-dispose-{Guid.NewGuid():N}");
+        var service = new CanBusService(bus);
+        using var client = CanOpen.OpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        service.Dispose();
+
+        await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>();
+    }
+
+    [Fact]
+    public async Task A_Lost_Echo_Of_An_Answered_Send_Does_Not_Fail_The_Upload()
+    {
+        // The server answers the last sub-block ack with its end frame, so the ack reached it.
+        // The ack's confirmation then fails -- a lost echo -- while the end acknowledgement is
+        // still being sent. That failure must not fail an upload the server has completed. The
+        // test decides both confirmations itself, in that order, so no clock is involved.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-lost-echo-{Guid.NewGuid():N}");
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        using var client = CanOpen.OpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
+        var ackConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var endAckConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var endAckSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Hold = frame =>
+        {
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
+            var cs = frame.Data.Span[0];
+            if ((cs & 0xE3) == SdoBlockFrames.CcsBlockUploadInitBase)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildBlockUploadInitResponse(
+                    0x1000, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 4));
+                return null;
+            }
+
+            if (cs == SdoBlockFrames.CcsBlockUploadStart)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, new byte[] { 1, 2, 3, 4 }));
+                return null;
+            }
+
+            if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildEnd(
+                    SdoBlockFrames.ScsBlockUploadEndBase, unusedBytesInLastSegment: 3, crc: 0));
+                return ackConfirmation.Task;
+            }
+
+            if (cs == SdoBlockFrames.CcsBlockUploadEndResponse)
+            {
+                endAckSent.TrySetResult(true);
+                return endAckConfirmation.Task;
+            }
+
+            return null;
+        };
+
+        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block);
+        await endAckSent.Task.WithTimeoutAsync(ShortTimeout);
+        // Without RunContinuationsAsynchronously the node's continuation runs inside SetResult,
+        // so the ack's outcome is posted to the node before the end acknowledgement's is.
+        ackConfirmation.SetResult(new TxConfirmation
+        {
+            Confirmed = false,
+            FailureReason = TxConfirmFailureReason.Timeout,
+            Timestamp = DateTime.UtcNow,
+        });
+        endAckConfirmation.SetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
+
+        var data = await upload.WithTimeoutAsync(ShortTimeout);
+        data.Should().Equal(1, 2, 3, 4);
+    }
+
+    private static void Answer(ControllableBus bus, int cobId, byte[] payload)
+        => _ = Task.Run(() => bus.RaiseObserved(CanFrame.Classic(cobId, payload), isEcho: false));
+
+    /// <summary>
+    /// Delegates to a real service, except that <see cref="Hold"/> may hand back the
+    /// confirmation of a frame for the test to complete.
+    /// </summary>
+    private sealed class HeldConfirmationService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+
+        public HeldConfirmationService(ICanBusService inner) => _inner = inner;
+
+        public Func<CanFrame, Task<TxConfirmation>?>? Hold { get; set; }
+
+        public CanKit.Abstractions.API.Can.ICanBus Bus => _inner.Bus;
+
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false) => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            var held = Hold?.Invoke(frame);
+            if (held is null) return _inner.SendConfirmed(frame, timeout, cancellationToken);
+            _inner.SendConfirmed(frame, timeout, cancellationToken); // the frame still goes out
+            return held;
+        }
+
+        public void Dispose()
+        {
+        }
     }
 
     [Fact]

@@ -101,7 +101,7 @@ internal sealed partial class CanOpenNode
     private void OnSdoBlockClientTimeout(byte serverNodeId)
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return;
-        if (session.PendingSends > 0)
+        if (session.LatestSendPending)
         {
             // As OnSdoClientTimeout: an unconfirmed send decides the transfer (#197).
             session.TimedOut = true;
@@ -426,6 +426,10 @@ internal sealed partial class CanOpenNode
                     // and the transfer has not ended (#197).
                     session.Deadline?.Dispose();
                     session.Finishing = true;
+                    // The end frame answers every send before it, the last sub-block ack
+                    // included: none of their outcomes may decide the upload now.
+                    session.LatestSendId++;
+                    session.LatestSendPending = false;
                     _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
                         SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadEndResponse),
                         onSendCompleted: failure => PostSdoClientSendOutcome(() =>
@@ -562,8 +566,7 @@ internal sealed partial class CanOpenNode
         }
         session.ResumeSeqno = seqno;
         session.Phase = SdoBlockClientPhase.AwaitSubBlockAck;
-        session.PendingSends++;
-        _ = SendOrderedControlFrames(SdoBlockClientSendCompleted(session), frames.ToArray());
+        _ = SendOrderedControlFrames(TrackSdoBlockClientSend(session), frames.ToArray());
     }
 
     private void SendBlockDownloadEnd(SdoBlockClientSession session)
@@ -1194,8 +1197,11 @@ internal sealed partial class CanOpenNode
         public bool IsDownload { get; }
         public byte[]? Payload { get; set; }
 
-        /// <summary>Sends of this transfer that have not ended yet (#197).</summary>
-        public int PendingSends { get; set; }
+        /// <summary>Numbers this transfer's sends; only the latest can still decide it (#197).</summary>
+        public int LatestSendId { get; set; }
+
+        /// <summary>The latest send has not ended yet.</summary>
+        public bool LatestSendPending { get; set; }
 
         /// <summary>The SDO timeout elapsed while a send was still unconfirmed; the transfer
         /// ends when that send does.</summary>
