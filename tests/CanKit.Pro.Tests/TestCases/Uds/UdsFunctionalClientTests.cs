@@ -46,9 +46,6 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         NAs = TimeSpan.FromMilliseconds(500),
     };
 
-    private static TimeSpan Between(long earlier, long later)
-        => TimeSpan.FromSeconds((later - earlier) / (double)Stopwatch.Frequency);
-
     /// <summary>
     /// A functional client whose P2, P2* and collection windows run on <see cref="Clock"/>,
     /// and a demux that stamps frames with that same clock. A zero stamp means "unstamped",
@@ -110,6 +107,23 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
             if (delay is null || delay > TimeSpan.FromMilliseconds(20)) return;
             await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(21));
         }
+    }
+
+    // A collection short enough to be the earliest timer once it is armed: a listener kept by a
+    // send in flight re-arms 20 ms slices, and anything longer would hide under them.
+    private static readonly TimeSpan ShortCollection = TimeSpan.FromMilliseconds(10);
+
+    // Lets a call's collection run out and returns its result, moving the clock by exactly the
+    // collection. It is armed from the confirmation, on a thread the test does not see, so it
+    // is waited for rather than stepped towards: stepping until the call returns runs the clock
+    // on for as long as the host takes to arm it. Measured while converting these tests, that
+    // was several seconds of virtual time -- enough to carry a test past the very window it was
+    // checking, and a mutation it should have caught went green (#195).
+    private static async Task<T> CollectFor<T>(WindowClock clock, Task<T> call, TimeSpan collection)
+    {
+        await WaitUntilArmed(clock, collection);
+        await clock.Clock.AdvanceAsync(collection);
+        return await call.WaitAsync(ShortTimeout);
     }
 
     private static CanFrame SingleFrameFrom(uint canId, byte[] pdu)
@@ -511,89 +525,81 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex on #150: the window is the ECU's P2 from the *transmission* -- the instant the
     // driver accepted the frame, as the physical client counts it -- not from before the
-    // send. With the driver holding the frame 200 ms before accepting it, the next call for
-    // the service goes out P2 = 1000 ms after the acceptance, not 800.
+    // send. With the driver taking 200 ms to accept the frame, the window ends P2 = 1000 ms
+    // after the acceptance, at 1200 ms, not at 1000.
     [Fact]
     public async Task A_Window_Is_Anchored_At_The_Drivers_Acceptance_Not_Before_The_Send()
     {
+        using var clock = new WindowClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new CanBusService(bus);
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(1000));
+        using var functional = OpenOnClock(bus, clock, responseWindow: TimeSpan.FromMilliseconds(1000));
 
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
-        var acceptedAt = new List<long>();
-        using var hold = new ManualResetEventSlim();
+        int handedOver = 0;
+        // The first frame: the driver takes 200 ms to accept it, as a cost on the clock rather
+        // than a wait on the wall (#195).
         bus.OnTransmitting = frame =>
         {
-            if (frame.ID != unchecked((int)FunctionalTxId)) return;
-            lock (acceptedAt)
-            {
-                if (acceptedAt.Count == 0) hold.Wait(); // the first frame: the driver takes 200 ms to accept it
-                acceptedAt.Add(Stopwatch.GetTimestamp());
-            }
+            if (frame.ID == unchecked((int)FunctionalTxId) && Interlocked.Increment(ref handedOver) == 1)
+                clock.Clock.Advance(TimeSpan.FromMilliseconds(200));
         };
 
+        var sentFrom = clock.Clock.Elapsed;
+        var acceptedAt = sentFrom + TimeSpan.FromMilliseconds(200);
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // On the pool: the driver's hold is inside the service's send lock, a synchronous wait.
-        var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(50), cts.Token));
-        await Task.Delay(200);
-        hold.Set();
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
-        await first;
+        await CollectFor(clock, first, ShortCollection);
+        await RetireInFlightSlices(clock);
 
+        // At 1100 ms a window ending at 1200 still holds the next call back, its listener
+        // collecting the 100 ms left. Anchored before the send, the window would have ended at
+        // 1000: the call would be out, and the earliest timer its own collection.
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        var windowEnd = acceptedAt + TimeSpan.FromMilliseconds(1000);
+        await clock.Clock.AdvanceToAsync(sentFrom + TimeSpan.FromMilliseconds(1100));
+        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100));
+        bus.DeferredEchoes.Enqueued.Should().Be(1, "the next call is still waiting out the window");
+
+        // At the window's end, and without the clock moving any further, the call goes out.
+        await clock.Clock.AdvanceToAsync(windowEnd);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the count never decreases
         bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
-        (await second).Should().ContainSingle();
-
-        long gap;
-        lock (acceptedAt) gap = acceptedAt[1] - acceptedAt[0];
-        // A lower bound a loaded host only raises; noted before the send only, the window
-        // would have ended 200 ms sooner.
-        Between(0, gap).Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(950),
+        (await RunCall(clock, second)).Should().ContainSingle(
             "the window is P2 from the driver's acceptance, not from before the send");
     }
 
     // Codex on #150: and not from the confirmation either. With the confirmation held 2 s past
     // the acceptance, the window -- P2 = 1000 ms from the acceptance -- is over by the time
-    // the first call returns, and the next call goes out at once rather than 950 ms later.
+    // the first call returns, and the next call goes out at once rather than 1000 ms later.
     [Fact]
     public async Task A_Window_Is_Anchored_At_The_Drivers_Acceptance_Not_At_The_Confirmation()
     {
+        using var clock = new WindowClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new CanBusService(bus);
-        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(5) };
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(1000));
+        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = ShortTimeout };
+        using var functional = OpenOnClock(bus, clock, responseWindow: TimeSpan.FromMilliseconds(1000), options: options);
 
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
-        var sentAt = new List<long>();
-        bus.OnTransmitting = frame => { if (frame.ID == unchecked((int)FunctionalTxId)) lock (sentAt) sentAt.Add(Stopwatch.GetTimestamp()); };
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
-        await Task.Delay(2000); // the confirmation held, the window long over
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(2000)); // the confirmation held, the window long over
         bus.DeferredEchoes.ReleaseNext();
-        await first;
+        await CollectFor(clock, first, ShortCollection);
+        await RetireInFlightSlices(clock);
 
-        var startedAt = Stopwatch.GetTimestamp();
+        // The clock is not moved from here until the call has gone out. Anchored at the
+        // confirmation, the window would still have 1000 ms less the collection to run, on a
+        // clock nobody moves: the call would never be sent (#195).
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
         bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
-        (await second).Should().ContainSingle();
-
-        long secondSentAt;
-        lock (sentAt) secondSentAt = sentAt[1];
-        // Anchored at the confirmation, the second call would wait 950 ms before sending; the
-        // bound sits 450 ms from either reading.
-        Between(startedAt, secondSentAt).Should().BeLessThan(TimeSpan.FromMilliseconds(500),
+        (await RunCall(clock, second)).Should().ContainSingle(
             "the window is P2 from the driver's acceptance, over by the time the confirmation came");
     }
 
@@ -895,15 +901,17 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     // 0x78 is applied by the anchoring; with a 1000 ms window the listener's collection returns
     // after the anchoring and applies it itself (Bugbot on #150). Neither may move the window.
     [Theory]
-    [InlineData(100, 1000)]
-    [InlineData(1000, 2000)]
-    public async Task A_Pending_Answer_From_Before_The_Handoff_Is_Not_This_Requests(int windowMs, int boundMs)
+    [InlineData(100)]
+    [InlineData(1000)]
+    public async Task A_Pending_Answer_From_Before_The_Handoff_Is_Not_This_Requests(int windowMs)
     {
+        var p2 = TimeSpan.FromMilliseconds(windowMs);
+        using var clock = new WindowClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new CanBusService(bus);
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(windowMs), responsePendingWindow: TimeSpan.FromMilliseconds(3000));
+        using var inner = new CanBusService(bus, clock.Actor.TimeSource.GetTimestamp);
+        var service = new SendEnteredService(inner);
+        using var functional = OpenOnClock(service, clock,
+            responseWindow: p2, responsePendingWindow: TimeSpan.FromMilliseconds(3000));
 
         var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x90, 0x02 });
@@ -913,34 +921,53 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var holding = new ManualResetEventSlim();
         var inside = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         bus.OnTransmitting = f => { if (f.ID == 0x123) { inside.TrySetResult(true); holding.Wait(); } };
-        var other = Task.Run(() => service.SendConfirmed(CanFrame.Classic(0x123, new byte[8]), TimeSpan.FromSeconds(5)));
+        var other = Task.Run(() => inner.SendConfirmed(CanFrame.Classic(0x123, new byte[8]), TimeSpan.FromSeconds(5)));
         await inside.Task.WaitAsync(ShortTimeout);
 
+        // The request reaching the service's SendConfirmed is what the 0x78 must follow: by
+        // then its listener and its collection have both subscribed and drained, and what is
+        // left is the wait for the lock. A sleep stood in for that once, and a host that
+        // delayed the request past it let the drain take the frame -- a pass for the wrong
+        // reason (#195). On the pool, since the wait for the lock is synchronous.
+        var reached = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.OnSending = f => { if (f.ID == unchecked((int)FunctionalTxId)) reached.TrySetResult(true); };
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // The request: subscribed and drained, then waiting for the lock -- on the pool, since
-        // the wait is synchronous and would hold this thread. (A host that delays it past the
-        // 0x78 lets the drain take the frame: a pass for the wrong reason, never a failure.)
-        var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, Window, cts.Token));
-        await Task.Delay(50);
+        var provisionalEnd = clock.Clock.Elapsed + p2; // the listener's window, noted before the send
+        var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token));
+        await reached.Task.WaitAsync(ShortTimeout);
         bus.RaiseObserved(pending, isEcho: false); // before the handoff: not this request's
+        // Strictly before: the handoff is stamped once the lock is free, 10 ms on.
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(10));
+        var handedOverAt = clock.Clock.Elapsed; // the clock does not move again until the request is out
         holding.Set();
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext(); // the other sender's confirmation
         await other;
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        if (windowMs == 100)
+        {
+            // The confirmation outlasts the short window: the listener's collection ends while
+            // the send is still in flight, so the 0x78 goes to the anchoring, and the listener
+            // stays in 20 ms slices -- the second wait is what shows it got that far.
+            await WaitUntilArmed(clock, provisionalEnd - clock.Clock.Elapsed);
+            await clock.Clock.AdvanceToAsync(provisionalEnd);
+            await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(20));
+        }
         bus.RaiseObserved(positive, isEcho: false); // after the handoff, inside the collection
         bus.DeferredEchoes.ReleaseNext(); // the request's
-        var responses = await first;
+        var responses = await CollectFor(clock, first, ShortCollection);
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse("the 0x78 from before the handoff is not this request's");
+        await RetireInFlightSlices(clock);
 
-        // Nor did it move the window out: a next call goes out after P2, not after P2* = 3 s.
-        var sw = Stopwatch.StartNew();
+        // Nor did it move the window out: at the end of P2 from the handoff the next call goes
+        // out without the clock moving further. Moved out by the 0x78 it would wait for P2*,
+        // 3000 ms from the 0x78, on a clock nobody moves.
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
+        var windowEnd = handedOverAt + p2;
+        if (clock.Clock.Elapsed < windowEnd) await clock.Clock.AdvanceToAsync(windowEnd);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
-        await second;
-        sw.Stop();
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(boundMs), "the 0x78 from before the handoff did not move the window out");
+        await RunCall(clock, second);
     }
 
     // Codex on #150: the windows a client is created with are bounded as a collection window
@@ -1016,46 +1043,51 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex on #150: a driver that accepts the frame only after the provisional window has run
-    // out lets the pre-send listener retire; anchoring the window at the acceptance must start
-    // one again, or the next call has nothing to wait for.
+    // out lets the pre-send listener's window lapse while the send is in flight; anchoring the
+    // window at the acceptance must move it out again, or the next call has nothing to wait for.
     [Fact]
     public async Task A_Listener_Is_Restarted_When_The_Acceptance_Outlasted_The_Window()
     {
+        using var clock = new WindowClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
-        using var service = new CanBusService(bus);
-        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromSeconds(3) };
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(service, FunctionalTxId, Ecu1, 0x7EF, options),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(1000));
+        var options = new IsoTpFunctionalOptions { IsExtendedCanId = false, UseCanFd = false, UsePadding = true, NAs = ShortTimeout };
+        using var functional = OpenOnClock(bus, clock, responseWindow: TimeSpan.FromMilliseconds(1000), options: options);
 
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
-        int accepted = 0;
-        using var hold = new ManualResetEventSlim();
+        int handedOver = 0;
+        // The first frame: accepted 1100 ms after it was handed over -- longer than the
+        // 1000 ms window the pre-send listener was given -- as a cost on the clock (#195).
         bus.OnTransmitting = frame =>
         {
-            if (frame.ID != unchecked((int)FunctionalTxId)) return;
-            if (Interlocked.Increment(ref accepted) == 1) hold.Wait(); // the first frame: accepted 1100 ms after it was handed over
+            if (frame.ID == unchecked((int)FunctionalTxId) && Interlocked.Increment(ref handedOver) == 1)
+                clock.Clock.Advance(TimeSpan.FromMilliseconds(1100));
         };
 
+        var acceptedAt = clock.Clock.Elapsed + TimeSpan.FromMilliseconds(1100);
+        var windowEnd = acceptedAt + TimeSpan.FromMilliseconds(1000);
         using var cts = new CancellationTokenSource(ShortTimeout);
-        // The first request's acceptance is held for 1100 ms -- longer than the 1000 ms window
-        // the pre-send listener was given; the ECU answers negatively 150 ms after the frame
-        // is accepted, inside the window as anchored there, with 850 ms to spare for the host
-        // to delay that timer.
-        var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(30), cts.Token));
-        await Task.Delay(1100);
-        hold.Set();
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
-        _ = Task.Run(async () => { await Task.Delay(150); bus.RaiseObserved(negative, isEcho: false); });
-        await first;
+        await CollectFor(clock, first, ShortCollection);
+        await RetireInFlightSlices(clock);
 
+        // The next call waits for a listener whose timer runs to the window anchored at the
+        // acceptance. Anchored before the send, the window would have ended 1100 ms sooner:
+        // over already, and the call out.
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
+        await WaitUntilArmed(clock, windowEnd - clock.Clock.Elapsed);
+        bus.DeferredEchoes.Enqueued.Should().Be(1, "the next call is still waiting out the window");
+
+        // The ECU's negative answer to the first request, late but inside the window as
+        // anchored at the acceptance: the waiting call must not collect it.
+        bus.RaiseObserved(negative, isEcho: false);
+        await clock.Clock.AdvanceToAsync(windowEnd);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
         bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
-        var responses = await second;
+        var responses = await RunCall(clock, second);
 
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse(
             "the second request waited out the window anchored at the first's late acceptance");
@@ -1250,5 +1282,46 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         (await RunCall(clock, next)).Should().BeEmpty();
         transmitted().Should().Be(2);
+    }
+
+    /// <summary>
+    /// Forwards to a real service and reports each <see cref="ICanBusService.SendConfirmed"/> as
+    /// it is entered: for a request, the point after it has subscribed and drained, where it
+    /// is about to wait for the service's transmit lock.
+    /// </summary>
+    private sealed class SendEnteredService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+
+        public SendEnteredService(ICanBusService inner) => _inner = inner;
+
+        public Action<CanFrame>? OnSending { get; set; }
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            OnSending?.Invoke(frame);
+            return _inner.SendConfirmed(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() { /* the test owns the inner service */ }
     }
 }
