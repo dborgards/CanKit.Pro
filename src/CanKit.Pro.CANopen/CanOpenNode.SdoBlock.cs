@@ -101,6 +101,20 @@ internal sealed partial class CanOpenNode
     private void OnSdoBlockClientTimeout(byte serverNodeId)
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return;
+        if (session.PendingSends > 0)
+        {
+            // As OnSdoClientTimeout: an unconfirmed send decides the transfer (#197).
+            session.TimedOut = true;
+            session.Deadline?.Dispose();
+            return;
+        }
+
+        CompleteSdoBlockClientTimeout(session);
+    }
+
+    private void CompleteSdoBlockClientTimeout(SdoBlockClientSession session)
+    {
+        byte serverNodeId = session.ServerNodeId;
         _sdoBlockClients.Remove(serverNodeId);
         session.Deadline?.Dispose();
         _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId),
@@ -172,6 +186,7 @@ internal sealed partial class CanOpenNode
     private bool HandleSdoClientResponseBlock(byte serverNodeId, byte[] data)
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return false;
+        if (session.TimedOut) return true; // decided already; only the pending send's outcome is awaited
         if (data.Length == 0) return true; // consume — nothing to parse
 
         // Pad short DLC frames back to 8 bytes for parsing, matching the classic SDO client
@@ -533,7 +548,8 @@ internal sealed partial class CanOpenNode
         }
         session.ResumeSeqno = seqno;
         session.Phase = SdoBlockClientPhase.AwaitSubBlockAck;
-        _ = SendOrderedControlFrames(SdoBlockClientSendFailure(session), frames.ToArray());
+        session.PendingSends++;
+        _ = SendOrderedControlFrames(SdoBlockClientSendCompleted(session), frames.ToArray());
     }
 
     private void SendBlockDownloadEnd(SdoBlockClientSession session)
@@ -1163,6 +1179,13 @@ internal sealed partial class CanOpenNode
         public byte Subindex { get; }
         public bool IsDownload { get; }
         public byte[]? Payload { get; set; }
+
+        /// <summary>Sends of this transfer that have not ended yet (#197).</summary>
+        public int PendingSends { get; set; }
+
+        /// <summary>The SDO timeout elapsed while a send was still unconfirmed; the transfer
+        /// ends when that send does.</summary>
+        public bool TimedOut { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
         public bool LocalCrcSupported { get; }
         public bool CrcActive { get; set; }

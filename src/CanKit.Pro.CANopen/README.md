@@ -263,7 +263,10 @@ a frame is sent.
 A request the bus rejects or does not confirm fails its transfer immediately with
 `CanOpenTransportException`, instead of waiting for `SdoTimeout`. With the request not on the
 wire, no answer can come, and a timeout would look like a silent server. The same failure is also
-raised on `BackgroundExceptionOccurred`.
+raised on `BackgroundExceptionOccurred`. If `SdoTimeout` elapses while a request is still waiting for its
+confirmation, the confirmation decides. A failed send ends the transfer with
+`CanOpenTransportException`. A confirmed one lets the timeout stand, which then completes up to
+the confirmation window (`CanBusService.DefaultConfirmTimeout`) later than `SdoTimeout`.
 
 ## Observing a peer PDO
 
