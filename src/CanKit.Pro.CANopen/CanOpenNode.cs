@@ -907,7 +907,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private void ReconcileProducer(int producer)
     {
-        var absorbers = new HashSet<(byte, byte, ulong)>();
+        var absorbers = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
         var newest = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
         LinkedListNode<PendingEvent>? lastTracked = null;
 
@@ -917,10 +917,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             var waiting = node.Value;
             if (waiting.Key is { } key && key.ProducerId == producer)
             {
-                if (absorbers.Contains(key.Identity))
+                if (absorbers.TryGetValue(key.Identity, out var survivor))
                 {
                     _pendingEvents.Remove(node);
                     _coalescedEventCount++;
+                    // As when folding at enqueue time: the survivor reports the newest settings.
+                    if (key.IsTimeout) survivor.Value = survivor.Value.WithRaise(waiting.Raise);
                     // A survivor always remains for this key, so the producer's count cannot reach
                     // zero here and the burst report stays as it was.
                     if (waiting.EmcyProducer is >= 0 and var emcy)
@@ -934,7 +936,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                         absorbers.Clear();
                         lastTracked = node;
                     }
-                    absorbers.Add(key.Identity);
+                    absorbers[key.Identity] = node;
                     newest[key.Identity] = node;
                 }
             }

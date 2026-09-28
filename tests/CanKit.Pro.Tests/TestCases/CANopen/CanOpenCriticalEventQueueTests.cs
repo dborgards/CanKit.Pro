@@ -900,6 +900,64 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
+    // The same rule when two timeouts are folded because their separator was dropped: the one that
+    // remains reports the newest settings.
+    [Fact]
+    public async Task Folding_Timeouts_After_A_Drop_Keeps_The_Newest_Settings()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-reconcile-settings"));
+        var clock = new ManualTimeSource();
+        var options = new CanOpenNodeOptions { EventQueueCapacity = 2 };
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, options, ownsService: true, clock);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timeouts = new List<TimeSpan>();
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.HeartbeatTimeout += (_, e) => { lock (timeouts) timeouts.Add(e.Timeout); };
+
+        var slow = TimeSpan.FromSeconds(7);
+        try
+        {
+            Settle(node);
+            node.AddHeartbeatConsumer(HeartbeatProducer, GuardWindow);
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            Advance(clock, node, GuardWindow);                     // timeout 1, under the first setting
+            long submitted = node.SubmittedEventCount;
+            bus.RaiseObserved(
+                CanFrame.Classic(unchecked((int)(0x700u + HeartbeatProducer)), new byte[] { 0x05 }),
+                isEcho: false);                                    // alive: separates the two
+            await WaitForSubmittedAsync(node, submitted + 1);
+            node.AddHeartbeatConsumer(HeartbeatProducer, slow);
+            Settle(node);
+            Advance(clock, node, slow);                            // timeout 2, under the new one
+            node.CoalescedEventCount.Should().Be(0, "the heartbeat is still waiting between them");
+
+            RaiseSync(bus);
+            RaiseSync(bus);                                        // evicts the heartbeat
+            await WaitUntilAsync(() => node.CoalescedEventCount == 1);
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => { lock (timeouts) return timeouts.Count == 1; });
+            lock (timeouts) timeouts.Should().Equal(slow);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
     [Fact]
     public async Task A_Throwing_Queued_Callback_Does_Not_Drop_A_Later_Heartbeat_Timeout()
     {
