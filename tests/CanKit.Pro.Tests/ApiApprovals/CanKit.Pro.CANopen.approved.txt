@@ -60,6 +60,21 @@ namespace CanKit.Pro.CANopen
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription ParseDcf(string content) { }
         public static CanKit.Pro.CANopen.CanOpenDeviceDescription ParseEds(string content) { }
     }
+    public sealed class CanOpenDiscoveredNode
+    {
+        public CanOpenDiscoveredNode(byte nodeId, CanKit.Pro.CANopen.CanOpenPresenceEvidence evidence, CanKit.Pro.CANopen.Nmt.NmtState? heartbeatState, uint? deviceType) { }
+        public uint? DeviceType { get; }
+        public CanKit.Pro.CANopen.CanOpenPresenceEvidence Evidence { get; }
+        public CanKit.Pro.CANopen.Nmt.NmtState? HeartbeatState { get; }
+        public byte NodeId { get; }
+    }
+    public static class CanOpenDiscovery
+    {
+        public static System.TimeSpan DefaultListenWindow { get; }
+        public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ListenAsync(CanKit.Abstractions.API.Can.ICanBus bus, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
+        public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ListenAsync(CanKit.Pro.RawCan.ICanBusService service, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
+        public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ScanAsync(CanKit.Pro.CANopen.ICanOpenNode client, System.Collections.Generic.IEnumerable<byte>? skipNodeIds = null, System.Threading.CancellationToken cancellationToken = default) { }
+    }
     public sealed class CanOpenNodeOptions
     {
         public CanOpenNodeOptions() { }
@@ -82,6 +97,14 @@ namespace CanKit.Pro.CANopen
     {
         Device = 0,
         Tool = 1,
+    }
+    [System.Flags]
+    public enum CanOpenPresenceEvidence
+    {
+        None = 0,
+        Heartbeat = 1,
+        BootUp = 2,
+        SdoResponse = 4,
     }
     public sealed class CanOpenTransportException : CanKit.Core.Exceptions.CanKitException
     {

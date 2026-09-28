@@ -27,8 +27,9 @@ This is a **subset of CiA 301**, not a complete implementation of it. What the s
 every requirement of SRS §4.3.2 — the requirements this repository set itself. FR-CO-013 to
 FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 (`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
-scope (#132); the SRS's "Quelle" column says for each of them whether CiA 301 requires it or the
-architecture does.
+scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
+(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`). The SRS's "Quelle" column says for each
+of them whether a standard requires it, the architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
 | --- | --- |
@@ -60,6 +61,12 @@ architecture does.
 | FR-CO-026 | Whatever the node cannot take as written is degraded, corrected in the dictionary and reported per entry in `DeviceDescription` (omitted / corrected / PDO disabled / not implemented / default supplied, with the SDO abort code that decided) |
 | FR-CO-027 | The file's access rights govern the bus: `rw` PDO records are writable without `WritableCommunicationParameters`, `ro` stays `ro`; its `PDOMapping` attribute is the object's mappability |
 | FR-CO-028 | The described values are the power-on values: "load" and Reset Communication return `1000h`–`1FFFh` to them (or to the last "save"), Reset Node the application objects too |
+| FR-CO-029 | The SDO client transfers only what a peer EDS/DCF bound for the server declares; without one, only `1000h:00`, `1001h:00` and `1018h:00`–`04h` ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)) |
+| FR-CO-030 | `ObserveForeignPdoAsync` splits a peer's PDO with its live COB-ID and mapping, falling back to the peer file ([Observing a peer PDO](#observing-a-peer-pdo)) |
+| FR-CO-031 | NMT flying master election, CiA 302-2 v4.1.0 ([Flying master](#flying-master)) |
+| FR-CO-032 | Boot-up of the slaves in `1F81h` by the active master, `1F80h`, `1F82h`, `1F89h` ([Boot-up](#boot-up)) |
+| FR-CO-033 | Listen-only discovery: heartbeat or boot-up within a caller-chosen window, nothing transmitted ([Discovery](#discovery)) |
+| FR-CO-034 | Scan on request: one SDO upload of `1000h:00` per node-id not already found ([Discovery](#discovery)) |
 
 ## Not built, and why
 
@@ -214,8 +221,10 @@ its abort code:
 
 The parsed model is available as `CanOpenDeviceDescription.Objects` (the `EdsDcfNet` object
 dictionary) and `DeviceInfo`, and `ParseDiagnostics` lists what the parser repaired while reading
-a lenient file. A tool that configures a *foreign* device from its DCF is the master-role round
-(#131), not this loader, which shapes the node it is given to.
+a lenient file. This loader shapes the node it is given to. A *foreign* device's file is bound
+with `BindPeerDeviceDescription` instead, as the list of objects the SDO client may transfer
+([below](#sdo-client-and-a-peers-device-description)). Writing a whole DCF into a foreign device
+is not built.
 
 ## SDO client and a peer's device description
 
@@ -251,6 +260,18 @@ including `1003h`. `PeerSdoAccessException.IsAllowedWithoutPeerDescription` is t
 Anything else throws `PeerSdoAccessException` with `PeerDescriptionLoaded` false, again before
 a frame is sent.
 
+A request the bus rejects or does not confirm fails its transfer immediately with
+`CanOpenTransportException`, instead of waiting for `SdoTimeout`. With the request not on the
+wire, no answer can come, and a timeout would look like a silent server. The same failure is also
+raised on `BackgroundExceptionOccurred`. If `SdoTimeout` elapses while a request is still waiting for its
+confirmation, the confirmation decides. A failed send ends the transfer with
+`CanOpenTransportException`. A confirmed one lets the timeout stand, which then completes up to
+the confirmation window (`CanBusService.DefaultConfirmTimeout`) later than `SdoTimeout`. Only the latest request of a transfer can decide it this way. The client sends again only
+after the server has answered, and that answer proves the earlier request reached the server.
+A later failed confirmation of the earlier request means a lost echo, not a lost frame, and is
+only raised on `BackgroundExceptionOccurred`. A send that is cancelled because the service was
+disposed counts as failed.
+
 ## Observing a peer PDO
 
 `ObserveForeignPdoAsync` splits a PDO of another node into a caller-supplied sink. Nothing is
@@ -269,6 +290,49 @@ file passed to the call. Observations of one peer run one after another. A CAN-I
 restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
 A payload shorter than the mapping writes nothing; a dummy entry `0002h`–`0007h` consumes its
 bytes and writes no signal.
+
+## Discovery
+
+`CanOpenDiscovery` finds the nodes on a bus. Listening is the default, and scanning is a separate
+call.
+
+```csharp
+// Opens no node and transmits nothing. The window defaults to 2 s.
+var heard = await CanOpenDiscovery.ListenAsync(bus);
+
+// Only when asked: one SDO upload of 1000h:00 to each node-id not heard.
+using var client = CanOpen.OpenNode(bus, nodeId: 0x7F);
+var answered = await CanOpenDiscovery.ScanAsync(client, heard.Select(n => n.NodeId));
+```
+
+`ListenAsync` subscribes to `701h`–`77Fh` for the window the caller passes, any positive duration.
+Without one it uses `DefaultListenWindow`, 2 seconds. A node is reported when either of these is
+seen:
+
+- a heartbeat: state byte `04h`, `05h` or `7Fh`
+- a boot-up: `00h`
+
+`Evidence` says which of the two were heard. `HeartbeatState` is the state in the last heartbeat.
+Bit 7, the guarding toggle, is masked, as the node's own heartbeat consumer does. Other state
+bytes, remote frames and 29-bit frames are ignored. There is an overload that takes
+an `ICanBusService` shared with other protocols, and that service is left open.
+
+`ScanAsync` reads `1000h:00` through the client's SDO client, and that is the only request it
+sends. A node that stays silent also gets the client's usual timeout abort (`0504 0000h`), so a
+node that answers late can drop its half-open transfer. It asks every node-id from 1 to 127
+except the client's own and the ones passed in, and the requests run concurrently. A node is
+reported when it answers:
+
+- with the value, which lands in `DeviceType`
+- with an SDO abort
+- with a response the client aborts as malformed
+
+The client's own timeout (`SdoTimeout`) means the node is absent. The peer-SDO gate applies, so a
+node-id whose bound file does not list `1000h:00` is not asked. Neither is a node-id the client
+already has a transfer with, and neither kind is reported. Any other failure ends the scan. That
+includes a request the bus rejects or does not confirm, which fails with
+`CanOpenTransportException`, so a dead bus does not look like an empty one.
+Opening the client transmits its boot-up, which is one reason the scan is not the default.
 
 ## PDO engine
 
@@ -586,6 +650,9 @@ CanKit.Pro.CANopen/
   CanOpenNode.NodeGuarding.cs         // partial: node-guarding consumer + producer, life guarding
   CanOpenNode.FlyingMaster.cs         // partial: NMT flying-master election
   CanOpenNode.BootUp.cs               // partial: boot-up of the slaves in 1F81h once the master is active
+  CanOpenNode.PeerSdo.cs              // partial: peer EDS/DCF binding and the client SDO gate
+  CanOpenNode.ForeignPdo.cs           // partial: splitting a peer's PDO
+  CanOpenDiscovery.cs                 // listen-only discovery and the scan on request
   CanOpenNodeOptions.cs
   CanOpenCobId.cs                     // pre-defined connection set, COB-ID control bits, restricted CAN-IDs
   CanOpenEvents.cs                    // event argument types
