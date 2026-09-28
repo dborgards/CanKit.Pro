@@ -2833,9 +2833,18 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
+    /// <summary>
+    /// Runs on the sender's thread as a frame is handed to this service, before the inner
+    /// service sees it -- before any lock of its own is taken.
+    /// </summary>
+    public Action<CanFrame>? OnSendConfirmed { get; set; }
+
     public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
-        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+    {
+        OnSendConfirmed?.Invoke(frame);
+        return _inner.SendConfirmed(frame, timeout, cancellationToken);
+    }
 
     public void Dispose() => _inner.Dispose();
 
