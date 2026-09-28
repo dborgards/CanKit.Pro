@@ -102,6 +102,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             var ecuChannel = IsoTpFactory.Open(busEcu, IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0),
                 FastIsoTp(useCanFd: false));
 
+            EcuBus = busEcu;
             Ecu = new SimulatedUdsEcu(ecuChannel);
             configure(Ecu);
             Ecu.Start();
@@ -118,6 +119,9 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         public IsoTpChannel Channel { get; }
 
         public SimulatedUdsEcu Ecu { get; }
+
+        /// <summary>The ECU's raw bus, for a frame its ISO-TP channel would not send.</summary>
+        public ICanBus EcuBus { get; private set; } = null!;
 
         public IUdsClient Client { get; }
 
@@ -182,7 +186,15 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     {
         private readonly Dictionary<TimeSpan, TaskCompletionSource<bool>> _gates = new();
 
-        public Task WaitAsync(TimeSpan delay, CancellationToken _) => Gate(delay).Task;
+        // Honours the ECU's token: a test that fails before releasing a gate still disposes the
+        // ECU, and an ECU loop parked on a gate nobody opens would hang that disposal -- and the
+        // test run with it -- instead of letting the failure be reported.
+        public async Task WaitAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using (cancellationToken.Register(() => cancelled.TrySetCanceled()))
+                await await Task.WhenAny(Gate(delay).Task, cancelled.Task).ConfigureAwait(false);
+        }
 
         public void Release(TimeSpan delay) => Gate(delay).TrySetResult(true);
 
@@ -518,6 +530,46 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #57 on a virtual clock (#171): NRC 0x21 repeats the request after BusyRepeatRequestDelay,
+    // measured on the client's clock like its P2 -- the repeat goes out only once the test has
+    // moved the clock past the delay.
+    [Fact]
+    public async Task A_Busy_Repeat_Waits_Its_Delay_On_The_Clients_Clock()
+    {
+        var calls = 0;
+        using var pair = new ClockPair(
+            e => e.On(0x22, req => Interlocked.Increment(ref calls) == 1
+                ? throw new EcuNegativeResponse(0x21)
+                : new byte[] { 0xF1, 0x90, 0xAA }),
+            options: new UdsClientOptions { BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(100) });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(100)); // the busy delay, not P2
+        Volatile.Read(ref calls).Should().Be(1, "the repeat waits for the delay");
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        (await Within(read)).Should().Equal(0xAA);
+        Volatile.Read(ref calls).Should().Be(2);
+    }
+
+    // A caller cancelling during the busy delay ends the wait at once, as Task.Delay's token did.
+    [Fact]
+    public async Task A_Busy_Repeat_Delay_On_The_Clients_Clock_Ends_On_Cancellation()
+    {
+        using var pair = new ClockPair(
+            e => e.On(0x22, req => throw new EcuNegativeResponse(0x21)),
+            options: new UdsClientOptions { BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(100) });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(100));
+        cts.Cancel();
+
+        Func<Task> act = () => Within(read); // a delay deaf to the token would never end
+        await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
     // -----------------------------------------------------------------------------------
     // #28 — ISO 14229-2: P2 ends with the *first* frame of the response. A multi-frame
     // response whose transfer outlasts P2 (here: paced by the client's own STmin) is not a
@@ -582,21 +634,23 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task P2_Is_Not_Extended_By_A_MultiFrame_Transfer_For_Another_Service()
     {
         // The ECU answers the RDBI request with silence, but first starts a 146-byte
-        // ReadDTCInformation response (SID 0x59): FF + 20 CFs at the client's STmin of 127 ms.
-        // On a virtual clock (#171) the transfer is proven still in progress by
-        // GetReceptionsInProgress() rather than by outrunning a real N_Cr; P2 is then moved
-        // past on the clock and must fire regardless -- the sibling of
-        // P2_Ends_With_The_First_Frame_Of_A_MultiFrame_Response, whose in-progress transfer
-        // extends the wait because it *is* this request's answer, where this one's must not
-        // because it is somebody else's.
-        var unrelated = new byte[146];
-        unrelated[0] = 0x59;
+        // ReadDTCInformation response (SID 0x59) and never finishes it: only its First Frame goes
+        // on the bus. On a virtual clock (#171) the client's N_Cr cannot end that reception, so
+        // it stays in progress for as long as the test runs. P2 is then moved past on the clock:
+        // the client must time out, because that transfer is somebody else's answer -- the
+        // sibling of P2_Ends_With_The_First_Frame_Of_A_MultiFrame_Response, where the transfer
+        // in progress is this request's own and does extend the wait. A client fooled into
+        // waiting for it never returns, and the test's own token ends it with a cancellation,
+        // not a timeout: no bound on the wall clock is needed to tell the two apart.
         var p2 = TimeSpan.FromMilliseconds(500);
+        ClockPair? stack = null;
 
-        using var pair = new ClockPair(
+        using var pair = stack = new ClockPair(
             e => e.On(0x22, req =>
             {
-                _ = e.Channel.SendAsync(unrelated);
+                // FF of a 146-byte (0x92) response for SID 0x59; the Consecutive Frames never follow.
+                stack!.EcuBus.Transmit(CanFrame.Classic(0x7E8,
+                    new byte[] { 0x10, 0x92, 0x59, 0x00, 0x00, 0x00, 0x00, 0x00 }, isExtendedFrame: false));
                 throw new EcuSilent();
             }),
             options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 },
@@ -606,12 +660,10 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 UsePadding = true,
                 NAs = TimeSpan.FromMilliseconds(500),
                 NBs = TimeSpan.FromMilliseconds(500),
-                NCr = TimeSpan.FromSeconds(10),
-                LocalStMin = TimeSpan.FromMilliseconds(127),
+                NCr = TimeSpan.FromSeconds(10), // longer than the test: the reception outlives P2
             });
 
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var sw = Stopwatch.StartNew();
         var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
 
         var deadline = DateTime.UtcNow + ShortTimeout;
@@ -621,20 +673,11 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             await Task.Delay(1);
         }
         await pair.Clock.AdvanceAsync(p2 + TimeSpan.FromMilliseconds(100)); // P2 runs out mid-transfer
-        // The unrelated transfer is really still in progress: otherwise the result below would
-        // hold for a client that has nothing left to be fooled by.
-        pair.Channel.GetReceptionsInProgress().Should().NotBeEmpty();
+        pair.Channel.GetReceptionsInProgress().Should().NotBeEmpty(
+            "the unrelated transfer is still in progress when P2 runs out");
 
         Func<Task> act = () => read;
         await act.Should().ThrowAsync<UdsTimeoutException>(
-            "an unrelated transfer must not hold the request past its budget");
-        sw.Stop();
-        // The unrelated transfer's remaining CFs are paced by the ECU's own (real) STmin --
-        // 127 ms x 19 more CFs, well over a second -- so a client that keeps waiting for it (by
-        // treating it as this request's own answer) is caught here, not just by the exception
-        // type: both a correct and a fooled client eventually throw UdsTimeoutException, only
-        // the fooled one does so after the whole transfer has played out in real time.
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1),
             "an unrelated transfer must not hold the request past its budget");
     }
 
