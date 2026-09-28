@@ -839,6 +839,66 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
+    // A timeout raised under a reconfigured consumer reports the new settings. Folding it into
+    // one still waiting from the old configuration would hand the subscriber stale details.
+    [Fact]
+    public async Task A_Timeout_Under_A_Reconfigured_Consumer_Is_Not_Folded_Into_The_Stale_One()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-reconfig"));
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true, clock);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var heartbeats = new List<TimeSpan>();
+        var guardings = new List<(TimeSpan GuardTime, byte Factor)>();
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.HeartbeatTimeout += (_, e) => { lock (heartbeats) heartbeats.Add(e.Timeout); };
+        node.NodeGuardingTimeout += (_, e) => { lock (guardings) guardings.Add((e.GuardTime, e.LifeTimeFactor)); };
+
+        var slow = TimeSpan.FromSeconds(7);
+        try
+        {
+            Settle(node);
+            node.AddHeartbeatConsumer(HeartbeatProducer, GuardWindow);
+            node.StartNodeGuardingConsumer(GuardedNode, GuardWindow, lifeTimeFactor: 1);
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            Advance(clock, node, GuardWindow);                     // both time out under the first settings
+            node.QueuedEventCount.Should().Be(2);
+
+            node.AddHeartbeatConsumer(HeartbeatProducer, slow);
+            node.StartNodeGuardingConsumer(GuardedNode, GuardWindow, lifeTimeFactor: 2);
+            Settle(node);
+            Advance(clock, node, TimeSpan.FromSeconds(10));        // and again under the new ones
+            node.CoalescedEventCount.Should().Be(0, "the settings differ, so these are different events");
+
+            node.StartNodeGuardingConsumer(GuardedNode, slow, lifeTimeFactor: 2);   // only the guard time differs now
+            Settle(node);
+            Advance(clock, node, TimeSpan.FromSeconds(20));
+            node.CoalescedEventCount.Should().Be(1, "the heartbeat timeout under the unchanged settings folds; the guarding one does not");
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => { lock (heartbeats) lock (guardings) return heartbeats.Count == 2 && guardings.Count == 3; });
+            lock (heartbeats) heartbeats.Should().Equal(GuardWindow, slow);
+            lock (guardings) guardings.Should().Equal((GuardWindow, (byte)1), (GuardWindow, (byte)2), (slow, (byte)2));
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
     [Fact]
     public async Task A_Throwing_Queued_Callback_Does_Not_Drop_A_Later_Heartbeat_Timeout()
     {

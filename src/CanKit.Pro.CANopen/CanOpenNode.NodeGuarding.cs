@@ -370,7 +370,7 @@ internal sealed partial class CanOpenNode
         {
             try { NodeGuardingTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.NodeGuardingTimeout(producer), emcyProducer: -1, producer);
+        }, critical: true, EventKey.NodeGuardingTimeout(producer, guardTime, lifeTimeFactor), emcyProducer: -1, producer);
     }
 
     private sealed class NodeGuardingConsumer

@@ -1015,27 +1015,33 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public long Ordinal { get; }
     }
 
-    /// <summary>Identity of a critical event for coalescing: what it is, who raised it and, for
-    /// an EMCY, the whole 8-byte payload.</summary>
+    /// <summary>Identity of a critical event for coalescing: what it is, who raised it and what it
+    /// says -- for an EMCY the whole 8-byte payload, for a timeout the settings it reports, so
+    /// that one raised under a reconfigured consumer is not folded into a stale one.</summary>
     private readonly struct EventKey : IEquatable<EventKey>
     {
         private readonly byte _kind;
         private readonly byte _producer;
         private readonly ulong _payload;
+        private readonly byte _extra;
 
-        private EventKey(byte kind, byte producer, ulong payload)
+        private EventKey(byte kind, byte producer, ulong payload, byte extra = 0)
         {
             _kind = kind;
             _producer = producer;
             _payload = payload;
+            _extra = extra;
         }
 
         public bool IsTimeout => _kind is 1 or 2;
 
         public byte ProducerId => _producer;
 
-        public static EventKey HeartbeatTimeout(byte producer) => new(1, producer, 0);
-        public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
+        public static EventKey HeartbeatTimeout(byte producer, TimeSpan timeout)
+            => new(1, producer, (ulong)timeout.Ticks);
+
+        public static EventKey NodeGuardingTimeout(byte producer, TimeSpan guardTime, byte lifeTimeFactor)
+            => new(2, producer, (ulong)guardTime.Ticks, lifeTimeFactor);
 
         public static EventKey Emcy(EmcyMessage msg)
         {
@@ -1047,11 +1053,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
 
         public bool Equals(EventKey other)
-            => (_kind, _producer, _payload).Equals((other._kind, other._producer, other._payload));
+            => (_kind, _producer, _payload, _extra).Equals((other._kind, other._producer, other._payload, other._extra));
 
         public override bool Equals(object? obj) => obj is EventKey other && Equals(other);
 
-        public override int GetHashCode() => (_kind, _producer, _payload).GetHashCode();
+        public override int GetHashCode() => (_kind, _producer, _payload, _extra).GetHashCode();
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
@@ -2428,7 +2434,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
+        }, critical: true, EventKey.HeartbeatTimeout(producer, timeout), emcyProducer: -1, producer);
     }
 
     private void RaiseEmcyReceived(EmcyMessage msg, DateTime ts)
