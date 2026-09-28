@@ -788,9 +788,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     _pendingEvents.Remove(drop);
                     _pendingNonCritical--;
                     _oldestNonCritical = next;
-                    if (drop.Value.Producer is >= 0 and var dropped
-                        && ReferenceEquals(_lastForProducer[dropped], drop))
-                        _lastForProducer[dropped] = LastWaitingFor(dropped);
+                    // What separated two identical critical events may be exactly what was
+                    // dropped: the handler will never see it, so they are one event now.
+                    if (drop.Value.Producer is >= 0 and var dropped)
+                        ReconcileProducer(dropped);
                 }
                 var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false, key: null, emcyProducer: -1, producer, ++_enqueueOrdinal));
                 _oldestNonCritical ??= added;
@@ -891,13 +892,60 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
     }
 
-    /// <summary>The newest event still waiting that concerns <paramref name="producer"/>. Called
-    /// under <see cref="_eventLock"/> when the one that was the newest has just been dropped.</summary>
-    private LinkedListNode<PendingEvent>? LastWaitingFor(int producer)
+    /// <summary>
+    /// Re-applies the folding rule to what is waiting for <paramref name="producer"/> after an
+    /// event about it was dropped to make room. Walks the queue in order: an identical critical
+    /// event that no heartbeat, guarding response or EMCY now separates from an earlier one is
+    /// folded into it, exactly as it would have been had the dropped event never been queued.
+    /// Also records the newest event left that says something about the producer's state. Called
+    /// under <see cref="_eventLock"/>; cost is one pass over the queue, and only when the event
+    /// dropped was about a producer.
+    /// </summary>
+    private void ReconcileProducer(int producer)
     {
-        for (var node = _pendingEvents.Last; node is not null; node = node.Previous)
-            if (node.Value.Producer == producer) return node;
-        return null;
+        Dictionary<EventKey, LinkedListNode<PendingEvent>>? absorbers = null;
+        Dictionary<EventKey, LinkedListNode<PendingEvent>>? newest = null;
+        LinkedListNode<PendingEvent>? lastTracked = null;
+
+        for (var node = _pendingEvents.First; node is not null;)
+        {
+            var next = node.Next;
+            var waiting = node.Value;
+            if (waiting.Key is { } key && key.ProducerId == producer)
+            {
+                if (absorbers is not null && absorbers.ContainsKey(key))
+                {
+                    _pendingEvents.Remove(node);
+                    _coalescedEventCount++;
+                    // A survivor always remains for this key, so the producer's count cannot reach
+                    // zero here and the burst report stays as it was.
+                    if (waiting.EmcyProducer is >= 0 and var emcy)
+                        --_pendingEmcyPerProducer[emcy];
+                }
+                else
+                {
+                    bool tracked = !key.IsTimeout;
+                    if (tracked)
+                    {
+                        absorbers?.Clear();
+                        lastTracked = node;
+                    }
+                    (absorbers ??= new())[key] = node;
+                    (newest ??= new())[key] = node;
+                }
+            }
+            else if (waiting.Producer == producer)
+            {
+                absorbers?.Clear();
+                lastTracked = node;
+            }
+            node = next;
+        }
+
+        if (newest is not null)
+            foreach (var entry in newest)
+                _pendingKeyed[entry.Key] = entry.Value;
+        _lastForProducer[producer] = lastTracked;
     }
 
     private static LinkedListNode<PendingEvent>? NextNonCritical(LinkedListNode<PendingEvent>? node)
@@ -983,6 +1031,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         }
 
         public bool IsTimeout => _kind is 1 or 2;
+
+        public byte ProducerId => _producer;
 
         public static EventKey HeartbeatTimeout(byte producer) => new(1, producer, 0);
         public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
