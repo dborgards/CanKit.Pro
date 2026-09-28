@@ -198,17 +198,22 @@ public static class CanOpenDiscovery
     }
 
     /// <summary>
-    /// The listen. <paramref name="delay"/> is the window; a test passes one it completes itself.
+    /// The listen. <paramref name="delay"/> is the window; a test passes one it completes itself,
+    /// and <paramref name="pumpStarted"/> hands it the drain task to check it has ended.
     /// Frames are drained on a pump for the whole window, so a busy bus does not overflow the
     /// subscription buffer, and a frame already buffered when the window closes is still counted.
     /// </summary>
     internal static async Task<IReadOnlyList<CanOpenDiscoveredNode>> ListenCoreAsync(ICanBusService service,
-        TimeSpan window, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken)
+        TimeSpan window, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken,
+        Action<Task>? pumpStarted = null)
     {
         var heard = new Dictionary<byte, (CanOpenPresenceEvidence Evidence, NmtState? State)>();
         Task pump;
+        Task closed;
         // Disposing the subscription completes Frames after the frames already buffered, so the
-        // pump is awaited only once the window has closed.
+        // pump is awaited only once the window has closed. A cancelled window closes it too:
+        // WhenAny waits without throwing, the pump is drained, and only then does the
+        // cancellation surface, so a caller disposing the service afterwards never races it.
         using (var subscription = service.Subscribe(
             CanIdFilter.Range(
                 CanOpenCobId.HeartbeatBase + CanOpenCobId.MinNodeId,
@@ -221,10 +226,13 @@ public static class CanOpenDiscovery
                     Record(heard, frameEvent.Frame);
                 }
             });
-            await delay(window, cancellationToken).ConfigureAwait(false);
+            pumpStarted?.Invoke(pump);
+            closed = delay(window, cancellationToken);
+            await Task.WhenAny(closed).ConfigureAwait(false);
         }
 
         await pump.ConfigureAwait(false);
+        await closed.ConfigureAwait(false);
         return heard
             .OrderBy(pair => pair.Key)
             .Select(pair => new CanOpenDiscoveredNode(pair.Key, pair.Value.Evidence, pair.Value.State, deviceType: null))

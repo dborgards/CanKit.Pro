@@ -170,6 +170,28 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Cancelled_Window_Drains_The_Pump_Before_The_Cancellation_Surfaces()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-discovery-drain-{Guid.NewGuid():N}");
+        using var service = new CanBusService(bus);
+        var window = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task? pump = null;
+        var listen = CanOpenDiscovery.ListenCoreAsync(service, TimeSpan.FromSeconds(1),
+            (_, _) => window.Task, CancellationToken.None, started => pump = started);
+
+        // A full buffer gives the drain work left to do when the window is cancelled, so a listen
+        // that let the cancellation out first would be seen with the pump still running.
+        for (var i = 0; i < CanBusService.DefaultBufferCapacity; i++)
+            bus.RaiseObserved(Heartbeat((byte)(1 + i % 127), 0x05), isEcho: false);
+        window.SetCanceled();
+
+        var pumpEndedFirst = listen.ContinueWith(_ => pump!.IsCompleted, TaskContinuationOptions.ExecuteSynchronously);
+        await FluentActions.Awaiting(() => listen.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<OperationCanceledException>();
+        (await pumpEndedFirst).Should().BeTrue("the cancellation surfaces only after the drain has ended");
+    }
+
+    [Fact]
     public async Task ListenAsync_On_A_Bus_Uses_The_Window_And_Detaches_Afterwards()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-discovery-bus-{Guid.NewGuid():N}");
