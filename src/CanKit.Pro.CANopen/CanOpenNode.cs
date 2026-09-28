@@ -2021,10 +2021,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             catch (Exception ex)
             {
-                RaiseBackgroundException(ex);
+                // The event carries the same failure the transfer is failed with; a thrown
+                // exception of another type is its InnerException (#197).
                 failure = ex as CanOpenTransportException
                     ?? new CanOpenTransportException(
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                RaiseBackgroundException(failure);
             }
             finally
             {
@@ -2166,10 +2168,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     }
                     catch (Exception ex)
                     {
-                        RaiseBackgroundException(ex);
+                        // As in SendControlFrame: the event carries the transfer's failure.
                         failure = ex as CanOpenTransportException
                             ?? new CanOpenTransportException(
                                 $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                        RaiseBackgroundException(failure);
                         return;
                     }
                 }

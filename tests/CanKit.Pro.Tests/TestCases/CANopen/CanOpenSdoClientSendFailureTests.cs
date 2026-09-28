@@ -123,13 +123,18 @@ public class CanOpenSdoClientSendFailureTests
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-send-throws-{Guid.NewGuid():N}");
         using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        var reported = new ConcurrentQueue<Exception>();
+        client.BackgroundExceptionOccurred += (_, ex) => reported.Enqueue(ex);
         bus.OnTransmitting = frame =>
         {
             if ((uint)frame.ID == CanOpenCobId.SdoRx(0x11)) throw new InvalidOperationException("adapter fault");
         };
 
-        await FluentActions.Awaiting(() => client.SdoUploadAsync(0x11, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout))
-            .Should().ThrowAsync<CanOpenTransportException>();
+        var failure = (await FluentActions.Awaiting(() => client.SdoUploadAsync(0x11, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>()).Which;
+        failure.InnerException.Should().BeOfType<InvalidOperationException>();
+        // Raised before the transfer is failed: the event carries that same failure.
+        reported.Should().Contain(failure);
     }
 
     [Fact]
