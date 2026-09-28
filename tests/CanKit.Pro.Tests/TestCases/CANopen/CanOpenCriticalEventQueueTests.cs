@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
@@ -146,6 +147,170 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
+    // #201: the critical events are not dropped, but they are not unbounded either. Every
+    // timeout kind re-arms on expiry, so one silent peer and a stuck handler used to grow the
+    // queue by one event per period for as long as the handler stayed stuck.
+    [Fact]
+    public async Task Repeated_Timeouts_For_One_Producer_Are_Folded_Into_The_One_Already_Waiting()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-fold"));
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true, clock);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var heartbeats = new List<HeartbeatTimeoutEventArgs>();
+        var guardings = new List<NodeGuardingTimeoutEventArgs>();
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.HeartbeatTimeout += (_, e) => { lock (heartbeats) heartbeats.Add(e); };
+        node.NodeGuardingTimeout += (_, e) => { lock (guardings) guardings.Add(e); };
+
+        try
+        {
+            Settle(node);
+            node.AddHeartbeatConsumer(HeartbeatProducer, GuardWindow);
+            node.StartNodeGuardingConsumer(GuardedNode, GuardWindow, lifeTimeFactor: 1);
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            const int Expiries = 4;
+            for (int i = 0; i < Expiries; i++) Advance(clock, node, GuardWindow);
+
+            node.QueuedEventCount.Should().Be(2, "one heartbeat timeout and one node-guarding timeout wait, however often they expired");
+            node.CoalescedEventCount.Should().Be(2 * (Expiries - 1));
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => node.QueuedEventCount == 0);
+            lock (heartbeats) heartbeats.Should().ContainSingle();
+            lock (guardings) guardings.Should().ContainSingle();
+
+            // Once delivered, the next expiry is a new event: the handler has not seen it.
+            Advance(clock, node, GuardWindow);
+            await WaitUntilAsync(() => { lock (heartbeats) return heartbeats.Count == 2; });
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
+    [Fact]
+    public async Task An_Emcy_Identical_To_One_Already_Waiting_Is_Folded_Into_It()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-emcy-fold"));
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, new CanOpenNodeOptions(), ownsService: true);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var emergencies = new List<EmcyReceivedEventArgs>();
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.EmcyReceived += (_, e) => { lock (emergencies) emergencies.Add(e); };
+
+        try
+        {
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            RaiseEmcy(bus, EmcyProducer, 0x8110, 0x11, manufacturer: 1);
+            for (int i = 0; i < 4; i++) RaiseEmcy(bus, EmcyProducer, 0x8110, 0x11, manufacturer: 1);
+            RaiseEmcy(bus, EmcyProducer, 0x8110, 0x11, manufacturer: 2);   // differs in the manufacturer field
+            RaiseEmcy(bus, EmcyProducer, 0x8110, 0x12, manufacturer: 1);   // differs in the register
+            RaiseEmcy(bus, EmcyProducer, 0x8111, 0x11, manufacturer: 1);   // differs in the code
+            RaiseEmcy(bus, EmcyProducer + 1, 0x8110, 0x11, manufacturer: 1); // differs in the producer
+            await WaitUntilAsync(() => node.CoalescedEventCount == 4 && node.QueuedEventCount == 5);
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => node.QueuedEventCount == 0);
+            await WaitUntilAsync(() => { lock (emergencies) return emergencies.Count == 5; });
+            node.EmcyOverflowCount.Should().Be(0);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
+    [Fact]
+    public async Task A_Producer_Cannot_Keep_More_Than_The_Queue_Capacity_Of_Distinct_Emergencies_Waiting()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-emcy-cap"));
+        var options = new CanOpenNodeOptions { EventQueueCapacity = Capacity };
+        using var node = new CanOpenNode(new CanBusService(bus), NodeId, options, ownsService: true);
+
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var emergencies = new List<EmcyReceivedEventArgs>();
+        var background = new List<Exception>();
+        int syncs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.EmcyReceived += (_, e) => { lock (emergencies) emergencies.Add(e); };
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+
+        try
+        {
+            Settle(node);
+            RaiseSync(bus);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            // Distinct payloads, so folding cannot help: this is the flood that varies its data.
+            for (ushort code = 0x8000; code < 0x8000 + 5; code++)
+                RaiseEmcy(bus, EmcyProducer, code, 0x01, manufacturer: 0);
+            RaiseEmcy(bus, EmcyProducer + 1, 0x8000, 0x01, manufacturer: 0);   // another producer is unaffected
+            await WaitUntilAsync(() => node.EmcyOverflowCount == 3 && node.QueuedEventCount == Capacity + 1);
+            lock (background)
+            {
+                background.Should().ContainSingle("the burst is reported once, not once per discarded frame")
+                    .Which.Should().BeOfType<InvalidOperationException>()
+                    .Which.Message.Should().Contain("0x44");
+            }
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => node.QueuedEventCount == 0);
+            await WaitUntilAsync(() => { lock (emergencies) return emergencies.Count == Capacity + 1; });
+            lock (emergencies)
+            {
+                emergencies.Where(e => e.Message.ProducerNodeId == EmcyProducer).Select(e => e.Message.ErrorCode)
+                    .Should().Equal(new ushort[] { 0x8000, 0x8001 }, "the oldest ones are kept, in order");
+            }
+
+            // The backlog drained, so the next burst is a new one and is reported again.
+            for (ushort code = 0x9000; code < 0x9000 + 3; code++)
+                RaiseEmcy(bus, EmcyProducer, code, 0x01, manufacturer: 0);
+            await WaitUntilAsync(() => node.EmcyOverflowCount == 4);
+            await WaitUntilAsync(() => { lock (emergencies) return emergencies.Count == Capacity + 1 + Capacity; });
+            lock (background) background.Should().HaveCount(2);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
     [Fact]
     public async Task A_Throwing_Queued_Callback_Does_Not_Drop_A_Later_Heartbeat_Timeout()
     {
@@ -235,6 +400,24 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         ran.Should().Be(0);
         node.SubmittedEventCount.Should().Be(submitted);
         node.QueuedEventCount.Should().Be(0);
+    }
+
+    private static void RaiseEmcy(ControllableBus bus, int producer, ushort code, byte register, byte manufacturer)
+    {
+        var emcy = new EmcyMessage((byte)producer, code, register, new byte[] { manufacturer, 0, 0, 0, 0 });
+        bus.RaiseObserved(
+            CanFrame.Classic(unchecked((int)CanOpenCobId.Emcy((byte)producer)), emcy.Encode()),
+            isEcho: false);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("Condition not reached in time.");
+            await Task.Delay(1);
+        }
     }
 
     private static void RaiseSync(ControllableBus bus)

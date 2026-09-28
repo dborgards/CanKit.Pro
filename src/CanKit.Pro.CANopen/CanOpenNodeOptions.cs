@@ -58,7 +58,12 @@ public sealed class CanOpenNodeOptions
     /// and <see cref="CanOpenNode.EmcyReceived"/> travel on the same queue, in the order they
     /// were raised, but are never discarded to make room: a guarding consumer that misses one
     /// treats a silent peer as alive. They can make the queue longer than this capacity while
-    /// a handler is stuck. <see cref="CanOpenNode.BackgroundExceptionOccurred"/> is dispatched
+    /// a handler is stuck, but not without bound. A timeout for a producer whose timeout is
+    /// already waiting is folded into it, and so is an EMCY identical to one already waiting.
+    /// Each EMCY producer may have at most this many distinct emergencies waiting; the surplus
+    /// from it is discarded until its backlog drains, and one
+    /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> report is raised per such burst.
+    /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> is dispatched
     /// synchronously and is not queued.
     /// </summary>
     public int EventQueueCapacity { get; init; } = 64;

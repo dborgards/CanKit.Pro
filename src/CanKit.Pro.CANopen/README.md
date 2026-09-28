@@ -345,7 +345,11 @@ appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up
 with heartbeats, SYNC, PDOs and NMT, and keep their place in that order. They are the events
 the queue will not drop when a subscriber falls behind `EventQueueCapacity` (default 64). A
 slow handler can lose a heartbeat or an RPDO; it cannot lose a timeout or an emergency and
-then treat the peer as healthy. `BackgroundExceptionOccurred` is not queued.
+then treat the peer as healthy. Their backlog is still bounded: a timeout for a producer whose
+timeout is already waiting is folded into it, an EMCY identical to one already waiting likewise,
+and a producer with `EventQueueCapacity` distinct emergencies waiting has its further ones
+discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundExceptionOccurred`
+is not queued.
 
 **Node guarding (consumer side).** `StartNodeGuardingConsumer(nodeId, guardTime, lifeTimeFactor)`
 polls `0x700 + nodeId` with an RTR every `guardTime` and raises `NodeGuardingTimeout` after
