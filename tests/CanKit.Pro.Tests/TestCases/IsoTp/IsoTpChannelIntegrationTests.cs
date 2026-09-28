@@ -2836,8 +2836,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     public void A_First_Frame_Arriving_After_Dispose_Is_Not_Announced()
     {
         using var service = new StarvedReaderBusService();
-        var actor = new ProtocolActor();
-        var channel = new IsoTpChannel(service,
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
             IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
         actor.Dispose();
         channel.Dispose();

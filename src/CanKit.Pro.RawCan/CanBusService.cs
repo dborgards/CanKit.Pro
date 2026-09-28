@@ -359,7 +359,15 @@ namespace CanKit.Pro.RawCan
                     isExtendedFrame: frame.IsExtendedFrame, isErrorFrame: frame.IsErrorFrame)
                 : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
                     isRemoteFrame: frame.IsRemoteFrame, isErrorFrame: frame.IsErrorFrame);
-            var transmit = _bus.TransmitAsync(detached, cancellationToken)
+            //
+            // The driver's token is ours, linked to the caller's: when the timeout wins it is
+            // cancelled, so a driver that honours cancellation stops the abandoned operation
+            // instead of putting a stale frame on the wire behind whatever the caller sends next
+            // (Codex on #216). One that does not cannot be stopped from here, and waiting for it
+            // would bring back the hang this bound exists to remove (#202); the timed-out result
+            // is what tells the caller the frame may or may not have gone out.
+            using var transmitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var transmit = _bus.TransmitAsync(detached, transmitCts.Token)
                 .ContinueWith(
                     static (completed, state) =>
                     {
@@ -407,6 +415,7 @@ namespace CanKit.Pro.RawCan
                         CancellationToken.None,
                         TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                         TaskScheduler.Default);
+                    transmitCts.Cancel();
                     cancellationToken.ThrowIfCancellationRequested();
                     return new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Timeout };
                 }

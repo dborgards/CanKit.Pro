@@ -426,6 +426,21 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Codex on #216: a timed-out send asks the driver to stop the transmit it abandoned, so a
+    // cooperative bus does not put a stale frame on the wire behind the caller's next send.
+    [Fact]
+    public async Task A_Timed_Out_Approximated_Send_Cancels_The_Drivers_Transmit()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+
+        (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+            .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+
+        (await bus.FirstAsyncTransmitToken.WaitAsync(ShortTimeout)).IsCancellationRequested.Should().BeTrue();
+    }
+
     // Bugbot on #216: cancelling a stalled send is a cancellation, immediately -- not a timeout
     // reported after the full timeout has run out. The timeout here is far beyond ShortTimeout,
     // so a send that waited for it would trip the hang bound instead of completing.

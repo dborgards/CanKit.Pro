@@ -126,6 +126,11 @@ public sealed class ControllableBus : ICanBus
     /// <summary>Faults every stalled asynchronous transmit and stops stalling.</summary>
     public void FaultStalledTransmits(Exception error) => Interlocked.Exchange(ref _stall, null)?.TrySetException(error);
 
+    private readonly TaskCompletionSource<CancellationToken> _firstAsyncTransmitToken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes with the token the first <c>TransmitAsync</c> call was handed.</summary>
+    public Task<CancellationToken> FirstAsyncTransmitToken => _firstAsyncTransmitToken.Task;
+
     /// <summary>Completes with the frame the first <c>TransmitAsync</c> call was handed.</summary>
     public Task<CanFrame> FirstAsyncTransmit => _firstAsyncTransmit.Task;
 
@@ -239,6 +244,7 @@ public sealed class ControllableBus : ICanBus
     public Task<int> TransmitAsync(CanFrame frame, CancellationToken cancellationToken = default)
     {
         _firstAsyncTransmit.TrySetResult(frame);
+        _firstAsyncTransmitToken.TrySetResult(cancellationToken);
         return Volatile.Read(ref _stall) is { } stall ? stall.Task : Task.FromResult(Transmit(frame));
     }
 

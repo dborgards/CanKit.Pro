@@ -168,7 +168,8 @@ namespace CanKit.Pro.RawCan
         /// the driver to accept the frame (<see cref="ICanBus.TransmitAsync(CanFrame, System.Threading.CancellationToken)"/>),
         /// which every current adapter completes immediately, so it only bites for a bus whose
         /// asynchronous transmit stalls. A frame reported as timed out may still reach the wire
-        /// later. Must be positive.
+        /// later (the bus is asked to cancel the transmit, but a driver that ignores that cannot
+        /// be stopped). Must be positive.
         /// </param>
         /// <param name="cancellationToken">
         /// Caller-supplied cancellation; cancels the returned task per standard .NET convention,
