@@ -186,7 +186,8 @@ internal sealed partial class CanOpenNode
     private bool HandleSdoClientResponseBlock(byte serverNodeId, byte[] data)
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return false;
-        if (session.TimedOut) return true; // decided already; only the pending send's outcome is awaited
+        // Decided already; only the outcome of a pending send is awaited.
+        if (session.TimedOut || session.Finishing) return true;
         if (data.Length == 0) return true; // consume — nothing to parse
 
         // Pad short DLC frames back to 8 bytes for parsing, matching the classic SDO client
@@ -420,12 +421,25 @@ internal sealed partial class CanOpenNode
                         }
                     }
 
-                    // Acknowledge end and complete the transfer.
-                    _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
-                        SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadEndResponse));
-                    _sdoBlockClients.Remove(session.ServerNodeId);
+                    // Acknowledge the end. The upload completes once the acknowledgement is on
+                    // the wire: if the bus does not send it, the server is still waiting for it
+                    // and the transfer has not ended (#197).
                     session.Deadline?.Dispose();
-                    session.Tcs.TrySetResult(final);
+                    session.Finishing = true;
+                    _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
+                        SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadEndResponse),
+                        onSendCompleted: failure => PostSdoClientSendOutcome(() =>
+                        {
+                            if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live)
+                                || !ReferenceEquals(live, session))
+                            {
+                                return;
+                            }
+
+                            _sdoBlockClients.Remove(session.ServerNodeId);
+                            if (failure is not null) session.Tcs.TrySetException(failure);
+                            else session.Tcs.TrySetResult(final);
+                        }));
                 }
                 return true;
 
@@ -1186,6 +1200,10 @@ internal sealed partial class CanOpenNode
         /// <summary>The SDO timeout elapsed while a send was still unconfirmed; the transfer
         /// ends when that send does.</summary>
         public bool TimedOut { get; set; }
+
+        /// <summary>The upload is complete and its end acknowledgement is being sent; the
+        /// transfer ends when that send does.</summary>
+        public bool Finishing { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
         public bool LocalCrcSupported { get; }
         public bool CrcActive { get; set; }

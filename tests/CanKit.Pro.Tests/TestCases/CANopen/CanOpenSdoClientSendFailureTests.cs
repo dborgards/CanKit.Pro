@@ -92,6 +92,48 @@ public class CanOpenSdoClientSendFailureTests
     }
 
     [Fact]
+    public async Task A_Block_Upload_Whose_End_Acknowledgement_Is_Rejected_Does_Not_Succeed()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-end-fail-{Guid.NewGuid():N}");
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return;
+            var cs = frame.Data.Span[0];
+            // A server that runs the upload to its end, answering on its own thread.
+            Action? answer = null;
+            if ((cs & 0xE3) == SdoBlockFrames.CcsBlockUploadInitBase)
+            {
+                answer = () => bus.RaiseObserved(CanFrame.Classic(server, SdoBlockFrames.BuildBlockUploadInitResponse(
+                    0x1000, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 4)), isEcho: false);
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadStart)
+            {
+                answer = () => bus.RaiseObserved(CanFrame.Classic(server,
+                    SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, new byte[] { 1, 2, 3, 4 })), isEcho: false);
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck)
+            {
+                answer = () =>
+                {
+                    // Everything the client sends from here on is rejected: that is only the end
+                    // acknowledgement.
+                    bus.AcceptTransmit = false;
+                    bus.RaiseObserved(CanFrame.Classic(server, SdoBlockFrames.BuildEnd(
+                        SdoBlockFrames.ScsBlockUploadEndBase, unusedBytesInLastSegment: 3, crc: 0)), isEcho: false);
+                };
+            }
+
+            if (answer is not null) _ = Task.Run(answer);
+        };
+
+        await FluentActions.Awaiting(() => client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block)
+                .WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>();
+    }
+
+    [Fact]
     public async Task A_Rejected_Block_Segment_Stops_The_Sub_Block()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-seg-fail-{Guid.NewGuid():N}");
