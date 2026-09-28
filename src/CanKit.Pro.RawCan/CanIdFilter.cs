@@ -61,6 +61,12 @@ namespace CanKit.Pro.RawCan
         /// <param name="from">Minimum ID, inclusive.</param>
         /// <param name="to">Maximum ID, inclusive.</param>
         /// <param name="idType">Standard or extended ID space.</param>
+        /// <exception cref="ArgumentOutOfRangeException">
+        /// <paramref name="idType"/> is not a defined <see cref="CanFilterIDType"/> value (for
+        /// instance an out-of-range cast). It is not silently treated as standard, because
+        /// <see cref="Overlaps"/> compares the raw values and would then miss an overlap with a
+        /// genuine standard filter over the same IDs.
+        /// </exception>
         /// <exception cref="ArgumentException"><paramref name="to"/> is below <paramref name="from"/>.</exception>
         /// <exception cref="ArgumentOutOfRangeException">
         /// A bound lies outside <paramref name="idType"/>'s ID space (0x7FF for standard,
@@ -70,13 +76,15 @@ namespace CanKit.Pro.RawCan
         /// </exception>
         public static CanIdFilter Range(uint from, uint to, CanFilterIDType idType = CanFilterIDType.Standard)
         {
+            // Validate idType first, so an undefined value is reported as such whatever the bounds are.
+            var maxId = MaxId(idType);
+
             if (to < from) throw new ArgumentException("'to' must be greater than or equal to 'from'.", nameof(to));
 
             // Fail loudly rather than never matching. A filter built from an out-of-space bound --
             // Range(0x18FEF100, ...) with the idType forgotten is the canonical one -- silently
             // accepted no frames and reported nothing, which is the most expensive way for this
             // kind of mistake to be found.
-            var maxId = MaxId(idType);
             if (from > maxId) throw OutOfIdSpace(nameof(from), from, idType, maxId);
             if (to > maxId) throw OutOfIdSpace(nameof(to), to, idType, maxId);
 
@@ -91,7 +99,8 @@ namespace CanKit.Pro.RawCan
         /// <param name="accMask">Acceptance mask; only the set bits are compared.</param>
         /// <param name="idType">Standard or extended ID space.</param>
         /// <exception cref="ArgumentOutOfRangeException">
-        /// The pair requires a bit outside <paramref name="idType"/>'s ID space to be set --
+        /// <paramref name="idType"/> is not a defined <see cref="CanFilterIDType"/> value, or the
+        /// pair requires a bit outside <paramref name="idType"/>'s ID space to be set --
         /// <c>(accCode &amp; accMask)</c> reaches above 0x7FF (standard) or 0x1FFFFFFF (extended).
         /// No real CAN ID has those bits set, so the filter could never match. A mask that reaches
         /// above the ID space is fine on its own: it then merely requires those bits to be zero,
@@ -110,8 +119,15 @@ namespace CanKit.Pro.RawCan
             return new CanIdFilter(Kind.Mask, accCode, accMask, idType);
         }
 
+        // Exhaustive on purpose: an undefined value must not fall back to either ID space.
         private static uint MaxId(CanFilterIDType idType)
-            => idType == CanFilterIDType.Extend ? ID_EXT_MASK : ID_STD_MASK;
+            => idType switch
+            {
+                CanFilterIDType.Standard => ID_STD_MASK,
+                CanFilterIDType.Extend => ID_EXT_MASK,
+                _ => throw new ArgumentOutOfRangeException(nameof(idType), idType,
+                    $"{(int)idType} is not a defined CanFilterIDType; use Standard or Extend."),
+            };
 
         private static ArgumentOutOfRangeException OutOfIdSpace(string paramName, uint value, CanFilterIDType idType, uint maxId)
             => new(paramName, value,
