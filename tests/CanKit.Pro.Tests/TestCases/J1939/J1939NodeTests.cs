@@ -3035,10 +3035,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         // Short arbitration window so many rebinds happen while peer traffic is in flight;
         // small Th so a single BAM takes a couple of ms end-to-end.
+        //
+        // The node's TP channels run on the wall clock, and two of their limits are ones a
+        // loaded host can reach while a probe is on its way (#195): T1, if the probe's own DT
+        // gap stretches past it, and the receive inbox, which drops its oldest datagram when
+        // the node's reader falls a full inbox of background BAMs behind (32 by default).
+        // Neither is what this test is about, so both are set beyond ShortTimeout -- 4096 BAMs
+        // cannot complete in under 16 s, each one waiting out two 2 ms spacings -- and a stall
+        // long enough to reach them fails the probe's wait first, and says so.
         var opts = new J1939NodeOptions(Name(1))
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(40),
-            TransportOptions = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(2)),
+            TransportOptions = new J1939TpOptions().With(
+                bamPacketSpacing: TimeSpan.FromMilliseconds(2),
+                t1: ShortTimeout + ShortTimeout,
+                receiveBufferCapacity: 4096),
         };
         using var node = J1939Node.Open(busNode, opts);
 
@@ -3157,6 +3168,87 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         got.Where(d => d.Pgn == probePgn).Select(d => d.Seq).Should()
             .Equal(Enumerable.Range(0, claims),
                 "each rebind must be followed by a delivered probe, exactly once, in order");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #195: one aborted reassembly must not end the node's multi-frame receive path. The
+    // channel reports an abort both through BackgroundExceptionOccurred and as a fault in
+    // ReceiveAllAsync, and the node's transport reader used to take that fault as the end of
+    // the channel: it stopped, and every later BAM or TP.CM was dropped until the next rebind.
+    //
+    // Before the fix, this is how RebindTransport_DoesNotDeliverBamMoreThanOncePerRebind can
+    // fail the way it did on macOS in run 36407937076 -- the probe sent, and never delivered:
+    // its background stream is in flight across every rebind, and one aborted background BAM
+    // is enough. In that test only a loaded runner aborts one, most plainly by stretching a
+    // TP.DT gap past T1's 750 ms. Here the abort is a TP.DT out of sequence instead, which
+    // aborts at once and needs no clock at all.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Broadcast_After_An_Aborted_Reassembly_Is_Still_Delivered()
+    {
+        const byte peerSa = 0x77;
+        const uint abortedPgn = 0xFED3u;
+        const uint followingPgn = 0xFED4u;
+
+        var session = NewSession();
+        using var busNode = Open(session, 0);
+        using var busPeer = Open(session, 1);
+        using var node = J1939Node.Open(busNode, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        });
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        var aborts = new List<J1939TpAbortException>();
+        var firstAbort = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is not J1939TpAbortException abort) return;
+            lock (aborts) aborts.Add(abort);
+            firstAbort.TrySetResult(true);
+        };
+        var following = new TaskCompletionSource<J1939Message>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.MessageReceived += (_, m) =>
+        {
+            if (m.Pgn == followingPgn) following.TrySetResult(m);
+        };
+
+        var cmId = unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa));
+        var dtId = unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa));
+        var payload = new byte[12];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)(0xA0 + i);
+        int packets = J1939TpFrames.TotalPackets(payload.Length);
+
+        // A BAM whose first TP.DT carries sequence number 2: the session is aborted on the spot.
+        busPeer.Transmit(CanFrame.Classic(cmId,
+            J1939TpFrames.BuildBam(payload.Length, packets, abortedPgn), isExtendedFrame: true));
+        busPeer.Transmit(CanFrame.Classic(dtId,
+            J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+        await firstAbort.Task.AsTaskWithTimeout(ShortTimeout);
+
+        // Then a complete, well-formed BAM from the same peer.
+        busPeer.Transmit(CanFrame.Classic(cmId,
+            J1939TpFrames.BuildBam(payload.Length, packets, followingPgn), isExtendedFrame: true));
+        for (int i = 0; i < packets; i++)
+        {
+            busPeer.Transmit(CanFrame.Classic(dtId,
+                J1939TpFrames.BuildDt((byte)(i + 1), payload, i * J1939TpFrames.DtDataBytes),
+                isExtendedFrame: true));
+        }
+
+        var message = await following.Task.AsTaskWithTimeout(ShortTimeout);
+        message.SourceAddress.Should().Be(peerSa);
+        message.Payload.ToArray().Should().Equal(payload,
+            "an aborted transfer from a peer ends that transfer, not the node's multi-frame receive path");
+
+        // Read after the delivery on purpose: the reader meets the abort's fault in the inbox
+        // before the datagram queued behind it, so a second report would already be here.
+        lock (aborts)
+        {
+            aborts.Should().ContainSingle(
+                "the abort is reported once, by the channel; the reader stepping over it must not repeat it")
+                .Which.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
+        }
     }
 
     // ---------------------------------------------------------------------------------------
