@@ -2643,10 +2643,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Stalled_Asynchronous_Transmit_Times_Out_And_Does_Not_Wedge_The_Channel()
     {
         var session = NewSession();
-        using var innerA = OpenClassic(session, 0);
         using var busB = OpenClassic(session, 1);
-        var bus = StallableAsyncTransmitBus.Wrap(innerA, out var control);
-        control.Stalled = true;
+        using var bus = ControllableBus.Plain(session);
+        bus.StallTransmitAsync = true;
+        using var wire = OpenClassic(session, 2);
+        bus.OnTransmitting = frame => wire.Transmit(frame); // what the sender puts on the wire
 
         var epA = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
         var epB = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
@@ -2663,7 +2664,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var ex = await Assert.ThrowsAsync<IsoTpTimeoutException>(() => first.WaitAsync(ShortTimeout));
         ex.Timer.Should().Be(IsoTpTimer.NAs);
 
-        control.Stalled = false;
+        bus.StallTransmitAsync = false;
         await sender.SendAsync(new byte[] { 4, 5, 6 }).WaitAsync(ShortTimeout);
         using var cts = new CancellationTokenSource(ShortTimeout);
         (await receiver.ReceiveAsync(cts.Token)).Should().Equal(4, 5, 6);
@@ -2695,9 +2696,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     public async Task Dispose_After_The_Injected_Actor_Was_Disposed_Fails_The_InFlight_Send()
     {
         var session = NewSession();
-        using var inner = OpenClassic(session, 0);
-        var bus = StallableAsyncTransmitBus.Wrap(inner, out var control);
-        control.Stalled = true;
+        using var bus = ControllableBus.Plain(session);
+        bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus);
         using var actor = new ProtocolActor();
         var options = new IsoTpChannelOptions { UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromMinutes(5) };
@@ -2705,13 +2705,13 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), options, ownsService: false, actor);
 
         var send = channel.SendAsync(new byte[] { 1, 2, 3 });
-        await control.FirstTransmit.WaitAsync(ShortTimeout); // the frame is out, its confirm stalled
+        await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout); // the frame is out, its confirm stalled
 
         actor.Dispose();
         channel.Dispose();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
-        control.Release();
+        bus.ReleaseStalledTransmits();
     }
 
     // The other await Dispose's fallback must release: SendAsync canceled while a frame's confirm
@@ -2722,9 +2722,8 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     public async Task Dispose_After_The_Injected_Actor_Was_Disposed_Releases_The_Bus_Idle_Wait()
     {
         var session = NewSession();
-        using var inner = OpenClassic(session, 0);
-        var bus = StallableAsyncTransmitBus.Wrap(inner, out var control);
-        control.Stalled = true;
+        using var bus = ControllableBus.Plain(session);
+        bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus);
         using var actor = new ProtocolActor();
         var options = new IsoTpChannelOptions { UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromMinutes(5) };
@@ -2733,7 +2732,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource();
 
         var send = channel.SendAsync(new byte[] { 1, 2, 3 }, cts.Token);
-        await control.FirstTransmit.WaitAsync(ShortTimeout);
+        await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
         cts.Cancel(); // completes the send's outcome; the bus-idle wait is what remains
 
         var waiterField = typeof(IsoTpChannel).GetField("_busTxIdleWaiter", BindingFlags.Instance | BindingFlags.NonPublic)!;
@@ -2748,7 +2747,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.Dispose();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
-        control.Release();
+        bus.ReleaseStalledTransmits();
     }
 
     // Bugbot on #216: a First Frame announced but not yet handled when the channel is disposed
@@ -2778,6 +2777,30 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         channel.Dispose();
         gate.Release();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // Codex on #216: a reassembly already under way when the channel is disposed is abandoned
+    // with it, not reported as in progress for ever.
+    [Fact]
+    public async Task A_Reception_Under_Way_Is_Withdrawn_When_The_Channel_Is_Disposed()
+    {
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+        channel.GetReceptionsInProgress(); // takes the First Frame to the actor
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        channel.GetReceptionsInProgress().Should().HaveCount(1, "the actor accepted the First Frame");
+
+        channel.Dispose();
         await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
 
         channel.GetReceptionsInProgress().Should().BeEmpty();

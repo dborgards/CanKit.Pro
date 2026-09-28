@@ -513,6 +513,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             var idle = _busTxIdleWaiter;
             _busTxIdleWaiter = null;
             idle?.TrySetResult(null);
+
+            // A reassembly under way dies with the channel: its deadline is cancelled and its
+            // record withdrawn, so GetReceptionsInProgress does not keep reporting a transfer
+            // nobody will complete (Codex on #216). Posted behind any frame already queued, so
+            // that frame is handled first (and dropped by the disposed guard).
+            var rx = _rx;
+            if (rx is not null)
+            {
+                rx.CancelDeadline();
+                _rx = null;
+                WithdrawReception(rx.Announce);
+            }
         }
 
         try
