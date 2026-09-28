@@ -2563,12 +2563,20 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing, maxQueuedSendsPerDestination: maxQueued),
             ownsService: false, actor);
 
-    private static async Task DrainAsync(VirtualClock clock, params Task[] sends)
+    // Advances the frozen clock one spacing at a time, but only once the actor has armed the
+    // next spacing timer: a step taken before that is lost, and the send would stall.
+    private static async Task DrainAsync(VirtualClock clock, ProtocolActor actor, params Task[] sends)
     {
-        for (int i = 0; i < 12 && !sends.All(t => t.IsCompleted); i++)
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!sends.All(t => t.IsCompleted))
         {
-            await clock.AdvanceAsync(InFlightSpacing);
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("The queued sends did not drain.");
             await clock.SettleAsync();
+            if (await actor.NextTimerDelayAsync() == InFlightSpacing)
+                await clock.AdvanceAsync(InFlightSpacing);
+            else
+                await Task.Yield();
         }
         await Task.WhenAll(sends).WaitAsync(ShortTimeout);
     }
@@ -2588,7 +2596,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var waiting2 = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3));
         var excess = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4));
 
-        // The rejection needs no clock advance: it is decided when the send reaches the actor.
+        // The rejection needs no clock advance and no actor turn: it is decided at the call.
+        excess.IsFaulted.Should().BeTrue("the excess send is refused when it is made");
         Func<Task> act = async () => await excess.WaitAsync(ShortTimeout);
         await act.Should().ThrowAsync<J1939TpSendRejectedException>()
             .WithMessage("*MaxQueuedSendsPerDestination = 2*");
@@ -2596,7 +2605,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         waiting1.IsCompleted.Should().BeFalse("a send within the limit queues as before");
         waiting2.IsCompleted.Should().BeFalse("a send within the limit queues as before");
 
-        await DrainAsync(clock, first, waiting1, waiting2);
+        await DrainAsync(clock, actor, first, waiting1, waiting2);
     }
 
     [Fact]
@@ -2631,7 +2640,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var survivor = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 20));
         await clock.SettleAsync();
         survivor.IsCompleted.Should().BeFalse("the freed capacity admits a send");
-        await DrainAsync(clock, first, survivor);
+        await DrainAsync(clock, actor, first, survivor);
     }
 
     [Fact]
@@ -2648,6 +2657,53 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> act = async () => await sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2)).WaitAsync(ShortTimeout);
         await act.Should().ThrowAsync<J1939TpSendRejectedException>();
         first.IsCompleted.Should().BeFalse();
+    }
+
+    // Codex on #215: sends posted to the actor and not yet run are not in the queue, so a limit
+    // enforced only there is no bound at all against a producer that outruns the actor. The actor
+    // is held busy on a gate, so every send below is made while nothing has run.
+    [Fact]
+    public async Task Sends_Not_Yet_Started_By_The_Actor_Count_Against_The_Queue_Limit()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 2);
+
+        using var gate = new ManualResetEventSlim();
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            gate.Wait(ShortTimeout);
+        });
+        await occupied.Task.WaitAsync(ShortTimeout);
+
+        // One on the wire plus two waiting are admitted, though none has reached the actor.
+        var admitted = new[]
+        {
+            sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1)),
+            sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2)),
+            sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3)),
+        };
+        var excess = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4));
+        excess.IsFaulted.Should().BeTrue("the fourth send is refused at the call, while the actor has run nothing");
+        excess.Exception!.InnerException.Should().BeOfType<J1939TpSendRejectedException>();
+        admitted.Should().OnlyContain(t => !t.IsCompleted);
+
+        gate.Set();
+        await DrainAsync(clock, actor, admitted);
+
+        // Completion gave every slot back: the same three fit again.
+        var again = new[]
+        {
+            sender.SendBamAsync(0xFEC4u, RandomPayload(9, seed: 5)),
+            sender.SendBamAsync(0xFEC5u, RandomPayload(9, seed: 6)),
+            sender.SendBamAsync(0xFEC6u, RandomPayload(9, seed: 7)),
+        };
+        again.Should().OnlyContain(t => !t.IsFaulted);
+        await DrainAsync(clock, actor, again);
     }
 
     [Fact]

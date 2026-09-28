@@ -88,7 +88,9 @@ public sealed class J1939TpOptions
 
     /// <summary>
     /// How many sends may wait for their destination's session slot, per destination address,
-    /// behind the one on the wire. A send that would exceed it faults at once with
+    /// behind the one on the wire; a send the channel has accepted but not yet started counts as
+    /// waiting, so the bound holds against a producer that outruns the channel. A send that would
+    /// exceed it faults at the call, before its PDU is queued anywhere, with
     /// <see cref="J1939TpSendRejectedException"/>; every BAM goes to the global address, so this
     /// also bounds the BAMs waiting on the channel. Each waiting send holds its whole PDU (up to
     /// 1785 bytes) and, against a peer that never answers, drains at T3 pace, so an unbounded

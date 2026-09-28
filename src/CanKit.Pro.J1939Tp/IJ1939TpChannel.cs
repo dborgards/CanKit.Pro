@@ -20,8 +20,8 @@ namespace CanKit.Pro.J1939Tp;
 /// destination address, so one PDU at a time is on the wire towards any one destination — and,
 /// since every BAM goes to the global address, one BAM at a time per channel (J1939-21 §5.10.3).
 /// A send whose destination is busy waits its turn, at most
-/// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> of them per destination: one more
-/// faults at once with <see cref="J1939TpSendRejectedException"/>. There is no deadline on the
+/// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> of them per destination, counting
+/// sends the channel has accepted but not yet started: one more faults at the call with <see cref="J1939TpSendRejectedException"/>. There is no deadline on the
 /// wait -- a peer may legitimately hold the session ahead (J1939-21 §5.10.2.4, CTS(0)) -- so
 /// the caller's <see cref="CancellationToken"/> is what bounds it, and a cancelled send leaves
 /// the queue at once. A second send for the same (destination, PGN) while one is in flight or
@@ -54,8 +54,10 @@ public interface IJ1939TpChannel : IDisposable
     /// <param name="payload">User payload; 9..1785 bytes.</param>
     /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
     /// <exception cref="J1939TpSendRejectedException">
-    /// Reported through the returned task when the destination is busy and
-    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> sends already wait for it.
+    /// Reported through the returned task, already faulted when the call returns, when the
+    /// destination has its one send on the wire and
+    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> more pending (waiting or handed
+    /// to the channel and not yet started).
     /// </exception>
     Task SendBamAsync(uint pgn, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default);
 
@@ -69,8 +71,10 @@ public interface IJ1939TpChannel : IDisposable
     /// <param name="payload">User payload; 9..1785 bytes.</param>
     /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
     /// <exception cref="J1939TpSendRejectedException">
-    /// Reported through the returned task when the destination is busy and
-    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> sends already wait for it.
+    /// Reported through the returned task, already faulted when the call returns, when the
+    /// destination has its one send on the wire and
+    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> more pending (waiting or handed
+    /// to the channel and not yet started).
     /// </exception>
     Task SendCmAsync(uint pgn, byte destinationAddress, ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken = default);
