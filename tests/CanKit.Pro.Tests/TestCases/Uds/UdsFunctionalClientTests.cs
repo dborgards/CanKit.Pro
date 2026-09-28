@@ -109,6 +109,34 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Steps the clock through a listener's in-flight slices -- and through nothing longer --
+    // until `done` holds for the earliest armed timer. Those slices are re-armed from a thread
+    // the test does not see, so "no timer armed" can mean one is about to be; this waits for
+    // it rather than taking it for the end, as RetireInFlightSlices does. A window still open
+    // is longer than a slice and is never stepped through: whatever waits on it times out here,
+    // which is how a window anchored too late shows (#195).
+    private static async Task StepThroughSlicesUntil(WindowClock clock, Func<TimeSpan?, bool> done)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (true)
+        {
+            var delay = await clock.Actor.NextTimerDelayAsync();
+            if (done(delay)) return;
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException(
+                    $"Not done at {clock.Clock.Elapsed}; the earliest timer is {delay?.ToString() ?? "none"} away.");
+            if (delay is { } slice && slice <= TimeSpan.FromMilliseconds(20))
+                await clock.Clock.AdvanceAsync(slice);
+            else
+                await Task.Delay(1);
+        }
+    }
+
+    // For StepThroughSlicesUntil: the earliest timer is the one ending at `end`.
+    private static Func<TimeSpan?, bool> ArmedUntil(WindowClock clock, TimeSpan end)
+        => delay => delay is { } d && d >= end - clock.Clock.Elapsed
+                    && d - (end - clock.Clock.Elapsed) <= TimeSpan.FromMilliseconds(5);
+
     // A collection short enough to be the earliest timer once it is armed: a listener kept by a
     // send in flight re-arms 20 ms slices, and anything longer would hide under them.
     private static readonly TimeSpan ShortCollection = TimeSpan.FromMilliseconds(10);
@@ -551,20 +579,19 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await CollectFor(clock, first, ShortCollection);
-        await RetireInFlightSlices(clock);
 
         // At 1100 ms a window ending at 1200 still holds the next call back, its listener
-        // collecting the 100 ms left. Anchored before the send, the window would have ended at
+        // collecting what is left. Anchored before the send, the window would have ended at
         // 1000: the call would be out, and the earliest timer its own collection.
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
         var windowEnd = acceptedAt + TimeSpan.FromMilliseconds(1000);
         await clock.Clock.AdvanceToAsync(sentFrom + TimeSpan.FromMilliseconds(1100));
-        await WaitUntilArmed(clock, TimeSpan.FromMilliseconds(100));
+        await StepThroughSlicesUntil(clock, ArmedUntil(clock, windowEnd));
         bus.DeferredEchoes.Enqueued.Should().Be(1, "the next call is still waiting out the window");
 
-        // At the window's end, and without the clock moving any further, the call goes out.
+        // At the window's end, and without the clock moving past a slice, the call goes out.
         await clock.Clock.AdvanceToAsync(windowEnd);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the count never decreases
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
         bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
         (await RunCall(clock, second)).Should().ContainSingle(
@@ -590,13 +617,13 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(2000)); // the confirmation held, the window long over
         bus.DeferredEchoes.ReleaseNext();
         await CollectFor(clock, first, ShortCollection);
-        await RetireInFlightSlices(clock);
 
-        // The clock is not moved from here until the call has gone out. Anchored at the
-        // confirmation, the window would still have 1000 ms less the collection to run, on a
-        // clock nobody moves: the call would never be sent (#195).
+        // The clock is moved from here only through the listener's in-flight slices until the
+        // call has gone out. Anchored at the confirmation, the window would still have 1000 ms
+        // less the collection to run, which is never stepped through: the call would never be
+        // sent (#195).
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
         bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
         (await RunCall(clock, second)).Should().ContainSingle(
@@ -957,15 +984,14 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         bus.DeferredEchoes.ReleaseNext(); // the request's
         var responses = await CollectFor(clock, first, ShortCollection);
         responses.Should().ContainSingle().Which.IsNegative.Should().BeFalse("the 0x78 from before the handoff is not this request's");
-        await RetireInFlightSlices(clock);
 
         // Nor did it move the window out: at the end of P2 from the handoff the next call goes
-        // out without the clock moving further. Moved out by the 0x78 it would wait for P2*,
-        // 3000 ms from the 0x78, on a clock nobody moves.
+        // out with the clock moved no further than through a slice. Moved out by the 0x78 it
+        // would wait for P2*, 3000 ms from the 0x78, which is never stepped through.
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
         var windowEnd = handedOverAt + p2;
         if (clock.Clock.Elapsed < windowEnd) await clock.Clock.AdvanceToAsync(windowEnd);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 3);
         bus.DeferredEchoes.ReleaseNext();
         await RunCall(clock, second);
     }
@@ -1071,20 +1097,19 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await CollectFor(clock, first, ShortCollection);
-        await RetireInFlightSlices(clock);
 
         // The next call waits for a listener whose timer runs to the window anchored at the
         // acceptance. Anchored before the send, the window would have ended 1100 ms sooner:
         // over already, and the call out.
         var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, Window, cts.Token);
-        await WaitUntilArmed(clock, windowEnd - clock.Clock.Elapsed);
+        await StepThroughSlicesUntil(clock, ArmedUntil(clock, windowEnd));
         bus.DeferredEchoes.Enqueued.Should().Be(1, "the next call is still waiting out the window");
 
         // The ECU's negative answer to the first request, late but inside the window as
         // anchored at the acceptance: the waiting call must not collect it.
         bus.RaiseObserved(negative, isEcho: false);
         await clock.Clock.AdvanceToAsync(windowEnd);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
         bus.RaiseObserved(positive, isEcho: false);
         bus.DeferredEchoes.ReleaseNext();
         var responses = await RunCall(clock, second);
