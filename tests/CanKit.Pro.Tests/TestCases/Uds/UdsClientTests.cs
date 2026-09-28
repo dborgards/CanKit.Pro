@@ -73,6 +73,186 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         return (client, ecu, dispose);
     }
 
+    /// <summary>
+    /// A client whose P2, P2* and suppressed-response windows are measured <em>and waited out</em>
+    /// on a <see cref="VirtualClock"/>, opposite a <see cref="SimulatedUdsEcu"/> on the wall
+    /// clock (#171). Nothing a test asserts about those windows then depends on how the host
+    /// schedules: the client's waits end only when the test moves the clock, every frame is
+    /// stamped with the virtual instant it arrived at, and <see cref="Service"/> says when a
+    /// frame from the ECU has been handed to the client's actor.
+    /// </summary>
+    private sealed class ClockPair : IDisposable
+    {
+        private readonly IDisposable _stack;
+
+        public ClockPair(Action<SimulatedUdsEcu> configure, UdsClientOptions? options = null,
+            IsoTpChannelOptions? clientIsoTp = null)
+        {
+            var session = NewSession();
+            var busClient = OpenClassic(session, 0);
+            var busEcu = OpenClassic(session, 1);
+
+            // A zero stamp means "unstamped" to the channel, so the clock starts off zero.
+            Clock.Advance(TimeSpan.FromMilliseconds(1));
+            Actor = Clock.NewActor();
+            Service = new FrameConsumptionCountingBusService(
+                new CanBusService(busClient, Actor.TimeSource.GetTimestamp));
+            Channel = new IsoTpChannel(Service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8),
+                clientIsoTp ?? FastIsoTp(useCanFd: false), ownsService: true, Actor);
+            var ecuChannel = IsoTpFactory.Open(busEcu, IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0),
+                FastIsoTp(useCanFd: false));
+
+            EcuBus = busEcu;
+            Ecu = new SimulatedUdsEcu(ecuChannel);
+            configure(Ecu);
+            Ecu.Start();
+            Client = UdsClient.Create(Channel, Actor, options);
+            _stack = new CompositeDisposable(Client, Ecu, ecuChannel, Channel, busEcu, busClient);
+        }
+
+        public VirtualClock Clock { get; } = new();
+
+        public ProtocolActor Actor { get; }
+
+        public FrameConsumptionCountingBusService Service { get; }
+
+        public IsoTpChannel Channel { get; }
+
+        public SimulatedUdsEcu Ecu { get; }
+
+        /// <summary>The ECU's raw bus, for a frame its ISO-TP channel would not send.</summary>
+        public ICanBus EcuBus { get; private set; } = null!;
+
+        public IUdsClient Client { get; }
+
+        /// <summary>
+        /// Returns once the client has armed a timer exactly <paramref name="remaining"/> away:
+        /// the wait the test is about to end by moving the clock, and the one a client waiting on
+        /// something else would not have armed.
+        /// </summary>
+        public Task WaitUntilWaitingAsync(TimeSpan remaining)
+            => Clock.WaitUntilTimerArmedAsync(Actor, remaining, ShortTimeout);
+
+        /// <summary>
+        /// Runs <paramref name="release"/> -- whatever makes the ECU answer -- and returns once
+        /// the client's actor has taken in the frame it sends, a Single Frame matching
+        /// <paramref name="match"/>. Its stamp is then the instant the clock stood at, and the
+        /// clock may be moved again.
+        /// </summary>
+        public async Task DeliverAsync(Action release, Func<byte[], bool> match)
+        {
+            var taken = Service.WaitUntilConsumedAsync(e =>
+                e.Frame.ID == 0x7E8 && match(e.Frame.Data.ToArray()));
+            release();
+            if (await Task.WhenAny(taken, Task.Delay(ShortTimeout)) != taken)
+                throw new TimeoutException("The ECU's frame did not reach the client.");
+            await Clock.SettleAsync();
+        }
+
+        public void Dispose()
+        {
+            _stack.Dispose();
+            Clock.Dispose();
+        }
+    }
+
+    // The task's result, or a timeout rather than a hang when it never comes.
+    private static async Task<T> Within<T>(Task<T> task)
+    {
+        if (await Task.WhenAny(task, Task.Delay(ShortTimeout)) != task)
+            throw new TimeoutException($"No result within {ShortTimeout}.");
+        return await task;
+    }
+
+    // As Within<T>, for a task with no result -- a wait that hangs (a suppressed-window bug
+    // left waiting forever on a clock nobody advances further) surfaces as a timeout here
+    // rather than the test itself hanging.
+    private static async Task Within(Task task)
+    {
+        if (await Task.WhenAny(task, Task.Delay(ShortTimeout)) != task)
+            throw new TimeoutException($"No result within {ShortTimeout}.");
+        await task;
+    }
+
+    // A Single Frame carrying a negative response [0x7F, sid, nrc].
+    private static Func<byte[], bool> Negative(byte sid, byte nrc)
+        => data => data.Length >= 4 && data[1] == 0x7F && data[2] == sid && data[3] == nrc;
+
+    /// <summary>
+    /// Stands in for <see cref="SimulatedUdsEcu.Delay"/>: each delay the ECU asks for waits until
+    /// the test releases that delay by its length, after moving the clock to where it ends.
+    /// </summary>
+    private sealed class EcuSteps
+    {
+        private readonly Dictionary<TimeSpan, TaskCompletionSource<bool>> _gates = new();
+
+        // Honours the ECU's token: a test that fails before releasing a gate still disposes the
+        // ECU, and an ECU loop parked on a gate nobody opens would hang that disposal -- and the
+        // test run with it -- instead of letting the failure be reported.
+        public async Task WaitAsync(TimeSpan delay, CancellationToken cancellationToken)
+        {
+            var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using (cancellationToken.Register(() => cancelled.TrySetCanceled()))
+                await await Task.WhenAny(Gate(delay).Task, cancelled.Task).ConfigureAwait(false);
+        }
+
+        public void Release(TimeSpan delay) => Gate(delay).TrySetResult(true);
+
+        private TaskCompletionSource<bool> Gate(TimeSpan delay)
+        {
+            lock (_gates)
+            {
+                if (!_gates.TryGetValue(delay, out var gate))
+                    _gates[delay] = gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                return gate;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stands in for <see cref="SimulatedUdsEcu.Delay"/> like <see cref="EcuSteps"/>, but gates
+    /// by call order rather than by the delay's length: needed whenever a scenario asks for the
+    /// same duration more than once (two 0x78s spaced by the same gap), where <see cref="EcuSteps"/>
+    /// would hand both callers the same, already-resolved gate.
+    /// </summary>
+    private sealed class OrderedGates
+    {
+        private readonly Queue<TaskCompletionSource<bool>> _waiters = new();
+        private readonly object _gate = new();
+        private int _pendingReleases;
+
+        // Symmetric with EcuSteps' own race-freedom (see its remarks): a ReleaseNext() that
+        // arrives before the matching WaitAsync -- the ECU has not yet reached its gate on its
+        // own thread -- must not be lost. It is banked instead, so the next WaitAsync call
+        // returns at once.
+        public Task WaitAsync(TimeSpan _, CancellationToken ct)
+        {
+            lock (_gate)
+            {
+                if (_pendingReleases > 0)
+                {
+                    _pendingReleases--;
+                    return Task.CompletedTask;
+                }
+
+                var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _waiters.Enqueue(tcs);
+                return tcs.Task.WaitAsync(ct);
+            }
+        }
+
+        public void ReleaseNext()
+        {
+            TaskCompletionSource<bool>? tcs = null;
+            lock (_gate)
+            {
+                if (_waiters.Count > 0) tcs = _waiters.Dequeue();
+                else _pendingReleases++;
+            }
+            tcs?.TrySetResult(true);
+        }
+    }
+
     private static ICanBus OpenCanFd(string session, int channel) => CanBus.Open(
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.CanFd).Fd(VirtualAdapterFixture.Bitrate, VirtualAdapterFixture.DataBitrate));
@@ -350,6 +530,88 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // The same repeat without an injected clock, where the delay is a real Task.Delay: the
+    // request goes out again and succeeds. No timing is asserted -- how long the delay lasts is
+    // what the clock test below proves; this only runs the wall-clock path end to end.
+    [Fact]
+    public async Task A_Busy_Repeat_With_A_Delay_Repeats_On_The_Wall_Clock()
+    {
+        var calls = 0;
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, req => Interlocked.Increment(ref calls) == 1
+                ? throw new EcuNegativeResponse(0x21)
+                : new byte[] { 0xF1, 0x90, 0xAA }),
+            options: new UdsClientOptions { BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(10) });
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            (await client.ReadDataByIdentifierAsync(0xF190, cts.Token)).Should().Equal(0xAA);
+            Volatile.Read(ref calls).Should().Be(2);
+        }
+    }
+
+    // The clock-injecting overload (#171) guards its channel as the public one does.
+    [Fact]
+    public void Create_On_A_Clock_Rejects_A_Null_Channel()
+    {
+        using var clock = new VirtualClock();
+        Action act = () => UdsClient.Create(null!, clock.NewActor());
+        act.Should().Throw<ArgumentNullException>().WithParameterName("channel");
+    }
+
+    // Omitted options default as the public overload's do.
+    [Fact]
+    public void Create_On_A_Clock_Defaults_Omitted_Options()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var service = new StarvedReaderBusService();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            FastIsoTp(useCanFd: false), ownsService: false, actor);
+        using var client = UdsClient.Create(channel, actor);
+        client.Options.P2ClientMax.Should().Be(new UdsClientOptions().P2ClientMax);
+    }
+
+    // #57 on a virtual clock (#171): NRC 0x21 repeats the request after BusyRepeatRequestDelay,
+    // measured on the client's clock like its P2 -- the repeat goes out only once the test has
+    // moved the clock past the delay.
+    [Fact]
+    public async Task A_Busy_Repeat_Waits_Its_Delay_On_The_Clients_Clock()
+    {
+        var calls = 0;
+        using var pair = new ClockPair(
+            e => e.On(0x22, req => Interlocked.Increment(ref calls) == 1
+                ? throw new EcuNegativeResponse(0x21)
+                : new byte[] { 0xF1, 0x90, 0xAA }),
+            options: new UdsClientOptions { BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(100) });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(100)); // the busy delay, not P2
+        Volatile.Read(ref calls).Should().Be(1, "the repeat waits for the delay");
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        (await Within(read)).Should().Equal(0xAA);
+        Volatile.Read(ref calls).Should().Be(2);
+    }
+
+    // A caller cancelling during the busy delay ends the wait at once, as Task.Delay's token did.
+    [Fact]
+    public async Task A_Busy_Repeat_Delay_On_The_Clients_Clock_Ends_On_Cancellation()
+    {
+        using var pair = new ClockPair(
+            e => e.On(0x22, req => throw new EcuNegativeResponse(0x21)),
+            options: new UdsClientOptions { BusyRepeatRequestDelay = TimeSpan.FromMilliseconds(100) });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(100));
+        cts.Cancel();
+
+        Func<Task> act = () => Within(read); // a delay deaf to the token would never end
+        await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
     // -----------------------------------------------------------------------------------
     // #28 — ISO 14229-2: P2 ends with the *first* frame of the response. A multi-frame
     // response whose transfer outlasts P2 (here: paced by the client's own STmin) is not a
@@ -358,15 +620,16 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task P2_Ends_With_The_First_Frame_Of_A_MultiFrame_Response()
     {
-        // 90-byte response = FF (6 data bytes) + 12 CFs. The client advertises STmin = 127 ms,
-        // so the ECU cannot deliver the last CF earlier than 12 x 127 ms = 1.5 s after the
-        // First Frame -- three times the P2 budget below. The First Frame itself is answered
-        // at once; the quantity the host perturbs is that single round trip, against a 500 ms
-        // budget the suite's other P2 tests already trust at 80 ms.
+        // 90-byte response = FF (6 data bytes) + 12 CFs, paced by the client's advertised STmin
+        // of 127 ms: the ECU needs 1.5 s of real time to deliver it. On a virtual clock (#171)
+        // the client's P2 is made to expire in the middle of that transfer -- the clock is moved
+        // past P2 once the First Frame is in -- and its N_Cr, on the same clock, never can. On
+        // the wall clock the transfer was a race between 12 real CF gaps and a 500 ms N_Cr,
+        // which macOS CI lost (#185, #188).
         var record = Enumerable.Range(0, 87).Select(i => (byte)i).ToArray();
         var p2 = TimeSpan.FromMilliseconds(500);
 
-        var (client, _, dispose) = BuildPair(
+        using var pair = new ClockPair(
             e => e.On(0x22, req =>
             {
                 var body = new byte[2 + record.Length];
@@ -382,22 +645,26 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 UsePadding = true,
                 NAs = TimeSpan.FromMilliseconds(500),
                 NBs = TimeSpan.FromMilliseconds(500),
-                NCr = TimeSpan.FromMilliseconds(500),
+                NCr = TimeSpan.FromSeconds(10),
                 LocalStMin = TimeSpan.FromMilliseconds(127),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            var sw = Stopwatch.StartNew();
-            var data = await client.ReadDataByIdentifierAsync(0xF190, cts.Token);
-            sw.Stop();
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
 
-            data.Should().Equal(record);
-            // The transfer really outlasted P2 -- otherwise the assertion above would hold for
-            // a client that still measures P2 against the last frame.
-            sw.Elapsed.Should().BeGreaterThan(p2);
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (pair.Channel.GetReceptionsInProgress().Count == 0)
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The First Frame never arrived.");
+            await Task.Delay(1);
         }
+        await pair.Clock.AdvanceAsync(p2 + TimeSpan.FromMilliseconds(100)); // P2 runs out mid-transfer
+        // The transfer really outlasted P2: otherwise the result below would hold for a client
+        // that still measures P2 against the last frame. 1.4 s of CF gaps are still to come.
+        pair.Channel.GetReceptionsInProgress().Should().NotBeEmpty();
+
+        var data = await Within(read);
+        data.Should().Equal(record);
     }
 
     // -----------------------------------------------------------------------------------
@@ -409,17 +676,23 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task P2_Is_Not_Extended_By_A_MultiFrame_Transfer_For_Another_Service()
     {
         // The ECU answers the RDBI request with silence, but first starts a 146-byte
-        // ReadDTCInformation response (SID 0x59): FF + 20 CFs at the client's STmin of 127 ms,
-        // i.e. 2.5 s on the wire. The client must time out at P2 (500 ms), not after the
-        // transfer; the bound below leaves 1 s for the host between the two.
-        var unrelated = new byte[146];
-        unrelated[0] = 0x59;
+        // ReadDTCInformation response (SID 0x59) and never finishes it: only its First Frame goes
+        // on the bus. On a virtual clock (#171) the client's N_Cr cannot end that reception, so
+        // it stays in progress for as long as the test runs. P2 is then moved past on the clock:
+        // the client must time out, because that transfer is somebody else's answer -- the
+        // sibling of P2_Ends_With_The_First_Frame_Of_A_MultiFrame_Response, where the transfer
+        // in progress is this request's own and does extend the wait. A client fooled into
+        // waiting for it never returns, and the test's own token ends it with a cancellation,
+        // not a timeout: no bound on the wall clock is needed to tell the two apart.
         var p2 = TimeSpan.FromMilliseconds(500);
+        ClockPair? stack = null;
 
-        var (client, _, dispose) = BuildPair(
+        using var pair = stack = new ClockPair(
             e => e.On(0x22, req =>
             {
-                _ = e.Channel.SendAsync(unrelated);
+                // FF of a 146-byte (0x92) response for SID 0x59; the Consecutive Frames never follow.
+                stack!.EcuBus.Transmit(CanFrame.Classic(0x7E8,
+                    new byte[] { 0x10, 0x92, 0x59, 0x00, 0x00, 0x00, 0x00, 0x00 }, isExtendedFrame: false));
                 throw new EcuSilent();
             }),
             options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 },
@@ -429,21 +702,25 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 UsePadding = true,
                 NAs = TimeSpan.FromMilliseconds(500),
                 NBs = TimeSpan.FromMilliseconds(500),
-                NCr = TimeSpan.FromMilliseconds(500),
-                LocalStMin = TimeSpan.FromMilliseconds(127),
+                NCr = TimeSpan.FromSeconds(10), // longer than the test: the reception outlives P2
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            var sw = Stopwatch.StartNew();
-            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, cts.Token);
-            await act.Should().ThrowAsync<UdsTimeoutException>();
-            sw.Stop();
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
 
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(1500),
-                "an unrelated transfer must not hold the request past its budget");
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (pair.Channel.GetReceptionsInProgress().Count == 0)
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The unrelated First Frame never arrived.");
+            await Task.Delay(1);
         }
+        await pair.Clock.AdvanceAsync(p2 + TimeSpan.FromMilliseconds(100)); // P2 runs out mid-transfer
+        pair.Channel.GetReceptionsInProgress().Should().NotBeEmpty(
+            "the unrelated transfer is still in progress when P2 runs out");
+
+        Func<Task> act = () => read;
+        await act.Should().ThrowAsync<UdsTimeoutException>(
+            "an unrelated transfer must not hold the request past its budget");
     }
 
     // -----------------------------------------------------------------------------------
@@ -512,28 +789,36 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Late_Negative_Response_To_A_Suppressed_Send_Is_Not_The_Next_Requests()
     {
-        var (client, ecu, dispose) = BuildPair(
+        // On a virtual clock (#171): the ECU holds its negative answer until the test lets it go,
+        // so "late" is an instant on the clock rather than a sleep that must land on the right
+        // side of the next request's send.
+        using var answer = new ManualResetEventSlim();
+        using var pair = new ClockPair(
             e => e.On(0x3E, req =>
             {
                 if ((req[1] & 0x80) != 0)
                 {
-                    Thread.Sleep(100);                  // late ...
+                    answer.Wait(ShortTimeout);          // late ...
                     throw new EcuNegativeResponse(0x12); // ... and negative, to the suppressed one
                 }
                 return new byte[] { 0x00 };
             }),
             options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window: 300 ms
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
 
-            // Follows at once; the ECU's negative answer to the suppressed send is still coming.
-            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            await act.Should().NotThrowAsync("the negative response belongs to the suppressed send");
-            ecu.RequestsHandled.Should().Be(2);
-        }
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        // The next request waits out what is left of the window -- 200 ms -- rather than going
+        // out and arming a fresh P2 of 300.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(200));
+        await pair.DeliverAsync(answer.Set, Negative(0x3E, 0x12)); // at 100 ms
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200)); // the window closes
+        Func<Task> act = () => next;
+        await act.Should().NotThrowAsync("the negative response belongs to the suppressed send");
+        pair.Ecu.RequestsHandled.Should().Be(2);
     }
 
     // Codex and Bugbot on #150: the windows are per service. A suppressed send for another
@@ -541,13 +826,14 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Suppressed_Send_Windows_Are_Kept_Per_Service()
     {
-        var (client, ecu, dispose) = BuildPair(
+        using var answer = new ManualResetEventSlim();
+        using var pair = new ClockPair(
             e => e
                 .On(0x3E, req =>
                 {
                     if ((req[1] & 0x80) != 0)
                     {
-                        Thread.Sleep(100);
+                        answer.Wait(ShortTimeout);
                         throw new EcuNegativeResponse(0x12);
                     }
                     return new byte[] { 0x00 };
@@ -555,16 +841,21 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 .On(0x11, req => Array.Empty<byte>()),
             options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window opens
-            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // another service's
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window: to 300 ms
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
+        await pair.Client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // another service's: to 350 ms
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
 
-            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            await act.Should().NotThrowAsync("the TesterPresent window is still open, whatever came after");
-            ecu.RequestsHandled.Should().Be(3);
-        }
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        // TesterPresent's own window, 200 ms from here -- not the later one's 250, and not none.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(200));
+        await pair.DeliverAsync(answer.Set, Negative(0x3E, 0x12));
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+        Func<Task> act = () => next;
+        await act.Should().NotThrowAsync("the TesterPresent window is still open, whatever came after");
+        pair.Ecu.RequestsHandled.Should().Be(3);
     }
 
     // Codex on #150: NRC 0x78 to a suppressed send says the final answer is still coming, up
@@ -572,88 +863,93 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_To_A_Suppressed_Send_Extends_Its_Window_By_P2Star()
     {
-        var (client, ecu, dispose) = BuildPair(
-            e => e.On(0x3E, req =>
+        // On a virtual clock (#171): the ECU's 0x78 and its following negative are each held on
+        // a gate the test releases at the virtual instant they belong to.
+        var steps = new EcuSteps();
+        var pendingAt = TimeSpan.FromMilliseconds(50);
+        var negativeAt = TimeSpan.FromMilliseconds(400); // after the 0x78, not from the send
+        using var pair = new ClockPair(
+            e =>
             {
-                if ((req[1] & 0x80) != 0)
-                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                        delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(400));
-                return new byte[] { 0x00 };
-            }),
+                e.Delay = steps.WaitAsync;
+                e.On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: pendingAt, delayAfter: negativeAt);
+                    return new byte[] { 0x00 };
+                });
+            },
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(300),
                 P2StarClientMax = TimeSpan.FromMilliseconds(1500),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window: 300 ms
 
-            // 0x78 at 50 ms, the negative at 450 ms: past P2, inside P2* from the 0x78.
-            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            await act.Should().NotThrowAsync("the negative answer belongs to the suppressed send");
-            ecu.RequestsHandled.Should().Be(2);
-        }
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(300));
+
+        await pair.Clock.AdvanceAsync(pendingAt); // 50 ms: past nothing yet, inside the window
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x3E, 0x78));
+        // The window moves out to P2* from the 0x78's arrival: 50 + 1500 = 1550 ms, 1500 from here.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(1500));
+
+        await pair.Clock.AdvanceAsync(negativeAt); // 450 ms total: past the original P2 (300 ms)
+        await pair.DeliverAsync(() => steps.Release(negativeAt), Negative(0x3E, 0x12));
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1100)); // the window closes at 1550
+        Func<Task> act = () => next;
+        await act.Should().NotThrowAsync("the negative answer belongs to the suppressed send");
+        pair.Ecu.RequestsHandled.Should().Be(2);
     }
 
     // Bugbot on #150: a 0x78 already queued when the window is over still moves it out.
     [Fact]
     public async Task A_Queued_Pending_Answer_Still_Extends_A_Window_That_Has_Run_Out()
     {
-        // P2 is long enough that a loaded host still delivers the 0x78 inside it. The test
-        // then waits that P2 out itself, so the client finds the window over and the 0x78
-        // already queued. P2* from that arrival reaches past P2; a fixed 300 ms sleep on a
-        // 200 ms window did not -- the 0x78 was still on its way, the call returned at once,
-        // and the suppressed send had not been counted yet (macOS CI on #153).
+        // On a virtual clock (#171): the 0x78 is delivered -- so it is queued, not merely on its
+        // way -- before the test moves the clock past the window's end, which is the scenario
+        // this test names (Bugbot on #150): a 0x78 already queued when the window is over still
+        // moves it out.
+        var steps = new EcuSteps();
+        var pendingAt = TimeSpan.FromMilliseconds(20);
         var p2 = TimeSpan.FromMilliseconds(1500);
         var p2Star = TimeSpan.FromMilliseconds(2500);
-        var (client, ecu, dispose) = BuildPair(
-            e => e.On(0x3E, req =>
+        using var pair = new ClockPair(
+            e =>
             {
-                if ((req[1] & 0x80) != 0)
-                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                        delayBefore: TimeSpan.FromMilliseconds(20), delayAfter: TimeSpan.FromSeconds(20));
-                return new byte[] { 0x00 };
-            }),
+                e.Delay = steps.WaitAsync;
+                e.On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: pendingAt, delayAfter: TimeSpan.FromSeconds(20));
+                    return new byte[] { 0x00 };
+                });
+            },
             options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2Star });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
-            // After the send returns the window has already started, so waiting P2 from here
-            // lands past its end.
-            long sentAt = Stopwatch.GetTimestamp();
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window: 1500 ms
 
-            var deadline = DateTime.UtcNow + ShortTimeout;
-            while (ecu.PendingNrcsSent == 0)
-            {
-                if (DateTime.UtcNow > deadline) throw new TimeoutException("the 0x78 was not sent");
-                await Task.Delay(5);
-            }
-            long pendingAt = Stopwatch.GetTimestamp();
-            var sinceSend = TimeSpan.FromSeconds((pendingAt - sentAt) / (double)Stopwatch.Frequency);
-            sinceSend.Should().BeLessThan(p2, "the 0x78 has to arrive while the window is still open");
+        await pair.Clock.AdvanceAsync(pendingAt); // 20 ms: well inside the window
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x3E, 0x78));
 
-            var windowEnd = sentAt + (long)(p2.TotalSeconds * Stopwatch.Frequency);
-            while (Stopwatch.GetTimestamp() < windowEnd)
-                await Task.Delay(10);
+        await pair.Clock.AdvanceAsync(p2 - pendingAt); // the window is now over, as measured
 
-            long callAt = Stopwatch.GetTimestamp();
-            var sw = Stopwatch.StartNew();
-            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            sw.Stop();
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        // The 0x78, already queued, moves the window out to P2* from its arrival: 20 + 2500 =
+        // 2520 ms; the clock stands at p2 (1500 ms), so 1020 ms remain.
+        var remaining = p2Star - p2 + pendingAt;
+        await pair.WaitUntilWaitingAsync(remaining);
+        await pair.Clock.AdvanceAsync(remaining);
 
-            // P2* from the 0x78, minus how long we already waited past that arrival. A missed
-            // extension returns in a round trip; this bound sits under the shortest extension
-            // (a 0x78 that arrived as the window opened) and a loaded host only lengthens it.
-            var extensionLeft = p2Star - TimeSpan.FromSeconds((callAt - pendingAt) / (double)Stopwatch.Frequency);
-            sw.Elapsed.Should().BeGreaterThanOrEqualTo(extensionLeft - TimeSpan.FromMilliseconds(200),
-                "the queued 0x78 moved the window out to P2* from its arrival");
-            ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x3E, 0x00 });
-        }
+        Func<Task> act = () => next;
+        await act.Should().NotThrowAsync("the queued 0x78 moved the window out to P2* from its arrival");
+        pair.Ecu.LastRequest.Should().BeEquivalentTo(new byte[] { 0x3E, 0x00 });
     }
 
     // Codex on #150: the converse -- a 0x78 queued after the window ran out answers nothing
@@ -661,33 +957,36 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Queued_Pending_Answer_From_After_The_Windows_End_Does_Not_Revive_It()
     {
-        var (client, _, dispose) = BuildPair(
-            e => e.On(0x3E, req =>
+        // On a virtual clock (#171): the 0x78 is delivered, and so queued, only once the clock
+        // already stands past the window's end -- late by construction, not by a race against a
+        // sleep.
+        var steps = new EcuSteps();
+        var pendingAt = TimeSpan.FromMilliseconds(500);
+        var p2 = TimeSpan.FromMilliseconds(200);
+        using var pair = new ClockPair(
+            e =>
             {
-                if ((req[1] & 0x80) != 0)
-                    throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                        delayBefore: TimeSpan.FromMilliseconds(500), delayAfter: TimeSpan.FromSeconds(3));
-                return new byte[] { 0x00 };
-            }),
-            options: new UdsClientOptions
-            {
-                P2ClientMax = TimeSpan.FromMilliseconds(200),
-                P2StarClientMax = TimeSpan.FromMilliseconds(2000),
-            });
+                e.Delay = steps.WaitAsync;
+                e.On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: pendingAt, delayAfter: TimeSpan.FromSeconds(3));
+                    return new byte[] { 0x00 };
+                });
+            },
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = TimeSpan.FromMilliseconds(2000) });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
-            await Task.Delay(700); // the window ran out at 200 ms; the 0x78 at 500 ms is queued
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window: 200 ms
 
-            // Revived, the window would reach 2500 ms and this call would wait most of two
-            // seconds; a loaded host only makes the call slower, so the bound is wide.
-            var sw = Stopwatch.StartNew();
-            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            sw.Stop();
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the queued 0x78 from after the window did not revive it");
-        }
+        await pair.Clock.AdvanceAsync(pendingAt); // 500 ms: past the window's own end (200 ms)
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x3E, 0x78));
+
+        // Revived, the window would reach 2500 ms; not revived, nothing is left to wait out, and
+        // this resolves without the clock moving any further -- the only way it *can* resolve,
+        // since nothing here ever advances it that far.
+        await Within(pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token));
     }
 
     // Codex on #150: a 0x78 stamped inside a suppressed send's window may still be on its way
@@ -696,10 +995,18 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_Still_On_Its_Way_Through_The_Channel_Extends_The_Window()
     {
+        // On a virtual clock (#171): the client's channel is opened on a VirtualClock actor, as
+        // ClockPair does, so the property -- a 0x78 stamped inside the window may still be on
+        // its way through the channel's actor when the window is measured as over -- is a fact
+        // about the interval the client arms, not a race against a sleep.
+        using var clock = new VirtualClock();
+        clock.Advance(TimeSpan.FromMilliseconds(1)); // a zero stamp means "unstamped" to the channel
+        using var actor = clock.NewActor();
         using var service = new StarvedReaderBusService();
-        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp(useCanFd: false), leaveOpen: true);
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            FastIsoTp(useCanFd: false), ownsService: false, actor);
         var pendingBudget = TimeSpan.FromMilliseconds(600);
-        using var client = UdsClient.Create(channel, new UdsClientOptions
+        using var client = UdsClient.Create(channel, actor, new UdsClientOptions
         {
             P2ClientMax = TimeSpan.FromMilliseconds(100),
             P2StarClientMax = pendingBudget,
@@ -707,23 +1014,29 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
         using var cts = new CancellationTokenSource(ShortTimeout);
         await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+
         // The ECU's 0x78, stamped at the send -- inside the window by construction, not by a
         // timer -- buffered by the demux; the reader task that would take it to the actor is
         // starved by construction.
-        long arrival = Stopwatch.GetTimestamp();
+        long arrival = clock.Elapsed.Ticks;
         byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
         service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), arrival);
-        await Task.Delay(150); // the window has run out, as measured
 
-        // The next TesterPresent waits the window out: P2* from the 0x78 if the channel was
-        // settled before the inbox was read empty, else nothing. It is never answered; what
-        // matters is that it did not fail before P2* from the 0x78 had passed -- a lower bound
-        // a loaded host only raises.
-        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
-        await next.Should().ThrowAsync<UdsTimeoutException>();
-        var sinceArrival = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - arrival) / (double)Stopwatch.Frequency);
-        sinceArrival.Should().BeGreaterThanOrEqualTo(pendingBudget,
-            "the 0x78 on its way through the channel moved the window out to P2* from its arrival");
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(150)); // the window has run out, as measured
+
+        var next = client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        // The window moves out to P2* from the 0x78's arrival, settled in before the deadline is
+        // read as empty: 600 ms from the arrival stamp, 450 ms from here.
+        var remaining = TimeSpan.FromTicks(arrival + pendingBudget.Ticks - clock.Elapsed.Ticks);
+        await clock.WaitUntilTimerArmedAsync(actor, remaining, ShortTimeout);
+        await clock.AdvanceAsync(remaining); // the window closes; the real request goes out
+
+        // Nothing answers it either: its own P2 must now run out too.
+        await clock.WaitUntilTimerArmedAsync(actor, TimeSpan.FromMilliseconds(100), ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+
+        Func<Task> nextFn = () => next;
+        await nextFn.Should().ThrowAsync<UdsTimeoutException>();
     }
 
     // Codex on #150: a suppressed request the channel refuses before transmitting -- here,
@@ -732,26 +1045,21 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Suppressed_Send_The_Channel_Refuses_Leaves_No_Window()
     {
-        var (client, _, dispose) = BuildPair(
+        // On a virtual clock (#171): a window left behind by mistake would have this call wait
+        // out P2 = 2 s on a clock nothing here ever advances, so it can only resolve -- inside
+        // Within's real timeout -- if no window was left at all.
+        using var pair = new ClockPair(
             e => e.On(0x3E, req => new byte[] { 0x00 }),
             options: new UdsClientOptions { P2ClientMax = TimeSpan.FromSeconds(2), P2StarClientMax = TimeSpan.FromSeconds(2) });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            var oversized = new byte[4200];
-            oversized[0] = 0x3E;
-            oversized[1] = 0x80;
-            Func<Task> refused = () => client.SendRawAsync(oversized, cts.Token);
-            await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var oversized = new byte[4200];
+        oversized[0] = 0x3E;
+        oversized[1] = 0x80;
+        Func<Task> refused = () => pair.Client.SendRawAsync(oversized, cts.Token);
+        await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
 
-            // Left with a window, this call would wait P2 = 2 s before sending; a loaded host
-            // only makes the call slower, so the bound is wide.
-            var sw = Stopwatch.StartNew();
-            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            sw.Stop();
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "nothing was transmitted, so nothing is answered");
-        }
+        await Within(pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token));
     }
 
     // Bugbot on #150: a refused request puts the window back to what it was -- an earlier
@@ -759,28 +1067,26 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Suppressed_Send_The_Channel_Refuses_Leaves_An_Earlier_Window_As_It_Was()
     {
-        var (client, _, dispose) = BuildPair(
+        // On a virtual clock (#171): the earlier window's survival is proven by the exact
+        // interval the next call arms, not by a real elapsed-time floor.
+        using var pair = new ClockPair(
             e => e.On(0x3E, req => new byte[] { 0x00 }),
             options: new UdsClientOptions { P2ClientMax = TimeSpan.FromSeconds(2), P2StarClientMax = TimeSpan.FromSeconds(2) });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            var sw = Stopwatch.StartNew();
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: a 2 s window, not waited out by the next suppressed send
-            var oversized = new byte[4200];
-            oversized[0] = 0x3E;
-            oversized[1] = 0x80;
-            Func<Task> refused = () => client.SendRawAsync(oversized, cts.Token);
-            await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: a 2 s window, not waited out by the next suppressed send
+        var oversized = new byte[4200];
+        oversized[0] = 0x3E;
+        oversized[1] = 0x80;
+        Func<Task> refused = () => pair.Client.SendRawAsync(oversized, cts.Token);
+        await refused.Should().ThrowAsync<ArgumentOutOfRangeException>();
 
-            // The unsuppressed TesterPresent waits the first send's window out: at least 2 s
-            // after it, a lower bound a loaded host only raises.
-            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            sw.Stop();
-            sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(1900),
-                "the refused send left the earlier suppressed send's window as it was");
-        }
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        // The unsuppressed TesterPresent waits the first send's window out: 2 s, unshortened by
+        // the refused send in between.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromSeconds(2));
+        await pair.Clock.AdvanceAsync(TimeSpan.FromSeconds(2));
+        await Within(next);
     }
 
     // Codex on #150: the discard on an aborted request -- here, one the caller cancelled --
@@ -789,10 +1095,20 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_Still_On_Its_Way_Is_Routed_By_An_Aborted_Requests_Discard()
     {
+        // On a virtual clock (#171), as A_Pending_Answer_Still_On_Its_Way_Through_The_Channel_
+        // Extends_The_Window above: only the frame's stamp and the client's own timers need to
+        // be virtual. The race the comment below describes is about *ordering* (the frame must
+        // be delivered before the abort, once the send is visible on the wire) rather than about
+        // *when* on a clock, so the poll for service.Sent.Count stays a bounded real poll of an
+        // observable condition.
+        using var clock = new VirtualClock();
+        clock.Advance(TimeSpan.FromMilliseconds(1));
+        using var actor = clock.NewActor();
         using var service = new StarvedReaderBusService();
-        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8), FastIsoTp(useCanFd: false), leaveOpen: true);
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x7E0, 0x7E8),
+            FastIsoTp(useCanFd: false), ownsService: false, actor);
         var pendingBudget = TimeSpan.FromMilliseconds(600);
-        using var client = UdsClient.Create(channel, new UdsClientOptions
+        using var client = UdsClient.Create(channel, actor, new UdsClientOptions
         {
             P2ClientMax = TimeSpan.FromMilliseconds(100),
             P2StarClientMax = pendingBudget,
@@ -805,14 +1121,13 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         // The 0x78 is stamped right after the request's synchronous start -- after its pre-send
         // discard's stamp, which would otherwise drop the frame as older, and inside the window
         // by construction rather than by a timer (macOS CI on #150) -- and delivered while the
-        // request waits, before its abort, whose discard is the one under test. A 50 ms timer
-        // lost that race on macOS: the host resumed after P2 had already elapsed and the wait
-        // reported a timeout. Cancelling from here, once the send is visible, does not depend
-        // on a timer firing first. (A host that delays the delivery past the abort lets the
-        // next call's wait-out route it instead: a pass for the wrong reason, never a failure.)
+        // request waits, before its abort, whose discard is the one under test. Cancelling from
+        // here, once the send is visible, does not depend on a timer firing first. (A host that
+        // delays the delivery past the abort lets the next call's wait-out route it instead: a
+        // pass for the wrong reason, never a failure.)
         using var early = new CancellationTokenSource();
         var other = client.ReadDataByIdentifierAsync(0xF190, early.Token);
-        long arrival = Stopwatch.GetTimestamp();
+        long arrival = clock.Elapsed.Ticks;
         var sent = DateTime.UtcNow + ShortTimeout;
         while (service.Sent.Count < 2)
         {
@@ -825,11 +1140,19 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         Func<Task> cancelled = () => other;
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
-        // The next TesterPresent waits P2* from the 0x78 if the abort routed it, else nothing.
-        Func<Task> next = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
-        await next.Should().ThrowAsync<UdsTimeoutException>();
-        var sinceArrival = TimeSpan.FromSeconds((Stopwatch.GetTimestamp() - arrival) / (double)Stopwatch.Frequency);
-        sinceArrival.Should().BeGreaterThanOrEqualTo(pendingBudget,
+        var next = client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        // The window moves out to P2* from the 0x78's arrival: 600 ms from the arrival stamp,
+        // and the clock has not moved since, so 600 ms from here too.
+        var remaining = TimeSpan.FromTicks(arrival + pendingBudget.Ticks - clock.Elapsed.Ticks);
+        await clock.WaitUntilTimerArmedAsync(actor, remaining, ShortTimeout);
+        await clock.AdvanceAsync(remaining); // the window closes; the real request goes out
+
+        // Nothing answers it either: its own P2 must now run out too.
+        await clock.WaitUntilTimerArmedAsync(actor, TimeSpan.FromMilliseconds(100), ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+
+        Func<Task> nextFn = () => next;
+        await nextFn.Should().ThrowAsync<UdsTimeoutException>(
             "the aborted request's discard routed the 0x78 to the suppressed send's window");
     }
 
@@ -839,77 +1162,95 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Stale_Pending_Answer_Queued_Before_A_Suppressed_Send_Does_Not_Extend_Its_Window()
     {
+        // On a virtual clock (#171): the earlier request's own P2 wait, its cancellation, and
+        // the stale 0x78's delivery are all driven by the test rather than raced against sleeps.
+        var steps = new EcuSteps();
         int calls = 0;
-        var (client, _, dispose) = BuildPair(
-            e => e.On(0x3E, req =>
+        using var pair = new ClockPair(
+            e =>
             {
-                switch (Interlocked.Increment(ref calls))
+                e.Delay = steps.WaitAsync;
+                e.On(0x3E, req =>
                 {
-                    case 1: // the request the caller cancels: its 0x78 at 100 ms is stale by then, its negative never comes in time
-                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
-                    case 2: // the suppressed send: no answer
-                        throw new EcuSilent();
-                    default:
-                        return new byte[] { 0x00 };
-                }
-            }),
+                    switch (Interlocked.Increment(ref calls))
+                    {
+                        case 1: // the request the caller cancels: its 0x78 is stale by the time the suppressed send discards it
+                            throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                                delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
+                        case 2: // the suppressed send: no answer
+                            throw new EcuSilent();
+                        default:
+                            return new byte[] { 0x00 };
+                    }
+                });
+            },
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(100),
                 P2StarClientMax = TimeSpan.FromMilliseconds(2000),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(30));
-            Func<Task> cancelled = () => client.SendRawAsync(new byte[] { 0x3E, 0x00 }, early.Token);
-            await cancelled.Should().ThrowAsync<OperationCanceledException>();
-            await Task.Delay(150); // the stale 0x78 (100 ms) is queued
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        using var early = new CancellationTokenSource();
+        var cancelled = pair.Client.SendRawAsync(new byte[] { 0x3E, 0x00 }, early.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(100)); // call #1 waiting on its own P2
+        early.Cancel();
+        Func<Task> cancelledFn = () => cancelled;
+        await cancelledFn.Should().ThrowAsync<OperationCanceledException>();
 
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+        // The stale 0x78 (its 100 ms delay) is queued before the suppressed send opens its window.
+        await pair.DeliverAsync(() => steps.Release(TimeSpan.FromMilliseconds(100)), Negative(0x3E, 0x78));
 
-            // Read as this send's, the stale 0x78 would move the window out to 2100 ms and this
-            // call wait most of two seconds; a loaded host only makes it slower.
-            var sw = Stopwatch.StartNew();
-            var answer = await client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
-            sw.Stop();
-            answer.Should().Equal(0x7E, 0x00);
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the stale 0x78 was discarded before the suppressed send");
-        }
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: window P2 = 100 ms
+
+        var next = pair.Client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token);
+        // Read as this send's, the stale 0x78 would move the window out to 2100 ms; the exact
+        // interval armed here is the suppressed send's own 100 ms, unextended.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(100));
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+
+        var answer = await Within(next);
+        answer.Should().Equal(0x7E, 0x00);
     }
 
     // Bugbot on #150: a wait cancelled part-way keeps what remains of the window.
     [Fact]
     public async Task A_Cancelled_Wait_Keeps_The_Rest_Of_The_Window()
     {
-        var (client, ecu, dispose) = BuildPair(
+        using var answer = new ManualResetEventSlim();
+        using var pair = new ClockPair(
             e => e.On(0x3E, req =>
             {
                 if ((req[1] & 0x80) != 0)
                 {
-                    Thread.Sleep(200);
+                    answer.Wait(ShortTimeout);
                     throw new EcuNegativeResponse(0x12);
                 }
                 return new byte[] { 0x00 };
             }),
             options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(400) });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token);
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // its window: 400 ms
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
 
-            using var early = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
-            Func<Task> cancelled = () => client.TesterPresentAsync(suppressPositiveResponse: false, early.Token);
-            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        using var early = new CancellationTokenSource();
+        var cancelled = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, early.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(350)); // waiting out the window
+        early.Cancel();
+        Func<Task> cancel = () => cancelled;
+        await cancel.Should().ThrowAsync<OperationCanceledException>();
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
 
-            // The negative at 200 ms is still coming; the window must still be honoured.
-            Func<Task> act = () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            await act.Should().NotThrowAsync("the remaining window survived the cancelled wait");
-            ecu.RequestsHandled.Should().Be(2);
-        }
+        // The negative is still coming; the rest of the window -- 300 ms -- must still be honoured.
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(300));
+        await pair.DeliverAsync(answer.Set, Negative(0x3E, 0x12));
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(300));
+        Func<Task> act = () => next;
+        await act.Should().NotThrowAsync("the remaining window survived the cancelled wait");
+        pair.Ecu.RequestsHandled.Should().Be(2);
     }
 
     // Codex on #150: a 0x78 for service B, heard while waiting out service A's window, moves
@@ -917,39 +1258,58 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_For_Another_Service_Heard_During_A_Wait_Extends_That_Services_Window()
     {
-        var (client, _, dispose) = BuildPair(
-            e => e
-                .On(0x3E, req =>
-                {
-                    if ((req[1] & 0x80) != 0) throw new EcuSilent();
-                    return new byte[] { 0x00 };
-                })
-                .On(0x11, req =>
-                {
-                    if ((req[1] & 0x80) != 0)
-                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                            delayBefore: TimeSpan.FromMilliseconds(50), delayAfter: TimeSpan.FromMilliseconds(500));
-                    Thread.Sleep(250); // slow enough that the stale negative (at 550 ms) would be first in line
-                    return new byte[] { 0x01 };
-                }),
+        // On a virtual clock (#171): B's 0x78 is delivered while A's TesterPresent is actively
+        // waiting out A's window, at the exact instant the test moves the clock to, and B's
+        // window's extension is then proven by the exact interval B's own next request arms --
+        // stronger than the original's implicit race against a slow positive reply, and not
+        // dependent on one.
+        var steps = new EcuSteps();
+        var pendingAt = TimeSpan.FromMilliseconds(50);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x3E, req =>
+                    {
+                        if ((req[1] & 0x80) != 0) throw new EcuSilent();
+                        return new byte[] { 0x00 };
+                    })
+                    .On(0x11, req =>
+                    {
+                        if ((req[1] & 0x80) != 0)
+                            throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                                delayBefore: pendingAt, delayAfter: TimeSpan.FromMilliseconds(500));
+                        return new byte[] { 0x01 };
+                    });
+            },
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(400),
                 P2StarClientMax = TimeSpan.FromMilliseconds(1500),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, silent
-            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B: 0x78 at 50 ms, negative at 450 ms
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, silent: window(0x3E) to 400 ms
+        await pair.Client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B, suppressed: window(0x11) to 400 ms too
 
-            // A's request waits A's window out and hears B's 0x78 meanwhile.
-            await client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
-            // B's request follows at once: B's window must now reach past 450 ms.
-            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
-            reset.Should().Equal(0x51, 0x01);
-        }
+        // A's request waits A's window out and hears B's 0x78 meanwhile.
+        var a = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(400));
+
+        await pair.Clock.AdvanceAsync(pendingAt); // 50 ms
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x11, 0x78)); // heard as B's, not A's
+
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(350)); // A's own window, unaffected
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(350)); // A's window closes at 400 ms
+        await Within(a);
+
+        // B's request follows: B's window now reaches P2* past the 0x78 -- 1550 ms, 1150 from here.
+        var reset = pair.Client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(1150));
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1150));
+
+        var result = await Within(reset);
+        result.Should().Equal(0x51, 0x01);
     }
 
     // Codex on #150: a 0x78 for service A, consumed as a stray while service B's request runs
@@ -957,37 +1317,56 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_Consumed_As_Another_Requests_Stray_Still_Extends_Its_Window()
     {
-        var (client, _, dispose) = BuildPair(
-            e => e
-                .On(0x11, req =>
-                {
-                    if ((req[1] & 0x80) != 0)
-                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromMilliseconds(650));
-                    Thread.Sleep(400); // A's request, out at 600 ms without the routing, is answered at 1000: the stale negative at 750 is first in line
-                    return new byte[] { 0x01 };
-                })
-                .On(0x22, req =>
-                {
-                    Thread.Sleep(200); // B's request is on the wire while A's 0x78 arrives
-                    return new byte[] { 0xF1, 0x90, 0xAA };
-                }),
+        // On a virtual clock (#171), each ECU answer released at its instant: the 400 ms and
+        // 200 ms sleeps that placed them before were a 200 ms margin a loaded runner overran.
+        var steps = new EcuSteps();
+        using var answerB = new ManualResetEventSlim();
+        var pendingAt = TimeSpan.FromMilliseconds(100);  // A's 0x78, while B's request is out
+        var negativeAt = TimeSpan.FromMilliseconds(650); // A's final negative, 650 ms after it
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x11, req =>
+                    {
+                        if ((req[1] & 0x80) != 0)
+                            throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                                delayBefore: pendingAt, delayAfter: negativeAt);
+                        return new byte[] { 0x01 };
+                    })
+                    .On(0x22, req =>
+                    {
+                        answerB.Wait(ShortTimeout); // B's request is on the wire while A's 0x78 arrives
+                        return new byte[] { 0xF1, 0x90, 0xAA };
+                    });
+            },
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(600),
                 P2StarClientMax = TimeSpan.FromMilliseconds(2000),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: 0x78 at 100 ms, negative at 750 ms
-            await client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, another service, consumes A's 0x78 as a stray
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: its window to 600 ms
+        var b = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, another service
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(600));     // B's P2
 
-            // A's request follows: its window must reach past 750 ms.
-            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
-            reset.Should().Equal(0x51, 0x01);
-        }
+        await pair.Clock.AdvanceAsync(pendingAt);
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x11, 0x78)); // B consumes it as a stray
+        answerB.Set();
+        await Within(b);
+
+        // A's request follows: its window now reaches P2* past the 0x78 -- 2100 ms, 2000 from here.
+        // Without the routing it would end at 600 ms, before A's negative at 750 is on the wire.
+        var a = pair.Client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(2000));
+
+        await pair.Clock.AdvanceAsync(negativeAt);
+        await pair.DeliverAsync(() => steps.Release(negativeAt), Negative(0x11, 0x12)); // at 750 ms
+
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1350)); // the window closes at 2100
+        var reset = await Within(a);
+        reset.Should().Equal(0x51, 0x01);
     }
 
     // Codex on #150: a 0x78 for service A that arrives after A's window has run out answers
@@ -996,38 +1375,57 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_From_After_A_Windows_End_Does_Not_Revive_It()
     {
-        var (client, _, dispose) = BuildPair(
-            e => e
-                .On(0x11, req =>
-                {
-                    if ((req[1] & 0x80) != 0)
-                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                            delayBefore: TimeSpan.FromMilliseconds(500), delayAfter: TimeSpan.FromSeconds(3));
-                    return new byte[] { 0x01 };
-                })
-                .On(0x22, req => throw new EcuResponsePending(pendingCount: 1,
-                    finalResponse: new byte[] { 0xF1, 0x90, 0xAA }, delayBetween: TimeSpan.FromMilliseconds(700))),
+        // On a virtual clock (#171): A's late 0x78 is delivered once B's own receive loop is
+        // waiting for it, at an instant already past A's window's end -- late by construction --
+        // and "not revived" is then proven by A's next request resolving without the clock
+        // moving any further, the only way it can resolve if nothing was revived.
+        var steps = new EcuSteps();
+        var pendingAt = TimeSpan.FromMilliseconds(500);
+        var bGap = TimeSpan.FromMilliseconds(700);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x11, req =>
+                    {
+                        if ((req[1] & 0x80) != 0)
+                            throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                                delayBefore: pendingAt, delayAfter: TimeSpan.FromSeconds(3));
+                        return new byte[] { 0x01 };
+                    })
+                    .On(0x22, req => throw new EcuResponsePending(pendingCount: 1,
+                        finalResponse: new byte[] { 0xF1, 0x90, 0xAA }, delayBetween: bGap));
+            },
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(200),
                 P2StarClientMax = TimeSpan.FromMilliseconds(2000),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: window P2 = 200 ms; its 0x78 comes at 500 ms
-            await client.ReadDataByIdentifierAsync(0xF190, cts.Token);      // B, waiting in P2* until 700 ms, consumes A's late 0x78 as a stray
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // A, suppressed: window(0x11) to 200 ms
 
-            // A's next request: the window ran out at 200 ms, and the 0x78 at 500 did not
-            // reopen it -- revived, it would reach 2500 ms, and this call would wait most of
-            // two seconds. A loaded host only makes the call slower, so the bound is wide.
-            var sw = Stopwatch.StartNew();
-            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
-            sw.Stop();
-            reset.Should().Equal(0x51, 0x01);
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the late 0x78 did not revive the window");
-        }
+        // B's own first 0x78 goes out the instant its request is handled, with nothing pacing
+        // it -- on a fast host that can land before a check for B's initial P2 would even see
+        // it armed, so what is checked directly is the interval B restarts to, which only a
+        // client that has already received and processed that 0x78 could have armed.
+        var b = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(2000)); // B's P2*, restarted
+        await pair.Clock.AdvanceAsync(pendingAt); // 500 ms: past A's window's end (200 ms)
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x11, 0x78)); // A's late 0x78, heard as B's stray
+
+        // B's own wait is unaffected: 2000 ms from its 0x78 at 1 ms, minus the 500 ms elapsed.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(1500));
+        await pair.Clock.AdvanceAsync(bGap - pendingAt); // 200 ms further: B's own gap (700 ms) ends
+        await pair.DeliverAsync(() => steps.Release(bGap), data => data.Length >= 2 && data[1] == 0x62); // B's final response
+        var data = await Within(b);
+        data.Should().Equal(0xAA);
+
+        // A's next request: the window ran out at 200 ms, and the late 0x78 did not reopen it --
+        // revived, it would reach 2500 ms, and this resolves without the clock moving any
+        // further, which is only possible if nothing was revived.
+        var reset = await Within(pair.Client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token));
+        reset.Should().Equal(0x51, 0x01);
     }
 
     // Codex on #150: the same, heard while another service's wait-out runs rather than by a
@@ -1035,43 +1433,61 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Pending_Answer_From_After_A_Windows_End_Heard_In_A_Wait_Out_Does_Not_Revive_It()
     {
-        var (client, _, dispose) = BuildPair(
-            e => e
-                .On(0x11, req =>
-                {
-                    if ((req[1] & 0x80) != 0)
-                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                            delayBefore: TimeSpan.FromMilliseconds(1500), delayAfter: TimeSpan.FromSeconds(3));
-                    return new byte[] { 0x01 };
-                })
-                .On(0x3E, req =>
-                {
-                    if ((req[1] & 0x80) != 0)
-                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
-                            delayBefore: TimeSpan.FromMilliseconds(100), delayAfter: TimeSpan.FromSeconds(3));
-                    return new byte[] { 0x00 };
-                }),
+        // On a virtual clock (#171): B's late 0x78 is delivered while A is actively waiting out
+        // A's own (self-extended) window -- the "heard in a wait-out" path, as opposed to the
+        // sibling test's "heard by a request's stray branch" -- again proven by exact intervals
+        // rather than a race against a sleep.
+        var steps = new EcuSteps();
+        var aPendingAt = TimeSpan.FromMilliseconds(100);
+        var bPendingAt = TimeSpan.FromMilliseconds(1500);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x11, req =>
+                    {
+                        if ((req[1] & 0x80) != 0)
+                            throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                                delayBefore: bPendingAt, delayAfter: TimeSpan.FromSeconds(3));
+                        return new byte[] { 0x01 };
+                    })
+                    .On(0x3E, req =>
+                    {
+                        if ((req[1] & 0x80) != 0)
+                            throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                                delayBefore: aPendingAt, delayAfter: TimeSpan.FromSeconds(3));
+                        return new byte[] { 0x00 };
+                    });
+            },
             options: new UdsClientOptions
             {
                 P2ClientMax = TimeSpan.FromMilliseconds(200),
                 P2StarClientMax = TimeSpan.FromMilliseconds(2000),
             });
 
-        using (dispose)
-        {
-            using var cts = new CancellationTokenSource(ShortTimeout);
-            await client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B, suppressed: window to 200 ms; its 0x78 comes at 1500 ms
-            await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, suppressed: its own 0x78 at 100 ms moves its window to 2100 ms
-            await client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token); // A again: waits its window out until 2100 ms, hearing B's late 0x78 at 1500
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await pair.Client.SendRawAsync(new byte[] { 0x11, 0x81 }, cts.Token); // B, suppressed: window(0x11) to 200 ms
+        await pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // A, suppressed: window(0x3E) to 200 ms too
 
-            // B's next request: revived at 1500 ms, B's window would reach 3500 ms and this
-            // call, at ~2100 ms, would wait most of 1.5 s.
-            var sw = Stopwatch.StartNew();
-            var reset = await client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token);
-            sw.Stop();
-            reset.Should().Equal(0x51, 0x01);
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1), "the late 0x78 heard in the wait-out did not revive the window");
-        }
+        var again = pair.Client.SendRawAsync(new byte[] { 0x3E, 0x00 }, cts.Token); // A again: waits its own window out
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(200));
+
+        await pair.Clock.AdvanceAsync(aPendingAt); // 100 ms: A's own 0x78 arrives
+        await pair.DeliverAsync(() => steps.Release(aPendingAt), Negative(0x3E, 0x78));
+        // A's own window moves out to P2* from its 0x78: 100 + 2000 = 2100 ms, 2000 from here.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(2000));
+
+        await pair.Clock.AdvanceAsync(bPendingAt - aPendingAt); // 1500 ms total: B's late 0x78 arrives
+        await pair.DeliverAsync(() => steps.Release(bPendingAt), Negative(0x11, 0x78)); // heard in A's own wait-out
+        // A's wait is unaffected: 2100 ms total, 600 ms from here.
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(600));
+        await pair.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(600)); // A's window closes at 2100 ms
+        await Within(again);
+
+        // B's next request: revived, B's window would reach 3500 ms; unrevived, it resolves
+        // without the clock moving any further.
+        var reset = await Within(pair.Client.SendRawAsync(new byte[] { 0x11, 0x01 }, cts.Token));
+        reset.Should().Equal(0x51, 0x01);
     }
 
     // NRC 0x21 asks for a repeat; the client repeats, up to MaxBusyRepeatRequests.
@@ -1462,29 +1878,45 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Client_Times_Out_With_P2Star_When_Ecu_Sends_Only_ResponsePending()
     {
-        var (client, _, dispose) = BuildPair(
-            e => e.On(0x22, _ => throw new EcuResponsePendingThenSilent(
-                pendingCount: 2, delayBetween: TimeSpan.FromMilliseconds(40))),
+        // On a virtual clock (#171): each 0x78 is delivered at the exact virtual instant it
+        // belongs to, via OrderedGates because the two delays share the same 40 ms length --
+        // EcuSteps would hand both callers the same, already-resolved gate. The first 0x78 goes
+        // out the instant the request is handled, with nothing pacing it -- on a fast host that
+        // can land, and be processed, before a check for the initial P2 would even see it armed
+        // -- so what is checked directly is the interval the client restarts to, which only a
+        // client that has already received and processed that 0x78 could have armed.
+        var gates = new OrderedGates();
+        var gap = TimeSpan.FromMilliseconds(40);
+        var p2 = TimeSpan.FromMilliseconds(100);
+        var p2Star = TimeSpan.FromMilliseconds(250);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = gates.WaitAsync;
+                e.On(0x22, _ => throw new EcuResponsePendingThenSilent(pendingCount: 2, delayBetween: gap));
+            },
             options: new UdsClientOptions
             {
-                P2ClientMax = TimeSpan.FromMilliseconds(100),
-                P2StarClientMax = TimeSpan.FromMilliseconds(250),
+                P2ClientMax = p2,
+                P2StarClientMax = p2Star,
                 MaxResponsePendingCount = 10,
             });
-        using (dispose)
-        {
-            var sw = Stopwatch.StartNew();
-            Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190,
-                new CancellationTokenSource(ShortTimeout).Token);
-            var ex = (await act.Should().ThrowAsync<UdsTimeoutException>()).Which;
-            sw.Stop();
 
-            ex.Timer.Should().Be(UdsTimeoutTimer.P2Star,
-                "the ECU answered with NRC 0x78 (response pending), so the running timer is P2* — not P2");
-            ex.RequestedService.Should().Be(UdsServiceId.ReadDataByIdentifier);
-            sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(200),
-                "P2* restarts on each 0x78, so the timeout must fire well past the initial P2 budget (100 ms)");
-        }
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+
+        await pair.WaitUntilWaitingAsync(p2Star); // restarted on the first 0x78's arrival
+        await pair.Clock.AdvanceAsync(gap);
+        await pair.DeliverAsync(gates.ReleaseNext, Negative(0x22, 0x78)); // the second 0x78, at 40 ms
+
+        await pair.WaitUntilWaitingAsync(p2Star); // restarted again, from the second 0x78
+        await pair.Clock.AdvanceAsync(p2Star); // then silence: P2* must expire
+
+        Func<Task> act = () => read;
+        var ex = (await act.Should().ThrowAsync<UdsTimeoutException>()).Which;
+        ex.Timer.Should().Be(UdsTimeoutTimer.P2Star,
+            "the ECU answered with NRC 0x78 (response pending), so the running timer is P2* — not P2");
+        ex.RequestedService.Should().Be(UdsServiceId.ReadDataByIdentifier);
     }
 
     // -----------------------------------------------------------------------------------
@@ -1494,26 +1926,50 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task ResponsePending_Restarts_P2Star_And_Returns_Final_Response()
     {
+        // On a virtual clock (#171): the three 0x78s (60 ms apart) and the final response are
+        // each delivered at the exact instant they belong to, via OrderedGates for the same
+        // reason as the P2* timeout test above. The first 0x78 goes out unpaced and can land
+        // before a check for the initial P2 would see it armed, so what is checked directly is
+        // the interval the client restarts to. The exact interval armed after every 0x78 proves
+        // the restart directly, rather than by the client merely finishing with the right
+        // payload despite a short initial P2.
+        var gates = new OrderedGates();
+        var gap = TimeSpan.FromMilliseconds(60);
+        var p2 = TimeSpan.FromMilliseconds(120);
+        var p2Star = TimeSpan.FromSeconds(1);
         byte[] finalBody = { 0xF1, 0x90, 0xAA, 0xBB, 0xCC, 0xDD };
-        var (client, _, dispose) = BuildPair(
-            e => e.On(0x22, _ => throw new EcuResponsePending(
-                pendingCount: 3, finalResponse: finalBody,
-                delayBetween: TimeSpan.FromMilliseconds(60))),
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = gates.WaitAsync;
+                e.On(0x22, _ => throw new EcuResponsePending(
+                    pendingCount: 3, finalResponse: finalBody, delayBetween: gap));
+            },
             options: new UdsClientOptions
             {
-                // P2 short: proves the client actually restarts on 0x78 rather than living
-                // inside the (accidentally) generous initial budget. 120 ms is several times
-                // the first-hop cliff measured for #118 (see the P2* timeout test above).
-                P2ClientMax = TimeSpan.FromMilliseconds(120),
-                P2StarClientMax = TimeSpan.FromSeconds(1),
+                P2ClientMax = p2,
+                P2StarClientMax = p2Star,
                 MaxResponsePendingCount = 10,
             });
-        using (dispose)
-        {
-            var data = await client.ReadDataByIdentifierAsync(0xF190,
-                new CancellationTokenSource(ShortTimeout).Token);
-            data.Should().Equal(0xAA, 0xBB, 0xCC, 0xDD);
-        }
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+
+        await pair.WaitUntilWaitingAsync(p2Star); // restarted on the 1st (unpaced) 0x78's arrival
+        await pair.Clock.AdvanceAsync(gap);
+        await pair.DeliverAsync(gates.ReleaseNext, Negative(0x22, 0x78)); // 2nd 0x78 @ 60 ms
+
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.Clock.AdvanceAsync(gap);
+        await pair.DeliverAsync(gates.ReleaseNext, Negative(0x22, 0x78)); // 3rd 0x78 @ 120 ms
+
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.Clock.AdvanceAsync(gap);
+        // Releasing the 3rd gate lets the final positive response go out right away.
+        await pair.DeliverAsync(gates.ReleaseNext, data => data.Length >= 2 && data[1] == 0x62);
+
+        var data = await Within(read);
+        data.Should().Equal(0xAA, 0xBB, 0xCC, 0xDD);
     }
 
     // -----------------------------------------------------------------------------------

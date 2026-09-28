@@ -213,4 +213,34 @@ public class ProtocolActorTimerTests
 
         observed.Should().BeNull();
     }
+
+    // #171: a caller whose deadline is fixed already arms it as that instant. Armed as a delay
+    // from a fresh reading instead, a clock that moved after the caller's own reading would put
+    // the timer late by the whole move -- on a clock a test moves, a timer that never fires.
+    [Fact]
+    public async Task ScheduleAt_Fires_At_The_Instant_Not_A_Delay_From_When_It_Was_Armed()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        var time = actor.TimeSource;
+        long Ms(int ms) => (long)(ms / 1000.0 * time.Frequency);
+
+        var deadline = time.GetTimestamp() + Ms(50); // the caller's reading, and its deadline
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(30)); // the clock moves before the arming
+        var fired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var handle = actor.ScheduleAt(deadline, () => fired.TrySetResult(true));
+
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(19));
+        fired.Task.IsCompleted.Should().BeFalse("the deadline is still 1 ms away");
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        fired.Task.IsCompleted.Should().BeTrue("due 50 ms after the caller's reading, not 50 ms after the arming");
+
+        var late = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var past = actor.ScheduleAt(deadline, () => late.TrySetResult(true));
+        await clock.SettleAsync();
+        late.Task.IsCompleted.Should().BeTrue("an instant already past fires on the loop's next pass");
+
+        Action noCallback = () => actor.ScheduleAt(deadline, null!);
+        noCallback.Should().Throw<ArgumentNullException>();
+    }
 }

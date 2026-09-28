@@ -2862,7 +2862,25 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
             }
         }
 
-        public bool TryRead(out CanFrameEvent frameEvent) => _inner.TryRead(out frameEvent);
+        // The same meaning for a reader that drains with TryRead, as the ISO-TP channel's pump
+        // does: a frame is finished with once the reader asks for the next one -- by then it has
+        // been handed to the actor. Only one reader drains a subscription at a time (the
+        // channel's pump lock), so the frame in hand needs no lock of its own.
+        private CanFrameEvent _taken;
+        private bool _hasTaken;
+
+        public bool TryRead(out CanFrameEvent frameEvent)
+        {
+            if (_hasTaken)
+            {
+                _hasTaken = false;
+                _owner.Consumed(_taken);
+            }
+            if (!_inner.TryRead(out frameEvent)) return false;
+            _taken = frameEvent;
+            _hasTaken = true;
+            return true;
+        }
 
         public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
             => _inner.WaitToReadAsync(cancellationToken);

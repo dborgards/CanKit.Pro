@@ -1,4 +1,5 @@
 using System;
+using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
 
 namespace CanKit.Pro.Uds;
@@ -33,5 +34,23 @@ public static class UdsClient
     {
         if (channel is null) throw new ArgumentNullException(nameof(channel));
         return new UdsClientImpl(channel, options ?? new UdsClientOptions(), ownsChannel: !leaveOpen);
+    }
+
+    /// <summary>
+    /// As <see cref="Create(IIsoTpChannel, UdsClientOptions?, bool)"/>, measuring and waiting
+    /// out P2, P2* and the suppressed-response windows on <paramref name="clock"/>; null is the
+    /// wall clock, as
+    /// the public overload uses. <paramref name="channel"/> must have been opened on that same
+    /// actor, and its demux must stamp frames with its time source, or a deadline and an
+    /// arrival are not comparable (#171).
+    /// </summary>
+    internal static IUdsClient Create(
+        IIsoTpChannel channel,
+        ProtocolActor? clock,
+        UdsClientOptions? options = null,
+        bool leaveOpen = true)
+    {
+        if (channel is null) throw new ArgumentNullException(nameof(channel));
+        return new UdsClientImpl(channel, options ?? new UdsClientOptions(), ownsChannel: !leaveOpen, clock);
     }
 }

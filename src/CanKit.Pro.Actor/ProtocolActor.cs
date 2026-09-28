@@ -345,7 +345,25 @@ namespace CanKit.Pro.Actor
             if (callback is null) throw new ArgumentNullException(nameof(callback));
             if (delay < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(delay), "Delay must not be negative.");
 
-            var entry = new TimerEntry(DueTimestamp(delay), callback);
+            return Insert(new TimerEntry(DueTimestamp(delay), callback));
+        }
+
+        /// <summary>
+        /// As <see cref="Schedule"/>, due at <paramref name="dueTimestamp"/> on
+        /// <see cref="TimeSource"/> rather than a delay from the reading this call takes. For a
+        /// caller whose deadline is fixed already: a delay computed from its own earlier reading
+        /// lands late by however far the clock moved in between, and on a clock a test moves in
+        /// steps that can be a whole step -- a timer that then never fires (#171). A due instant
+        /// already past fires on the loop's next pass.
+        /// </summary>
+        internal IDisposable ScheduleAt(long dueTimestamp, Action callback)
+        {
+            if (callback is null) throw new ArgumentNullException(nameof(callback));
+            return Insert(new TimerEntry(dueTimestamp, callback));
+        }
+
+        private IDisposable Insert(TimerEntry entry)
+        {
             lock (_disposeGate)
             {
                 ThrowIfDisposed();
