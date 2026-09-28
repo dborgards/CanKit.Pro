@@ -77,6 +77,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // after a successful claim we must re-open the channel on the claimed address (Bugbot
     // 3600377721). Mutation of these two fields only happens on the actor loop.
     private IJ1939TpChannel _transport = null!;
+    // Null in production; see the constructor.
+    private readonly Func<byte, IJ1939TpChannel>? _openTransport;
     private Task _transportReaderTask = null!;
     private readonly Task _readerTask;
     private readonly CancellationTokenSource _readerCts = new();
@@ -162,15 +164,23 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// wall-clock gaps on a shared runner (#92). The node's own anchor arithmetic reads the
     /// clock off the actor rather than taking one of its own, so the two cannot be given
     /// different clocks.
+    /// <paramref name="openTransport"/> is the same kind of seam: it opens the node's own TP
+    /// channel -- the one seeded here and replaced at every rebind -- in place of
+    /// <c>J1939Tp.Open</c>, so a test can hand the transport reader a datagram at the instant a
+    /// race needs it, after a rebind or after the actor is gone, instead of hoping the host
+    /// lands there (#195). Null, the only value production passes, opens the real channel on
+    /// <paramref name="service"/>. The single-use channel of a send that races a rebind is
+    /// not opened through it.
     /// </remarks>
     internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService,
-        ProtocolActor? actor = null)
+        ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
         _ownsService = ownsService;
         _name = options.Name;
+        _openTransport = openTransport;
 
         var inboxOpts = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
         {
@@ -195,8 +205,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // transition; here we just seed the initial placeholder channel.
         try
         {
-            _transport = J1939Tp.J1939Tp.Open(_service, sourceAddress: J1939Pgn.NullAddress,
-                options: _options.TransportOptions, leaveOpen: true);
+            _transport = OpenTransport(J1939Pgn.NullAddress);
         }
         catch
         {
@@ -1396,52 +1405,67 @@ internal sealed class J1939NodeImpl : IJ1939Node
         catch (Exception ex) { RaiseBackgroundException(ex); }
     }
 
+    private IJ1939TpChannel OpenTransport(byte sourceAddress)
+        => _openTransport?.Invoke(sourceAddress)
+           ?? J1939Tp.J1939Tp.Open(_service, sourceAddress: sourceAddress,
+               options: _options.TransportOptions, leaveOpen: true);
+
     private Task StartTransportReader(IJ1939TpChannel transport)
         => Task.Run(() => RunTransportReaderAsync(transport));
 
     // Bound to a specific transport instance so a rebind (which replaces _transport) does not
     // accidentally cause an already-running reader to switch enumerables mid-flight. The
     // per-instance inbox completes on channel Dispose, so this loop exits cleanly on rebind.
+    //
+    // A reassembly abort (bad TP.DT sequence, T1, a BAM superseded by the next one from the
+    // same source) is thrown out of ReceiveAllAsync, which ends that enumeration. It ends one
+    // peer's transfer, not the channel: the inbox stays open and the next datagram is already
+    // queued behind the fault, so the reader enumerates again. Stopping here, as it once did,
+    // left the node deaf to every multi-frame message until the next rebind (#195). The abort
+    // is not re-raised: the channel has already raised it through BackgroundExceptionOccurred,
+    // which the node forwards.
     private async Task RunTransportReaderAsync(IJ1939TpChannel transport)
     {
-        try
+        while (true)
         {
-            await foreach (var datagram in transport.ReceiveAllAsync(_readerCts.Token).ConfigureAwait(false))
+            try
             {
-                // Drop datagrams from a channel that has already been replaced by rebind
-                // (we no longer Wait the old reader on the actor — Bugbot 3600717311).
-                if (!ReferenceEquals(transport, _transport))
-                    return;
-
-                // Reassembled PDU: emit as a J1939Message just like a single-frame arrival.
-                // `IJ1939Node.MessageReceived` documents that handlers run on the node's actor
-                // loop; the transport reader is a separate Task, so we must marshal onto the
-                // actor before firing the event so single-frame and multi-frame receive paths
-                // share the same thread affinity guarantee (Bugbot 3600440957).
-                var message = new J1939Message(datagram.Pgn, datagram.Payload,
-                    priority: _options.DefaultPriority,
-                    sourceAddress: datagram.SourceAddress,
-                    destinationAddress: datagram.DestinationAddress);
-                try
-                {
-                    _actor.Post(() =>
-                    {
-                        if (!ReferenceEquals(transport, _transport)) return;
-                        EmitMessage(message);
-                    });
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Node was disposed while we had a datagram in hand; drop it silently —
-                    // consistent with the RunReaderAsync path which also stops posting after
-                    // dispose.
-                    return;
-                }
+                await ForwardTransportDatagramsAsync(transport).ConfigureAwait(false);
+                return;
             }
+            catch (J1939TpAbortException) { /* surfaced by the channel; keep reading */ }
+            catch (OperationCanceledException) { return; /* expected on Dispose */ }
+            catch (ObjectDisposedException) { return; /* the node was disposed with a datagram in hand */ }
+            catch (Exception ex) { RaiseBackgroundException(ex); return; }
         }
-        catch (OperationCanceledException) { /* expected on Dispose */ }
-        catch (ObjectDisposedException) { /* expected on rebind: old channel was disposed */ }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+    }
+
+    private async Task ForwardTransportDatagramsAsync(IJ1939TpChannel transport)
+    {
+        await foreach (var datagram in transport.ReceiveAllAsync(_readerCts.Token).ConfigureAwait(false))
+        {
+            // Drop datagrams from a channel that has already been replaced by rebind
+            // (we no longer Wait the old reader on the actor — Bugbot 3600717311).
+            if (!ReferenceEquals(transport, _transport))
+                return;
+
+            // Reassembled PDU: emit as a J1939Message just like a single-frame arrival.
+            // `IJ1939Node.MessageReceived` documents that handlers run on the node's actor
+            // loop; the transport reader is a separate Task, so we must marshal onto the
+            // actor before firing the event so single-frame and multi-frame receive paths
+            // share the same thread affinity guarantee (Bugbot 3600440957).
+            var message = new J1939Message(datagram.Pgn, datagram.Payload,
+                priority: _options.DefaultPriority,
+                sourceAddress: datagram.SourceAddress,
+                destinationAddress: datagram.DestinationAddress);
+            // Throws ObjectDisposedException once the node is disposed: the reader above takes
+            // that as its end and drops the datagram in hand, as RunReaderAsync stops posting.
+            _actor.Post(() =>
+            {
+                if (!ReferenceEquals(transport, _transport)) return;
+                EmitMessage(message);
+            });
+        }
     }
 
     /// <summary>
@@ -1491,8 +1515,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         IJ1939TpChannel newTransport;
         try
         {
-            newTransport = J1939Tp.J1939Tp.Open(_service, sourceAddress: sourceAddress,
-                options: _options.TransportOptions, leaveOpen: true);
+            newTransport = OpenTransport(sourceAddress);
         }
         catch (Exception ex)
         {
