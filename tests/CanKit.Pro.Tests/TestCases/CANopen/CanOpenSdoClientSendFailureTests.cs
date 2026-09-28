@@ -161,7 +161,9 @@ public class CanOpenSdoClientSendFailureTests
     public async Task A_Send_Outcome_After_Dispose_Is_Dropped()
     {
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-outcome-dispose-{Guid.NewGuid():N}");
-        var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        // `using` as well as the explicit Dispose below: that one is the state under test, and
+        // `using` still disposes if a wait before it throws.
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
 
