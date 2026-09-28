@@ -76,7 +76,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private LinkedListNode<PendingEvent>? _oldestNonCritical;
     private int _pendingNonCritical;
     private long _submittedEventCount;
-    private readonly Dictionary<EventKey, LinkedListNode<PendingEvent>> _pendingKeyed = new();
+    private readonly Dictionary<(byte, byte, ulong, byte), LinkedListNode<PendingEvent>> _pendingKeyed = new();
     // Per producer node-id: the last event still waiting that says something about the producer's
     // state -- a heartbeat or guarding response, an EMCY, but not a timeout. A waiting critical
     // event absorbs an identical one only while no such event was queued behind it, so "error,
@@ -803,7 +803,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // An identical event is already waiting: the handler will see it, and nothing
                 // it could learn from a second copy is lost (#201).
                 if (key is { } k && producer >= 0
-                    && _pendingKeyed.TryGetValue(k, out var waiting)
+                    && _pendingKeyed.TryGetValue(k.Identity, out var waiting)
                     && (_lastForProducer[producer] is not { } newest || newest.Value.Ordinal <= waiting.Value.Ordinal))
                 {
                     _coalescedEventCount++;
@@ -832,7 +832,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     // the producer's state, so it is not recorded against it.
                     int tracked = key is { IsTimeout: true } ? -1 : producer;
                     var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer, tracked, ++_enqueueOrdinal));
-                    if (key is { } keyed) _pendingKeyed[keyed] = queued;
+                    if (key is { } keyed) _pendingKeyed[keyed.Identity] = queued;
                     if (tracked >= 0) _lastForProducer[tracked] = queued;
                 }
             }
@@ -873,9 +873,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (node is null) return null;
             _pendingEvents.RemoveFirst();
             // A newer identical event may have replaced this one's entry; only remove our own.
-            if (node.Value.Key is { } key && _pendingKeyed.TryGetValue(key, out var entry)
+            if (node.Value.Key is { } key && _pendingKeyed.TryGetValue(key.Identity, out var entry)
                 && ReferenceEquals(entry, node))
-                _pendingKeyed.Remove(key);
+                _pendingKeyed.Remove(key.Identity);
             if (node.Value.Producer is >= 0 and var about && ReferenceEquals(_lastForProducer[about], node))
                 _lastForProducer[about] = null;
             if (node.Value.EmcyProducer is >= 0 and var producer
@@ -903,8 +903,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private void ReconcileProducer(int producer)
     {
-        Dictionary<EventKey, LinkedListNode<PendingEvent>>? absorbers = null;
-        Dictionary<EventKey, LinkedListNode<PendingEvent>>? newest = null;
+        var absorbers = new HashSet<(byte, byte, ulong, byte)>();
+        var newest = new Dictionary<(byte, byte, ulong, byte), LinkedListNode<PendingEvent>>();
         LinkedListNode<PendingEvent>? lastTracked = null;
 
         for (var node = _pendingEvents.First; node is not null;)
@@ -913,7 +913,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             var waiting = node.Value;
             if (waiting.Key is { } key && key.ProducerId == producer)
             {
-                if (absorbers is not null && absorbers.ContainsKey(key))
+                if (absorbers.Contains(key.Identity))
                 {
                     _pendingEvents.Remove(node);
                     _coalescedEventCount++;
@@ -927,24 +927,23 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     bool tracked = !key.IsTimeout;
                     if (tracked)
                     {
-                        absorbers?.Clear();
+                        absorbers.Clear();
                         lastTracked = node;
                     }
-                    (absorbers ??= new())[key] = node;
-                    (newest ??= new())[key] = node;
+                    absorbers.Add(key.Identity);
+                    newest[key.Identity] = node;
                 }
             }
             else if (waiting.Producer == producer)
             {
-                absorbers?.Clear();
+                absorbers.Clear();
                 lastTracked = node;
             }
             node = next;
         }
 
-        if (newest is not null)
-            foreach (var entry in newest)
-                _pendingKeyed[entry.Key] = entry.Value;
+        foreach (var entry in newest)
+            _pendingKeyed[entry.Key] = entry.Value;
         _lastForProducer[producer] = lastTracked;
     }
 
@@ -1018,7 +1017,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// <summary>Identity of a critical event for coalescing: what it is, who raised it and what it
     /// says -- for an EMCY the whole 8-byte payload, for a timeout the settings it reports, so
     /// that one raised under a reconfigured consumer is not folded into a stale one.</summary>
-    private readonly struct EventKey : IEquatable<EventKey>
+    private readonly struct EventKey
     {
         private readonly byte _kind;
         private readonly byte _producer;
@@ -1052,12 +1051,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return new EventKey(3, msg.ProducerNodeId, payload);
         }
 
-        public bool Equals(EventKey other)
-            => (_kind, _producer, _payload, _extra).Equals((other._kind, other._producer, other._payload, other._extra));
-
-        public override bool Equals(object? obj) => obj is EventKey other && Equals(other);
-
-        public override int GetHashCode() => (_kind, _producer, _payload, _extra).GetHashCode();
+        /// <summary>The fields that make two keys the same event, as a tuple so that keys can be
+        /// compared and hashed without members of their own.</summary>
+        public (byte, byte, ulong, byte) Identity => (_kind, _producer, _payload, _extra);
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
