@@ -2090,23 +2090,34 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         {
             if (frame.ID != 0x7E0) return;
             aTransmitting.Set();
-            release.Wait(ShortTimeout);
+            // Held for as long as the test says, with no deadline of its own to race B's arrival
+            // (Codex on #191); the finally below releases it whatever the outcome.
+            release.Wait();
         };
 
         var sendA = a.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
-        aTransmitting.Wait(ShortTimeout).Should().BeTrue("A's frame must reach the driver call");
+        IsoTpTransmitStamps stampsB;
+        long releasedAt;
+        try
+        {
+            aTransmitting.Wait(ShortTimeout).Should().BeTrue("A's frame must reach the driver call");
 
-        // B is handed to the service, whose lock A holds across its driver call (#171: this was a
-        // 50 ms wait for B to get there). Any reading B's channel takes before that hand-off --
-        // the pre-call stamp a channel that ignores the service's own would keep -- is therefore
-        // before the instant below; a reading inside the lock can only be after it.
-        var sendB = b.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
-        bHandedToService.Wait(ShortTimeout).Should().BeTrue("B's frame must reach the service");
-        var releasedAt = Stopwatch.GetTimestamp();
-        release.Set();
+            // B is handed to the service, whose lock A holds across its driver call (#171: this
+            // was a 50 ms wait for B to get there). Any reading B's channel takes before that
+            // hand-off -- the pre-call stamp a channel that ignores the service's own would keep --
+            // is therefore before the instant below; a reading inside the lock can only be after it.
+            var sendB = b.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
+            bHandedToService.Wait(ShortTimeout).Should().BeTrue("B's frame must reach the service");
+            releasedAt = Stopwatch.GetTimestamp();
+            release.Set();
 
-        await sendA.WaitAsync(ShortTimeout);
-        var stampsB = await sendB.WaitAsync(ShortTimeout);
+            await sendA.WaitAsync(ShortTimeout);
+            stampsB = await sendB.WaitAsync(ShortTimeout);
+        }
+        finally
+        {
+            release.Set();
+        }
 
         stampsB.LastFrameHandoffTimestamp.Should().BeGreaterThan(releasedAt,
             "B's handoff instant is taken inside the lock, which A held until the instant above");
