@@ -696,4 +696,50 @@ public class IsoTpFrameCodecTests
         pci.Length.Should().Be(0x1000);
         pci.DataOffset.Should().Be(6);
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // #207: FF_DL == 0 is not a valid First Frame and must not be built or parsed.
+    // ---------------------------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void BuildFirstFrame_ZeroTotalLength_Throws(bool isCanFd)
+    {
+        var ep = IsoTpEndpoint.Normal(0x100, 0x101);
+
+        Action act = () => IsoTpFrameCodec.BuildFirstFrame(ep, 0, new byte[] { 1, 2, 3 }, isCanFd);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("totalLength");
+    }
+
+    [Fact]
+    public void TryParsePci_FirstFrame_CanFd_Escape_ZeroLength_Is_Rejected()
+    {
+        var frame = new byte[]
+        {
+            0x10, 0x00, 0x00, 0x00, 0x00, 0x00, // escape header, FF_DL = 0
+            1, 2, 3, 4, 5, 6, 7, 8,
+        };
+        var ep = IsoTpEndpoint.Normal(0x1, 0x2);
+
+        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: true, out _).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(4095, false)]
+    [InlineData(4096, true)]
+    [InlineData(70_000, true)]
+    public void FirstFrame_Build_Then_Parse_RoundTrips_And_Zero_Never_Parses(int totalLength, bool isCanFd)
+    {
+        var ep = IsoTpEndpoint.Normal(0x100, 0x101);
+        var chunk = new byte[] { 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5 };
+
+        var frame = IsoTpFrameCodec.BuildFirstFrame(ep, totalLength, chunk, isCanFd);
+
+        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd, out var pci).Should().BeTrue();
+        pci.Type.Should().Be(PciType.FirstFrame);
+        pci.Length.Should().Be(totalLength);
+    }
 }
