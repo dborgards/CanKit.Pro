@@ -76,9 +76,10 @@ public sealed class CanOpenDiscoveredNode
 /// <para>
 /// <see cref="ScanAsync"/> uses a node the caller has opened. It sends an SDO upload of
 /// <c>1000h:00</c> to every node-id 1..127 except the client's own and the ones the caller
-/// passes, typically those a listen already found. That is its whole content: the pair is one
-/// the peer-SDO gate allows without a peer file, and with a peer file bound only if the file
-/// lists it.
+/// passes, typically those a listen already found. That is the only request it sends: the pair
+/// is one the peer-SDO gate allows without a peer file, and with a peer file bound only if the
+/// file lists it. A node that stays silent also receives the SDO client's usual timeout abort
+/// (<c>0504 0000h</c>), which lets a node that answers late drop its half-open transfer.
 /// </para>
 /// </remarks>
 public static class CanOpenDiscovery

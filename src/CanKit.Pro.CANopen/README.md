@@ -317,7 +317,9 @@ Bit 7, the guarding toggle, is masked, as the node's own heartbeat consumer does
 bytes, remote frames and 29-bit frames are ignored. There is an overload that takes
 an `ICanBusService` shared with other protocols, and that service is left open.
 
-`ScanAsync` reads `1000h:00` through the client's SDO client. It asks every node-id from 1 to 127
+`ScanAsync` reads `1000h:00` through the client's SDO client, and that is the only request it
+sends. A node that stays silent also gets the client's usual timeout abort (`0504 0000h`), so a
+node that answers late can drop its half-open transfer. It asks every node-id from 1 to 127
 except the client's own and the ones passed in, and the requests run concurrently. A node is
 reported when it answers:
 

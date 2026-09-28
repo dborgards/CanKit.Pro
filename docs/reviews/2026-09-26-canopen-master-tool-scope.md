@@ -160,7 +160,9 @@ Er wird nicht durch eine Implementierung ersetzt.
    `1001h:00` und `1018h:00`–`04h`. Was ein Abruf-Scan sonst sendet, steht hier weiter nicht.
 
    Beantwortet (28.09.2026): Genau ein SDO-Upload von `1000h:00` je Node-ID, die nicht ausgenommen
-   ist, und sonst nichts. Das geht durch das Peer-SDO-Tor: Ist eine Datei gebunden, die `1000h:00`
+   ist, und keine andere Anfrage. Eine stumme Node-ID erhält danach den üblichen Timeout-Abbruch
+   des SDO-Clients (`0504 0000h`); das ist so entschieden (#197), damit ein Knoten, der zu spät
+   antwortet, seine halb offene Übertragung verwirft. Das geht durch das Peer-SDO-Tor: Ist eine Datei gebunden, die `1000h:00`
    nicht führt, wird die Node-ID nicht angefragt. Anwesend ist, wer antwortet, auch mit einem
    SDO-Abbruch. Die eigene Zeitüberschreitung des Clients bedeutet Abwesenheit (FR-CO-034).
 3. **Live-Mapping und das Lese-Tor.** Primärquelle sind `1600h`–`1603h` und `1A00h`–`1A03h`.
