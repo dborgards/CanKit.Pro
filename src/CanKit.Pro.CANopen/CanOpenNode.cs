@@ -2011,6 +2011,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 {
                     failure = new CanOpenTransportException(
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} was cancelled before it was confirmed.", oce);
+                    RaiseBackgroundException(failure);
                 }
 
                 // Propagate so SendNmtCommandAsync / SendSyncAsync / SendEmcyAsync (and any

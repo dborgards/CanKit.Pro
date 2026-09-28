@@ -182,9 +182,12 @@ public class CanOpenSdoClientSendFailureTests
         // Disposing the shared service cancels the pending send: the frame was not confirmed,
         // and the transfer must hear that rather than wait for its SDO timeout.
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-service-dispose-{Guid.NewGuid():N}");
-        var service = new CanBusService(bus);
+        // `using` as well as the explicit Dispose below, which is the event under test.
+        using var service = new CanBusService(bus);
         using var client = CanOpen.OpenNode(service, 0x7F,
             new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        var reported = new ConcurrentQueue<Exception>();
+        client.BackgroundExceptionOccurred += (_, ex) => reported.Enqueue(ex);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
 
@@ -192,8 +195,10 @@ public class CanOpenSdoClientSendFailureTests
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
         service.Dispose();
 
-        await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
-            .Should().ThrowAsync<CanOpenTransportException>();
+        var failure = (await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>()).Which;
+        // Raised before the transfer is failed, so it is there by now.
+        reported.Should().Contain(failure, "the outage is reported on the background event as well");
     }
 
     [Fact]
