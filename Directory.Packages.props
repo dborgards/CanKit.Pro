@@ -38,7 +38,7 @@
       automated major-version bump here (see .github/dependabot.yml).
     -->
     <PackageVersion Include="FluentAssertions" Version="6.12.2" />
-    <PackageVersion Include="coverlet.collector" Version="10.0.1" />
+    <PackageVersion Include="coverlet.collector" Version="10.1.0" />
     <!--
       Polyfill supplies the BCL APIs the test suite uses but netstandard2.0/net48 lack:
       the non-generic TaskCompletionSource and Task.WaitAsync among them. It is a source-only package
