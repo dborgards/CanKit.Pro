@@ -69,12 +69,18 @@ namespace CanKit.Pro.RawCan
                 service.Subscribe(predicate, bufferCapacity, includeEcho), service, onNext, onError);
         }
 
-        private sealed class CallbackSubscription : IDisposable
+        internal sealed class CallbackSubscription : IDisposable
         {
             private readonly ISubscription _subscription;
             private readonly Task _pumpTask;
             private readonly AsyncLocal<bool> _isOnPump = new();
             private int _disposed;
+
+            // Test hook (#171): the delivery pump. onNext and every report run on it and on
+            // nothing else, so once it has completed no further call can be made -- the
+            // observable a test waits on instead of a window it hopes delivery would have
+            // shown up in.
+            internal Task Completion => _pumpTask;
 
             public CallbackSubscription(
                 ISubscription subscription,
