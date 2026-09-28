@@ -568,7 +568,7 @@ internal sealed class UdsClientImpl : IUdsClient
                     if (DrainExtends(sid, ref until)) continue;
                     break;
                 }
-                using var slice = CancelAfter(remaining);
+                using var slice = CancelAt(until);
                 using var combined = CancellationTokenSource.CreateLinkedTokenSource(linkedToken, slice.Token);
                 IsoTpReceivedPdu pdu;
                 try
@@ -1350,7 +1350,7 @@ internal sealed class UdsClientImpl : IUdsClient
                 notBefore, linkedToken).ConfigureAwait(false);
         }
 
-        using var timeoutCts = CancelAfter(remaining);
+        using var timeoutCts = CancelAt(budgetStart + Ticks(budget));
         using var combined = CancellationTokenSource.CreateLinkedTokenSource(
             linkedToken, timeoutCts.Token);
 
@@ -1461,16 +1461,22 @@ internal sealed class UdsClientImpl : IUdsClient
     private long Ticks(TimeSpan window) => SuppressedResponseWindows.Ticks(window, _time.Frequency);
 
     /// <summary>
-    /// A token source cancelled once <paramref name="delay"/> has passed on <see cref="_time"/>:
-    /// a real <see cref="CancellationTokenSource"/> timer in production, the injected actor's
-    /// timer in a test, so a deadline and the wait bounded by it are on one clock (#171). The
-    /// actor's timer fires on its loop; the cancellation is handed to the thread pool rather than
-    /// run there, because cancelling runs the channel's registrations, and whatever they resume
-    /// must not run on -- and block -- the loop the channel itself needs.
+    /// A token source cancelled once <see cref="_time"/> reaches <paramref name="deadline"/>: a
+    /// real <see cref="CancellationTokenSource"/> timer in production, the injected actor's
+    /// timer in a test, so a deadline and the wait bounded by it are on one clock (#171). On the
+    /// actor the deadline is armed as the instant it is, not as a delay from a fresh reading --
+    /// a test that moves the clock between this client's reading and the arming would otherwise
+    /// push the timer past the deadline, and it would never fire. The actor's timer fires on its
+    /// loop; the cancellation is handed to the thread pool rather than run there, because
+    /// cancelling runs the channel's registrations, and whatever they resume must not run on --
+    /// and block -- the loop the channel itself needs.
     /// </summary>
-    private ClockTimeout CancelAfter(TimeSpan delay) => new(_clock, delay);
+    private ClockTimeout CancelAt(long deadline)
+        => _clock is null
+            ? new ClockTimeout(SuppressedResponseWindows.Remaining(deadline, Now(), _time.Frequency))
+            : new ClockTimeout(_clock, deadline);
 
-    // A wait of delay on _time, as CancelAfter measures it.
+    // A wait of delay on _time, as CancelAt measures it.
     private Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
         => _clock is null ? Task.Delay(delay, cancellationToken) : WaitOnClockAsync(_clock, delay, cancellationToken);
 
@@ -1488,15 +1494,13 @@ internal sealed class UdsClientImpl : IUdsClient
         private readonly CancellationTokenSource _cts;
         private readonly IDisposable? _timer;
 
-        public ClockTimeout(ProtocolActor? clock, TimeSpan delay)
+        public ClockTimeout(TimeSpan remaining)
+            => _cts = new CancellationTokenSource(remaining);
+
+        public ClockTimeout(ProtocolActor clock, long deadline)
         {
-            if (clock is null)
-            {
-                _cts = new CancellationTokenSource(delay);
-                return;
-            }
             _cts = new CancellationTokenSource();
-            _timer = clock.Schedule(delay, () => ThreadPool.QueueUserWorkItem(static state =>
+            _timer = clock.ScheduleAt(deadline, () => ThreadPool.QueueUserWorkItem(static state =>
                 ((CancellationTokenSource)state!).Cancel(), _cts));
         }
 
