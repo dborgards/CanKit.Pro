@@ -60,7 +60,7 @@ internal sealed partial class CanOpenNode
             clientCrcSupported: session.LocalCrcSupported,
             sizeIndicated: true,
             totalSize: (uint)payload.Length);
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId), init);
+        SendSdoBlockClientRequest(session, init);
     }
 
     // =========================================================================================
@@ -95,12 +95,26 @@ internal sealed partial class CanOpenNode
             clientCrcSupported: session.LocalCrcSupported,
             blockSize: session.LocalBlockSize,
             pst: 0);
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId), init);
+        SendSdoBlockClientRequest(session, init);
     }
 
     private void OnSdoBlockClientTimeout(byte serverNodeId)
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return;
+        if (session.LatestSendPending)
+        {
+            // As OnSdoClientTimeout: an unconfirmed send decides the transfer (#197).
+            session.TimedOut = true;
+            session.AwaitingSendOutcome = true;
+            return;
+        }
+
+        CompleteSdoBlockClientTimeout(session);
+    }
+
+    private void CompleteSdoBlockClientTimeout(SdoBlockClientSession session)
+    {
+        byte serverNodeId = session.ServerNodeId;
         _sdoBlockClients.Remove(serverNodeId);
         session.Deadline?.Dispose();
         _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId),
@@ -172,6 +186,8 @@ internal sealed partial class CanOpenNode
     private bool HandleSdoClientResponseBlock(byte serverNodeId, byte[] data)
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return false;
+        // Decided already; only the outcome of a pending send is awaited.
+        if (session.AwaitingSendOutcome) return true;
         if (data.Length == 0) return true; // consume — nothing to parse
 
         // Pad short DLC frames back to 8 bytes for parsing, matching the classic SDO client
@@ -357,7 +373,7 @@ internal sealed partial class CanOpenNode
                     session.Phase = SdoBlockClientPhase.ReceivingSegments;
 
                     // Tell the server to begin streaming segments.
-                    _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
+                    SendSdoBlockClientRequest(session,
                         SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
                 }
                 return true;
@@ -415,12 +431,29 @@ internal sealed partial class CanOpenNode
                         }
                     }
 
-                    // Acknowledge end and complete the transfer.
-                    _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
-                        SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadEndResponse));
-                    _sdoBlockClients.Remove(session.ServerNodeId);
+                    // Acknowledge the end. The upload completes once the acknowledgement is on
+                    // the wire: if the bus does not send it, the server is still waiting for it
+                    // and the transfer has not ended (#197).
                     session.Deadline?.Dispose();
-                    session.Tcs.TrySetResult(final);
+                    session.AwaitingSendOutcome = true;
+                    // The end frame answers every send before it, the last sub-block ack
+                    // included: none of their outcomes may decide the upload now.
+                    session.LatestSendId++;
+                    session.LatestSendPending = false;
+                    _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
+                        SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadEndResponse),
+                        onSendCompleted: failure => PostSdoClientSendOutcome(() =>
+                        {
+                            if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live)
+                                || !ReferenceEquals(live, session))
+                            {
+                                return;
+                            }
+
+                            _sdoBlockClients.Remove(session.ServerNodeId);
+                            if (failure is not null) session.Tcs.TrySetException(failure);
+                            else session.Tcs.TrySetResult(final);
+                        }));
                 }
                 return true;
 
@@ -442,6 +475,15 @@ internal sealed partial class CanOpenNode
         {
             AbortBlockClient(session, SdoAbortCode.InvalidSequenceNumber);
             return true;
+        }
+
+        // The server streams segments without the client sending in between. Any segment of
+        // this sub-block -- in sequence or not -- answers the start or the last sub-block ack,
+        // so their outcomes may no longer decide the upload (#197).
+        if (session.LatestSendPending)
+        {
+            session.LatestSendId++;
+            session.LatestSendPending = false;
         }
 
         if (!session.SubBlockDamaged && seq == session.NextExpectedSeq)
@@ -487,7 +529,7 @@ internal sealed partial class CanOpenNode
             var ack = SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck,
                 lastAckedSeq: (byte)(session.NextExpectedSeq - 1),
                 nextBlockSize: session.LocalBlockSize);
-            _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), ack);
+            SendSdoBlockClientRequest(session, ack);
             if (session.SubBlockDamaged)
             {
                 // Partial confirm: NextExpectedSeq stays where the gap was; the server resends
@@ -543,7 +585,7 @@ internal sealed partial class CanOpenNode
         }
         session.ResumeSeqno = seqno;
         session.Phase = SdoBlockClientPhase.AwaitSubBlockAck;
-        _ = SendOrderedControlFrames(frames.ToArray());
+        _ = SendOrderedControlFrames(TrackSdoBlockClientSend(session), frames.ToArray());
     }
 
     private void SendBlockDownloadEnd(SdoBlockClientSession session)
@@ -558,7 +600,7 @@ internal sealed partial class CanOpenNode
         var end = SdoBlockFrames.BuildEnd(SdoBlockFrames.CcsBlockDownloadEndBase,
             session.LastSegmentUnusedBytes, crc);
         session.Phase = SdoBlockClientPhase.AwaitEndResponse;
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), end);
+        SendSdoBlockClientRequest(session, end);
     }
 
     // =========================================================================================
@@ -1181,6 +1223,21 @@ internal sealed partial class CanOpenNode
         public byte Subindex { get; }
         public bool IsDownload { get; }
         public byte[]? Payload { get; set; }
+
+        /// <summary>Numbers this transfer's sends; only the latest can still decide it (#197).</summary>
+        public int LatestSendId { get; set; }
+
+        /// <summary>The latest send has not ended yet.</summary>
+        public bool LatestSendPending { get; set; }
+
+        /// <summary>The SDO timeout elapsed while a send was still unconfirmed; the transfer
+        /// ends when that send does.</summary>
+        public bool TimedOut { get; set; }
+
+        /// <summary>The transfer is decided -- it timed out, or the upload is complete and its end
+        /// acknowledgement is being sent -- and ends when that send does. Frames from the server
+        /// are no longer taken.</summary>
+        public bool AwaitingSendOutcome { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
         public bool LocalCrcSupported { get; }
         public bool CrcActive { get; set; }

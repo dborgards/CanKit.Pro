@@ -1811,7 +1811,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             payload: null, tcs);
         _sdoClients[serverNodeId] = session;
         session.Deadline = _deadlines.Arm(_options.SdoTimeout, () => OnSdoClientTimeout(serverNodeId));
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId), SdoFrames.BuildUploadInit(index, subindex));
+        SendSdoClientRequest(session, SdoFrames.BuildUploadInit(index, subindex));
     }
 
     private void BeginSdoDownload(byte serverNodeId, ushort index, byte subindex,
@@ -1833,13 +1833,28 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             payload, tcs);
         _sdoClients[serverNodeId] = session;
         session.Deadline = _deadlines.Arm(_options.SdoTimeout, () => OnSdoClientTimeout(serverNodeId));
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId),
-            SdoFrames.BuildDownloadInit(index, subindex, payload));
+        SendSdoClientRequest(session, SdoFrames.BuildDownloadInit(index, subindex, payload));
     }
 
     private void OnSdoClientTimeout(byte serverNodeId)
     {
         if (!_sdoClients.TryGetValue(serverNodeId, out var session)) return;
+        if (session.LatestSendPending)
+        {
+            // A request is still unconfirmed. If it fails, nothing ever reached the server and
+            // the transfer must end with that failure, not a timeout that reads as a silent
+            // server; if it is confirmed, the timeout stands. OnSdoClientSendCompleted decides.
+            // The deadline has fired and needs no disposing.
+            session.TimedOut = true;
+            return;
+        }
+
+        CompleteSdoClientTimeout(session);
+    }
+
+    private void CompleteSdoClientTimeout(SdoClientSession session)
+    {
+        byte serverNodeId = session.ServerNodeId;
         _sdoClients.Remove(serverNodeId);
         session.Deadline?.Dispose();
         // Send a client-side abort so the server knows to drop any lingering state.
@@ -1852,6 +1867,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private void HandleSdoClientResponse(byte serverNodeId, byte[] data)
     {
         if (!_sdoClients.TryGetValue(serverNodeId, out var session)) return;
+        if (session.TimedOut) return; // decided already; only the pending send's outcome is awaited
         if (data.Length == 0) return; // nothing to look at — can't even read the CS byte
         int wireLength = data.Length;
         if (data.Length < 8)
@@ -2069,7 +2085,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         bool last = (session.Offset + chunk) >= session.Payload.Length;
         session.Offset += chunk;
         var seg = SdoFrames.BuildSegment(SdoFrames.CcsDownloadSegmentBase, session.Toggle, last, payload);
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), seg);
+        SendSdoClientRequest(session, seg);
     }
 
     private void SendNextClientUploadSegmentRequest(SdoClientSession session)
@@ -2078,7 +2094,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (session.Toggle) cs |= SdoFrames.ToggleBit;
         var req = new byte[8];
         req[0] = cs;
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), req);
+        SendSdoClientRequest(session, req);
     }
 
     private void AbortClient(SdoClientSession session, SdoAbortCode code)
@@ -2094,28 +2110,42 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
-    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default)
+    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
+        Action<CanOpenTransportException?>? onSendCompleted = null)
     {
         // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmed for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
-        // callers do not need per-frame confirmation. For SDO client requests, an unconfirmed
-        // send that would have thrown will still surface via BackgroundExceptionOccurred and
-        // the SDO deadline will time the client out — the standard client contract.
+        // callers do not need per-frame confirmation. A failed send always surfaces via
+        // BackgroundExceptionOccurred. An SDO client request also passes onSendCompleted, which
+        // is told once how the send ended -- null when confirmed or cancelled, the failure
+        // otherwise -- so the transfer can fail at once instead of by the SDO timeout (#197).
         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
         return Task.Run(async () =>
         {
+            CanOpenTransportException? failure = null;
             try
             {
                 var conf = await _service.SendConfirmed(frame, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
-                    RaiseBackgroundException(new CanOpenTransportException(
-                        $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}."));
+                    failure = new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                    RaiseBackgroundException(failure);
                 }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException oce)
             {
+                // A cancellation this caller did not ask for -- the service was disposed under a
+                // pending send -- means the frame was not sent, and an SDO transfer must hear
+                // that as a transport failure rather than as a confirmed send (#197).
+                if (!cancellationToken.IsCancellationRequested)
+                {
+                    failure = new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} was cancelled before it was confirmed.", oce);
+                    RaiseBackgroundException(failure);
+                }
+
                 // Propagate so SendNmtCommandAsync / SendSyncAsync / SendEmcyAsync (and any
                 // other awaiters of this Task) observe cancellation instead of a silent
                 // success (Bugbot 3600845875).
@@ -2123,9 +2153,109 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             catch (Exception ex)
             {
-                RaiseBackgroundException(ex);
+                // The event carries the same failure the transfer is failed with; a thrown
+                // exception of another type is its InnerException (#197).
+                failure = ex as CanOpenTransportException
+                    ?? new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                RaiseBackgroundException(failure);
+            }
+            finally
+            {
+                onSendCompleted?.Invoke(failure);
             }
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends a request of a live SDO client transfer. If the bus rejects it or does not confirm
+    /// it, the transfer fails with that <see cref="CanOpenTransportException"/> as soon as the
+    /// failure is known: without the request on the wire no answer can come, and a timeout would
+    /// read as a silent server (#197). While the send is still unconfirmed, the SDO timeout does
+    /// not decide the transfer either (<see cref="OnSdoClientTimeout"/>).
+    /// </summary>
+    /// <remarks>
+    /// Only the latest send can decide. SDO is request and response: the client sends again
+    /// only after the server has answered, and an answer proves the request before it reached
+    /// the server, whatever its confirmation later says -- a lost echo, not a lost frame.
+    /// </remarks>
+    private void SendSdoClientRequest(SdoClientSession session, byte[] payload)
+    {
+        var sendId = ++session.LatestSendId;
+        session.LatestSendPending = true;
+        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
+            onSendCompleted: failure => PostSdoClientSendOutcome(
+                () => OnSdoClientSendCompleted(session, sendId, failure)));
+    }
+
+    /// <summary>Actor side of <see cref="SendSdoClientRequest"/>: send
+    /// <paramref name="sendId"/> of <paramref name="session"/> has ended, with
+    /// <paramref name="failure"/> or confirmed.</summary>
+    private void OnSdoClientSendCompleted(SdoClientSession session, int sendId, CanOpenTransportException? failure)
+    {
+        if (!_sdoClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
+            return;
+        if (sendId != session.LatestSendId) return; // answered since: it reached the server
+        session.LatestSendPending = false;
+        if (failure is not null)
+        {
+            _sdoClients.Remove(session.ServerNodeId);
+            session.Deadline!.Dispose(); // armed before the session's first send
+            session.Tcs.TrySetException(failure);
+            return;
+        }
+
+        if (session.TimedOut) CompleteSdoClientTimeout(session);
+    }
+
+    /// <summary>As <see cref="SendSdoClientRequest"/>, for a block transfer.</summary>
+    private void SendSdoBlockClientRequest(SdoBlockClientSession session, byte[] payload)
+        => _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
+            onSendCompleted: TrackSdoBlockClientSend(session));
+
+    /// <summary>
+    /// Makes the send about to start the latest one of <paramref name="session"/> and returns
+    /// the reaction to its outcome. As in <see cref="SendSdoClientRequest"/>, only the latest
+    /// send decides: the block client, too, sends again only after the server has answered.
+    /// </summary>
+    private Action<CanOpenTransportException?> TrackSdoBlockClientSend(SdoBlockClientSession session)
+    {
+        var sendId = ++session.LatestSendId;
+        session.LatestSendPending = true;
+        return failure => PostSdoClientSendOutcome(() =>
+        {
+            if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
+                return;
+            if (sendId != session.LatestSendId) return; // answered since: it reached the server
+            session.LatestSendPending = false;
+            if (failure is not null)
+            {
+                _sdoBlockClients.Remove(session.ServerNodeId);
+                session.Deadline!.Dispose(); // armed before the session's first send
+                session.Tcs.TrySetException(failure);
+                return;
+            }
+
+            if (session.TimedOut) CompleteSdoBlockClientTimeout(session);
+        });
+    }
+
+    /// <summary>
+    /// Runs a send-outcome reaction on the actor, where the session tables live. After disposal
+    /// there is nothing left to report to: disposal has already completed every open transfer.
+    /// </summary>
+    private void PostSdoClientSendOutcome(Action react)
+    {
+        try
+        {
+            _actor.Post(react);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The actor is disposed only with the node, and disposing the node has completed the
+            // transfer this outcome belonged to, so there is nothing left to report it to.
+            return;
+        }
     }
 
     /// <summary>
@@ -2133,26 +2263,54 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// race behind the subsequent Pre-Operational heartbeat (Bugbot 3600879326).
     /// </summary>
     private Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
+        => SendOrderedControlFrames(onSendCompleted: null, frames);
+
+    /// <summary>
+    /// As above. <paramref name="onSendCompleted"/>, when given, is told once how the batch ended,
+    /// as in <see cref="SendControlFrame"/>, and the batch stops at its first failed frame: the
+    /// transfer those frames belong to is failed then, and its remaining frames would reach the
+    /// peer after the caller may already have started the next transfer with it (#197).
+    /// </summary>
+    private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
+        params (uint CobId, byte[] Payload)[] frames)
     {
         return Task.Run(async () =>
         {
-            foreach (var (cobId, payload) in frames)
+            CanOpenTransportException? failure = null;
+            try
             {
-                try
+                foreach (var (cobId, payload) in frames)
                 {
-                    var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-                    var conf = await _service.SendConfirmed(frame).ConfigureAwait(false);
-                    if (!conf.Confirmed)
+                    try
                     {
-                        RaiseBackgroundException(new CanOpenTransportException(
-                            $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}."));
+                        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+                        var conf = await _service.SendConfirmed(frame).ConfigureAwait(false);
+                        if (!conf.Confirmed)
+                        {
+                            var unconfirmed = new CanOpenTransportException(
+                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                            RaiseBackgroundException(unconfirmed);
+                            if (onSendCompleted is not null)
+                            {
+                                failure = unconfirmed;
+                                return;
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // As in SendControlFrame: the event carries the transfer's failure.
+                        failure = ex as CanOpenTransportException
+                            ?? new CanOpenTransportException(
+                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                        RaiseBackgroundException(failure);
+                        return;
                     }
                 }
-                catch (Exception ex)
-                {
-                    RaiseBackgroundException(ex);
-                    return;
-                }
+            }
+            finally
+            {
+                onSendCompleted?.Invoke(failure);
             }
         });
     }
@@ -2299,6 +2457,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public byte[]? Payload { get; set; }
         public int Offset { get; set; }
         public bool Toggle { get; set; }
+
+        /// <summary>Numbers this transfer's sends; only the latest can still decide it (#197).</summary>
+        public int LatestSendId { get; set; }
+
+        /// <summary>The latest send has not ended yet.</summary>
+        public bool LatestSendPending { get; set; }
+
+        /// <summary>The SDO timeout elapsed while a request was still unconfirmed; the
+        /// transfer ends when that send does.</summary>
+        public bool TimedOut { get; set; }
 
         /// <summary>
         /// False while the initiate response is awaited, true once it has been accepted and

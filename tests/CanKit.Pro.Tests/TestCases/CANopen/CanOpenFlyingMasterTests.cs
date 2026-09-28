@@ -22,7 +22,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// <summary>
 /// NMT flying master and the boot-up that follows a win, bound to CiA 302-2 version 4.1.0
 /// (historically DSP 302 clause 5.5): <c>1F80h</c>, <c>1F81h</c>, <c>1F82h</c>, <c>1F89h</c>,
-/// <c>1F90h</c>, and the services on <c>0x071</c>, <c>0x072</c>, <c>0x073</c> and <c>0x076</c>.
+/// <c>1F90h</c>, and the services on <c>0x071</c>, <c>0x072</c>, <c>0x073</c> and <c>0x076</c>
+/// (FR-CO-031 the election, FR-CO-032 the boot-up).
 /// The clock is virtual. A step moves
 /// it, then waits until both actors have fired what became due and until a control frame those
 /// timers handed to <c>Task.Run</c> has come back, because the negotiation echo restarts the

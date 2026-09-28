@@ -14,7 +14,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// <summary>
 /// The SDO client transfers an (index, sub-index) only when a peer EDS/DCF bound for that
 /// server declares it. With nothing bound, only 1000h:00, 1001h:00 and 1018h:00–04 proceed.
-/// A refusal is thrown before any SDO request frame.
+/// A refusal is thrown before any SDO request frame (FR-CO-029).
 /// </summary>
 public class CanOpenPeerSdoGateTests : IClassFixture<VirtualAdapterFixture>
 {

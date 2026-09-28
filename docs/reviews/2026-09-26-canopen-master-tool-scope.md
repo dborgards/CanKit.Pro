@@ -13,6 +13,10 @@ Verfahrensablauf für Flying Master, kein Inhalt des Abruf-Scans, keine Signatur
 `FR-CO`-Zeile. Eine `Must`-Zeile ohne das Verhalten, das sie prüft, wäre eine geratene
 Implementierung.
 
+Nachgetragen (28.09.2026): Alle acht Fragen sind beantwortet, die Antworten stehen unter der
+jeweiligen Frage. Die Rolle steht jetzt als FR-CO-029..034 in der SRS (§4.3.2). Jede dieser
+Zeilen wurde erst geschrieben, als das Verhalten gebaut war, das sie prüft.
+
 ## Woher die Belege kommen
 
 | Stufe | Was so belegt ist |
@@ -52,6 +56,11 @@ Gemessen fehlt heute:
 - Flying Master kommt im Paket nicht vor. Der einzige Satz dazu stellt es mit dem
   Boot-up-Manager nach draußen (`README.md:92`).
 
+Nachgetragen (28.09.2026): Diese Liste ist der Stand von `871d153`. Seitdem sind alle vier Punkte
+geschlossen: das Lese-Tor mit #174 (FR-CO-029), das Zerlegen fremder PDOs mit #163 (FR-CO-030),
+Flying Master und Boot-up-Manager mit #164 (FR-CO-031, FR-CO-032) und das Hörfenster mit
+`CanOpenDiscovery` (FR-CO-033, FR-CO-034).
+
 ## Entscheidungen
 
 ### 1. Gerätebeschreibung vor dem Lesen
@@ -89,6 +98,12 @@ anzufragen ist nicht der Default.
 `HeartbeatReceived` liefert die beiden Meldungsarten schon. Das Fenster und die Regel „Scan nur
 auf Abruf" sind nicht das, was das Sample tut: es fragt danach die IDs ohne Heartbeat per SDO ab.
 
+Nachgetragen (28.09.2026): Mit den Antworten auf die Fragen 1, 2, 6 und 8 ist die Erkennung ein
+Teil der Bibliothek. `CanOpenDiscovery.ListenAsync` hört, ohne einen Knoten zu öffnen und ohne zu
+senden (FR-CO-033). `CanOpenDiscovery.ScanAsync` ist der Abruf-Scan und läuft nur, wenn er
+aufgerufen wird (FR-CO-034). Das Sample nutzt beide; #178 hatte dort schon das Hören zum Default
+gemacht.
+
 ### 4. Flying Master
 
 Die Einstufung als optional ist zurückgenommen. Flying Master ist Pflicht und wird
@@ -121,6 +136,9 @@ Aufmerksamkeit. Vor den Fallback-Records ohne EDS kommen:
 Welche weiteren Geräteposten in dieselbe Zurückstufung gehören, ist nicht gesagt. Das ist
 Frage 7.
 
+Nachgetragen (28.09.2026): Die Reihenfolge ordnet offene Arbeit, und von der Geräterunde ist
+keine mehr offen. Nach Frage 7 ist die Zurückstufung deshalb gegenstandslos.
+
 ### 6. Keine Annahme
 
 Jeder Punkt, den die fünf Entscheidungen oben nicht schließen, ist eine Entscheidungsfrage.
@@ -130,11 +148,23 @@ Er wird nicht durch eine Implementierung ersetzt.
 
 1. **Anwesenheit im Hörfenster.** Genügt je Node-ID eine der beiden Meldungen — Heartbeat oder
    Boot-up — oder müssen im Fenster beide beobachtet worden sein?
+
+   Beantwortet (28.09.2026): Eine Meldung genügt. Ein laufender Knoten sendet im Fenster keinen
+   Boot-up; hieße es „beide“, würden nur Knoten erkannt, die gerade starten. Als Meldung zählen
+   die Zustandsbytes `00h` (Boot-up) sowie `04h`, `05h` und `7Fh` (Heartbeat) auf
+   `700h` + Node-ID. Andere Bytes sind keine dieser beiden Meldungen (FR-CO-033).
 2. **Abruf-Scan.** Was wird gesendet, wenn die Node-IDs 1..127 auf Abruf aktiv abgefragt werden?
    Die eigene Node-ID des Scanners ist davon ausgenommen. Lesen von Objekten, die nicht in einer
    vorliegenden EDS oder DCF stehen, lassen die Entscheidungen nicht zu. Für den SDO-Client ist
    die Ausnahme in Entscheidung 1 benannt: ohne Datei nur `1000h:00`,
    `1001h:00` und `1018h:00`–`04h`. Was ein Abruf-Scan sonst sendet, steht hier weiter nicht.
+
+   Beantwortet (28.09.2026): Genau ein SDO-Upload von `1000h:00` je Node-ID, die nicht ausgenommen
+   ist, und keine andere Anfrage. Eine stumme Node-ID erhält danach den üblichen Timeout-Abbruch
+   des SDO-Clients (`0504 0000h`); das ist so entschieden (#197), damit ein Knoten, der zu spät
+   antwortet, seine halb offene Übertragung verwirft. Das geht durch das Peer-SDO-Tor: Ist eine Datei gebunden, die `1000h:00`
+   nicht führt, wird die Node-ID nicht angefragt. Anwesend ist, wer antwortet, auch mit einem
+   SDO-Abbruch. Die eigene Zeitüberschreitung des Clients bedeutet Abwesenheit (FR-CO-034).
 3. **Live-Mapping und das Lese-Tor.** Primärquelle sind `1600h`–`1603h` und `1A00h`–`1A03h`.
    Gültiges Lesen setzt die Datei voraus und erlaubt nur Objekte aus ihr. Dürfen diese Records
    gelesen werden, wenn die Datei sie nicht führt? Gehören `1400h:01` und `1800h:01` (die COB-ID)
@@ -162,8 +192,18 @@ Er wird nicht durch eine Implementierung ersetzt.
    `1F82h` und `1F89h`. Die Identitätsprüfung `1F84h`–`1F88h` ist nicht dabei.
 6. **Dauer des Hörfensters.** „Etwa 1–2 Sekunden" ist das Band. Liegt darin ein fester Wert,
    oder wählt der Aufrufer die Dauer in diesem Band?
+
+   Beantwortet (28.09.2026): Der Aufrufer wählt die Dauer frei. Die Vorgabe ist 2 s und liegt im
+   Band. Ein Netz mit Heartbeat-Zeiten über 2 s kann das Fenster verlängern (FR-CO-033).
 7. **Weitere Geräteposten.** Welche Posten der Geräterunde außer den Fallback-Records ohne EDS
    treten hinter die vier Master-Lücken zurück? Die Records selbst bleiben fachlich richtig;
    ihre `Must`-Zeile bleibt stehen.
+
+   Beantwortet (28.09.2026): gegenstandslos. FR-CO-013..028 sind ausgeliefert, und zu keinem
+   ihrer Posten ist ein Issue offen. Neue Befunde zur Geräterolle werden wie jeder andere Befund
+   nach ihrer Schwere gewichtet.
 8. **Ort von Hörfenster und Abruf-Scan.** Ist das geforderte Verhalten ein Teil der Bibliothek,
    oder Anwendungscode auf dem vorhandenen `HeartbeatReceived`?
+
+   Beantwortet (28.09.2026): Es gehört in die Bibliothek, als öffentliche API mit Hören als Default
+   und dem Scan als eigenem Aufruf: `CanOpenDiscovery.ListenAsync` und `CanOpenDiscovery.ScanAsync`.

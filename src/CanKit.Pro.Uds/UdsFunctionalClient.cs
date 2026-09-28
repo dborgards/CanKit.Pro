@@ -268,11 +268,12 @@ public sealed class UdsFunctionalClient : IDisposable
         // parameter, arriving in this window, is told apart
         // (Codex on #150, twice). How many bytes, per service, is in EchoedRequestBytes.
         int echoed = Math.Min(EchoedRequestBytes(req), req.Length - 1);
-        // The window as anchored at the transmission, noted before the 0x78s are read: a
-        // listener that retired while the confirmation outlasted the provisional window has
-        // forgotten it, and a 0x78 inside the ECU's P2 must still move it out (Codex on #150).
-        // The transmission as the driver reported it; where it reports none, the collection
-        // ran for `window` from the confirmation, so the send was at least `window` ago.
+        // The window as anchored at the transmission, noted before the 0x78s are read, which
+        // ends the send in flight: the listener, kept through it, reads this window from here
+        // on and retires once it is over, and a 0x78 inside the ECU's P2 must move it out
+        // (Codex on #150). The transmission as the driver reported it; where it reports none,
+        // the collection ran for `window` from the confirmation, so the send was at least
+        // `window` ago.
         var raw = collected.Responses;
         long cutoff = collected.TransmitStamps.LastFrameHandoffTimestamp;
         long transmitted = collected.TransmitStamps.LastFrameTransmitTimestamp > 0
@@ -294,10 +295,10 @@ public sealed class UdsFunctionalClient : IDisposable
                 Extend(sid, r.HostArrivalTimestamp, r.HostArrivalTimestamp + Ticks(_responsePendingWindow));
             if (positive || negative) responses.Add(new UdsFunctionalResponse(r.SourceCanId, data));
         }
-        // Through StartListening again, after the 0x78s above moved the window: a confirmation
-        // that outlasted the window has let the listener retire, and the moved-out window
-        // needs one (Codex on #150).
-        StartListening(sid, transmitted, inFlight: false, cutoff);
+        // No listener to start here: the send's own was started whatever its window read, and
+        // could not retire while the send was in flight. One that retired since found the
+        // window over, and forgot it with any 0x78 above; it heard every frame the collection
+        // did, having subscribed first, and moved the window for them itself (#198).
         return responses;
     }
 
@@ -330,7 +331,7 @@ public sealed class UdsFunctionalClient : IDisposable
             {
                 NoteAnchored(sid, from, cutoff);
             }
-            EnsureListener(sid);
+            EnsureListener(sid, inFlight);
         }
     }
 
@@ -382,11 +383,15 @@ public sealed class UdsFunctionalClient : IDisposable
     // Under the listeners lock. Starts a listener for the service's window if the window is
     // open and none is reading it; forgets a window already over -- a collection that outlasted
     // P2 -- because a listener for it would only retire on its first read (Bugbot on #150).
-    private void EnsureListener(byte sid)
+    // For a send in flight it starts one whatever the window reads: the window was noted from
+    // a clock read before this lock, and a caller stalled for P2 in between would otherwise
+    // send with nobody listening, the 0x78s answered to it unheard (#198). Kept by the send,
+    // that listener retires only once the window anchored at the transmission is over.
+    private void EnsureListener(byte sid, bool inFlight = false)
     {
         if (_listeners.ContainsKey(sid)) return;
-        if (!_openWindows.TryGetDeadline(sid, out var until)
-            || RemainingUntil(until) <= TimeSpan.Zero)
+        if (!inFlight && (!_openWindows.TryGetDeadline(sid, out var until)
+            || RemainingUntil(until) <= TimeSpan.Zero))
         {
             _openWindows.Forget(sid);
             return;
