@@ -2041,12 +2041,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private void PostSdoClientSendFailure(Action fail)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;
         try
         {
             _actor.Post(fail);
         }
-        catch (ObjectDisposedException)
+        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
         {
+            // Disposal won the race between the check above and the post. It has completed the
+            // transfer this failure belonged to, so there is nothing left to report it to.
+            return;
         }
     }
 

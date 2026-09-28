@@ -194,11 +194,12 @@ namespace CanKit.Sample.CanOpenBusScan
 
             if (node.Evidence.HasFlag(CanOpenPresenceEvidence.SdoResponse))
             {
-                // ScanAsync already asked; a null DeviceType means the node answered without a
-                // four-byte value, and asking again would only repeat that.
+                // ScanAsync already asked. A null DeviceType means the node answered with an SDO
+                // abort, a malformed response or a value that is not four bytes; the result does
+                // not say which, and asking again would only repeat it.
                 Console.WriteLine(node.DeviceType is { } scanned
                     ? $"  0x1000:00 Device type = 0x{scanned:X8}"
-                    : "  0x1000:00 Device type = <answered without a 4-byte value>");
+                    : "  0x1000:00 Device type = <answered, but not with a 4-byte value>");
             }
             else if (peerDescription is null || peerDescription.Contains(DeviceTypeIndex, 0))
             {
