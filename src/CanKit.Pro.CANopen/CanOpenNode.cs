@@ -76,7 +76,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private LinkedListNode<PendingEvent>? _oldestNonCritical;
     private int _pendingNonCritical;
     private long _submittedEventCount;
-    private readonly Dictionary<(byte, byte, ulong, byte), LinkedListNode<PendingEvent>> _pendingKeyed = new();
+    private readonly Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>> _pendingKeyed = new();
     // Per producer node-id: the last event still waiting that says something about the producer's
     // state -- a heartbeat or guarding response, an EMCY, but not a timeout. A waiting critical
     // event absorbs an identical one only while no such event was queued behind it, so "error,
@@ -807,6 +807,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     && (_lastForProducer[producer] is not { } newest || newest.Value.Ordinal <= waiting.Value.Ordinal))
                 {
                     _coalescedEventCount++;
+                    // A timeout reports the consumer's current settings. If they changed while it
+                    // waited, the handler should see the newest, not the ones that were superseded;
+                    // an EMCY that folds is identical, so there is nothing to update.
+                    if (k.IsTimeout) waiting.Value = waiting.Value.WithRaise(raise);
                     return;
                 }
                 if (emcyProducer >= 0)
@@ -903,8 +907,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private void ReconcileProducer(int producer)
     {
-        var absorbers = new HashSet<(byte, byte, ulong, byte)>();
-        var newest = new Dictionary<(byte, byte, ulong, byte), LinkedListNode<PendingEvent>>();
+        var absorbers = new HashSet<(byte, byte, ulong)>();
+        var newest = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
         LinkedListNode<PendingEvent>? lastTracked = null;
 
         for (var node = _pendingEvents.First; node is not null;)
@@ -1006,6 +1010,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             Ordinal = ordinal;
         }
 
+        public PendingEvent WithRaise(Action raise)
+            => new(raise, Critical, Key, EmcyProducer, Producer, Ordinal);
+
         public Action Raise { get; }
         public bool Critical { get; }
         public EventKey? Key { get; }
@@ -1014,33 +1021,28 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public long Ordinal { get; }
     }
 
-    /// <summary>Identity of a critical event for coalescing: what it is, who raised it and what it
-    /// says -- for an EMCY the whole 8-byte payload, for a timeout the settings it reports, so
-    /// that one raised under a reconfigured consumer is not folded into a stale one.</summary>
+    /// <summary>Identity of a critical event for coalescing: what it is, who raised it and, for
+    /// an EMCY, the whole 8-byte payload.</summary>
     private readonly struct EventKey
     {
         private readonly byte _kind;
         private readonly byte _producer;
         private readonly ulong _payload;
-        private readonly byte _extra;
 
-        private EventKey(byte kind, byte producer, ulong payload, byte extra = 0)
+        private EventKey(byte kind, byte producer, ulong payload)
         {
             _kind = kind;
             _producer = producer;
             _payload = payload;
-            _extra = extra;
         }
 
         public bool IsTimeout => _kind is 1 or 2;
 
         public byte ProducerId => _producer;
 
-        public static EventKey HeartbeatTimeout(byte producer, TimeSpan timeout)
-            => new(1, producer, (ulong)timeout.Ticks);
+        public static EventKey HeartbeatTimeout(byte producer) => new(1, producer, 0);
 
-        public static EventKey NodeGuardingTimeout(byte producer, TimeSpan guardTime, byte lifeTimeFactor)
-            => new(2, producer, (ulong)guardTime.Ticks, lifeTimeFactor);
+        public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
 
         public static EventKey Emcy(EmcyMessage msg)
         {
@@ -1053,7 +1055,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
         /// <summary>The fields that make two keys the same event, as a tuple so that keys can be
         /// compared and hashed without members of their own.</summary>
-        public (byte, byte, ulong, byte) Identity => (_kind, _producer, _payload, _extra);
+        public (byte, byte, ulong) Identity => (_kind, _producer, _payload);
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
@@ -2430,7 +2432,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.HeartbeatTimeout(producer, timeout), emcyProducer: -1, producer);
+        }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
     }
 
     private void RaiseEmcyReceived(EmcyMessage msg, DateTime ts)

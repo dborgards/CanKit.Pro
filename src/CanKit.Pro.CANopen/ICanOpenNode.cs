@@ -83,7 +83,7 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
     /// looking alive. While a timeout for the same producer is still waiting for the handler,
     /// a further one is folded into it rather than queued again, unless a heartbeat from that
-    /// producer was queued in between.</summary>
+    /// producer was queued in between. The event that waits then reports the newest settings.</summary>
     event EventHandler<HeartbeatTimeoutEventArgs>? HeartbeatTimeout;
 
     /// <summary>Raised when an EMCY frame is received on the bus (FR-CO-011). Not discarded
@@ -136,7 +136,7 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
     /// looking alive. While a timeout for the same producer is still waiting for the handler,
     /// a further one is folded into it rather than queued again, unless a guarding response from
-    /// that producer was queued in between.</summary>
+    /// that producer was queued in between. The event that waits then reports the newest settings.</summary>
     event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout;
 
     /// <summary>

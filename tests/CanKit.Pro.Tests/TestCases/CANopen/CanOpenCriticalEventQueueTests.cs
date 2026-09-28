@@ -839,10 +839,11 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
         }
     }
 
-    // A timeout raised under a reconfigured consumer reports the new settings. Folding it into
-    // one still waiting from the old configuration would hand the subscriber stale details.
+    // A timeout raised under a reconfigured consumer reports the new settings, and it takes the
+    // place of the one still waiting from the old configuration: the handler sees the newest
+    // settings once, and reconfiguring again and again cannot grow the backlog.
     [Fact]
-    public async Task A_Timeout_Under_A_Reconfigured_Consumer_Is_Not_Folded_Into_The_Stale_One()
+    public async Task A_Timeout_Under_A_Reconfigured_Consumer_Replaces_The_Stale_One()
     {
         using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("canopen-evt-reconfig"));
         var clock = new ManualTimeSource();
@@ -881,17 +882,17 @@ public class CanOpenCriticalEventQueueTests : IClassFixture<VirtualAdapterFixtur
             node.StartNodeGuardingConsumer(GuardedNode, GuardWindow, lifeTimeFactor: 2);
             Settle(node);
             Advance(clock, node, TimeSpan.FromSeconds(10));        // and again under the new ones
-            node.CoalescedEventCount.Should().Be(0, "the settings differ, so these are different events");
+            node.CoalescedEventCount.Should().Be(2, "each takes the place of the one waiting, it does not queue behind it");
 
-            node.StartNodeGuardingConsumer(GuardedNode, slow, lifeTimeFactor: 2);   // only the guard time differs now
+            node.StartNodeGuardingConsumer(GuardedNode, slow, lifeTimeFactor: 2);   // reconfigured once more
             Settle(node);
             Advance(clock, node, TimeSpan.FromSeconds(20));
-            node.CoalescedEventCount.Should().Be(1, "the heartbeat timeout under the unchanged settings folds; the guarding one does not");
+            node.QueuedEventCount.Should().Be(2);
 
             release.TrySetResult(true);
-            await WaitUntilAsync(() => { lock (heartbeats) lock (guardings) return heartbeats.Count == 2 && guardings.Count == 3; });
-            lock (heartbeats) heartbeats.Should().Equal(GuardWindow, slow);
-            lock (guardings) guardings.Should().Equal((GuardWindow, (byte)1), (GuardWindow, (byte)2), (slow, (byte)2));
+            await WaitUntilAsync(() => { lock (heartbeats) lock (guardings) return heartbeats.Count == 1 && guardings.Count == 1; });
+            lock (heartbeats) heartbeats.Should().Equal(slow);
+            lock (guardings) guardings.Should().Equal((slow, (byte)2));
         }
         finally
         {
