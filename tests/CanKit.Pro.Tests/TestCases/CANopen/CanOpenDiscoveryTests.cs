@@ -135,9 +135,9 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
         CanOpenDiscovery.ValidateWindow(TimeSpan.FromMilliseconds(1)).Should().Be(TimeSpan.FromMilliseconds(1));
         CanOpenDiscovery.ValidateWindow(TimeSpan.FromSeconds(10)).Should().Be(TimeSpan.FromSeconds(10));
 
-        foreach (var bad in new[] { TimeSpan.Zero, TimeSpan.FromMilliseconds(-1), TimeSpan.FromDays(30) })
+        foreach (var act in new[] { TimeSpan.Zero, TimeSpan.FromMilliseconds(-1), TimeSpan.FromDays(30) }
+                     .Select(bad => (Action)(() => CanOpenDiscovery.ValidateWindow(bad))))
         {
-            var act = () => CanOpenDiscovery.ValidateWindow(bad);
             act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("window");
         }
     }
