@@ -49,8 +49,10 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   deadline starts); the two are not interchangeable (#146). Faults with `IsoTpTimeoutException`, `IsoTpOverflowException`,
   `IsoTpWaitFrameLimitExceededException`, or `IsoTpSendRejectedException` on the corresponding
   ISO 15765-2 error cases.
-- `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived` — three surfaces onto the same bounded,
-  drop-oldest PDU inbox (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64).
+- `ReceiveAsync` / `ReceiveAllAsync` — two surfaces onto the same bounded, drop-oldest PDU inbox
+  (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64), in arrival order.
+  `DatagramReceived` is not one of them: each completed PDU is raised on its own thread-pool work
+  item, so handlers may run concurrently and out of order, and none starts after `Dispose`.
   `ReceiveWithArrivalAsync` returns an `IsoTpReceivedPdu` stamped with the arrival of its last
   frame *and* of its first (`FirstFrameArrivalTimestamp`), because an application deadline
   such as UDS P2 ends with the first frame; `GetReceptionsInProgress` reports the multi-frame

@@ -260,6 +260,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // SendAsync race frames onto the bus (Bugbot 3596212788). Skip on dispose:
                 // no subsequent SendAsync can run, and bus-TX confirmations may never post
                 // back onto a torn-down actor (Bugbot 3596468541).
+                //
+                // Not unbounded while the channel lives (#202): every frame's SendConfirmed is
+                // bounded by N_As on both the echo and the approximated path, so a confirm that
+                // never comes back still posts a timed-out outcome and drains _busTxInFlight.
+                // That bound is what keeps this wait -- made with _sendGate held -- from wedging
+                // the channel; it does not take a token of its own.
                 if (Volatile.Read(ref _disposed) == 0)
                     await WaitForBusTxIdleAsync().ConfigureAwait(false);
             }
@@ -492,7 +498,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // Fail any in-flight SendAsync so its caller doesn't hang forever waiting for a TCS the
         // now-disposed actor will never complete. Also release any bus-TX idle waiter that would
         // otherwise block SendAsync's finally path after CancelInFlightSend.
-        _actor.Post(() =>
+        void FailInFlightSend()
         {
             var tx = _tx;
             _tx = null;
@@ -500,7 +506,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             var idle = _busTxIdleWaiter;
             _busTxIdleWaiter = null;
             idle?.TrySetResult(null);
-        });
+        }
+
+        try
+        {
+            _actor.Post(FailInFlightSend);
+        }
+        catch (ObjectDisposedException)
+        {
+            // An injected actor its owner already disposed (#205): Dispose must still be safe to
+            // call and must still run the rest of its cleanup below. No loop is left to race
+            // with, so the in-flight send is failed inline rather than posted.
+            FailInFlightSend();
+        }
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
@@ -1079,6 +1097,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival,
         IsoTpReceptionInProgress? announce)
     {
+        // Frames still in the mailbox when the channel is disposed are drained by the owned
+        // actor's final drain; they must not complete a PDU nobody can receive any more (#206).
+        if (Volatile.Read(ref _disposed) != 0)
+            return;
+
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
 
@@ -1489,12 +1512,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
 
         var handler = DatagramReceived;
-        if (handler is null)
+        if (handler is null || Volatile.Read(ref _disposed) != 0)
             return;
 
         var endpoint = _endpoint;
         _ = Task.Run(() =>
         {
+            // Queued before Dispose but scheduled after it: still not delivered (#206).
+            if (Volatile.Read(ref _disposed) != 0)
+                return;
+
             try
             {
                 handler.Invoke(this, new IsoTpDatagramReceivedEventArgs(endpoint, pdu));

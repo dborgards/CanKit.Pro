@@ -322,6 +322,44 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5));
     }
 
+    // FR-RAW-033 / #202: "never hangs" holds on the approximated path too. A custom bus whose
+    // TransmitAsync never completes resolves as a timed-out confirmation instead of hanging. No
+    // lower bound on the elapsed time is asserted: the only failure of interest is the hang, and
+    // that is bounded by ShortTimeout rather than measured against a clock.
+    [Fact]
+    public async Task NonEcho_Bus_Times_Out_Observably_When_TransmitAsync_Never_Completes()
+    {
+        using var inner = OpenPlain();
+        var bus = StallableAsyncTransmitBus.Wrap(inner, out var control);
+        control.Stalled = true;
+        using var service = new CanBusService(bus);
+
+        var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+            .WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeFalse();
+        result.IsApproximated.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        control.Release();
+    }
+
+    // #202: the bound must not turn an asynchronous but timely acceptance into a timeout.
+    [Fact]
+    public async Task NonEcho_Bus_Confirms_When_An_Asynchronous_TransmitAsync_Completes_In_Time()
+    {
+        using var inner = OpenPlain();
+        var bus = StallableAsyncTransmitBus.Wrap(inner, out var control);
+        control.Stalled = true;
+        using var service = new CanBusService(bus);
+
+        var send = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), ShortTimeout);
+        control.Release();
+        var result = await send.WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue();
+        result.IsApproximated.Should().BeTrue();
+    }
+
     // FR-RAW-034 (Should): the timeout is configurable per call, not a single hardcoded value --
     // a longer configured timeout measurably takes longer to fail than a shorter one. Coarse
     // comparison since CI timing is noisy; not a tight tolerance.

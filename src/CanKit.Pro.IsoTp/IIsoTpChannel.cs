@@ -177,6 +177,13 @@ public interface IIsoTpChannel : IDisposable
     /// <see cref="DiscardPendingPdus()"/> — cannot deadlock the protocol actor. Handlers must be
     /// non-throwing; a throwing handler is caught and surfaced via
     /// <see cref="BackgroundExceptionOccurred"/>.
+    /// <para>
+    /// Each PDU gets its own thread-pool work item, so handlers for successive PDUs may run
+    /// concurrently and not necessarily in the order the PDUs completed;
+    /// <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/> keep that order. No new
+    /// invocation starts once <see cref="IDisposable.Dispose"/> has begun, but one already
+    /// running is not waited for.
+    /// </para>
     /// </summary>
     event EventHandler<IsoTpDatagramReceivedEventArgs>? DatagramReceived;
 

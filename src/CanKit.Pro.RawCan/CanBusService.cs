@@ -323,10 +323,10 @@ namespace CanKit.Pro.RawCan
 
             return useEcho
                 ? await SendWithEchoConfirmAsync(frame, effectiveTimeout, cancellationToken).ConfigureAwait(false)
-                : await SendApproximatedAsync(frame, cancellationToken).ConfigureAwait(false);
+                : await SendApproximatedAsync(frame, effectiveTimeout, cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task<TxConfirmation> SendApproximatedAsync(CanFrame frame, CancellationToken cancellationToken)
+        private async Task<TxConfirmation> SendApproximatedAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
             // FR-RAW-032: best-effort approximation -- confirmed as soon as the driver accepts the
             // frame, explicitly marked IsApproximated so callers can never mistake this for a real
@@ -341,7 +341,7 @@ namespace CanKit.Pro.RawCan
             // runtime declines to inline it the reading is what it would have been anyway.
             var stamp = new HandoffStamp(_hostTimestamp);
             var handoffStart = stamp.Now();
-            var accepted = await _bus.TransmitAsync(frame, cancellationToken)
+            var transmit = _bus.TransmitAsync(frame, cancellationToken)
                 .ContinueWith(
                     static (completed, state) =>
                     {
@@ -355,8 +355,40 @@ namespace CanKit.Pro.RawCan
                     stamp,
                     CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default)
-                .ConfigureAwait(false);
+                    TaskScheduler.Default);
+
+            // FR-RAW-033 / #202: "never hangs" holds on this path too. Every v0.5.6 adapter
+            // completes TransmitAsync synchronously, so this bound only ever matters for a custom
+            // ICanBus whose TransmitAsync is genuinely asynchronous -- and there it is what stops
+            // a task that never completes from wedging the caller (ISO-TP's SendAsync included).
+            // The timeout resolves as a timed-out confirmation, exactly as on the echo path. The
+            // frame may still reach the wire after that; the caller has no way to know, which is
+            // what an unconfirmed send means.
+            int accepted;
+            if (transmit.IsCompleted)
+            {
+                accepted = await transmit.ConfigureAwait(false);
+            }
+            else
+            {
+                using var timeoutCts = new CancellationTokenSource();
+                var winner = await Task.WhenAny(transmit, Task.Delay(timeout, timeoutCts.Token)).ConfigureAwait(false);
+                if (!ReferenceEquals(winner, transmit))
+                {
+                    // Nobody will await the abandoned task; observe its fault so a late driver
+                    // failure does not surface as an unobserved task exception.
+                    _ = transmit.ContinueWith(
+                        static t => _ = t.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                    return new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Timeout };
+                }
+
+                timeoutCts.Cancel();
+                accepted = await transmit.ConfigureAwait(false);
+            }
+
             var handoff = stamp.Value;
             return accepted > 0
                 ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff, HostHandoffTimestamp = handoffStart }
