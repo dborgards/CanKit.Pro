@@ -23,6 +23,46 @@ public class CanIdFilterOverlapTests : IClassFixture<VirtualAdapterFixture>
 
     private static ICanBus Open(string session, int channel) => VirtualAdapterFixture.Open(session, channel);
 
+    [Theory]
+    [InlineData(7)]
+    [InlineData(-1)]
+    public void Range_Rejects_An_Undefined_IdType(int raw)
+    {
+        var act = () => CanIdFilter.Range(0x100, 0x1FF, (CanFilterIDType)raw);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("idType");
+    }
+
+    [Fact]
+    public void Range_Reports_An_Undefined_IdType_Before_Bad_Bounds()
+    {
+        var act = () => CanIdFilter.Range(0x200, 0x100, (CanFilterIDType)7);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("idType");
+    }
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(-1)]
+    public void Mask_Rejects_An_Undefined_IdType(int raw)
+    {
+        var act = () => CanIdFilter.Mask(0x100, 0x7FF, (CanFilterIDType)raw);
+
+        act.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("idType");
+    }
+
+    [Fact]
+    public void Defined_IdTypes_Are_Still_Accepted_And_Overlap_Consistently()
+    {
+        var std = CanIdFilter.Range(0x100, 0x1FF, CanFilterIDType.Standard);
+        var ext = CanIdFilter.Range(0x100, 0x1FF, CanFilterIDType.Extend);
+
+        std.IdType.Should().Be(CanFilterIDType.Standard);
+        ext.IdType.Should().Be(CanFilterIDType.Extend);
+        std.Overlaps(CanIdFilter.Mask(0x100, 0x700, CanFilterIDType.Standard)).Should().BeTrue();
+        std.Overlaps(ext).Should().BeFalse();
+    }
+
     [Fact]
     public void Range_Filters_That_Overlap_Are_Detected()
     {

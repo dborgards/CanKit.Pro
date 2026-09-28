@@ -265,16 +265,18 @@ public static class IsoTpFrameCodec
     /// exceeds the PDU size announced in the FF_DL field (fixes bugbot 3596393504).
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// <paramref name="totalLength"/> is negative or exceeds the addressable range for the
+    /// <paramref name="totalLength"/> is zero, negative or exceeds the addressable range for the
     /// requested frame kind; classic-CAN cannot address totals &gt; 4095 (FF escape form is
     /// CAN-FD-only per ISO 15765-2).
     /// </exception>
     public static int BuildFirstFrame(Span<byte> destination, in IsoTpEndpoint endpoint,
         int totalLength, ReadOnlySpan<byte> firstChunk, bool isCanFd)
     {
-        if (totalLength < 0)
+        // FF_DL == 0 is not a valid First Frame: 0x10 0x00 is the CAN-FD escape header, so a
+        // zero-length FF would not round-trip through TryParsePci (#207).
+        if (totalLength <= 0)
             throw new ArgumentOutOfRangeException(nameof(totalLength), totalLength,
-                "Total PDU length must be non-negative.");
+                "Total PDU length must be positive; a First Frame cannot announce zero bytes.");
         int addrExt = endpoint.AddressExtensionSize;
         int maxFrame = isCanFd ? CanFdMaxData : ClassicCanMaxData;
         bool useLongLength = totalLength > MaxClassicFirstFrameLength;
@@ -542,6 +544,12 @@ public static class IsoTpFrameCodec
                             ((uint)canPayload[lenStart + 2] << 8) |
                             canPayload[lenStart + 3];
                         if (longLen > int.MaxValue)
+                            return false;
+                        // An escape-form FF_DL of zero announces no PDU at all; reject it (#207).
+                        // OPEN QUESTION (#207): escape-form FF_DL 1..4095 is still accepted here;
+                        // whether ISO 15765-2 requires rejecting it is not verified against the
+                        // standard text, so behaviour is deliberately unchanged for that range.
+                        if (longLen == 0)
                             return false;
                         pci = new Pci(type, (int)longLen, 0, FlowStatus.ClearToSend, 0, 0, TimeSpan.Zero,
                             pciIndex + 6);
