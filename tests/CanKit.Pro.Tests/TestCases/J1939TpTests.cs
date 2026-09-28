@@ -2706,6 +2706,87 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await DrainAsync(clock, actor, again);
     }
 
+    // Codex on #215: the admission limit is the option plus one, and int.MaxValue + 1 wrapped to a
+    // negative number that refused every send.
+    [Fact]
+    public async Task The_Largest_Queue_Limit_Does_Not_Overflow_The_Admission_Limit()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: int.MaxValue);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        var second = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+
+        first.IsFaulted.Should().BeFalse();
+        second.IsFaulted.Should().BeFalse();
+        await DrainAsync(clock, actor, first, second);
+    }
+
+    // Codex and Bugbot on #215: a send that fails after its slot is reserved -- here the actor
+    // is gone, so posting throws -- must give the slot back. With a limit of 0 one leaked slot
+    // would turn every later send into a rejection.
+    [Fact]
+    public async Task A_Send_That_Fails_After_Admission_Gives_Its_Slot_Back()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+        actor.Dispose();
+
+        for (int i = 0; i < 3; i++)
+        {
+            Func<Task> send = () => sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+            await send.Should().ThrowAsync<ObjectDisposedException>(
+                $"attempt {i}: the failure is the actor's, not a rejection by a slot an earlier attempt kept");
+        }
+    }
+
+#if NETFRAMEWORK
+    // Bugbot on #215: CancellationToken.Register on a token whose source is disposed throws on
+    // .NET Framework (modern .NET returns an empty registration instead, so there is nothing
+    // to roll back there). It ran after the slot was reserved and outside the rollback.
+    [Fact]
+    public async Task A_Token_Whose_Source_Is_Disposed_Does_Not_Leak_The_Slot()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+        var cts = new CancellationTokenSource();
+        var token = cts.Token;
+        cts.Dispose();
+
+        for (int i = 0; i < 3; i++)
+        {
+            Func<Task> send = () => sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1), token);
+            await send.Should().ThrowAsync<ObjectDisposedException>($"attempt {i}");
+        }
+    }
+#endif
+
+    // A send can be completed more than once (a cancel racing a result, a dispose after a fault);
+    // the slot it held must come back exactly once, or a later send is admitted past the limit.
+    [Fact]
+    public async Task A_Completion_Gives_Its_Slot_Back_Exactly_Once_However_Often_It_Is_Completed()
+    {
+        int released = 0;
+        var completion = new J1939TpChannel.TxCompletion(() => Interlocked.Increment(ref released));
+
+        completion.TrySetResult(null).Should().BeTrue();
+        completion.TrySetException(new InvalidOperationException()).Should().BeFalse("already completed");
+        completion.TrySetCanceled().Should().BeFalse();
+        completion.TrySetCanceled(new CancellationToken(true)).Should().BeFalse();
+
+        released.Should().Be(1);
+        await completion.Task.WaitAsync(ShortTimeout);
+    }
+
     [Fact]
     public void Options_Default_The_Queue_Limit_To_Eight_And_Reject_A_Negative_One()
     {

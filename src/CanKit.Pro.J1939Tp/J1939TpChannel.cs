@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
@@ -211,7 +212,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private Task Admit(TxSessionKey key, byte[] pdu, CancellationToken ct, bool isCm)
     {
         byte destination = key.DestinationAddress;
-        int limit = _options.MaxQueuedSendsPerDestination + 1;
+        long limit = (long)_options.MaxQueuedSendsPerDestination + 1; // int.MaxValue + 1 must not wrap
         int admitted;
         lock (_admissionLock)
         {
@@ -225,10 +226,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 $"{admitted} sends to it are already pending (on the wire, waiting or not yet started); " +
                 $"MaxQueuedSendsPerDestination = {_options.MaxQueuedSendsPerDestination}."));
         }
-        var tcs = new TxCompletion(this, destination);
-        RegisterCancellation(tcs, ct, key);
+        var tcs = new TxCompletion(() => ReleaseSlot(destination));
         try
         {
+            // Everything from here on can throw (a token whose source is disposed, a disposed
+            // actor); the slot is reserved, so any failure gives it back.
+            RegisterCancellation(tcs, ct, key);
             _actor.Post(() => BeginTxOnLoop(key, pdu, tcs, isCm));
         }
         catch
@@ -835,19 +838,17 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return false;
         foreach (var pending in queue)
         {
-            if (pending.Key.Equals(key) && !pending.Tcs.Task.IsCompleted) return true;
+            if (pending.Key.Equals(key)) return true;
         }
         return false;
     }
 
-    /// <summary>Entries held in the TX queues, cancelled or not. Actor-loop state: read it there.</summary>
+    /// <summary>Entries held in the TX queues. Actor-loop state: read it there.</summary>
     internal int QueuedSendCount
     {
         get
         {
-            int count = 0;
-            foreach (var queue in _txQueues.Values) count += queue.Count;
-            return count;
+            return _txQueues.Values.Sum(queue => queue.Count);
         }
     }
 
@@ -877,7 +878,6 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             var next = queue[0];
             queue.RemoveAt(0);
-            if (next.Tcs.Task.IsCompleted) continue; // cancelled while waiting
             StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
             break;
         }
@@ -1386,19 +1386,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// <em>before</em> the caller's task completes, on whichever thread completes it, so a caller
     /// that awaits a send and sends again at the limit is never refused by a release still to run.
     /// </summary>
-    private sealed class TxCompletion
+    internal sealed class TxCompletion
     {
         private readonly TaskCompletionSource<object?> _tcs =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly J1939TpChannel _owner;
-        private readonly byte _destination;
+        private readonly Action _release;
         private int _released;
 
-        public TxCompletion(J1939TpChannel owner, byte destination)
-        {
-            _owner = owner;
-            _destination = destination;
-        }
+        /// <param name="release">Gives the slot back; runs once, however often the send is completed.</param>
+        public TxCompletion(Action release) => _release = release;
 
         public Task Task => _tcs.Task;
 
@@ -1409,12 +1405,16 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
         private void Release()
         {
-            if (Interlocked.Exchange(ref _released, 1) != 0) return;
-            lock (_owner._admissionLock)
-            {
-                if (_owner._admitted[_destination] == 1) _owner._admitted.Remove(_destination);
-                else _owner._admitted[_destination]--;
-            }
+            if (Interlocked.Exchange(ref _released, 1) == 0) _release();
+        }
+    }
+
+    private void ReleaseSlot(byte destination)
+    {
+        lock (_admissionLock)
+        {
+            if (_admitted[destination] == 1) _admitted.Remove(destination);
+            else _admitted[destination]--;
         }
     }
 
