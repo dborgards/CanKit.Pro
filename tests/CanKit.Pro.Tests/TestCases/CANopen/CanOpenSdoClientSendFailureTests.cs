@@ -70,15 +70,18 @@ public class CanOpenSdoClientSendFailureTests
             .Should().ThrowAsync<CanOpenTransportException>();
     }
 
-    [Fact]
-    public async Task A_Confirmation_That_Arrives_After_The_Sdo_Timeout_Leaves_The_Timeout_Standing()
+    [Theory]
+    [MemberData(nameof(Uploads))]
+    public async Task A_Confirmation_That_Arrives_After_The_Sdo_Timeout_Leaves_The_Timeout_Standing(string transfer)
     {
         using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-late-ok-{Guid.NewGuid():N}");
         using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(50) });
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
         bus.DeferredEchoes.ReleaseAll();
 
-        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00);
+        var upload = transfer == "upload"
+            ? client.SdoUploadAsync(0x11, 0x1000, 0x00)
+            : client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
         // Whether or not the SDO timeout has elapsed by now, a confirmed request that nobody
         // answers ends in the timeout: the send outcome only overrides it when the send failed.
@@ -89,6 +92,84 @@ public class CanOpenSdoClientSendFailureTests
             .Should().ThrowAsync<SdoAbortException>()).Which;
         abort.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
         abort.Origin.Should().Be(SdoAbortOrigin.Local);
+    }
+
+    [Fact]
+    public async Task An_Answer_After_The_Sdo_Timeout_Does_Not_Revive_The_Transfer()
+    {
+        // The SDO timeout has elapsed with the request unconfirmed. An answer arriving then is
+        // not taken: the transfer is waiting only for its send's outcome.
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-late-answer-{Guid.NewGuid():N}");
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(50) });
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        await Task.Delay(TimeSpan.FromMilliseconds(200)); // well past the 50 ms SDO timeout
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+            new byte[] { 0x43, 0x00, 0x10, 0x00, 0x91, 0x01, 0x0F, 0x00 }), isEcho: false);
+        bus.DeferredEchoes.ReleaseAll();
+
+        var abort = (await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<SdoAbortException>()).Which;
+        abort.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
+    }
+
+    [Fact]
+    public async Task A_Transmit_That_Throws_Fails_The_Transfer_With_A_Transport_Error()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-send-throws-{Guid.NewGuid():N}");
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoRx(0x11)) throw new InvalidOperationException("adapter fault");
+        };
+
+        await FluentActions.Awaiting(() => client.SdoUploadAsync(0x11, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>();
+    }
+
+    [Fact]
+    public async Task A_Block_Segment_Whose_Transmit_Throws_Fails_The_Transfer()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-seg-throws-{Guid.NewGuid():N}");
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        var accepted = 0;
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return;
+            if ((frame.Data.Span[0] & 0xE1) == SdoBlockFrames.CcsBlockDownloadInitBase && Interlocked.Exchange(ref accepted, 1) == 0)
+            {
+                _ = Task.Run(() => bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+                    SdoBlockFrames.BuildBlockDownloadInitResponse(0x1000, 0x00, serverCrcSupported: false, blockSize: 127)),
+                    isEcho: false));
+                return;
+            }
+
+            throw new InvalidOperationException("adapter fault");
+        };
+
+        await FluentActions.Awaiting(() => client.SdoDownloadAsync(0x11, 0x1000, 0x00, new byte[20], SdoTransferMode.Block)
+                .WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>();
+    }
+
+    [Fact]
+    public async Task A_Send_Outcome_After_Dispose_Is_Dropped()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-outcome-dispose-{Guid.NewGuid():N}");
+        var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+        client.Dispose();
+        bus.DeferredEchoes.ReleaseAll(); // the confirmation now lands on a disposed node
+
+        await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<ObjectDisposedException>("disposal completed the transfer, and nothing else reports it");
     }
 
     [Fact]
