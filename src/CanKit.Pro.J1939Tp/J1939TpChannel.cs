@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Channels;
@@ -74,7 +73,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // two sessions to one destination would interleave frames a receiver cannot tell apart --
     // J1939-21 has one BAM per source at a time and one CM connection per (SA, DA) pair. The
     // queue is what makes IJ1939TpChannel's "one PDU at a time per destination" true.
-    private readonly Dictionary<byte, List<PendingTx>> _txQueues = new();
+    private readonly Dictionary<byte, LinkedList<PendingTx>> _txQueues = new();
+    // The queued entry of each waiting send, so a cancelled one is unlinked in O(1) and the head
+    // leaves in O(1): a list would shift every remaining entry per send drained (#204).
+    private readonly Dictionary<TxCompletion, LinkedListNode<PendingTx>> _queuedNodes = new();
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
 
     // Sends admitted per destination and not yet completed: posted to the actor and not yet run,
@@ -436,6 +438,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
         }
         _txQueues.Clear();
+        _queuedNodes.Clear();
         foreach (var kv in _rxSessions)
             kv.Value.Cancel();
         _rxSessions.Clear();
@@ -817,8 +820,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (HasSessionTo(key.DestinationAddress))
         {
             if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue))
-                _txQueues[key.DestinationAddress] = queue = new List<PendingTx>();
-            queue.Add(new PendingTx(key, pdu, tcs, isCm));
+                _txQueues[key.DestinationAddress] = queue = new LinkedList<PendingTx>();
+            _queuedNodes[tcs] = queue.AddLast(new PendingTx(key, pdu, tcs, isCm));
             return;
         }
         StartTx(key, pdu, tcs, isCm);
@@ -848,22 +851,18 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         get
         {
-            return _txQueues.Values.Sum(queue => queue.Count);
+            return _queuedNodes.Count;
         }
     }
 
     /// <summary>Drops the queued entry that belongs to <paramref name="tcs"/>, if there is one.</summary>
     private void RemoveQueued(TxCompletion tcs)
     {
-        foreach (var kv in _txQueues)
-        {
-            var queue = kv.Value;
-            int index = queue.FindIndex(p => ReferenceEquals(p.Tcs, tcs));
-            if (index < 0) continue;
-            queue.RemoveAt(index);
-            if (queue.Count == 0) _txQueues.Remove(kv.Key);
-            return; // a tcs is queued at most once, and the enumerator is now stale
-        }
+        if (!_queuedNodes.TryGetValue(tcs, out var node)) return;
+        _queuedNodes.Remove(tcs);
+        var queue = node.List!;
+        queue.Remove(node);
+        if (queue.Count == 0) _txQueues.Remove(node.Value.Key.DestinationAddress);
     }
 
     /// <summary>
@@ -874,14 +873,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         _txSessions.Remove(key);
         if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
-        while (queue.Count > 0)
-        {
-            var next = queue[0];
-            queue.RemoveAt(0);
-            StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
-            break;
-        }
+        var next = queue.First!.Value; // a queue in the map is never empty
+        queue.RemoveFirst();
+        _queuedNodes.Remove(next.Tcs);
         if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
+        StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
     }
 
     private void StartTx(TxSessionKey key, byte[] pdu, TxCompletion tcs, bool isCm)

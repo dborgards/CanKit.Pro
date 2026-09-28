@@ -2732,7 +2732,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Send_That_Fails_After_Admission_Gives_Its_Slot_Back()
     {
         using var clock = new VirtualClock();
-        var actor = clock.NewActor();
+        using var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
         using var sender = QueueSender(actor, service, maxQueued: 0);
@@ -2769,6 +2769,43 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 #endif
+
+    // Cancelling a send in the middle of the queue unlinks exactly that entry: the others keep
+    // their order and both still go out.
+    [Fact]
+    public async Task Cancelling_A_Send_In_The_Middle_Of_The_Queue_Keeps_The_Others_In_Order()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 3);
+        var announced = new List<uint>();
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (J1939Pgn.IsTransportCm(fields.Pgn))
+                lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        using var cancel = new CancellationTokenSource();
+        var before = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        var middle = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3), cancel.Token);
+        var after = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4));
+        await clock.SettleAsync();
+        cancel.Cancel();
+        Func<Task> wait = async () => await middle.WaitAsync(ShortTimeout);
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(2);
+
+        await DrainAsync(clock, actor, first, before, after);
+        lock (announced) announced.Should().Equal(0xFEC0u, 0xFEC1u, 0xFEC3u);
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0,
+            "every entry that was queued has left the queue, sent or cancelled");
+    }
 
     // A send can be completed more than once (a cancel racing a result, a dispose after a fault);
     // the slot it held must come back exactly once, or a later send is admitted past the limit.
