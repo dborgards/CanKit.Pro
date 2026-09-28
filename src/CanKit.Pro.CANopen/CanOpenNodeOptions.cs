@@ -59,7 +59,8 @@ public sealed class CanOpenNodeOptions
     /// were raised, but are never discarded to make room: a guarding consumer that misses one
     /// treats a silent peer as alive. They can make the queue longer than this capacity while
     /// a handler is stuck, but not without bound. A timeout for a producer whose timeout is
-    /// already waiting is folded into it, and so is an EMCY identical to one already waiting.
+    /// already waiting is folded into it, and so is an EMCY identical to one already waiting,
+    /// provided nothing else about that producer was queued in between.
     /// Each EMCY producer may have at most this many distinct emergencies waiting; the surplus
     /// from it is discarded until its backlog drains, and one
     /// <see cref="CanOpenNode.BackgroundExceptionOccurred"/> report is raised per such burst.

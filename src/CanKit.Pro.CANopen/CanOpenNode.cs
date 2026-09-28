@@ -63,7 +63,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // peer as alive (#170). They can make the queue longer than the capacity, but not without
     // bound (#201): a timeout already waiting for the same producer absorbs the next one (the
     // handler will learn the peer is silent either way), an EMCY identical to one already
-    // waiting is absorbed likewise, and a producer that keeps a further EventQueueCapacity
+    // waiting is absorbed likewise, but only while nothing else about that producer has been
+    // queued since -- error, reset, error is three events, not two -- and a producer that keeps a further EventQueueCapacity
     // distinct EMCYs waiting has the surplus discarded and counted, reported once per burst on
     // BackgroundExceptionOccurred. The wake-up is a single coalesced signal, not one token per
     // event: a drop removes the event and leaves no token behind, and a burst while the pump is
@@ -75,7 +76,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private LinkedListNode<PendingEvent>? _oldestNonCritical;
     private int _pendingNonCritical;
     private long _submittedEventCount;
-    private readonly Dictionary<EventKey, LinkedListNode<PendingEvent>> _pendingKeyed = new();
+    private readonly Dictionary<EventKey, KeyedEntry> _pendingKeyed = new();
+    // Per producer node-id: the sequence number of the last event queued that concerns it. A
+    // waiting critical event absorbs an identical one only while nothing else about the same
+    // producer has been queued since, so "error, reset, error" reaches the handler as three
+    // events and not as two (#201).
+    private readonly long[] _producerSeq = new long[256];
+    private long _eventSeq;
     private readonly int[] _pendingEmcyPerProducer = new int[256];
     private readonly bool[] _emcyOverflowReported = new bool[256];
     private long _coalescedEventCount;
@@ -758,7 +765,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// one. Null for events that must each be delivered.</param>
     /// <param name="emcyProducer">The EMCY producer this event belongs to, or -1. At most
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> events per producer wait at once.</param>
-    private void EnqueueEvent(Action raise, bool critical, EventKey? key, int emcyProducer)
+    /// <param name="producer">The node-id this event is about, or -1. An event that is not folded
+    /// moves that node's sequence on, which is what stops a later identical one from folding
+    /// into an earlier one across it.</param>
+    private void EnqueueEvent(Action raise, bool critical, EventKey? key, int emcyProducer, int producer = -1)
     {
         int reportOverflowOf = -1;
         bool discarded = false;
@@ -767,6 +777,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (_eventPumpCompleted) return;
             if (!critical)
             {
+                if (producer >= 0) _producerSeq[producer] = ++_eventSeq;
                 // Drop the oldest ordinary event, never a timeout or an EMCY sitting in front
                 // of it. The newcomer still takes a slot, so the ordinary count stays at the cap.
                 if (_pendingNonCritical >= _options.EventQueueCapacity && _oldestNonCritical is { } drop)
@@ -784,11 +795,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             {
                 // An identical event is already waiting: the handler will see it, and nothing
                 // it could learn from a second copy is lost (#201).
-                if (key is { } k && _pendingKeyed.ContainsKey(k))
+                if (key is { } k && producer >= 0
+                    && _pendingKeyed.TryGetValue(k, out var waiting) && waiting.Seq == _producerSeq[producer])
                 {
                     _coalescedEventCount++;
                     return;
                 }
+                long seq = producer >= 0 ? (_producerSeq[producer] = ++_eventSeq) : 0;
                 if (emcyProducer >= 0)
                 {
                     if (_pendingEmcyPerProducer[emcyProducer] >= _options.EventQueueCapacity)
@@ -809,7 +822,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 if (!discarded)
                 {
                     var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer));
-                    if (key is { } keyed) _pendingKeyed[keyed] = queued;
+                    if (key is { } keyed) _pendingKeyed[keyed] = new KeyedEntry(queued, seq);
                 }
             }
             if (!discarded)
@@ -848,7 +861,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             var node = _pendingEvents.First;
             if (node is null) return null;
             _pendingEvents.RemoveFirst();
-            if (node.Value.Key is { } key) _pendingKeyed.Remove(key);
+            // A newer identical event may have replaced this one's entry; only remove our own.
+            if (node.Value.Key is { } key && _pendingKeyed.TryGetValue(key, out var entry)
+                && ReferenceEquals(entry.Node, node))
+                _pendingKeyed.Remove(key);
             if (node.Value.EmcyProducer is >= 0 and var producer
                 && --_pendingEmcyPerProducer[producer] == 0)
                 _emcyOverflowReported[producer] = false;
@@ -908,6 +924,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     internal long EmcyOverflowCount
     {
         get { lock (_eventLock) return _emcyOverflowCount; }
+    }
+
+    private readonly struct KeyedEntry
+    {
+        public KeyedEntry(LinkedListNode<PendingEvent> node, long seq)
+        {
+            Node = node;
+            Seq = seq;
+        }
+
+        public LinkedListNode<PendingEvent> Node { get; }
+        public long Seq { get; }
     }
 
     private readonly struct PendingEvent
@@ -2328,7 +2356,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatReceived?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        }, critical: false, key: null, emcyProducer: -1, producer);
     }
 
     private void RaiseHeartbeatTimeout(byte producer, TimeSpan timeout)
@@ -2338,7 +2366,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1);
+        }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
     }
 
     private void RaiseEmcyReceived(EmcyMessage msg, DateTime ts)
@@ -2348,7 +2376,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { EmcyReceived?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.Emcy(msg), msg.ProducerNodeId);
+        }, critical: true, EventKey.Emcy(msg), msg.ProducerNodeId, msg.ProducerNodeId);
     }
 
     private void RaiseSyncReceived(DateTime ts)

@@ -82,13 +82,15 @@ public interface ICanOpenNode : IDisposable
     /// Not discarded when the event queue is over
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
     /// looking alive. While a timeout for the same producer is still waiting for the handler,
-    /// a further one is folded into it rather than queued again.</summary>
+    /// a further one is folded into it rather than queued again, unless a heartbeat from that
+    /// producer was queued in between.</summary>
     event EventHandler<HeartbeatTimeoutEventArgs>? HeartbeatTimeout;
 
     /// <summary>Raised when an EMCY frame is received on the bus (FR-CO-011). Not discarded
     /// when the event queue is over <see cref="CanOpenNodeOptions.EventQueueCapacity"/>. While a
     /// handler is behind, an EMCY identical to one still waiting (same producer, code, register
-    /// and manufacturer field) is folded into it, and a producer with
+    /// and manufacturer field) is folded into it, unless another event about that producer was
+    /// queued in between, and a producer with
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> distinct emergencies already waiting
     /// has its further ones discarded, reported once per burst on
     /// <see cref="BackgroundExceptionOccurred"/>.</summary>
@@ -133,7 +135,8 @@ public interface ICanOpenNode : IDisposable
     /// (FR-CO-009). Not discarded when the event queue is over
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
     /// looking alive. While a timeout for the same producer is still waiting for the handler,
-    /// a further one is folded into it rather than queued again.</summary>
+    /// a further one is folded into it rather than queued again, unless a guarding response from
+    /// that producer was queued in between.</summary>
     event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout;
 
     /// <summary>

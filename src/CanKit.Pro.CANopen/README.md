@@ -410,8 +410,9 @@ with heartbeats, SYNC, PDOs and NMT, and keep their place in that order. They ar
 the queue will not drop when a subscriber falls behind `EventQueueCapacity` (default 64). A
 slow handler can lose a heartbeat or an RPDO; it cannot lose a timeout or an emergency and
 then treat the peer as healthy. Their backlog is still bounded: a timeout for a producer whose
-timeout is already waiting is folded into it, an EMCY identical to one already waiting likewise,
-and a producer with `EventQueueCapacity` distinct emergencies waiting has its further ones
+timeout is already waiting is folded into it, an EMCY identical to one already waiting likewise
+(only while nothing else about that producer was queued in between: error, reset, error stays
+three events), and a producer with `EventQueueCapacity` distinct emergencies waiting has its further ones
 discarded, with one `BackgroundExceptionOccurred` report per burst. `BackgroundExceptionOccurred`
 is not queued.
 
