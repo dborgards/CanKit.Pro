@@ -2074,9 +2074,15 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     public async Task Handoff_Instant_Is_Taken_Inside_The_Service_Lock_After_Another_Senders_Call()
     {
         using var bus = ControllableBus.EchoCapable(NewSession());
-        using var service = new CanBusService(bus);
+        using var inner = new CanBusService(bus);
+        using var service = new FrameConsumptionCountingBusService(inner);
         using var a = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8));
         using var b = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(txCanId: 0x7E1, rxCanId: 0x7E9));
+        using var bHandedToService = new ManualResetEventSlim();
+        service.OnSendConfirmed = frame =>
+        {
+            if (frame.ID == 0x7E1) bHandedToService.Set();
+        };
 
         using var aTransmitting = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
@@ -2090,9 +2096,12 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var sendA = a.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
         aTransmitting.Wait(ShortTimeout).Should().BeTrue("A's frame must reach the driver call");
 
-        // B enters the service and waits on the lock A holds across its driver call.
+        // B is handed to the service, whose lock A holds across its driver call (#171: this was a
+        // 50 ms wait for B to get there). Any reading B's channel takes before that hand-off --
+        // the pre-call stamp a channel that ignores the service's own would keep -- is therefore
+        // before the instant below; a reading inside the lock can only be after it.
         var sendB = b.SendWithTransmitStampAsync(new byte[] { 0x3E, 0x00 });
-        await Task.Delay(50); // B has had time to reach the lock; a shorter wait only weakens the check
+        bHandedToService.Wait(ShortTimeout).Should().BeTrue("B's frame must reach the service");
         var releasedAt = Stopwatch.GetTimestamp();
         release.Set();
 
