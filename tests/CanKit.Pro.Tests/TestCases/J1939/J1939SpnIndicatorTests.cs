@@ -92,41 +92,38 @@ public class J1939SpnIndicatorTests
         => J1939Spn.Classify(raw, bitLength).Should().Be(expected);
 
     // The sub-byte widths J1939-71 does not tabulate, pinned so the inferred rule cannot drift
-    // silently. The leading group stays the same size across a class — 4 bits for a 4..7-bit
-    // field, 2 bits for a 2..3-bit one — so each band widens with the field and the indicator
-    // *fraction* of the range is what the tabulated width of that class already spends: five
-    // sixteenths for 4..7 bits, one half for 2..3 bits.
+    // silently. The codes are single values at the top of the field, as in the 4-bit and 2-bit
+    // tables read literally: 5..7 bits take all five, 3 bits the 2-bit table's two (issue #99).
     [Theory]
-    // 5 bits: bands of 2 raw counts. 0..21 measure, 22..31 indicate.
+    // 5 bits: 0..26 measure, 27 parameter specific, 28..29 reserved, 30 error, 31 n/a.
     [InlineData(21UL, 5, J1939SpnValueKind.Valid)]
-    [InlineData(22UL, 5, J1939SpnValueKind.ParameterSpecific)]
-    [InlineData(23UL, 5, J1939SpnValueKind.ParameterSpecific)]
-    [InlineData(24UL, 5, J1939SpnValueKind.Reserved)]
-    [InlineData(27UL, 5, J1939SpnValueKind.Reserved)]
-    [InlineData(28UL, 5, J1939SpnValueKind.Error)]
-    [InlineData(29UL, 5, J1939SpnValueKind.Error)]
-    [InlineData(30UL, 5, J1939SpnValueKind.NotAvailable)]
+    [InlineData(26UL, 5, J1939SpnValueKind.Valid)]
+    [InlineData(27UL, 5, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(28UL, 5, J1939SpnValueKind.Reserved)]
+    [InlineData(29UL, 5, J1939SpnValueKind.Reserved)]
+    [InlineData(30UL, 5, J1939SpnValueKind.Error)]
     [InlineData(31UL, 5, J1939SpnValueKind.NotAvailable)]
-    // 6 bits: bands of 4.
-    [InlineData(43UL, 6, J1939SpnValueKind.Valid)]
-    [InlineData(44UL, 6, J1939SpnValueKind.ParameterSpecific)]
-    [InlineData(56UL, 6, J1939SpnValueKind.Error)]
-    [InlineData(60UL, 6, J1939SpnValueKind.NotAvailable)]
+    // 6 bits.
+    [InlineData(58UL, 6, J1939SpnValueKind.Valid)]
+    [InlineData(59UL, 6, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(60UL, 6, J1939SpnValueKind.Reserved)]
+    [InlineData(61UL, 6, J1939SpnValueKind.Reserved)]
+    [InlineData(62UL, 6, J1939SpnValueKind.Error)]
     [InlineData(63UL, 6, J1939SpnValueKind.NotAvailable)]
-    // 7 bits: bands of 8.
-    [InlineData(87UL, 7, J1939SpnValueKind.Valid)]
-    [InlineData(88UL, 7, J1939SpnValueKind.ParameterSpecific)]
-    [InlineData(112UL, 7, J1939SpnValueKind.Error)]
-    [InlineData(120UL, 7, J1939SpnValueKind.NotAvailable)]
+    // 7 bits.
+    [InlineData(122UL, 7, J1939SpnValueKind.Valid)]
+    [InlineData(123UL, 7, J1939SpnValueKind.ParameterSpecific)]
+    [InlineData(124UL, 7, J1939SpnValueKind.Reserved)]
+    [InlineData(125UL, 7, J1939SpnValueKind.Reserved)]
+    [InlineData(126UL, 7, J1939SpnValueKind.Error)]
     [InlineData(127UL, 7, J1939SpnValueKind.NotAvailable)]
-    // 3 bits: the 2-bit table scaled up, so bands of 2 and no reserved or parameter-specific
-    // band at all — the 2-bit table has none. This is the widest reading of any width here:
-    // half the value space indicates. See the remarks on J1939Spn.Classify and issue #99.
+    // 3 bits: the 2-bit table's two codes at the top, and no reserved or parameter-specific
+    // value — the 2-bit table has none. 4 and 5 are measurements.
     [InlineData(0UL, 3, J1939SpnValueKind.Valid)]
     [InlineData(3UL, 3, J1939SpnValueKind.Valid)]
-    [InlineData(4UL, 3, J1939SpnValueKind.Error)]
-    [InlineData(5UL, 3, J1939SpnValueKind.Error)]
-    [InlineData(6UL, 3, J1939SpnValueKind.NotAvailable)]
+    [InlineData(4UL, 3, J1939SpnValueKind.Valid)]
+    [InlineData(5UL, 3, J1939SpnValueKind.Valid)]
+    [InlineData(6UL, 3, J1939SpnValueKind.Error)]
     [InlineData(7UL, 3, J1939SpnValueKind.NotAvailable)]
     public void Classify_Unsigned_NonTabulatedSubByteWidths(ulong raw, int bitLength, J1939SpnValueKind expected)
         => J1939Spn.Classify(raw, bitLength).Should().Be(expected);
@@ -278,6 +275,26 @@ public class J1939SpnIndicatorTests
         payload[0] = 0xA0;   // 0xA is the last valid nibble.
         J1939Spn.Extract(payload, byteOffset: 0, startBit: 4, bitLength: 4,
             resolution: 0.5, offset: 0.0).Value.Should().Be(5.0);
+    }
+
+    [Theory]
+    // SPN 527 "Cruise Control States", CCVS1 (PGN 65265) byte 7 bits 6..8 — a real 3-bit SPN
+    // (issue #99). Resume and Set are states a driver produces on every use of the cruise
+    // control; reporting them as errors was the leading-group reading this width used to get.
+    [InlineData(0UL, J1939SpnValueKind.Valid)]         // Off/Disabled
+    [InlineData(4UL, J1939SpnValueKind.Valid)]         // Resume
+    [InlineData(5UL, J1939SpnValueKind.Valid)]         // Set
+    [InlineData(7UL, J1939SpnValueKind.NotAvailable)]
+    public void Extract_CruiseControlStates_ResumeAndSet_AreStates(ulong raw, J1939SpnValueKind expected)
+    {
+        var payload = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x1F, 0xFF };
+        J1939Spn.WriteRaw(payload, byteOffset: 6, startBit: 5, bitLength: 3, raw);
+
+        var state = J1939Spn.Extract(payload, byteOffset: 6, startBit: 5, bitLength: 3,
+            resolution: 1.0, offset: 0.0);
+
+        state.Kind.Should().Be(expected);
+        state.Raw.Should().Be(raw);
     }
 
     // -------------------------------------------------------------------------------------
