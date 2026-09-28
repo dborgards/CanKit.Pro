@@ -527,14 +527,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             }
         }
 
-        var actorGone = false;
         try
         {
             _actor.Post(FailInFlightSend);
         }
         catch (ObjectDisposedException)
         {
-            actorGone = true;
             // An injected actor its owner already disposed (#205): Dispose must still be safe to
             // call and must still run the rest of its cleanup below. Actor state (_tx,
             // _busTxIdleWaiter) is not touched from here -- the owner's Dispose may still be
@@ -546,17 +544,18 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
-        // With the actor gone nothing will ever withdraw the receptions it left published (Codex
-        // on #216). The published records are the one piece of reception state that is safe to
-        // clear from here: they are a lock-free snapshot readable from any thread, unlike _rx,
-        // which stays untouched. Done after the reader has stopped, so nothing announces anew.
-        if (actorGone)
+        _subscription.Dispose();
+
+        // Whatever is still published is withdrawn last: the reader has stopped, the subscription
+        // is closed, and under the pump lock no caller-side pump is mid-way through announcing a
+        // frame (later ones refuse, above). Needed when the actor is gone and can no longer run
+        // the cleanup it was asked to (Codex on #216); the published records are a lock-free
+        // snapshot any thread may update, unlike _rx, which stays untouched here.
+        lock (_pumpGate)
         {
             foreach (var reception in Volatile.Read(ref _receptionsInProgress))
                 WithdrawReception(reception);
         }
-
-        _subscription.Dispose();
         // Actor.Dispose drains the FailTx/idle-waiter post above (FinalDrain), so the in-flight
         // SendAsync can leave its await and enter WaitForBusTxIdleAsync / Release. An injected
         // actor is not ours to dispose -- the caller may still be running other channels on it --
@@ -609,6 +608,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         lock (_pumpGate)
         {
+            // A disposed channel takes nothing more off the subscription: a First Frame ingested
+            // now would be announced and then posted to an actor that no longer runs it, and
+            // nothing would ever withdraw the announcement (Codex on #216).
+            if (Volatile.Read(ref _disposed) != 0)
+                return;
+
             while (_subscription.TryRead(out var frameEvent))
             {
                 try

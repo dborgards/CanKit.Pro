@@ -2830,6 +2830,26 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.GetReceptionsInProgress().Should().BeEmpty();
     }
 
+    // Codex on #216: a First Frame that arrives once the channel is disposed must not be
+    // announced by a later caller-side pump -- with the actor gone, nothing would withdraw it.
+    [Fact]
+    public void A_First_Frame_Arriving_After_Dispose_Is_Not_Announced()
+    {
+        using var service = new StarvedReaderBusService();
+        var actor = new ProtocolActor();
+        var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+        actor.Dispose();
+        channel.Dispose();
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
     // #206: a frame that was already on its way to the actor when the channel was disposed
     // completes no PDU and raises no DatagramReceived. The channel is disposed with the actor
     // held, and the frame -- pumped into the mailbox beforehand -- runs only afterwards.

@@ -367,38 +367,22 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // The transmit a timed-out send abandons may still fail later; nobody awaits it, so the
-    // service must have observed it, or the fault surfaces as an unobserved task exception.
+    // service must observe it itself, or the fault surfaces as an unobserved task exception.
     [Fact]
     public async Task A_Late_Fault_Of_The_Abandoned_Transmit_Is_Observed()
     {
         using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
         bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus);
-        var unobserved = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.AbandonedTransmitFaultObserved = e => observed.TrySetResult(e);
         var marker = new InvalidOperationException("late driver failure");
-        EventHandler<UnobservedTaskExceptionEventArgs> onUnobserved = (_, e) =>
-        {
-            if (e.Exception.InnerExceptions.Contains(marker)) unobserved.Add(marker);
-        };
-        TaskScheduler.UnobservedTaskException += onUnobserved;
-        try
-        {
-            (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
-                .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
-            bus.FaultStalledTransmits(marker);
 
-            for (var i = 0; i < 3; i++)
-            {
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-            }
+        (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+            .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        bus.FaultStalledTransmits(marker);
 
-            unobserved.Should().BeEmpty("the abandoned transmit's fault was observed");
-        }
-        finally
-        {
-            TaskScheduler.UnobservedTaskException -= onUnobserved;
-        }
+        (await observed.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(marker);
     }
 
     // The private copy handed to the driver is the same frame: kind, identifier, flags, payload.

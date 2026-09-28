@@ -326,6 +326,12 @@ namespace CanKit.Pro.RawCan
                 : await SendApproximatedAsync(frame, effectiveTimeout, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Raised, for tests, when the fault of a transmit the timeout had already abandoned has
+        /// been observed -- the only signal that no unobserved-task-exception is left behind.
+        /// </summary>
+        internal Action<Exception> AbandonedTransmitFaultObserved { get; set; } = static _ => { };
+
         private async Task<TxConfirmation> SendApproximatedAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
             // FR-RAW-032: best-effort approximation -- confirmed as soon as the driver accepts the
@@ -397,7 +403,7 @@ namespace CanKit.Pro.RawCan
                     // Nobody will await the abandoned task; observe its fault so a late driver
                     // failure does not surface as an unobserved task exception.
                     _ = transmit.ContinueWith(
-                        static t => _ = t.Exception,
+                        t => AbandonedTransmitFaultObserved.Invoke(t.Exception!.GetBaseException()),
                         CancellationToken.None,
                         TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                         TaskScheduler.Default);
