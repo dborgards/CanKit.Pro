@@ -73,7 +73,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // two sessions to one destination would interleave frames a receiver cannot tell apart --
     // J1939-21 has one BAM per source at a time and one CM connection per (SA, DA) pair. The
     // queue is what makes IJ1939TpChannel's "one PDU at a time per destination" true.
-    private readonly Dictionary<byte, Queue<PendingTx>> _txQueues = new();
+    private readonly Dictionary<byte, List<PendingTx>> _txQueues = new();
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
 
     private int _disposed;
@@ -269,8 +269,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             return;
         }
         // Not on the wire yet: still queued behind another session to the same destination, or
-        // never started. Either way the caller's token decides; a queued entry stays in the
-        // queue as completed and EndTx skips it when its turn comes.
+        // never started. Either way the caller's token decides. A queued entry is removed on the
+        // spot (#204), so it stops holding its PDU and stops counting against
+        // MaxQueuedSendsPerDestination; cancel-then-resend cannot pile entries up.
+        RemoveQueued(tcs);
         tcs.TrySetCanceled(token);
     }
 
@@ -774,8 +776,23 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (HasSessionTo(key.DestinationAddress))
         {
             if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue))
-                _txQueues[key.DestinationAddress] = queue = new Queue<PendingTx>();
-            queue.Enqueue(new PendingTx(key, pdu, tcs, isCm));
+                _txQueues[key.DestinationAddress] = queue = new List<PendingTx>();
+            // A completed entry is not waiting any more, whatever completed it (#204).
+            int waiting = 0;
+            foreach (var pending in queue)
+            {
+                if (!pending.Tcs.Task.IsCompleted) waiting++;
+            }
+            if (waiting >= _options.MaxQueuedSendsPerDestination)
+            {
+                if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
+                tcs.TrySetException(new J1939TpSendRejectedException(
+                    $"J1939-TP send to destination 0x{key.DestinationAddress:X2} PGN 0x{key.Pgn:X} rejected: " +
+                    $"{waiting} sends are already waiting for that destination " +
+                    $"(MaxQueuedSendsPerDestination = {_options.MaxQueuedSendsPerDestination})."));
+                return;
+            }
+            queue.Add(new PendingTx(key, pdu, tcs, isCm));
             return;
         }
         StartTx(key, pdu, tcs, isCm);
@@ -800,6 +817,31 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         return false;
     }
 
+    /// <summary>Entries held in the TX queues, cancelled or not. Actor-loop state: read it there.</summary>
+    internal int QueuedSendCount
+    {
+        get
+        {
+            int count = 0;
+            foreach (var queue in _txQueues.Values) count += queue.Count;
+            return count;
+        }
+    }
+
+    /// <summary>Drops the queued entry that belongs to <paramref name="tcs"/>, if there is one.</summary>
+    private void RemoveQueued(TaskCompletionSource<object?> tcs)
+    {
+        foreach (var kv in _txQueues)
+        {
+            var queue = kv.Value;
+            int index = queue.FindIndex(p => ReferenceEquals(p.Tcs, tcs));
+            if (index < 0) continue;
+            queue.RemoveAt(index);
+            if (queue.Count == 0) _txQueues.Remove(kv.Key);
+            return; // a tcs is queued at most once, and the enumerator is now stale
+        }
+    }
+
     /// <summary>
     /// Removes a finished TX session and starts the next send queued for its destination, if
     /// any. Every path that ends a session goes through here so the queue cannot stall.
@@ -810,7 +852,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
         while (queue.Count > 0)
         {
-            var next = queue.Dequeue();
+            var next = queue[0];
+            queue.RemoveAt(0);
             if (next.Tcs.Task.IsCompleted) continue; // cancelled while waiting
             StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
             break;

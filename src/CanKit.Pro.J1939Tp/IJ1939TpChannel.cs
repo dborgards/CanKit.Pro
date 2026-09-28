@@ -19,9 +19,13 @@ namespace CanKit.Pro.J1939Tp;
 /// <see cref="SendCmAsync"/> concurrently from any thread; the channel serializes them per
 /// destination address, so one PDU at a time is on the wire towards any one destination — and,
 /// since every BAM goes to the global address, one BAM at a time per channel (J1939-21 §5.10.3).
-/// A send whose destination is busy waits its turn; a second send for the same
-/// (destination, PGN) while one is in flight or waiting faults with
-/// <see cref="InvalidOperationException"/>.
+/// A send whose destination is busy waits its turn, at most
+/// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> of them per destination: one more
+/// faults at once with <see cref="J1939TpSendRejectedException"/>. There is no deadline on the
+/// wait -- a peer may legitimately hold the session ahead (J1939-21 §5.10.2.4, CTS(0)) -- so
+/// the caller's <see cref="CancellationToken"/> is what bounds it, and a cancelled send leaves
+/// the queue at once. A second send for the same (destination, PGN) while one is in flight or
+/// waiting faults with <see cref="InvalidOperationException"/>.
 /// </para>
 /// <para>
 /// Received PDUs are delivered both as an event (<see cref="DatagramReceived"/>) and via
@@ -48,7 +52,11 @@ public interface IJ1939TpChannel : IDisposable
     /// </summary>
     /// <param name="pgn">Data PGN of the multi-packet message being announced.</param>
     /// <param name="payload">User payload; 9..1785 bytes.</param>
-    /// <param name="cancellationToken">Standard .NET cancellation of the returned task.</param>
+    /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
+    /// <exception cref="J1939TpSendRejectedException">
+    /// Reported through the returned task when the destination is busy and
+    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> sends already wait for it.
+    /// </exception>
     Task SendBamAsync(uint pgn, ReadOnlyMemory<byte> payload, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -59,7 +67,11 @@ public interface IJ1939TpChannel : IDisposable
     /// <param name="pgn">Data PGN of the multi-packet message being sent.</param>
     /// <param name="destinationAddress">Target node's source address (must not be 0xFF).</param>
     /// <param name="payload">User payload; 9..1785 bytes.</param>
-    /// <param name="cancellationToken">Standard .NET cancellation of the returned task.</param>
+    /// <param name="cancellationToken">Standard .NET cancellation of the returned task; also removes a send still waiting for its slot.</param>
+    /// <exception cref="J1939TpSendRejectedException">
+    /// Reported through the returned task when the destination is busy and
+    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> sends already wait for it.
+    /// </exception>
     Task SendCmAsync(uint pgn, byte destinationAddress, ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken = default);
 
