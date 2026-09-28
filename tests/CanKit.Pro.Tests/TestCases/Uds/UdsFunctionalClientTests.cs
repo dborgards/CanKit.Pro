@@ -1091,8 +1091,10 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     // Codex on #150: a driver that accepts the frame only after the provisional window has run
     // out lets the pre-send listener's window lapse while the send is in flight; anchoring the
     // window at the acceptance must move it out again, or the next call has nothing to wait for.
+    // The listener itself never retires here -- the send in flight keeps it -- so this pins the
+    // anchor, not a restart of the listener; there is none to make (#198).
     [Fact]
-    public async Task A_Listener_Is_Restarted_When_The_Acceptance_Outlasted_The_Window()
+    public async Task A_Window_Is_Anchored_At_An_Acceptance_That_Outlasted_The_Provisional_Window()
     {
         using var clock = new WindowClock();
         using var bus = ControllableBus.DeferredEchoCapable(NewSession());
