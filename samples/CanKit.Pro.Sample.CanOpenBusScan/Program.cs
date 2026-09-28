@@ -192,19 +192,23 @@ namespace CanKit.Sample.CanOpenBusScan
             Console.WriteLine($"Node 0x{nodeId:X2} ({nodeId})");
             Console.WriteLine($"  Found by: {FormatEvidence(node)}");
 
-            if (peerDescription is null || peerDescription.Contains(DeviceTypeIndex, 0))
+            if (node.Evidence.HasFlag(CanOpenPresenceEvidence.SdoResponse))
             {
-                var deviceType = node.DeviceType is { } value
-                    ? SdoReadResult.FromData(new[]
-                    {
-                        (byte)value, (byte)(value >> 8), (byte)(value >> 16), (byte)(value >> 24),
-                    })
-                    : await ReadObjectAsync(
-                        client,
-                        nodeId,
-                        DeviceTypeIndex,
-                        subindex: 0,
-                        cancellationToken).ConfigureAwait(false);
+                // ScanAsync already asked; a null DeviceType means the node answered without a
+                // four-byte value, and asking again would only repeat that.
+                Console.WriteLine(node.DeviceType is { } scanned
+                    ? $"  0x1000:00 Device type = 0x{scanned:X8}"
+                    : "  0x1000:00 Device type = <answered without a 4-byte value>");
+            }
+            else if (peerDescription is null || peerDescription.Contains(DeviceTypeIndex, 0))
+            {
+                // Heard, not scanned: this is the first read of 1000h:00 for the node.
+                var deviceType = await ReadObjectAsync(
+                    client,
+                    nodeId,
+                    DeviceTypeIndex,
+                    subindex: 0,
+                    cancellationToken).ConfigureAwait(false);
                 Console.WriteLine($"  0x1000:00 Device type = {FormatResult(deviceType)}");
             }
 

@@ -313,6 +313,37 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
         zero.Should().Throw<ArgumentOutOfRangeException>();
     }
 
+    [Fact]
+    public async Task A_Heartbeat_The_Adapter_Marks_As_This_Hosts_Echo_Is_Heard()
+    {
+        // A node in this process on the same bus: its heartbeat reaches the listen as an echo.
+        using var bus = ControllableBus.EchoCapable($"canopen-discovery-echo-{Guid.NewGuid():N}");
+        using var service = new CanBusService(bus);
+        var window = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var listen = CanOpenDiscovery.ListenCoreAsync(service, TimeSpan.FromSeconds(1),
+            (_, _) => window.Task, CancellationToken.None);
+
+        // RaiseObserved dispatches synchronously, so the frame is buffered when it returns.
+        bus.RaiseObserved(Heartbeat(0x2A, 0x05), isEcho: true);
+        window.SetResult(true);
+
+        var nodes = await listen.WithTimeoutAsync(ShortTimeout);
+        nodes.Select(n => n.NodeId).Should().Equal(0x2A);
+    }
+
+    [Fact]
+    public async Task A_Scan_On_A_Bus_That_Rejects_Every_Send_Ends_With_The_Transport_Error()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-discovery-busoff-{Guid.NewGuid():N}");
+        // Long enough that only the send failure, not the timeout, can end the probe in time.
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        bus.AcceptTransmit = false;
+
+        await FluentActions.Awaiting(() => CanOpenDiscovery.ScanAsync(client, Skip(except: new byte[] { 0x11 }))
+                .WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>();
+    }
+
     private static IEnumerable<byte> Skip(IEnumerable<byte> except)
     {
         var keep = new HashSet<byte>(except);

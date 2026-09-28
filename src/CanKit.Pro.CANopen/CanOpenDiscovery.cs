@@ -214,10 +214,14 @@ public static class CanOpenDiscovery
         // pump is awaited only once the window has closed. A cancelled window closes it too:
         // WhenAny waits without throwing, the pump is drained, and only then does the
         // cancellation surface, so a caller disposing the service afterwards never races it.
+        // Echoes included: a node running in this process on the same bus or service is on the
+        // bus too, and an adapter marks its heartbeats as this host's echoes. The listen itself
+        // sends nothing, so an echo can only be another node's frame.
         using (var subscription = service.Subscribe(
             CanIdFilter.Range(
                 CanOpenCobId.HeartbeatBase + CanOpenCobId.MinNodeId,
-                CanOpenCobId.HeartbeatBase + CanOpenCobId.MaxNodeId)))
+                CanOpenCobId.HeartbeatBase + CanOpenCobId.MaxNodeId),
+            includeEcho: true))
         {
             pump = Task.Run(async () =>
             {
