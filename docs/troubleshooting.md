@@ -9,7 +9,7 @@ builds can be different code, so the package version alone does not identify one
 
 | Version you see | What it is |
 | --- | --- |
-| `X.Y.Z` | A release. The `vX.Y.Z` tag is the code. |
+| `X.Y.Z` | A release. The package's embedded commit (below) is the code it was built from; the `vX.Y.Z` tag points at that commit or a later one, because the release's own changelog commit is made after packing. |
 | `0.0.0` | A local build (or a build from a source archive) with no version passed in. |
 | `0.0.0-unversioned.<n>` | A CI build where GitVersion could not name the commit; `<n>` is the workflow run number. |
 
@@ -29,10 +29,11 @@ like `0.0.0+a92dce82f5b0b598f24d2b20934ccf1da59c5e61`.
 ```
 
 ```csharp
-// In your own code
-typeof(CanKit.Pro.RawCan.CanBusServiceExtensions).Assembly  // any type from the assembly in question
-    .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?
-    .InformationalVersion
+// In your own code (needs: using System.Reflection;)
+// Any type from the assembly in question will do.
+string? version = typeof(CanKit.Pro.RawCan.CanBusServiceExtensions).Assembly
+    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+    .InformationalVersion;
 ```
 
 On Windows, the file's Properties dialog shows the same string as *Product version*.
