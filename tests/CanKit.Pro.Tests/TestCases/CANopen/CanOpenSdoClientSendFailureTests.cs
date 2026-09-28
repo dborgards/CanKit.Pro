@@ -111,6 +111,11 @@ public class CanOpenSdoClientSendFailureTests
         await Task.Delay(TimeSpan.FromMilliseconds(200)); // well past the 50 ms SDO timeout
         bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
             new byte[] { 0x43, 0x00, 0x10, 0x00, 0x91, 0x01, 0x0F, 0x00 }), isEcho: false);
+        // A request to the node's own SDO server, raised after the answer: its reply is parked
+        // only once the node has handled the answer, so the answer met the timed-out session.
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x7F)),
+            new byte[] { 0x40, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 }), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
         bus.DeferredEchoes.ReleaseAll();
 
         var abort = (await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
@@ -266,6 +271,248 @@ public class CanOpenSdoClientSendFailureTests
             Timestamp = DateTime.UtcNow,
         });
         endAckConfirmation.SetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
+
+        var data = await upload.WithTimeoutAsync(ShortTimeout);
+        data.Should().Equal(1, 2, 3, 4);
+    }
+
+    [Fact]
+    public async Task A_Block_Timeout_With_Its_Send_Confirmed_Ends_In_The_Timeout_Abort()
+    {
+        // Nobody answers; the request is confirmed at once, so the timeout decides as before.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-timeout-{Guid.NewGuid():N}");
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(200) });
+
+        var abort = (await FluentActions.Awaiting(() => client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block)
+                .WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<SdoAbortException>()).Which;
+        abort.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
+        abort.Origin.Should().Be(SdoAbortOrigin.Local);
+    }
+
+    [Fact]
+    public async Task A_Server_Frame_While_The_End_Acknowledgement_Is_Pending_Is_Ignored()
+    {
+        // The upload is decided once its end frame is taken. A frame that would otherwise abort
+        // it -- an unknown command specifier -- arrives while the end acknowledgement is still
+        // unconfirmed and must be ignored. A request to the node's own SDO server, sent after it
+        // on the same bus, is answered only once the node has handled that frame, so its answer
+        // marks the point from which the acknowledgement may be confirmed.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-decided-{Guid.NewGuid():N}");
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        using var client = CanOpen.OpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
+        var endAckConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var endAckSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeAnswered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Hold = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoTx(0x7F))
+            {
+                probeAnswered.TrySetResult(true);
+                return null;
+            }
+
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
+            var cs = frame.Data.Span[0];
+            if ((cs & 0xE3) == SdoBlockFrames.CcsBlockUploadInitBase)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildBlockUploadInitResponse(
+                    0x1000, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 4));
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadStart)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, new byte[] { 1, 2, 3, 4 }));
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildEnd(
+                    SdoBlockFrames.ScsBlockUploadEndBase, unusedBytesInLastSegment: 3, crc: 0));
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadEndResponse)
+            {
+                endAckSent.TrySetResult(true);
+                return endAckConfirmation.Task;
+            }
+
+            return null;
+        };
+
+        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block);
+        await endAckSent.Task.WithTimeoutAsync(ShortTimeout);
+        bus.RaiseObserved(CanFrame.Classic(server, new byte[] { 0xE5, 0, 0, 0, 0, 0, 0, 0 }), isEcho: false);
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x7F)),
+            new byte[] { 0x40, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 }), isEcho: false);
+        await probeAnswered.Task.WithTimeoutAsync(ShortTimeout);
+        endAckConfirmation.SetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
+
+        var data = await upload.WithTimeoutAsync(ShortTimeout);
+        data.Should().Equal(1, 2, 3, 4);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Send_Outcome_Of_A_Cancelled_Block_Transfer_Touches_Nothing(bool nextTransferStarted)
+    {
+        // The block initiate is still unconfirmed when the caller cancels. Its outcome, failed,
+        // arrives after the session is gone -- with no transfer to that server, or with the next
+        // one already running -- and must fail neither.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-stale-{Guid.NewGuid():N}");
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        using var client = CanOpen.OpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        var firstInitConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var inits = 0;
+        service.Hold = frame =>
+        {
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
+            if ((frame.Data.Span[0] & 0xE3) != SdoBlockFrames.CcsBlockUploadInitBase) return null;
+            return Interlocked.Increment(ref inits) == 1 ? firstInitConfirmation.Task : null;
+        };
+
+        using var cancel = new CancellationTokenSource();
+        var first = client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block, cancel.Token);
+        cancel.Cancel();
+        await FluentActions.Awaiting(() => first.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<OperationCanceledException>();
+
+        using var cancelNext = new CancellationTokenSource();
+        var next = nextTransferStarted
+            ? client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block, cancelNext.Token)
+            : Task.FromResult(Array.Empty<byte>());
+        firstInitConfirmation.SetResult(new TxConfirmation
+        {
+            Confirmed = false,
+            FailureReason = TxConfirmFailureReason.Timeout,
+            Timestamp = DateTime.UtcNow,
+        });
+
+        // The node answers its own SDO server only after everything posted before, the stale
+        // outcome included, so an answer means that outcome has been handled.
+        var probe = client.SdoUploadAsync(0x7F, 0x1000, 0x00);
+        await FluentActions.Awaiting(() => probe.WithTimeoutAsync(ShortTimeout)).Should().NotThrowAsync();
+        next.IsCompleted.Should().Be(!nextTransferStarted, "the stale outcome did not fail the next transfer");
+        cancelNext.Cancel();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_End_Acknowledgement_Outcome_After_Cancellation_Touches_Nothing(bool nextTransferStarted)
+    {
+        // The upload is cancelled while its end acknowledgement is unconfirmed. That outcome
+        // then arrives with no transfer to the server, or with the next one running, and must
+        // complete neither.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-end-stale-{Guid.NewGuid():N}");
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        using var client = CanOpen.OpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
+        var endAckConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var endAckSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inits = 0;
+        service.Hold = frame =>
+        {
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
+            var cs = frame.Data.Span[0];
+            if ((cs & 0xE3) == SdoBlockFrames.CcsBlockUploadInitBase)
+            {
+                // Only the first transfer is served; the next one stays waiting.
+                if (Interlocked.Increment(ref inits) == 1)
+                {
+                    Answer(bus, server, SdoBlockFrames.BuildBlockUploadInitResponse(
+                        0x1000, 0x00, serverCrcSupported: false, sizeIndicated: true, totalSize: 4));
+                }
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadStart)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildSegment(seqno: 1, isLastSegment: true, new byte[] { 1, 2, 3, 4 }));
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck)
+            {
+                Answer(bus, server, SdoBlockFrames.BuildEnd(
+                    SdoBlockFrames.ScsBlockUploadEndBase, unusedBytesInLastSegment: 3, crc: 0));
+            }
+            else if (cs == SdoBlockFrames.CcsBlockUploadEndResponse)
+            {
+                endAckSent.TrySetResult(true);
+                return endAckConfirmation.Task;
+            }
+
+            return null;
+        };
+
+        using var cancel = new CancellationTokenSource();
+        var first = client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block, cancel.Token);
+        await endAckSent.Task.WithTimeoutAsync(ShortTimeout);
+        cancel.Cancel();
+        await FluentActions.Awaiting(() => first.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<OperationCanceledException>();
+
+        using var cancelNext = new CancellationTokenSource();
+        var next = nextTransferStarted
+            ? client.SdoUploadAsync(0x11, 0x1000, 0x00, SdoTransferMode.Block, cancelNext.Token)
+            : Task.FromResult(Array.Empty<byte>());
+        endAckConfirmation.SetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
+
+        // As in the initiate case: the node's own SDO server answers only after that outcome.
+        var probe = client.SdoUploadAsync(0x7F, 0x1000, 0x00);
+        await FluentActions.Awaiting(() => probe.WithTimeoutAsync(ShortTimeout)).Should().NotThrowAsync();
+        next.IsCompleted.Should().Be(!nextTransferStarted, "the stale outcome did not complete the next transfer");
+        cancelNext.Cancel();
+    }
+
+    [Fact]
+    public async Task A_Failed_Confirmation_Of_An_Answered_Request_Is_Ignored()
+    {
+        // Segmented upload: the server answers the initiate, and the client sends its segment
+        // request. Only then does the initiate's confirmation fail -- a lost echo of a request
+        // the server has answered -- and the upload must still complete.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-answered-{Guid.NewGuid():N}");
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        using var client = CanOpen.OpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+        var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
+        var initiateConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var segmentRequested = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeAnswered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Hold = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoTx(0x7F)) probeAnswered.TrySetResult(true);
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
+            var cs = frame.Data.Span[0];
+            if (cs == 0x40)
+            {
+                // Segmented upload response, 4 bytes indicated.
+                Answer(bus, server, new byte[] { 0x41, 0x00, 0x10, 0x00, 0x04, 0x00, 0x00, 0x00 });
+                return initiateConfirmation.Task;
+            }
+
+            if ((cs & 0xEF) == 0x60) segmentRequested.TrySetResult(true);
+            return null;
+        };
+
+        var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00);
+        await segmentRequested.Task.WithTimeoutAsync(ShortTimeout);
+        // Without RunContinuationsAsynchronously the outcome is posted inside SetResult, before
+        // the probe below; the probe's reply therefore marks it handled while the upload is live.
+        initiateConfirmation.SetResult(new TxConfirmation
+        {
+            Confirmed = false,
+            FailureReason = TxConfirmFailureReason.Timeout,
+            Timestamp = DateTime.UtcNow,
+        });
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x7F)),
+            new byte[] { 0x40, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 }), isEcho: false);
+        await probeAnswered.Task.WithTimeoutAsync(ShortTimeout);
+        // Last segment, toggle 0, three unused bytes: 1, 2, 3, 4.
+        bus.RaiseObserved(CanFrame.Classic(server, new byte[] { 0x07, 1, 2, 3, 4, 0, 0, 0 }), isEcho: false);
 
         var data = await upload.WithTimeoutAsync(ShortTimeout);
         data.Should().Equal(1, 2, 3, 4);

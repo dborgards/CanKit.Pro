@@ -1719,8 +1719,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // A request is still unconfirmed. If it fails, nothing ever reached the server and
             // the transfer must end with that failure, not a timeout that reads as a silent
             // server; if it is confirmed, the timeout stands. OnSdoClientSendCompleted decides.
+            // The deadline has fired and needs no disposing.
             session.TimedOut = true;
-            session.Deadline?.Dispose();
             return;
         }
 
@@ -2068,7 +2068,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (failure is not null)
         {
             _sdoClients.Remove(session.ServerNodeId);
-            session.Deadline?.Dispose();
+            session.Deadline!.Dispose(); // armed before the session's first send
             session.Tcs.TrySetException(failure);
             return;
         }
@@ -2099,7 +2099,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (failure is not null)
             {
                 _sdoBlockClients.Remove(session.ServerNodeId);
-                session.Deadline?.Dispose();
+                session.Deadline!.Dispose(); // armed before the session's first send
                 session.Tcs.TrySetException(failure);
                 return;
             }
@@ -2114,14 +2114,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private void PostSdoClientSendOutcome(Action react)
     {
-        if (Volatile.Read(ref _disposed) != 0) return;
         try
         {
             _actor.Post(react);
         }
-        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+        catch (ObjectDisposedException)
         {
-            // Disposal won the race between the check above and the post. It has completed the
+            // The actor is disposed only with the node, and disposing the node has completed the
             // transfer this outcome belonged to, so there is nothing left to report it to.
             return;
         }

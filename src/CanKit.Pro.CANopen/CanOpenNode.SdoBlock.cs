@@ -105,7 +105,7 @@ internal sealed partial class CanOpenNode
         {
             // As OnSdoClientTimeout: an unconfirmed send decides the transfer (#197).
             session.TimedOut = true;
-            session.Deadline?.Dispose();
+            session.AwaitingSendOutcome = true;
             return;
         }
 
@@ -187,7 +187,7 @@ internal sealed partial class CanOpenNode
     {
         if (!_sdoBlockClients.TryGetValue(serverNodeId, out var session)) return false;
         // Decided already; only the outcome of a pending send is awaited.
-        if (session.TimedOut || session.Finishing) return true;
+        if (session.AwaitingSendOutcome) return true;
         if (data.Length == 0) return true; // consume — nothing to parse
 
         // Pad short DLC frames back to 8 bytes for parsing, matching the classic SDO client
@@ -425,7 +425,7 @@ internal sealed partial class CanOpenNode
                     // the wire: if the bus does not send it, the server is still waiting for it
                     // and the transfer has not ended (#197).
                     session.Deadline?.Dispose();
-                    session.Finishing = true;
+                    session.AwaitingSendOutcome = true;
                     // The end frame answers every send before it, the last sub-block ack
                     // included: none of their outcomes may decide the upload now.
                     session.LatestSendId++;
@@ -1216,9 +1216,10 @@ internal sealed partial class CanOpenNode
         /// ends when that send does.</summary>
         public bool TimedOut { get; set; }
 
-        /// <summary>The upload is complete and its end acknowledgement is being sent; the
-        /// transfer ends when that send does.</summary>
-        public bool Finishing { get; set; }
+        /// <summary>The transfer is decided -- it timed out, or the upload is complete and its end
+        /// acknowledgement is being sent -- and ends when that send does. Frames from the server
+        /// are no longer taken.</summary>
+        public bool AwaitingSendOutcome { get; set; }
         public TaskCompletionSource<byte[]> Tcs { get; }
         public bool LocalCrcSupported { get; }
         public bool CrcActive { get; set; }

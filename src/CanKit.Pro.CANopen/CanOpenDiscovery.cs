@@ -229,9 +229,13 @@ public static class CanOpenDiscovery
         {
             pump = Task.Run(async () =>
             {
-                await foreach (var frameEvent in subscription.Frames.ConfigureAwait(false))
+                // WaitToReadAsync turns false once the subscription is disposed and drained.
+                while (await subscription.WaitToReadAsync().ConfigureAwait(false))
                 {
-                    Record(heard, frameEvent.Frame);
+                    while (subscription.TryRead(out var frameEvent))
+                    {
+                        Record(heard, frameEvent.Frame);
+                    }
                 }
             });
             pumpStarted?.Invoke(pump);
@@ -274,27 +278,22 @@ public static class CanOpenDiscovery
         }
 
         byte nodeId = (byte)(id - CanOpenCobId.HeartbeatBase);
+        byte stateByte = (byte)(frame.Data.Span[0] & 0x7F);
         CanOpenPresenceEvidence evidence;
         NmtState? state = null;
-        switch (frame.Data.Span[0] & 0x7F)
+        if (stateByte == (byte)NmtState.Initializing)
         {
-            case 0x00:
-                evidence = CanOpenPresenceEvidence.BootUp;
-                break;
-            case 0x04:
-                evidence = CanOpenPresenceEvidence.Heartbeat;
-                state = NmtState.Stopped;
-                break;
-            case 0x05:
-                evidence = CanOpenPresenceEvidence.Heartbeat;
-                state = NmtState.Operational;
-                break;
-            case 0x7F:
-                evidence = CanOpenPresenceEvidence.Heartbeat;
-                state = NmtState.PreOperational;
-                break;
-            default:
-                return;
+            evidence = CanOpenPresenceEvidence.BootUp;
+        }
+        else if (stateByte is (byte)NmtState.Stopped or (byte)NmtState.Operational or (byte)NmtState.PreOperational)
+        {
+            // NmtState is defined with the heartbeat state bytes as its values.
+            evidence = CanOpenPresenceEvidence.Heartbeat;
+            state = (NmtState)stateByte;
+        }
+        else
+        {
+            return;
         }
 
         heard.TryGetValue(nodeId, out var previous);
