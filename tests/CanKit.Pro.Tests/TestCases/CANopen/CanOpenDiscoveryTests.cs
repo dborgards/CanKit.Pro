@@ -212,6 +212,22 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Faulted_Frame_Stream_Surfaces_And_Releases_The_Window()
+    {
+        using var service = new FaultingService();
+        CancellationToken windowToken = default;
+        var listen = CanOpenDiscovery.ListenCoreAsync(service, TimeSpan.FromMinutes(5), (_, token) =>
+        {
+            windowToken = token;
+            return Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, token);
+        }, CancellationToken.None);
+
+        await FluentActions.Awaiting(() => listen.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<InvalidOperationException>().WithMessage("stream fault");
+        windowToken.IsCancellationRequested.Should().BeTrue("the window's timer is released before the fault surfaces");
+    }
+
+    [Fact]
     public async Task ListenAsync_On_A_Bus_Uses_The_Window_And_Detaches_Afterwards()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-discovery-bus-{Guid.NewGuid():N}");
@@ -413,4 +429,59 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
 
     private static string Describe(uint id, bool remote, ReadOnlySpan<byte> data)
         => $"{id:X3}:{(remote ? "R" : "D")}:{Convert.ToHexString(data)}";
+
+    /// <summary>A service whose subscription's frame stream faults at the first wait.</summary>
+    private sealed class FaultingService : ICanBusService
+    {
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add { }
+            remove { }
+        }
+
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 0;
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false) => new FaultingSubscription();
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription();
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => Array.Empty<FilterOverlap>();
+
+        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class FaultingSubscription : ISubscription
+    {
+        public IAsyncEnumerable<CanFrameEvent> Frames => throw new NotSupportedException();
+
+        public bool TryRead(out CanFrameEvent frameEvent)
+        {
+            frameEvent = default!;
+            return false;
+        }
+
+        public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+            => new(Task.FromException<bool>(new InvalidOperationException("stream fault")));
+
+        public void Reconfigure(CanIdFilter filter)
+        {
+        }
+
+        public void Reconfigure(Func<CanFrameEvent, bool>? predicate)
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
 }

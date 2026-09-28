@@ -246,10 +246,13 @@ public static class CanOpenDiscovery
             await Task.WhenAny(closed, pump).ConfigureAwait(false);
         }
 
+        // A pump that ended first -- disposed service or faulted stream -- releases the window's
+        // timer before anything is rethrown, or it would live on for the rest of the window.
+        bool endedEarly = !closed.IsCompleted;
+        if (endedEarly) windowCancellation.Cancel();
         await pump.ConfigureAwait(false); // a fault of the frame stream surfaces here
-        if (!closed.IsCompleted)
+        if (endedEarly)
         {
-            windowCancellation.Cancel();
             throw new ObjectDisposedException(nameof(ICanBusService),
                 "The subscription ended before the listen window closed; the service was disposed.");
         }
