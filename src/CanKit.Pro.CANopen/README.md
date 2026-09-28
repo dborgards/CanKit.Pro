@@ -260,6 +260,11 @@ including `1003h`. `PeerSdoAccessException.IsAllowedWithoutPeerDescription` is t
 Anything else throws `PeerSdoAccessException` with `PeerDescriptionLoaded` false, again before
 a frame is sent.
 
+A request the bus rejects or does not confirm fails its transfer immediately with
+`CanOpenTransportException`, instead of waiting for `SdoTimeout`. With the request not on the
+wire, no answer can come, and a timeout would look like a silent server. The same failure is also
+raised on `BackgroundExceptionOccurred`.
+
 ## Observing a peer PDO
 
 `ObserveForeignPdoAsync` splits a PDO of another node into a caller-supplied sink. Nothing is
@@ -315,7 +320,9 @@ reported when it answers:
 
 The client's own timeout (`SdoTimeout`) means the node is absent. The peer-SDO gate applies, so a
 node-id whose bound file does not list `1000h:00` is not asked. Neither is a node-id the client
-already has a transfer with, and neither kind is reported. Any other failure ends the scan.
+already has a transfer with, and neither kind is reported. Any other failure ends the scan. That
+includes a request the bus rejects or does not confirm, which fails with
+`CanOpenTransportException`, so a dead bus does not look like an empty one.
 Opening the client transmits its boot-up, which is one reason the scan is not the default.
 
 ## PDO engine

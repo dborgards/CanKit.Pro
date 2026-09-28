@@ -1686,7 +1686,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             payload: null, tcs);
         _sdoClients[serverNodeId] = session;
         session.Deadline = _deadlines.Arm(_options.SdoTimeout, () => OnSdoClientTimeout(serverNodeId));
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId), SdoFrames.BuildUploadInit(index, subindex));
+        SendSdoClientRequest(session, SdoFrames.BuildUploadInit(index, subindex));
     }
 
     private void BeginSdoDownload(byte serverNodeId, ushort index, byte subindex,
@@ -1708,8 +1708,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             payload, tcs);
         _sdoClients[serverNodeId] = session;
         session.Deadline = _deadlines.Arm(_options.SdoTimeout, () => OnSdoClientTimeout(serverNodeId));
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId),
-            SdoFrames.BuildDownloadInit(index, subindex, payload));
+        SendSdoClientRequest(session, SdoFrames.BuildDownloadInit(index, subindex, payload));
     }
 
     private void OnSdoClientTimeout(byte serverNodeId)
@@ -1937,7 +1936,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         bool last = (session.Offset + chunk) >= session.Payload.Length;
         session.Offset += chunk;
         var seg = SdoFrames.BuildSegment(SdoFrames.CcsDownloadSegmentBase, session.Toggle, last, payload);
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), seg);
+        SendSdoClientRequest(session, seg);
     }
 
     private void SendNextClientUploadSegmentRequest(SdoClientSession session)
@@ -1946,7 +1945,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (session.Toggle) cs |= SdoFrames.ToggleBit;
         var req = new byte[8];
         req[0] = cs;
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), req);
+        SendSdoClientRequest(session, req);
     }
 
     private void AbortClient(SdoClientSession session, SdoAbortCode code)
@@ -1962,13 +1961,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
-    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default)
+    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
+        Action<CanOpenTransportException>? onSendFailure = null)
     {
         // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmed for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
-        // callers do not need per-frame confirmation. For SDO client requests, an unconfirmed
-        // send that would have thrown will still surface via BackgroundExceptionOccurred and
-        // the SDO deadline will time the client out — the standard client contract.
+        // callers do not need per-frame confirmation. A failed send always surfaces via
+        // BackgroundExceptionOccurred. An SDO client request also passes onSendFailure, which
+        // fails its transfer at once instead of leaving it to the SDO timeout (#197).
         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
         return Task.Run(async () =>
         {
@@ -1978,8 +1978,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     .ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
-                    RaiseBackgroundException(new CanOpenTransportException(
-                        $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}."));
+                    var failure = new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                    RaiseBackgroundException(failure);
+                    onSendFailure?.Invoke(failure);
                 }
             }
             catch (OperationCanceledException)
@@ -1992,8 +1994,60 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             catch (Exception ex)
             {
                 RaiseBackgroundException(ex);
+                onSendFailure?.Invoke(ex as CanOpenTransportException
+                    ?? new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex));
             }
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Sends a request of a live SDO client transfer. If the bus rejects it or does not confirm
+    /// it, the transfer fails with that <see cref="CanOpenTransportException"/> as soon as the
+    /// failure is known, rather than by the SDO timeout later: without the request on the wire
+    /// no answer can come, and a timeout would read as a silent server (#197).
+    /// </summary>
+    private void SendSdoClientRequest(SdoClientSession session, byte[] payload)
+        => _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
+            onSendFailure: failure => PostSdoClientSendFailure(() =>
+            {
+                if (!_sdoClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
+                    return;
+                _sdoClients.Remove(session.ServerNodeId);
+                session.Deadline?.Dispose();
+                session.Tcs.TrySetException(failure);
+            }));
+
+    /// <summary>As <see cref="SendSdoClientRequest"/>, for a block transfer.</summary>
+    private void SendSdoBlockClientRequest(SdoBlockClientSession session, byte[] payload)
+        => _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), payload,
+            onSendFailure: SdoBlockClientSendFailure(session));
+
+    /// <summary>The send-failure reaction for <paramref name="session"/>: fail it, if it is
+    /// still the live block transfer with that server.</summary>
+    private Action<CanOpenTransportException> SdoBlockClientSendFailure(SdoBlockClientSession session)
+        => failure => PostSdoClientSendFailure(() =>
+        {
+            if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
+                return;
+            _sdoBlockClients.Remove(session.ServerNodeId);
+            session.Deadline?.Dispose();
+            session.Tcs.TrySetException(failure);
+        });
+
+    /// <summary>
+    /// Runs a send-failure reaction on the actor, where the session tables live. After disposal
+    /// there is nothing left to fail: disposal has already completed every open transfer.
+    /// </summary>
+    private void PostSdoClientSendFailure(Action fail)
+    {
+        try
+        {
+            _actor.Post(fail);
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     /// <summary>
@@ -2001,6 +2055,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// race behind the subsequent Pre-Operational heartbeat (Bugbot 3600879326).
     /// </summary>
     private Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
+        => SendOrderedControlFrames(onSendFailure: null, frames);
+
+    /// <summary>As above; <paramref name="onSendFailure"/> is told of each frame that fails, as
+    /// in <see cref="SendControlFrame"/>.</summary>
+    private Task SendOrderedControlFrames(Action<CanOpenTransportException>? onSendFailure,
+        params (uint CobId, byte[] Payload)[] frames)
     {
         return Task.Run(async () =>
         {
@@ -2012,13 +2072,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     var conf = await _service.SendConfirmed(frame).ConfigureAwait(false);
                     if (!conf.Confirmed)
                     {
-                        RaiseBackgroundException(new CanOpenTransportException(
-                            $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}."));
+                        var failure = new CanOpenTransportException(
+                            $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                        RaiseBackgroundException(failure);
+                        onSendFailure?.Invoke(failure);
                     }
                 }
                 catch (Exception ex)
                 {
                     RaiseBackgroundException(ex);
+                    onSendFailure?.Invoke(ex as CanOpenTransportException
+                        ?? new CanOpenTransportException(
+                            $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex));
                     return;
                 }
             }

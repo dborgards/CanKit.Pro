@@ -60,7 +60,7 @@ internal sealed partial class CanOpenNode
             clientCrcSupported: session.LocalCrcSupported,
             sizeIndicated: true,
             totalSize: (uint)payload.Length);
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId), init);
+        SendSdoBlockClientRequest(session, init);
     }
 
     // =========================================================================================
@@ -95,7 +95,7 @@ internal sealed partial class CanOpenNode
             clientCrcSupported: session.LocalCrcSupported,
             blockSize: session.LocalBlockSize,
             pst: 0);
-        _ = SendControlFrame(CanOpenCobId.SdoRx(serverNodeId), init);
+        SendSdoBlockClientRequest(session, init);
     }
 
     private void OnSdoBlockClientTimeout(byte serverNodeId)
@@ -347,7 +347,7 @@ internal sealed partial class CanOpenNode
                     session.Phase = SdoBlockClientPhase.ReceivingSegments;
 
                     // Tell the server to begin streaming segments.
-                    _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId),
+                    SendSdoBlockClientRequest(session,
                         SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
                 }
                 return true;
@@ -477,7 +477,7 @@ internal sealed partial class CanOpenNode
             var ack = SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck,
                 lastAckedSeq: (byte)(session.NextExpectedSeq - 1),
                 nextBlockSize: session.LocalBlockSize);
-            _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), ack);
+            SendSdoBlockClientRequest(session, ack);
             if (session.SubBlockDamaged)
             {
                 // Partial confirm: NextExpectedSeq stays where the gap was; the server resends
@@ -533,7 +533,7 @@ internal sealed partial class CanOpenNode
         }
         session.ResumeSeqno = seqno;
         session.Phase = SdoBlockClientPhase.AwaitSubBlockAck;
-        _ = SendOrderedControlFrames(frames.ToArray());
+        _ = SendOrderedControlFrames(SdoBlockClientSendFailure(session), frames.ToArray());
     }
 
     private void SendBlockDownloadEnd(SdoBlockClientSession session)
@@ -548,7 +548,7 @@ internal sealed partial class CanOpenNode
         var end = SdoBlockFrames.BuildEnd(SdoBlockFrames.CcsBlockDownloadEndBase,
             session.LastSegmentUnusedBytes, crc);
         session.Phase = SdoBlockClientPhase.AwaitEndResponse;
-        _ = SendControlFrame(CanOpenCobId.SdoRx(session.ServerNodeId), end);
+        SendSdoBlockClientRequest(session, end);
     }
 
     // =========================================================================================
