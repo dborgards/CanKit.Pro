@@ -79,6 +79,12 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
     // FR-RAW-010: two subscriptions with disjoint ID filters on the same bus each receive only
     // their own matching frames.
+    // Waits for a callback subscription's delivery pump to end: after that no onNext call or
+    // report can happen, so a check that nothing more arrived is final rather than a bet on a
+    // window being long enough (#171).
+    private static Task PumpEndedAsync(IDisposable subscription)
+        => ((CanBusServiceExtensions.CallbackSubscription)subscription).Completion.WaitAsync(ShortTimeout);
+
     [Fact]
     public async Task Disjoint_Id_Filters_Each_Receive_Only_Their_Own_Frames()
     {
@@ -223,7 +229,9 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         sender.Transmit(CanFrame.Classic(0x100, new byte[] { 2 }));
         sender.Transmit(CanFrame.Classic(0x100, new byte[] { 3 }));
-        await Task.Delay(200);
+        // onNext runs on the delivery pump and nowhere else, so once the pump has ended nothing
+        // can be delivered any more -- the fact a 200 ms window only hoped to observe (#171).
+        await PumpEndedAsync(subscription);
 
         Volatile.Read(ref count).Should().Be(countAfterDispose);
     }
@@ -288,7 +296,8 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         proceed.TrySetResult(true);
         await disposed.Task.WaitAsync(ShortTimeout);
-        await Task.Delay(200);
+        // A pump that kept draining the completed buffer would deliver the burst before it ended.
+        await PumpEndedAsync(subscription!);
 
         Volatile.Read(ref count).Should().Be(1);
     }
@@ -395,7 +404,10 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         sender.Transmit(CanFrame.Classic(0x100, new byte[] { 1 }));
         await observed.Task.WaitAsync(ShortTimeout);
 
-        await Task.Delay(100); // give a second, wrong report time to arrive
+        // A second, wrong report would be made by the same report call on the pump, after onError
+        // returned; once the pump has ended, it has been made or never will be (#171).
+        subscription.Dispose();
+        await PumpEndedAsync(subscription);
         Volatile.Read(ref throughEvent).Should().Be(0, "onError is the destination the caller chose");
     }
 
