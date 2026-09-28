@@ -57,7 +57,8 @@ public sealed class CanOpenDiscoveredNode
     public NmtState? HeartbeatState { get; }
 
     /// <summary><c>1000h:00</c> as the node returned it to <see cref="CanOpenDiscovery.ScanAsync"/>,
-    /// or <see langword="null"/> when it was not read or the node answered with an abort.</summary>
+    /// or <see langword="null"/> when it was not read, the node answered with an abort, or the value
+    /// was not exactly four bytes.</summary>
     public uint? DeviceType { get; }
 }
 
@@ -281,7 +282,9 @@ public static class CanOpenDiscovery
         try
         {
             var data = await uploadDeviceType(nodeId, cancellationToken).ConfigureAwait(false);
-            uint? deviceType = data.Length >= 4
+            // 1000h:00 is UNSIGNED32. Any other length is an answer, and so presence, but not a
+            // device type: taking four bytes of a longer value would report one the node never gave.
+            uint? deviceType = data.Length == 4
                 ? (uint)(data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24)
                 : null;
             return new CanOpenDiscoveredNode(nodeId, CanOpenPresenceEvidence.SdoResponse, null, deviceType);

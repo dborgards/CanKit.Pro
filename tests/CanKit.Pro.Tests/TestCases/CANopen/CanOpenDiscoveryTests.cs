@@ -210,17 +210,19 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
             [0x05] = () => Task.FromException<byte[]>(Timeout(0x05)),
             [0x06] = () => throw new PeerSdoAccessException(0x06, 0x1000, 0, true, "not in the file"),
             [0x07] = () => Task.FromException<byte[]>(new InvalidOperationException("already in flight")),
+            [0x08] = () => Task.FromResult(new byte[] { 0x91, 0x01, 0x0F, 0x00, 0x55 }),
         };
 
         var nodes = await CanOpenDiscovery.ScanCoreAsync(0x7F, Skip(except: script.Keys),
             (id, _) => script[id](), CancellationToken.None);
 
-        nodes.Select(n => n.NodeId).Should().Equal(0x01, 0x02, 0x03, 0x04);
+        nodes.Select(n => n.NodeId).Should().Equal(0x01, 0x02, 0x03, 0x04, 0x08);
         nodes.Should().OnlyContain(n => n.Evidence == CanOpenPresenceEvidence.SdoResponse && n.HeartbeatState == null);
         nodes[0].DeviceType.Should().Be(0x000F0191u);
         nodes[1].DeviceType.Should().BeNull("a value shorter than UNSIGNED32 is an answer, not a device type");
         nodes[2].DeviceType.Should().BeNull();
         nodes[3].DeviceType.Should().BeNull();
+        nodes[4].DeviceType.Should().BeNull("a longer value is an answer too, but its first four bytes are not the device type");
     }
 
     [Fact]
@@ -261,6 +263,32 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
         nodes = await CanOpenDiscovery.ScanAsync(client, Skip(except: new byte[] { 0x21, 0x22 }))
             .WithTimeoutAsync(ShortTimeout);
         nodes.Select(n => n.NodeId).Should().Equal(0x21);
+    }
+
+    [Fact]
+    public async Task Without_A_Skip_List_Only_The_Client_Is_Left_Out()
+    {
+        var asked = new ConcurrentBag<byte>();
+        await CanOpenDiscovery.ScanCoreAsync(0x01, null, (id, _) =>
+        {
+            asked.Add(id);
+            return Task.FromException<byte[]>(Timeout(id));
+        }, CancellationToken.None);
+
+        asked.OrderBy(i => i).Should().Equal(Enumerable.Range(2, 126).Select(i => (byte)i));
+    }
+
+    [Fact]
+    public void A_Discovered_Node_Needs_A_Valid_Node_Id_And_Some_Evidence()
+    {
+        var node = new CanOpenDiscoveredNode(0x7F, CanOpenPresenceEvidence.BootUp, null, 0x191);
+        node.NodeId.Should().Be(0x7F);
+        node.DeviceType.Should().Be(0x191u);
+
+        var none = () => new CanOpenDiscoveredNode(0x10, CanOpenPresenceEvidence.None, null, null);
+        none.Should().Throw<ArgumentException>().WithParameterName("evidence");
+        var zero = () => new CanOpenDiscoveredNode(0x00, CanOpenPresenceEvidence.Heartbeat, NmtState.Operational, null);
+        zero.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     private static IEnumerable<byte> Skip(IEnumerable<byte> except)
