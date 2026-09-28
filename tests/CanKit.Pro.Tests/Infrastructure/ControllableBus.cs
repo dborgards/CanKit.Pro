@@ -97,7 +97,7 @@ public sealed class ControllableBus : ICanBus
 
     /// <summary>
     /// Creates a double whose <see cref="Options"/> are the wrapped bus's own, i.e. no
-    /// <c>Echo</c> capability: <c>SendConfirmed</c> takes the approximated path (FR-RAW-032).
+    /// <c>Echo</c> capability: <c>SendConfirmed</c> takes the approximated path.
     /// Nothing is echoed. <see cref="StallTransmitAsync"/> makes its asynchronous transmit
     /// genuinely asynchronous, which no shipped adapter is (#202).
     /// </summary>
@@ -122,6 +122,9 @@ public sealed class ControllableBus : ICanBus
 
     /// <summary>Completes every stalled asynchronous transmit as accepted and stops stalling.</summary>
     public void ReleaseStalledTransmits() => Interlocked.Exchange(ref _stall, null)?.TrySetResult(1);
+
+    /// <summary>Faults every stalled asynchronous transmit and stops stalling.</summary>
+    public void FaultStalledTransmits(Exception error) => Interlocked.Exchange(ref _stall, null)?.TrySetException(error);
 
     /// <summary>Completes with the frame the first <c>TransmitAsync</c> call was handed.</summary>
     public Task<CanFrame> FirstAsyncTransmit => _firstAsyncTransmit.Task;

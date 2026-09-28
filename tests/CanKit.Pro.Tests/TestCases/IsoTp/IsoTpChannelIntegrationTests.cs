@@ -2806,6 +2806,30 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.GetReceptionsInProgress().Should().BeEmpty();
     }
 
+    // Codex on #216: the same, when the injected actor was disposed first and can no longer run
+    // the channel's cleanup -- the published records are withdrawn without it.
+    [Fact]
+    public async Task A_Reception_Under_Way_Is_Withdrawn_When_The_Injected_Actor_Was_Disposed_First()
+    {
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+        channel.GetReceptionsInProgress();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        channel.GetReceptionsInProgress().Should().HaveCount(1);
+
+        actor.Dispose();
+        channel.Dispose();
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
     // #206: a frame that was already on its way to the actor when the channel was disposed
     // completes no PDU and raises no DatagramReceived. The channel is disposed with the actor
     // held, and the frame -- pumped into the mailbox beforehand -- runs only afterwards.

@@ -527,12 +527,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             }
         }
 
+        var actorGone = false;
         try
         {
             _actor.Post(FailInFlightSend);
         }
         catch (ObjectDisposedException)
         {
+            actorGone = true;
             // An injected actor its owner already disposed (#205): Dispose must still be safe to
             // call and must still run the rest of its cleanup below. Actor state (_tx,
             // _busTxIdleWaiter) is not touched from here -- the owner's Dispose may still be
@@ -543,6 +545,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
+
+        // With the actor gone nothing will ever withdraw the receptions it left published (Codex
+        // on #216). The published records are the one piece of reception state that is safe to
+        // clear from here: they are a lock-free snapshot readable from any thread, unlike _rx,
+        // which stays untouched. Done after the reader has stopped, so nothing announces anew.
+        if (actorGone)
+        {
+            foreach (var reception in Volatile.Read(ref _receptionsInProgress))
+                WithdrawReception(reception);
+        }
 
         _subscription.Dispose();
         // Actor.Dispose drains the FailTx/idle-waiter post above (FinalDrain), so the in-flight
@@ -1545,11 +1557,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var endpoint = _endpoint;
         _ = Task.Run(() =>
         {
-            // Queued before Dispose but scheduled after it: not delivered (#206). A start racing
-            // Dispose itself cannot be excluded without holding a lock across the handler.
-            if (Volatile.Read(ref _disposed) != 0)
-                return;
-
+            // No disposed check here: a start racing Dispose cannot be excluded without holding a
+            // lock across the handler, and the check above already stops emission once
+            // disposal has begun (#206).
             try
             {
                 handler.Invoke(this, new IsoTpDatagramReceivedEventArgs(endpoint, pdu));

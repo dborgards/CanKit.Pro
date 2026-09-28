@@ -366,6 +366,41 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         bus.ReleaseStalledTransmits();
     }
 
+    // The transmit a timed-out send abandons may still fail later; nobody awaits it, so the
+    // service must have observed it, or the fault surfaces as an unobserved task exception.
+    [Fact]
+    public async Task A_Late_Fault_Of_The_Abandoned_Transmit_Is_Observed()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        var unobserved = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+        var marker = new InvalidOperationException("late driver failure");
+        EventHandler<UnobservedTaskExceptionEventArgs> onUnobserved = (_, e) =>
+        {
+            if (e.Exception.InnerExceptions.Contains(marker)) unobserved.Add(marker);
+        };
+        TaskScheduler.UnobservedTaskException += onUnobserved;
+        try
+        {
+            (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+                .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+            bus.FaultStalledTransmits(marker);
+
+            for (var i = 0; i < 3; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+            }
+
+            unobserved.Should().BeEmpty("the abandoned transmit's fault was observed");
+        }
+        finally
+        {
+            TaskScheduler.UnobservedTaskException -= onUnobserved;
+        }
+    }
+
     // The private copy handed to the driver is the same frame: kind, identifier, flags, payload.
     [Fact]
     public async Task The_Drivers_Copy_Is_The_Same_Frame_For_Every_Kind()
