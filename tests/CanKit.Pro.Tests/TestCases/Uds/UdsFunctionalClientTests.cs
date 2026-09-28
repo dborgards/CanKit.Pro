@@ -132,6 +132,17 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // A call puts its listener up before the send, and the listener arms its collection for
+    // the provisional window from a thread of its own: it reads the remaining time, then arms
+    // that much from whatever the clock says by then. Moving the clock in between arms the
+    // whole window again from the new reading, and a call waiting on the listener then waits
+    // for a window that ends far too late -- measured in a full local run as a timer 990 ms
+    // out where the window was long over, behind CI's "Only 1 of 2 expected echoes" (#195). So before the clock moves under a send in flight, this waits for
+    // that collection to be armed; nothing else is armed yet, and the clock has not moved since
+    // the call noted its window, so it is exactly the window away.
+    private static Task WaitForProvisionalWindow(WindowClock clock, TimeSpan window)
+        => WaitUntilArmed(clock, window);
+
     // For StepThroughSlicesUntil: the earliest timer is the one ending at `end`.
     private static Func<TimeSpan?, bool> ArmedUntil(WindowClock clock, TimeSpan end)
         => delay => delay is { } d && d >= end - clock.Clock.Elapsed
@@ -564,18 +575,25 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
 
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
         int handedOver = 0;
-        // The first frame: the driver takes 200 ms to accept it, as a cost on the clock rather
-        // than a wait on the wall (#195).
+        using var hold = new ManualResetEventSlim();
+        var inside = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // The first frame: the driver holds it while the clock moves 200 ms, then accepts it.
         bus.OnTransmitting = frame =>
         {
-            if (frame.ID == unchecked((int)FunctionalTxId) && Interlocked.Increment(ref handedOver) == 1)
-                clock.Clock.Advance(TimeSpan.FromMilliseconds(200));
+            if (frame.ID != unchecked((int)FunctionalTxId) || Interlocked.Increment(ref handedOver) != 1) return;
+            inside.TrySetResult(true);
+            hold.Wait();
         };
 
         var sentFrom = clock.Clock.Elapsed;
         var acceptedAt = sentFrom + TimeSpan.FromMilliseconds(200);
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token);
+        // On the pool: the driver's hold is inside the service's send lock, a synchronous wait.
+        var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token));
+        await inside.Task.WaitAsync(ShortTimeout);
+        await WaitForProvisionalWindow(clock, TimeSpan.FromMilliseconds(1000));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200));
+        hold.Set();
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await CollectFor(clock, first, ShortCollection);
@@ -614,6 +632,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource(ShortTimeout);
         var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await WaitForProvisionalWindow(clock, TimeSpan.FromMilliseconds(1000));
         await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(2000)); // the confirmation held, the window long over
         bus.DeferredEchoes.ReleaseNext();
         await CollectFor(clock, first, ShortCollection);
@@ -962,6 +981,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var provisionalEnd = clock.Clock.Elapsed + p2; // the listener's window, noted before the send
         var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token));
         await reached.Task.WaitAsync(ShortTimeout);
+        await WaitForProvisionalWindow(clock, p2);
         bus.RaiseObserved(pending, isEcho: false); // before the handoff: not this request's
         // Strictly before: the handoff is stamped once the lock is free, 10 ms on.
         await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(10));
@@ -1082,18 +1102,27 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var negative = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x31 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
         int handedOver = 0;
+        using var hold = new ManualResetEventSlim();
+        var inside = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         // The first frame: accepted 1100 ms after it was handed over -- longer than the
-        // 1000 ms window the pre-send listener was given -- as a cost on the clock (#195).
+        // 1000 ms window the pre-send listener was given. The driver holds it while the clock
+        // moves.
         bus.OnTransmitting = frame =>
         {
-            if (frame.ID == unchecked((int)FunctionalTxId) && Interlocked.Increment(ref handedOver) == 1)
-                clock.Clock.Advance(TimeSpan.FromMilliseconds(1100));
+            if (frame.ID != unchecked((int)FunctionalTxId) || Interlocked.Increment(ref handedOver) != 1) return;
+            inside.TrySetResult(true);
+            hold.Wait();
         };
 
         var acceptedAt = clock.Clock.Elapsed + TimeSpan.FromMilliseconds(1100);
         var windowEnd = acceptedAt + TimeSpan.FromMilliseconds(1000);
         using var cts = new CancellationTokenSource(ShortTimeout);
-        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token);
+        // On the pool: the driver's hold is inside the service's send lock, a synchronous wait.
+        var first = Task.Run(() => functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, ShortCollection, cts.Token));
+        await inside.Task.WaitAsync(ShortTimeout);
+        await WaitForProvisionalWindow(clock, TimeSpan.FromMilliseconds(1000));
+        await clock.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1100));
+        hold.Set();
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext();
         await CollectFor(clock, first, ShortCollection);
