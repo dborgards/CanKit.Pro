@@ -205,12 +205,13 @@ public static class CanOpenDiscovery
         TimeSpan window, Func<TimeSpan, CancellationToken, Task> delay, CancellationToken cancellationToken)
     {
         var heard = new Dictionary<byte, (CanOpenPresenceEvidence Evidence, NmtState? State)>();
-        var subscription = service.Subscribe(
+        Task pump;
+        // Disposing the subscription completes Frames after the frames already buffered, so the
+        // pump is awaited only once the window has closed.
+        using (var subscription = service.Subscribe(
             CanIdFilter.Range(
                 CanOpenCobId.HeartbeatBase + CanOpenCobId.MinNodeId,
-                CanOpenCobId.HeartbeatBase + CanOpenCobId.MaxNodeId));
-        Task pump;
-        try
+                CanOpenCobId.HeartbeatBase + CanOpenCobId.MaxNodeId)))
         {
             pump = Task.Run(async () =>
             {
@@ -220,10 +221,6 @@ public static class CanOpenDiscovery
                 }
             });
             await delay(window, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            subscription.Dispose();
         }
 
         await pump.ConfigureAwait(false);
