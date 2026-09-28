@@ -192,6 +192,26 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Service_Disposed_During_The_Window_Ends_The_Listen_At_Once()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-discovery-service-gone-{Guid.NewGuid():N}");
+        // `using` as well as the explicit Dispose below, which is the event under test.
+        using var service = new CanBusService(bus);
+        CancellationToken windowToken = default;
+        var listen = CanOpenDiscovery.ListenCoreAsync(service, TimeSpan.FromMinutes(5), (_, token) =>
+        {
+            windowToken = token;
+            return Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, token);
+        }, CancellationToken.None);
+
+        service.Dispose();
+
+        await FluentActions.Awaiting(() => listen.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<ObjectDisposedException>("a listen that stopped hearing is not a complete one");
+        windowToken.IsCancellationRequested.Should().BeTrue("the window's timer is released, not left running");
+    }
+
+    [Fact]
     public async Task ListenAsync_On_A_Bus_Uses_The_Window_And_Detaches_Afterwards()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-discovery-bus-{Guid.NewGuid():N}");

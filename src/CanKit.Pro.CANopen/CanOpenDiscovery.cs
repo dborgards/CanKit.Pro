@@ -99,6 +99,8 @@ public static class CanOpenDiscovery
     /// <see cref="DefaultListenWindow"/>.</param>
     /// <param name="cancellationToken">Ends the listen early with
     /// <see cref="OperationCanceledException"/>.</param>
+    /// <exception cref="ObjectDisposedException">The service ended the subscription before the
+    /// window closed. What was heard until then is not returned as a complete listen.</exception>
     public static Task<IReadOnlyList<CanOpenDiscoveredNode>> ListenAsync(ICanBus bus, TimeSpan? window = null,
         CancellationToken cancellationToken = default)
     {
@@ -211,6 +213,7 @@ public static class CanOpenDiscovery
         var heard = new Dictionary<byte, (CanOpenPresenceEvidence Evidence, NmtState? State)>();
         Task pump;
         Task closed;
+        using var windowCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         // Disposing the subscription completes Frames after the frames already buffered, so the
         // pump is awaited only once the window has closed. A cancelled window closes it too:
         // WhenAny waits without throwing, the pump is drained, and only then does the
@@ -232,11 +235,21 @@ public static class CanOpenDiscovery
                 }
             });
             pumpStarted?.Invoke(pump);
-            closed = delay(window, cancellationToken);
-            await Task.WhenAny(closed).ConfigureAwait(false);
+            closed = delay(window, windowCancellation.Token);
+            // The pump ends on its own only when the stream does -- the service was disposed, or
+            // a subscription faulted -- and then the listen cannot go on for the rest of the
+            // window and report what it heard as if it had (#197).
+            await Task.WhenAny(closed, pump).ConfigureAwait(false);
         }
 
-        await pump.ConfigureAwait(false);
+        await pump.ConfigureAwait(false); // a fault of the frame stream surfaces here
+        if (!closed.IsCompleted)
+        {
+            windowCancellation.Cancel();
+            throw new ObjectDisposedException(nameof(ICanBusService),
+                "The subscription ended before the listen window closed; the service was disposed.");
+        }
+
         await closed.ConfigureAwait(false);
         return heard
             .OrderBy(pair => pair.Key)
