@@ -2840,6 +2840,56 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             "every entry that was queued has left the queue, sent or cancelled");
     }
 
+    // Bugbot on #215: a cancel that cannot be posted to the actor (it is being disposed) completes
+    // the waiter without unlinking its entry. The entry then reaches the head of the queue
+    // already completed and must be skipped, not sent after its caller saw the cancellation.
+    // The completion is forced from the actor loop through the queue's own bookkeeping.
+    [Fact]
+    public async Task A_Queued_Send_Completed_Without_Being_Unlinked_Is_Skipped_When_Its_Turn_Comes()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 3);
+        var announced = new List<uint>();
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (J1939Pgn.IsTransportCm(fields.Pgn))
+                lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var abandoned = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        var after = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3));
+        await clock.SettleAsync();
+
+        await actor.PostAsync(() =>
+        {
+            var nodes = (System.Collections.IDictionary)typeof(J1939TpChannel)
+                .GetField("_queuedNodes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(sender)!;
+            foreach (System.Collections.DictionaryEntry entry in nodes)
+            {
+                // PendingTx and its key are private to the channel, hence reflection.
+                var pending = entry.Value!.GetType().GetProperty("Value")!.GetValue(entry.Value)!;
+                var key = pending.GetType().GetProperty("Key")!.GetValue(pending)!;
+                if ((uint)key.GetType().GetProperty("Pgn")!.GetValue(key)! == 0xFEC1u)
+                    ((J1939TpChannel.TxCompletion)entry.Key).TrySetCanceled();
+            }
+            return 0;
+        }).WaitAsync(ShortTimeout);
+        abandoned.IsCanceled.Should().BeTrue("its waiter was completed while the entry stayed queued");
+
+        await DrainAsync(clock, actor, first, after);
+        lock (announced) announced.Should().Equal(new[] { 0xFEC0u, 0xFEC2u },
+            "the completed entry is skipped, not transmitted");
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0);
+    }
+
     // A send can be completed more than once (a cancel racing a result, a dispose after a fault);
     // the slot it held must come back exactly once, or a later send is admitted past the limit.
     [Fact]
