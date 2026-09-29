@@ -2659,6 +2659,39 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         first.IsCompleted.Should().BeFalse();
     }
 
+    // Codex on #215: the payload was copied before the limit check, so a producer outrunning a
+    // stalled destination paid a full PDU allocation for every send it made only to be refused.
+    // Measured, because "allocates no PDU" is the claim: the fixed cost of a rejection (the
+    // exception, its message, the faulted task) is far below the 1785 bytes a copy adds.
+    // GetAllocatedBytesForCurrentThread is exact for this thread, and the rejection is decided
+    // synchronously on it.
+    [Fact]
+    public async Task A_Rejected_Send_Does_Not_Copy_Its_Payload()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        var payload = RandomPayload(J1939TpFrames.MaxTpPayloadLength, seed: 2);
+        const int warmup = 50;
+        const int measured = 500;
+        for (var i = 0; i < warmup; i++) sender.SendBamAsync(0xFEC1u, payload).IsFaulted.Should().BeTrue();
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < measured; i++) _ = sender.SendBamAsync(0xFEC1u, payload);
+        var perSend = (GC.GetAllocatedBytesForCurrentThread() - before) / (double)measured;
+
+        perSend.Should().BeLessThan(J1939TpFrames.MaxTpPayloadLength,
+            "a refused send must be decided before its payload is copied");
+
+        await DrainAsync(clock, actor, first);
+    }
+
     // Codex on #215: sends posted to the actor and not yet run are not in the queue, so a limit
     // enforced only there is no bound at all against a producer that outruns the actor. The actor
     // is held busy on a gate, so every send below is made while nothing has run.

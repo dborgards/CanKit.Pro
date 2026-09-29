@@ -183,10 +183,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         ThrowIfDisposed();
         ValidateSendPayload(pgn, payload.Length);
 
-        var pduBytes = payload.ToArray();
         var key = new TxSessionKey(J1939Pgn.GlobalAddress, pgn);
 
-        return Admit(key, pduBytes, cancellationToken, isCm: false);
+        return Admit(key, payload, cancellationToken, isCm: false);
     }
 
     /// <inheritdoc />
@@ -199,10 +198,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 "TP.CM requires a specific destination address; use SendBamAsync for broadcasts.");
         ValidateSendPayload(pgn, payload.Length);
 
-        var pduBytes = payload.ToArray();
         var key = new TxSessionKey(destinationAddress, pgn);
 
-        return Admit(key, pduBytes, cancellationToken, isCm: true);
+        return Admit(key, payload, cancellationToken, isCm: true);
     }
 
     /// <summary>
@@ -210,8 +208,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> waiting ones) before anything is
     /// posted, so a producer outrunning the actor is refused at the call instead of piling up in
     /// the mailbox (#204). The slot is given back when the send's task completes, however it does.
+    /// The payload is copied only once the slot is reserved: a rejected send, which is what a
+    /// producer outrunning a stalled destination makes in bulk, allocates no PDU.
     /// </summary>
-    private Task Admit(TxSessionKey key, byte[] pdu, CancellationToken ct, bool isCm)
+    private Task Admit(TxSessionKey key, ReadOnlyMemory<byte> payload, CancellationToken ct, bool isCm)
     {
         byte destination = key.DestinationAddress;
         long limit = (long)_options.MaxQueuedSendsPerDestination + 1; // int.MaxValue + 1 must not wrap
@@ -233,6 +233,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             // Everything from here on can throw (a token whose source is disposed, a disposed
             // actor); the slot is reserved, so any failure gives it back.
+            var pdu = payload.ToArray();
             RegisterCancellation(tcs, ct, key);
             _actor.Post(() => BeginTxOnLoop(key, pdu, tcs, isCm));
         }
