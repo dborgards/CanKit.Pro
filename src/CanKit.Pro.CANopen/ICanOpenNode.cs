@@ -81,11 +81,19 @@ public interface ICanOpenNode : IDisposable
     /// <summary>Raised when a configured heartbeat consumer detects a missing heartbeat.
     /// Not discarded when the event queue is over
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
-    /// looking alive.</summary>
+    /// looking alive. While a timeout for the same producer is still waiting for the handler,
+    /// a further one is folded into it rather than queued again, unless a heartbeat from that
+    /// producer was queued in between. The event that waits then reports the newest settings.</summary>
     event EventHandler<HeartbeatTimeoutEventArgs>? HeartbeatTimeout;
 
     /// <summary>Raised when an EMCY frame is received on the bus (FR-CO-011). Not discarded
-    /// when the event queue is over <see cref="CanOpenNodeOptions.EventQueueCapacity"/>.</summary>
+    /// when the event queue is over <see cref="CanOpenNodeOptions.EventQueueCapacity"/>. While a
+    /// handler is behind, an EMCY identical to one still waiting (same producer, code, register
+    /// and manufacturer field) is folded into it, unless another event about that producer was
+    /// queued in between, and a producer with
+    /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> distinct emergencies already waiting
+    /// has its further ones discarded, reported once per burst on
+    /// <see cref="BackgroundExceptionOccurred"/>.</summary>
     event EventHandler<EmcyReceivedEventArgs>? EmcyReceived;
 
     /// <summary>Raised whenever a SYNC frame is received on the configured SYNC COB-ID
@@ -126,7 +134,9 @@ public interface ICanOpenNode : IDisposable
     /// (<c>guardTime × lifeTimeFactor</c>) elapses without seeing an answer to the RTR poll
     /// (FR-CO-009). Not discarded when the event queue is over
     /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> — losing it would leave the peer
-    /// looking alive.</summary>
+    /// looking alive. While a timeout for the same producer is still waiting for the handler,
+    /// a further one is folded into it rather than queued again, unless a guarding response from
+    /// that producer was queued in between. The event that waits then reports the newest settings.</summary>
     event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout;
 
     /// <summary>

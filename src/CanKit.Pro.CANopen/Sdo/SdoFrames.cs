@@ -174,6 +174,15 @@ internal static class SdoFrames
     }
 
     /// <summary>
+    /// Whether a segment frame that arrived <paramref name="wireLength"/> bytes long carries all
+    /// the data its command specifier <paramref name="cs"/> declares: byte 0 plus
+    /// <c>7 - n</c> data bytes. A shorter frame is truncated, and reading it as if it were
+    /// zero-padded would invent the missing bytes.
+    /// </summary>
+    internal static bool SegmentIsComplete(int wireLength, byte cs)
+        => wireLength >= 8 - ((cs >> 1) & 0x07);
+
+    /// <summary>
     /// Extracts the payload bytes from a segment frame's 7-byte data window using the encoded
     /// <c>n</c> field for the count of unused bytes. Also returns whether this was the last
     /// segment (the "no more segments" bit) and the toggle bit that came in.

@@ -191,7 +191,9 @@ internal sealed partial class CanOpenNode
         if (data.Length == 0) return true; // consume — nothing to parse
 
         // Pad short DLC frames back to 8 bytes for parsing, matching the classic SDO client
-        // path's behaviour with DLC-stripping ECUs.
+        // path's behaviour with DLC-stripping ECUs. A sub-block segment is the exception: its
+        // seven bytes are data, so a short one is refused below rather than completed (#203).
+        int wireLength = data.Length;
         if (data.Length < 8)
         {
             var padded = new byte[8];
@@ -243,6 +245,14 @@ internal sealed partial class CanOpenNode
         if (!BlockClientCommandSpecifierMatches(session, cs)) return true;
 
         RearmBlockClient(session, serverNodeId);
+
+        // A sub-block segment carries seven bytes of data; a shorter one was padded above only
+        // so the header could be read, and is refused rather than delivered as data (#203).
+        if (!session.IsDownload && session.Phase == SdoBlockClientPhase.ReceivingSegments && wireLength < 8)
+        {
+            AbortBlockClient(session, SdoAbortCode.DataTypeLengthMismatch);
+            return true;
+        }
 
         if (session.IsDownload)
         {
@@ -612,7 +622,10 @@ internal sealed partial class CanOpenNode
 
         if (data.Length == 0) return false;
 
-        // Pad short DLC frames back to 8 bytes for parsing.
+        // Pad short DLC frames back to 8 bytes for parsing. A sub-block segment is the
+        // exception: its seven bytes are data, so a short one is refused in the
+        // ReceivingSegments branch below rather than completed (#203).
+        int wireLength = data.Length;
         if (data.Length < 8)
         {
             var padded = new byte[8];
@@ -648,6 +661,11 @@ internal sealed partial class CanOpenNode
         // abort first.
         if (_sdoBlockServer is { Phase: SdoBlockServerPhase.ReceivingSegments } rx)
         {
+            if (wireLength < 8)
+            {
+                AbortBlockServer(rx, SdoAbortCode.DataTypeLengthMismatch);
+                return true;
+            }
             HandleBlockDownloadServerSegment(rx, data, cs);
             return true;
         }
