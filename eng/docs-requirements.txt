@@ -10,4 +10,4 @@ mkdocs-material==9.7.7
 # generated pages are not known to mkdocs.yml ahead of time. Held at 0.6.2: 0.6.3 declares its
 # MkDocs dependency under the "properdocs" name and would install a second copy of MkDocs next to
 # the pinned one.
-mkdocs-literate-nav==0.6.2
+mkdocs-literate-nav==0.6.3
