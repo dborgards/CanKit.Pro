@@ -154,6 +154,7 @@ hooks:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
+  - Troubleshooting: troubleshooting.md
   - Packages:
       - packages/index.md
       - L2 · Infrastructure:
