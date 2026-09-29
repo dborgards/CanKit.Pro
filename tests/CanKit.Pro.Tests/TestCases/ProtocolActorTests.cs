@@ -309,6 +309,35 @@ public class ProtocolActorTests
     }
 
     [Fact]
+    public void PostAsync_On_A_Disposed_Actor_Throws_Synchronously_Also_With_A_Live_Token()
+    {
+        var actor = new ProtocolActor();
+        actor.Dispose();
+        using var cts = new CancellationTokenSource();
+
+        // Not a returned task that never completes: the refusal is the call's own exception,
+        // exactly as without a token.
+        Action plain = () => { _ = actor.PostAsync(() => { }, cts.Token); };
+        Action generic = () => { _ = actor.PostAsync(() => 0, cts.Token); };
+        plain.Should().Throw<ObjectDisposedException>();
+        generic.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task PostAsync_With_A_Live_Token_Faults_Its_Task_When_SynchronizationContext_Send_Throws()
+    {
+        using var actor = new ProtocolActor(ActorExecutionMode.SynchronizationContext, new AlwaysThrowingSynchronizationContext());
+        using var cts = new CancellationTokenSource();
+
+        Func<Task> plain = () => actor.PostAsync(() => { }, cts.Token);
+        Func<Task> generic = () => actor.PostAsync(() => 0, cts.Token);
+
+        // A fault, not a hang and not a cancellation: the token was never cancelled.
+        await plain.Should().ThrowAsync<InvalidOperationException>();
+        await generic.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
     public async Task Dispose_Rejects_New_Work_With_ObjectDisposedException()
     {
         var actor = new ProtocolActor();

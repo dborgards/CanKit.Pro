@@ -361,7 +361,7 @@ namespace CanKit.Pro.Actor
                     // though PostAsync failures are documented to surface via the returned task.
                     onDispatchFailure: ex =>
                     {
-                        call.Completion.TrySetException(ex);
+                        call.Fail(ex);
                         call.Dispose();
                     });
             }
@@ -404,6 +404,20 @@ namespace CanKit.Pro.Actor
 
             /// <summary>Claims the work for the loop; <c>false</c> if the token withdrew it first.</summary>
             internal bool TryStart() => Interlocked.CompareExchange(ref _state, Started, Queued) == Queued;
+
+            /// <summary>
+            /// Faults the task because the marshal failed before the work could start -- unless the
+            /// token withdrew the item first, in which case the task is (or is about to be)
+            /// cancelled and a fault must not overtake that. Decided by the same transition
+            /// <see cref="TryStart"/> and <see cref="Withdraw"/> race for, not by whichever of
+            /// <see cref="TaskCompletionSource{TResult}.TrySetCanceled()"/> and
+            /// <see cref="TaskCompletionSource{TResult}.TrySetException(Exception)"/> gets there first.
+            /// </summary>
+            internal void Fail(Exception exception)
+            {
+                if (Interlocked.CompareExchange(ref _state, Started, Queued) != Withdrawn)
+                    Completion.TrySetException(exception);
+            }
 
             private void Withdraw()
             {
