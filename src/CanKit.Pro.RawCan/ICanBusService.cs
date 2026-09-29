@@ -175,6 +175,6 @@ namespace CanKit.Pro.RawCan
         /// Caller-supplied cancellation; cancels the returned task per standard .NET convention,
         /// distinct from the domain-level <see cref="TxConfirmFailureReason.Timeout"/> outcome.
         /// </param>
-        Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
+        Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }
 }

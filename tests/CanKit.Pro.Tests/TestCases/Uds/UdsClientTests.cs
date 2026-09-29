@@ -1713,7 +1713,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
             IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8),
             FastIsoTp(), ownsService: false, clientActor);
 
-        // The request's FrameObserved runs inside Transmit, before SendConfirmed returns and
+        // The request's FrameObserved runs inside Transmit, before SendConfirmedAsync returns and
         // therefore before OnSendConfirmed is posted. Queuing the hold here puts it ahead of
         // that confirmation, so the client stays inside SendAsync — P2 is not armed and no
         // settle probe is queued — until the hold is released.
@@ -2241,7 +2241,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>
     /// Records <see cref="TxConfirmation.HostTransmitTimestamp"/> of the first
-    /// <see cref="ICanBusService.SendConfirmed"/> and completes that task only afterwards,
+    /// <see cref="ICanBusService.SendConfirmedAsync"/> and completes that task only afterwards,
     /// so the channel posts its transmit confirmation after the stamp is visible to the test.
     /// </summary>
     private sealed class FirstConfirmStampService : ICanBusService
@@ -2274,10 +2274,10 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
-            var confirmation = await _inner.SendConfirmed(frame, timeout, cancellationToken)
+            var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken)
                 .ConfigureAwait(false);
             if (Interlocked.Exchange(ref _recorded, 1) == 0)
                 _stamp.TrySetResult(confirmation.HostTransmitTimestamp);

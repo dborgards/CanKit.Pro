@@ -967,10 +967,10 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         using var holding = new ManualResetEventSlim();
         var inside = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         bus.OnTransmitting = f => { if (f.ID == 0x123) { inside.TrySetResult(true); holding.Wait(); } };
-        var other = Task.Run(() => inner.SendConfirmed(CanFrame.Classic(0x123, new byte[8]), TimeSpan.FromSeconds(5)));
+        var other = Task.Run(() => inner.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[8]), TimeSpan.FromSeconds(5)));
         await inside.Task.WaitAsync(ShortTimeout);
 
-        // The request reaching the service's SendConfirmed is what the 0x78 must follow: by
+        // The request reaching the service's SendConfirmedAsync is what the 0x78 must follow: by
         // then its listener and its collection have both subscribed and drained, and what is
         // left is the wait for the lock. A sleep stood in for that once, and a host that
         // delayed the request past it let the drain take the frame -- a pass for the wrong
@@ -1341,7 +1341,7 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>
-    /// Forwards to a real service and reports each <see cref="ICanBusService.SendConfirmed"/> as
+    /// Forwards to a real service and reports each <see cref="ICanBusService.SendConfirmedAsync"/> as
     /// it is entered: for a request, the point after it has subscribed and drained, where it
     /// is about to wait for the service's transmit lock.
     /// </summary>
@@ -1371,11 +1371,11 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             OnSending?.Invoke(frame);
-            return _inner.SendConfirmed(frame, timeout, cancellationToken);
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
         }
 
         public void Dispose() { /* the test owns the inner service */ }

@@ -73,7 +73,7 @@ stream; disposing the service unwinds all of them and detaches from the bus.
 (`WorkMode == ChannelWorkMode.Echo`) the adapter reports your own transmissions back through the
 same RX stream. Frames you sent are not frames you received, and a protocol layer that confuses
 the two misbehaves only on the hardware that happens to echo — so the default is off, per
-subscription, and `includeEcho: true` is a deliberate choice. `SendConfirmed` is unaffected either
+subscription, and `includeEcho: true` is a deliberate choice. `SendConfirmedAsync` is unaffected either
 way: it matches echoes on the bus event itself, not through a subscription.
 
 Two caveats before you rely on it. The gate filters on the flag the adapter sets, and an adapter
@@ -109,11 +109,11 @@ a hull around a scattered set. If you only want the pair, it destructures: `var 
 ## Did the frame actually go out?
 
 `ICanBus.Transmit` tells you the driver accepted the frame, which is not the same thing. Where the
-bus supports TX echo, `SendConfirmed` waits for the real echo; where it does not, it falls back to
+bus supports TX echo, `SendConfirmedAsync` waits for the real echo; where it does not, it falls back to
 driver acceptance and says so:
 
 ```csharp
-var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
+var result = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 
 if (result.Confirmed && !result.IsApproximated)      // a real echo came back
 else if (result.Confirmed)                            // driver accepted it; nothing confirmed it

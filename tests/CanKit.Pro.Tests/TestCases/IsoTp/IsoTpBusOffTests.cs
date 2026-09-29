@@ -25,7 +25,7 @@ public class IsoTpBusOffTests : IClassFixture<VirtualAdapterFixture>
     private static string NewSession() => $"isotp-busoff-{Guid.NewGuid():N}";
 
     // An echo-capable bus that accepts frames but never echoes them: the First Frame's
-    // SendConfirmed stays pending, which is the deterministic window in which the BusOff
+    // SendConfirmedAsync stays pending, which is the deterministic window in which the BusOff
     // transition has to resolve the confirmation. Driving that from the double rather than an
     // adapter keeps the test about ISO-TP's reaction, not about how one adapter reaches BusOff.
     private static ControllableBus OpenSilentEcho()

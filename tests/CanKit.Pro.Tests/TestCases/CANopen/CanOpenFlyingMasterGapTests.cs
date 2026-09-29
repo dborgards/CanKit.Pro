@@ -1721,7 +1721,7 @@ public partial class CanOpenFlyingMasterTests
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
             if (IsBroadcastReset(frame) && ++_resetsSeen > PassResets)
             {
@@ -1734,7 +1734,7 @@ public partial class CanOpenFlyingMasterTests
                 if (RejectOnRelease)
                     return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
             }
-            return await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);
+            return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
         }
 
         public void Dispose()

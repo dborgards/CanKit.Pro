@@ -14,7 +14,7 @@ namespace CanKit.Pro.RawCan
     /// Default <see cref="ICanBusService"/>: attaches once to <see cref="ICanBus.FrameObserved"/>
     /// and fans each observed <see cref="CanFrameView"/> out to every registered
     /// <see cref="Subscription"/> (arc42 §5.3 "Multi-Protokoll-Demux", ADR-5), and implements
-    /// <see cref="SendConfirmed"/> (arc42 §6.3, ADR-7; FR-RAW-030..034) on the same single
+    /// <see cref="SendConfirmedAsync"/> (arc42 §6.3, ADR-7; FR-RAW-030..034) on the same single
     /// <see cref="ICanBus.FrameObserved"/> subscription.
     /// </summary>
     public sealed class CanBusService : ICanBusService
@@ -25,7 +25,7 @@ namespace CanKit.Pro.RawCan
         public const int DefaultBufferCapacity = 1024;
 
         /// <summary>
-        /// Default <see cref="SendConfirmed"/> echo-wait timeout when none is specified
+        /// Default <see cref="SendConfirmedAsync"/> echo-wait timeout when none is specified
         /// (FR-RAW-034).
         /// </summary>
         public static readonly TimeSpan DefaultConfirmTimeout = TimeSpan.FromSeconds(1);
@@ -43,7 +43,7 @@ namespace CanKit.Pro.RawCan
         // holding _hubsGate while delivering.
         private volatile Subscription[] _snapshot = Array.Empty<Subscription>();
 
-        // Pending SendConfirmed calls awaiting an echo match, keyed by everything that identifies
+        // Pending SendConfirmedAsync calls awaiting an echo match, keyed by everything that identifies
         // the frame on the wire (see PendingKey) so multiple concurrent identical sends are matched
         // FIFO instead of crashing/cross-matching, and two sends that merely *look* alike -- a
         // standard and an extended 0x100 with the same payload -- do not share one FIFO at all
@@ -52,12 +52,12 @@ namespace CanKit.Pro.RawCan
         private readonly object _pendingGate = new();
         private readonly Dictionary<PendingKey, LinkedList<PendingSend>> _pending = new();
 
-        // Guarded by _pendingGate; set once by Dispose so a racing SendConfirmed call can never
+        // Guarded by _pendingGate; set once by Dispose so a racing SendConfirmedAsync call can never
         // register a pending entry after Dispose's final sweep has already canceled everything.
         private bool _pendingDisposed;
 
         // Cheap lock-free fast path: skip the _pendingGate lock (and the PendingKey hashing) in
-        // OnFrameObserved entirely for services where nobody has ever called SendConfirmed. Same
+        // OnFrameObserved entirely for services where nobody has ever called SendConfirmedAsync. Same
         // "no cost for callers who don't use the feature" discipline as the subscription snapshot.
         private int _pendingCount;
 
@@ -184,7 +184,7 @@ namespace CanKit.Pro.RawCan
             var hostArrival = _hostTimestamp();
 
             // Independent of subscription dispatch below: echo frames must be checked against
-            // outstanding SendConfirmed calls regardless of whether anyone also has a
+            // outstanding SendConfirmedAsync calls regardless of whether anyone also has a
             // subscription open. Guarded by the same lock-free fast path as subscriptions.
             if (e.IsEcho && Volatile.Read(ref _pendingCount) > 0)
                 TryMatchEcho(e.CanFrame);
@@ -273,7 +273,7 @@ namespace CanKit.Pro.RawCan
             foreach (var subscription in outstanding)
                 subscription.CompleteFromService();
 
-            // Cancel every outstanding SendConfirmed call rather than leaving it to time out on
+            // Cancel every outstanding SendConfirmedAsync call rather than leaving it to time out on
             // its own -- otherwise disposing the service while sends are in flight would make
             // their tasks hang until each one's individual timeout, not "no leaked resources"
             // (same reasoning as unwinding subscriptions above; standard .NET convention is that
@@ -283,7 +283,7 @@ namespace CanKit.Pro.RawCan
             lock (_pendingGate)
             {
                 // Set before clearing, under the same lock SendWithEchoConfirmAsync checks before
-                // registering: closes the race where a call passes SendConfirmed's eager disposed
+                // registering: closes the race where a call passes SendConfirmedAsync's eager disposed
                 // check but hasn't registered yet -- it now either registers-and-transmits fully
                 // before this line runs (and gets swept up below like any other pending entry), or
                 // sees _pendingDisposed=true and throws ObjectDisposedException instead of silently
@@ -304,7 +304,7 @@ namespace CanKit.Pro.RawCan
         }
 
         /// <inheritdoc />
-        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
             if (Volatile.Read(ref _disposed) != 0)
                 throw new ObjectDisposedException(nameof(CanBusService));
@@ -450,7 +450,7 @@ namespace CanKit.Pro.RawCan
                 // closes the dispose race: Dispose sets _pendingDisposed under this same lock, so
                 // a call can never register after Dispose has already swept and canceled every
                 // pending entry -- it throws ObjectDisposedException instead, matching the eager
-                // check at the top of SendConfirmed. The lock is held only across the register +
+                // check at the top of SendConfirmedAsync. The lock is held only across the register +
                 // enqueue step (Transmit is expected to be a fast, non-blocking enqueue, same
                 // assumption every other caller of ICanBus.Transmit already makes), never across
                 // the echo wait, so unrelated sends are not serialized against each other.
@@ -531,7 +531,7 @@ namespace CanKit.Pro.RawCan
                 // arriving in the window before the `finally` unlinks walks past this entry to the
                 // live one behind it instead of being swallowed.
                 //
-                // What this does *not* change: the caller's SendConfirmed task still completes only
+                // What this does *not* change: the caller's SendConfirmedAsync task still completes only
                 // after that `finally`, and the unlink there does take the lock. That coupling is
                 // older than this fix and follows from holding _pendingGate across Transmit at all
                 // -- see the note on that lock, and #53.

@@ -64,7 +64,7 @@ internal sealed class StarvedReaderBusService : ICanBusService
         => new Sub(this);
 
     /// <summary>
-    /// Runs inside <see cref="SendConfirmed"/> before it confirms: the time a driver takes to
+    /// Runs inside <see cref="SendConfirmedAsync"/> before it confirms: the time a driver takes to
     /// confirm, modelled by moving a virtual clock (#171).
     /// </summary>
     public Action? OnSendConfirmed { get; set; }
@@ -72,7 +72,7 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// <summary>Every frame the channel put on the wire, in order.</summary>
     public List<byte[]> Sent { get; } = new();
 
-    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         lock (Sent) Sent.Add(frame.Data.ToArray());

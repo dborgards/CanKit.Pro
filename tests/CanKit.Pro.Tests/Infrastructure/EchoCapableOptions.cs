@@ -12,7 +12,7 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// <see cref="ChannelWorkMode.Echo"/>.
 ///
 /// <para>
-/// <c>CanBusService.SendConfirmed</c> branches on exactly those two, so a test that wants the
+/// <c>CanBusService.SendConfirmedAsync</c> branches on exactly those two, so a test that wants the
 /// real-echo path has to be able to state them. It cannot get them from an adapter: whether an
 /// adapter declares the static <c>CanFeature.Echo</c> capability is its own business, and the
 /// loopback adapter does not — which silently sends every echo test down the approximated path

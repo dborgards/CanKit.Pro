@@ -552,12 +552,12 @@ public class CanOpenSdoClientSendFailureTests
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             var held = Hold?.Invoke(frame);
-            if (held is null) return _inner.SendConfirmed(frame, timeout, cancellationToken);
-            _inner.SendConfirmed(frame, timeout, cancellationToken); // the frame still goes out
+            if (held is null) return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+            _inner.SendConfirmedAsync(frame, timeout, cancellationToken); // the frame still goes out
             return held;
         }
 

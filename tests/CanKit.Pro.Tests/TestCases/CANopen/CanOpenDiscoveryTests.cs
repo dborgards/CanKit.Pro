@@ -451,7 +451,7 @@ public class CanOpenDiscoveryTests : IClassFixture<VirtualAdapterFixture>
 
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => Array.Empty<FilterOverlap>();
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
         public void Dispose()
