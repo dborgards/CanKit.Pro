@@ -894,7 +894,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         _txSessions.Remove(key);
         if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
-        while (queue.Count > 0)
+        PendingTx? start = null;
+        while (start is null && queue.Count > 0)
         {
             var next = queue.First!.Value;
             queue.RemoveFirst();
@@ -902,12 +903,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // A cancel that could not be posted to the actor (it was being disposed) completes
             // the waiter without unlinking it, so an entry can still be queued after its caller
             // has seen the cancellation; it must not go on the wire.
-            if (next.Tcs.Task.IsCompleted) continue;
-            if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
-            StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
-            return;
+            if (!next.Tcs.Task.IsCompleted) start = next;
         }
-        _txQueues.Remove(key.DestinationAddress);
+        if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
+        if (start is not null) StartTx(start.Key, start.Pdu, start.Tcs, start.IsCm);
     }
 
     private void StartTx(TxSessionKey key, byte[] pdu, TxCompletion tcs, bool isCm)

@@ -2933,6 +2933,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
         var abandoned = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
         var after = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3));
+        var abandonedLast = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4)); // nothing follows it
         await clock.SettleAsync();
 
         await actor.PostAsync(() =>
@@ -2945,12 +2946,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
                 // PendingTx and its key are private to the channel, hence reflection.
                 var pending = entry.Value!.GetType().GetProperty("Value")!.GetValue(entry.Value)!;
                 var key = pending.GetType().GetProperty("Key")!.GetValue(pending)!;
-                if ((uint)key.GetType().GetProperty("Pgn")!.GetValue(key)! == 0xFEC1u)
+                if ((uint)key.GetType().GetProperty("Pgn")!.GetValue(key)! is 0xFEC1u or 0xFEC3u)
                     ((J1939TpChannel.TxCompletion)entry.Key).TrySetCanceled();
             }
             return 0;
         }).WaitAsync(ShortTimeout);
         abandoned.IsCanceled.Should().BeTrue("its waiter was completed while the entry stayed queued");
+        abandonedLast.IsCanceled.Should().BeTrue();
 
         await DrainAsync(clock, actor, first, after);
         lock (announced) announced.Should().Equal(new[] { 0xFEC0u, 0xFEC2u },
