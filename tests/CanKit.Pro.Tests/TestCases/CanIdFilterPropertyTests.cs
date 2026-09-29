@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Numerics;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core.Definitions;
@@ -26,8 +25,25 @@ public class CanIdFilterPropertyTests
     private const int MaxFreeBits29 = 16;
 
     // The generator remembers what it built: CanIdFilter keeps its state private.
-    private readonly record struct Gen(CanIdFilter Filter, bool IsRange, uint A, uint B)
+    // A plain struct rather than a record struct: init-only members need IsExternalInit on net48.
+    private readonly struct Gen
     {
+        public Gen(CanIdFilter filter, bool isRange, uint a, uint b)
+        {
+            Filter = filter;
+            IsRange = isRange;
+            A = a;
+            B = b;
+        }
+
+        public CanIdFilter Filter { get; }
+
+        public bool IsRange { get; }
+
+        public uint A { get; }
+
+        public uint B { get; }
+
         public override string ToString()
             => IsRange ? $"Range(0x{A:X}..0x{B:X},{Filter.IdType})" : $"Mask(code=0x{A:X},mask=0x{B:X},{Filter.IdType})";
     }
@@ -51,7 +67,7 @@ public class CanIdFilterPropertyTests
             };
             if (run.Rng.Next(3) != 0) mask &= space;
         }
-        while (BitOperations.PopCount(~mask & space) > maxFree);
+        while (SeededRun.PopCount(~mask & space) > maxFree);
         return mask;
     }
 

@@ -69,7 +69,7 @@ public class CanOpenDeviceDescriptionPropertyTests
                 case 6: // corrupt a section header
                     {
                         int at = run.Rng.Next(lines.Length);
-                        if (lines[at].StartsWith('['))
+                        if (lines[at].StartsWith("[", StringComparison.Ordinal))
                             lines[at] = run.Rng.Next(3) switch { 0 => "[", 1 => "[]", _ => "[" + lines[at].Substring(1).Replace("]", "") };
                         text = string.Join("\n", lines);
                         break;
@@ -116,7 +116,7 @@ public class CanOpenDeviceDescriptionPropertyTests
         // Known defect, tracked in #220: a malformed $NODEID value escapes as NotSupportedException
         // instead of EdsParseException. Only that exact failure is tolerated; remove this branch
         // when #220 is resolved.
-        if (thrown is NotSupportedException && thrown.Message.Contains("$NODEID formula", StringComparison.Ordinal))
+        if (thrown is NotSupportedException && thrown.Message.IndexOf("$NODEID formula", StringComparison.Ordinal) >= 0)
             return;
 
         if (thrown is not null)

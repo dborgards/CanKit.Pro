@@ -49,7 +49,7 @@ public class J1939SpnExtractPropertyTests
             int maxOffset = payload.Length - ((startBit + bitLength + 7) >> 3);
             if (maxOffset < 0) continue;
             int byteOffset = run.Rng.Next(0, maxOffset + 1);
-            var because = run.Tag(i, $"offset={byteOffset} startBit={startBit} bitLength={bitLength} payload={Convert.ToHexString(payload)}");
+            var because = run.Tag(i, $"offset={byteOffset} startBit={startBit} bitLength={bitLength} payload={SeededRun.Hex(payload)}");
 
             ulong expected = ReferenceRaw(payload, byteOffset, startBit, bitLength);
 

@@ -32,6 +32,16 @@ internal sealed class SeededRun
         return b;
     }
 
+    // The tests project also targets net48, which has neither BitOperations nor Convert.ToHexString.
+    public static int PopCount(uint value)
+    {
+        int count = 0;
+        for (; value != 0; value &= value - 1) count++;
+        return count;
+    }
+
+    public static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-", "");
+
     public uint NextUInt()
         => ((uint)Rng.Next(0, 1 << 16) << 16) | (uint)Rng.Next(0, 1 << 16);
 }

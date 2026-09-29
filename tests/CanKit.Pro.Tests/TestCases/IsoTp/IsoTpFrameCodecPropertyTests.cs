@@ -184,7 +184,7 @@ public class IsoTpFrameCodecPropertyTests
                 payload[pciIndex] = (byte)((run.Rng.Next(0, 5) << 4) | (run.Rng.Next(4) == 0 ? 0 : run.Rng.Next(16)));
             if (payload.Length > pciIndex + 1 && run.Rng.Next(4) == 0)
                 payload[pciIndex + 1] = 0;
-            var because = run.Tag(i, $"fd={fd} mode={ep.AddressingMode} bytes={Convert.ToHexString(payload)}");
+            var because = run.Tag(i, $"fd={fd} mode={ep.AddressingMode} bytes={SeededRun.Hex(payload)}");
 
             bool ok = false;
             Pci pci = default;
