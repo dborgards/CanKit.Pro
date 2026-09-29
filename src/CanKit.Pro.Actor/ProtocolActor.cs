@@ -309,19 +309,19 @@ namespace CanKit.Pro.Actor
             var call = new WithdrawableCall<object?>(cancellationToken);
             return PostWithdrawable(call, () =>
             {
-                if (!call.TryStart()) return;
-                try
+                // Disposed on every path out, including the one where the token withdrew the item.
+                using (call)
                 {
-                    work();
-                    call.Completion.TrySetResult(null);
-                }
-                catch (Exception ex)
-                {
-                    call.Completion.TrySetException(ex);
-                }
-                finally
-                {
-                    call.Dispose();
+                    if (!call.TryStart()) return;
+                    try
+                    {
+                        work();
+                        call.Completion.TrySetResult(null);
+                    }
+                    catch (Exception ex)
+                    {
+                        call.Completion.TrySetException(ex);
+                    }
                 }
             });
         }
@@ -334,18 +334,17 @@ namespace CanKit.Pro.Actor
             var call = new WithdrawableCall<T>(cancellationToken);
             return PostWithdrawable(call, () =>
             {
-                if (!call.TryStart()) return;
-                try
+                using (call)
                 {
-                    call.Completion.TrySetResult(work());
-                }
-                catch (Exception ex)
-                {
-                    call.Completion.TrySetException(ex);
-                }
-                finally
-                {
-                    call.Dispose();
+                    if (!call.TryStart()) return;
+                    try
+                    {
+                        call.Completion.TrySetResult(work());
+                    }
+                    catch (Exception ex)
+                    {
+                        call.Completion.TrySetException(ex);
+                    }
                 }
             });
         }
@@ -390,7 +389,7 @@ namespace CanKit.Pro.Actor
             private const int Queued = 0, Started = 1, Withdrawn = 2;
 
             private readonly CancellationToken _token;
-            private CancellationTokenRegistration _registration;
+            private readonly CancellationTokenRegistration _registration;
             private int _state;
 
             internal WithdrawableCall(CancellationToken token)
@@ -398,7 +397,7 @@ namespace CanKit.Pro.Actor
                 _token = token;
                 Completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
                 // A token that can never be cancelled needs no registration and allocates none.
-                if (token.CanBeCanceled) _registration = token.Register(Withdraw);
+                _registration = token.CanBeCanceled ? token.Register(Withdraw) : default;
             }
 
             internal TaskCompletionSource<T> Completion { get; }
