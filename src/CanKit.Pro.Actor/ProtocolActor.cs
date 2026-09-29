@@ -307,34 +307,23 @@ namespace CanKit.Pro.Actor
             if (work is null) throw new ArgumentNullException(nameof(work));
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
             var call = new WithdrawableCall<object?>(cancellationToken);
-            PostInternal(
-                () =>
+            return PostWithdrawable(call, () =>
+            {
+                if (!call.TryStart()) return;
+                try
                 {
-                    if (!call.TryStart()) return;
-                    try
-                    {
-                        work();
-                        call.Completion.TrySetResult(null);
-                    }
-                    catch (Exception ex)
-                    {
-                        call.Completion.TrySetException(ex);
-                    }
-                    finally
-                    {
-                        call.Dispose();
-                    }
-                },
-                // If the marshal itself fails (SynchronizationContext mode, Send throws before
-                // ever invoking the wrapped work above), the wrapper's own try/catch never runs,
-                // so nothing would otherwise complete this task -- it would hang forever even
-                // though PostAsync failures are documented to surface via the returned task.
-                onDispatchFailure: ex =>
+                    work();
+                    call.Completion.TrySetResult(null);
+                }
+                catch (Exception ex)
                 {
                     call.Completion.TrySetException(ex);
+                }
+                finally
+                {
                     call.Dispose();
-                });
-            return call.Completion.Task;
+                }
+            });
         }
 
         /// <inheritdoc />
@@ -343,28 +332,49 @@ namespace CanKit.Pro.Actor
             if (work is null) throw new ArgumentNullException(nameof(work));
             if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<T>(cancellationToken);
             var call = new WithdrawableCall<T>(cancellationToken);
-            PostInternal(
-                () =>
+            return PostWithdrawable(call, () =>
+            {
+                if (!call.TryStart()) return;
+                try
                 {
-                    if (!call.TryStart()) return;
-                    try
-                    {
-                        call.Completion.TrySetResult(work());
-                    }
-                    catch (Exception ex)
-                    {
-                        call.Completion.TrySetException(ex);
-                    }
-                    finally
-                    {
-                        call.Dispose();
-                    }
-                },
-                onDispatchFailure: ex =>
+                    call.Completion.TrySetResult(work());
+                }
+                catch (Exception ex)
                 {
                     call.Completion.TrySetException(ex);
+                }
+                finally
+                {
                     call.Dispose();
-                });
+                }
+            });
+        }
+
+        private Task<T> PostWithdrawable<T>(WithdrawableCall<T> call, Action work)
+        {
+            try
+            {
+                PostInternal(
+                    work,
+                    // If the marshal itself fails (SynchronizationContext mode, Send throws before
+                    // ever invoking the wrapped work), the wrapper's own try/catch never runs, so
+                    // nothing would otherwise complete this task -- it would hang forever even
+                    // though PostAsync failures are documented to surface via the returned task.
+                    onDispatchFailure: ex =>
+                    {
+                        call.Completion.TrySetException(ex);
+                        call.Dispose();
+                    });
+            }
+            catch
+            {
+                // Refused before anything was enqueued (the actor was disposed): no wrapper will
+                // ever run to release the registration on the caller's token, and no task is
+                // returned to hold it either. A long-lived token would keep this call alive.
+                call.Dispose();
+                throw;
+            }
+
             return call.Completion.Task;
         }
 
