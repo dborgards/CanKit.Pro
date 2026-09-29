@@ -985,7 +985,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
             try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
-        catch (Exception ex)
+        catch (ObjectDisposedException ex)
+        {
+            // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
+            // failures that do this have not put the frame on the wire.
+            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
+            catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
+        }
+        catch (InvalidOperationException ex)
         {
             // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
             // failures that do this have not put the frame on the wire.
