@@ -36,7 +36,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // Only ever a bound against a hang: every wait below is on an event the test itself caused.
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
 
-    // FR-RAW-030/032: without echo, SendConfirmed resolves as soon as the driver accepts the
+    // FR-RAW-030/032: without echo, SendConfirmedAsync resolves as soon as the driver accepts the
     // frame, explicitly marked as an approximation.
     [Fact]
     public async Task NonEcho_Bus_Confirms_Via_Driver_Acceptance_Approximation()
@@ -44,14 +44,14 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var sender = OpenPlain();
         using var service = new CanBusService(sender);
 
-        var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 
         result.Confirmed.Should().BeTrue();
         result.IsApproximated.Should().BeTrue();
         result.FailureReason.Should().Be(TxConfirmFailureReason.None);
     }
 
-    // FR-RAW-030/031: with echo enabled, SendConfirmed resolves from an actual matched echo frame,
+    // FR-RAW-030/031: with echo enabled, SendConfirmedAsync resolves from an actual matched echo frame,
     // never presented as an approximation.
     [Fact]
     public async Task Echo_Bus_Confirms_Via_Real_Echo_Match()
@@ -59,7 +59,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var sender = OpenEcho();
         using var service = new CanBusService(sender);
 
-        var result = await service.SendConfirmed(CanFrame.Classic(0x321, new byte[] { 9, 8, 7 }));
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x321, new byte[] { 9, 8, 7 }));
 
         result.Confirmed.Should().BeTrue();
         result.IsApproximated.Should().BeFalse();
@@ -91,7 +91,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         var sends = new Task<TxConfirmation>[n];
         for (var i = 0; i < n; i++)
         {
-            sends[i] = service.SendConfirmed(frame, TimeSpan.FromSeconds(30));
+            sends[i] = service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(30));
             // A parked echo means Transmit ran, which CanBusService does after registering the
             // pending entry -- so this waits on registration order, not on wall-clock luck.
             await sender.DeferredEchoes.WaitForEnqueuedAsync(i + 1, ShortTimeout);
@@ -140,7 +140,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         const int n = 16;
         var frame = CanFrame.Classic(0x500, new byte[] { 42 });
 
-        var tasks = Enumerable.Range(0, n).Select(_ => Task.Run(() => service.SendConfirmed(frame))).ToArray();
+        var tasks = Enumerable.Range(0, n).Select(_ => Task.Run(() => service.SendConfirmedAsync(frame))).ToArray();
         var results = await Task.WhenAll(tasks);
 
         results.Should().HaveCount(n);
@@ -172,14 +172,14 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         // The first send stays pending: its echo never comes back.
         sender.EchoAcceptedFrames = false;
-        var first = service.SendConfirmed(frame, TimeSpan.FromSeconds(30), cancelFirst.Token);
+        var first = service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(30), cancelFirst.Token);
         sender.TransmitCount.Should().Be(1,
-            "SendConfirmed registers the pending entry and transmits before it awaits anything");
+            "SendConfirmedAsync registers the pending entry and transmits before it awaits anything");
 
         sender.EchoAcceptedFrames = true;
         sender.OnTransmitting = _ => cancelFirst.Cancel();
 
-        var second = await service.SendConfirmed(frame, ShortTimeout);
+        var second = await service.SendConfirmedAsync(frame, ShortTimeout);
 
         second.Confirmed.Should().BeTrue(
             "the echo belongs to the only send still waiting for one, not to the cancelled entry");
@@ -197,7 +197,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // TryMatchEcho's skip of already-completed entries is what keeps #24 fixed meanwhile.
     //
     // Scope, stated so this test is not read as promising more than it checks: the caller's
-    // SendConfirmed task still completes only after the `finally` unlinks, and that unlink does
+    // SendConfirmedAsync task still completes only after the `finally` unlinks, and that unlink does
     // take the lock. That coupling predates this change and follows from holding _pendingGate
     // across Transmit at all -- the deliberate decision recorded next to that lock (#53). What is
     // asserted here is the part this change is responsible for.
@@ -214,7 +214,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         using var cancelFirst = new CancellationTokenSource();
         sender.EchoAcceptedFrames = false;
-        var first = service.SendConfirmed(
+        var first = service.SendConfirmedAsync(
             CanFrame.Classic(0x610, new byte[] { 1 }), TimeSpan.FromSeconds(30), cancelFirst.Token);
 
         // A second, unrelated send parks inside Transmit -- and so inside _pendingGate.
@@ -226,7 +226,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             reachedTransmit.Set();
             stuckInTransmit.Wait(TimeSpan.FromSeconds(10));
         };
-        var blocked = Task.Run(() => service.SendConfirmed(
+        var blocked = Task.Run(() => service.SendConfirmedAsync(
             CanFrame.Classic(0x611, new byte[] { 2 }), ShortTimeout));
 
         reachedTransmit.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
@@ -258,8 +258,8 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.EchoAcceptedFrames = false; // every echo in this test is delivered by hand
 
         var payload = new byte[] { 0xAB };
-        var standard = service.SendConfirmed(CanFrame.Classic(0x100, payload), TimeSpan.FromSeconds(30));
-        var extended = service.SendConfirmed(
+        var standard = service.SendConfirmedAsync(CanFrame.Classic(0x100, payload), TimeSpan.FromSeconds(30));
+        var extended = service.SendConfirmedAsync(
             CanFrame.Classic(0x100, payload, isExtendedFrame: true), TimeSpan.FromSeconds(30));
         sender.TransmitCount.Should().Be(2);
 
@@ -285,8 +285,8 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.EchoAcceptedFrames = false;
 
         var payload = new byte[] { 0xAB };
-        var classic = service.SendConfirmed(CanFrame.Classic(0x100, payload), TimeSpan.FromSeconds(30));
-        var fd = service.SendConfirmed(CanFrame.Fd(0x100, payload), TimeSpan.FromSeconds(30));
+        var classic = service.SendConfirmedAsync(CanFrame.Classic(0x100, payload), TimeSpan.FromSeconds(30));
+        var fd = service.SendConfirmedAsync(CanFrame.Fd(0x100, payload), TimeSpan.FromSeconds(30));
         sender.TransmitCount.Should().Be(2);
 
         sender.RaiseObserved(CanFrame.Fd(0x100, payload), isEcho: true);
@@ -311,7 +311,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         var timeout = TimeSpan.FromMilliseconds(300);
         var sw = Stopwatch.StartNew();
-        var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), timeout);
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), timeout);
         sw.Stop();
 
         result.Confirmed.Should().BeFalse();
@@ -333,7 +333,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus);
 
-        var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
             .WaitAsync(ShortTimeout);
 
         result.Confirmed.Should().BeFalse();
@@ -343,7 +343,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex and Bugbot on #216: when the timeout wins, the driver's operation may still be running
-    // while the caller -- entitled to, once SendConfirmed completes -- disposes its TX lease. The
+    // while the caller -- entitled to, once SendConfirmedAsync completes -- disposes its TX lease. The
     // driver must have been handed a frame that does not depend on that lease.
     [Fact]
     public async Task A_Timed_Out_Approximated_Send_Leaves_The_Driver_A_Frame_Independent_Of_The_Callers_Lease()
@@ -356,7 +356,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         var owner = new ScrubbedOwner((byte[])payload.Clone());
         using var lease = CanFrame.Classic(0x123, owner);
 
-        var result = await service.SendConfirmed(lease, TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        var result = await service.SendConfirmedAsync(lease, TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
         result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
         lease.Dispose(); // what the caller may now do
 
@@ -378,7 +378,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         service.AbandonedTransmitFaultObserved = e => observed.TrySetResult(e);
         var marker = new InvalidOperationException("late driver failure");
 
-        (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+        (await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
             .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
         bus.FaultStalledTransmits(marker);
 
@@ -403,7 +403,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
             using var service = new CanBusService(bus);
 
-            (await service.SendConfirmed(original, ShortTimeout)).Confirmed.Should().BeTrue();
+            (await service.SendConfirmedAsync(original, ShortTimeout)).Confirmed.Should().BeTrue();
 
             var handed = await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
             handed.FrameKind.Should().Be(original.FrameKind);
@@ -435,7 +435,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus);
 
-        (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+        (await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
             .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
 
         (await bus.FirstAsyncTransmitToken.WaitAsync(ShortTimeout)).IsCancellationRequested.Should().BeTrue();
@@ -452,7 +452,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(bus);
         using var cts = new CancellationTokenSource();
 
-        var send = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMinutes(5), cts.Token);
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMinutes(5), cts.Token);
         await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
         cts.Cancel();
 
@@ -469,7 +469,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         bus.StallTransmitAsync = true;
         using var service = new CanBusService(bus);
 
-        var send = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), ShortTimeout);
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), ShortTimeout);
         bus.ReleaseStalledTransmits();
         var result = await send.WaitAsync(ShortTimeout);
 
@@ -488,11 +488,11 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(sender);
 
         var shortSw = Stopwatch.StartNew();
-        var shortResult = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(100));
+        var shortResult = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(100));
         shortSw.Stop();
 
         var longSw = Stopwatch.StartNew();
-        var longResult = await service.SendConfirmed(CanFrame.Classic(0x124, new byte[] { 2 }), TimeSpan.FromMilliseconds(500));
+        var longResult = await service.SendConfirmedAsync(CanFrame.Classic(0x124, new byte[] { 2 }), TimeSpan.FromMilliseconds(500));
         longSw.Stop();
 
         shortResult.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
@@ -510,7 +510,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         // An FD frame on a Classic-mode bus is rejected by the adapter's transceiver (returns 0),
         // regardless of echo.
-        var result = await service.SendConfirmed(CanFrame.Fd(0x100, new byte[] { 1, 2, 3, 4 }));
+        var result = await service.SendConfirmedAsync(CanFrame.Fd(0x100, new byte[] { 1, 2, 3, 4 }));
 
         result.Confirmed.Should().BeFalse();
         result.IsApproximated.Should().BeFalse();
@@ -525,14 +525,14 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(sender);
 
         var sw = Stopwatch.StartNew();
-        var result = await service.SendConfirmed(CanFrame.Classic(0x100, new byte[] { 1, 2, 3, 4 }), TimeSpan.FromSeconds(5));
+        var result = await service.SendConfirmedAsync(CanFrame.Classic(0x100, new byte[] { 1, 2, 3, 4 }), TimeSpan.FromSeconds(5));
         sw.Stop();
 
         result.FailureReason.Should().Be(TxConfirmFailureReason.Rejected);
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1)); // resolved immediately, not via the 5s timeout
     }
 
-    // Disposing the service must not leave an in-flight SendConfirmed call hanging until its own
+    // Disposing the service must not leave an in-flight SendConfirmedAsync call hanging until its own
     // timeout -- standard .NET convention: disposing an in-flight operation's owner cancels it.
     [Fact]
     public async Task Disposing_Service_Cancels_Outstanding_SendConfirmed_Calls()
@@ -541,7 +541,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.EchoAcceptedFrames = false;
         var service = new CanBusService(sender);
 
-        var pendingTask = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        var pendingTask = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromSeconds(30));
 
         service.Dispose();
 
@@ -555,7 +555,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         using var sender = OpenPlain();
         using var service = new CanBusService(sender);
 
-        Func<Task> act = async () => await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.Zero);
+        Func<Task> act = async () => await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.Zero);
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
@@ -570,7 +570,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sender.EchoAcceptedFrames = false;
         using var service = new CanBusService(sender);
 
-        var pendingTask = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }),
+        var pendingTask = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }),
             TimeSpan.FromSeconds(30));
 
         // What a real adapter does when the controller drops off the bus: the state goes BusOff and
@@ -608,7 +608,7 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
 
         // One outstanding send, so the lookup is actually reached (with none, OnFrameObserved
         // short-circuits before building a key at all).
-        var outstanding = service.SendConfirmed(CanFrame.Classic(0x111, new byte[] { 1 }),
+        var outstanding = service.SendConfirmedAsync(CanFrame.Classic(0x111, new byte[] { 1 }),
             TimeSpan.FromSeconds(30));
 
         // A 64-byte payload on an ID nothing is waiting for: reached, hashed, compared, no match.
@@ -663,10 +663,10 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         };
 
         var frame = CanFrame.Classic(0x500, new byte[] { 42 });
-        // Off the test thread: SendConfirmed runs synchronously as far as Transmit, so calling it
+        // Off the test thread: SendConfirmedAsync runs synchronously as far as Transmit, so calling it
         // here would park *this* thread in OnTransmitting and there would be nobody left to
         // release it.
-        var send = Task.Run(() => service.SendConfirmed(frame, TimeSpan.FromSeconds(30)));
+        var send = Task.Run(() => service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(30)));
         transmitting.Wait(ShortTimeout).Should().BeTrue("the send must reach Transmit");
 
         // A dedicated thread rather than the pool: the point of the test is that this thread ends
@@ -739,10 +739,10 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         };
 
         var sent = CanFrame.Classic(0x500, new byte[] { 42 });
-        // Off the test thread, for the same reason as the test above: SendConfirmed runs
+        // Off the test thread, for the same reason as the test above: SendConfirmedAsync runs
         // synchronously as far as Transmit, so calling it here would park *this* thread in
         // OnTransmitting with nobody left to release it.
-        var send = Task.Run(() => service.SendConfirmed(sent, TimeSpan.FromSeconds(30)));
+        var send = Task.Run(() => service.SendConfirmedAsync(sent, TimeSpan.FromSeconds(30)));
         try
         {
             transmitting.Wait(ShortTimeout).Should().BeTrue("the send must reach Transmit");

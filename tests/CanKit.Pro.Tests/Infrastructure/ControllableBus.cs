@@ -48,7 +48,7 @@ public enum EchoDelivery
 /// <para>
 /// Configuration is delegated to a genuine CanKit bus, so the double never has to invent a whole
 /// configurator and cannot drift from what a real one reports. The two exceptions are the two
-/// properties <c>SendConfirmed</c> branches on: <see cref="EchoCapableOptions"/> forces
+/// properties <c>SendConfirmedAsync</c> branches on: <see cref="EchoCapableOptions"/> forces
 /// <c>Features</c> to include <c>CanFeature.Echo</c> and <c>WorkMode</c> to <c>Echo</c>, because
 /// whether an adapter declares that static capability is the adapter's business — the loopback
 /// adapter does not declare it, which would silently route every echo test down the approximated
@@ -73,7 +73,7 @@ public sealed class ControllableBus : ICanBus
 
     /// <summary>
     /// Creates a double whose <see cref="Options"/> report <c>ChannelWorkMode.Echo</c> and the
-    /// <c>CanFeature.Echo</c> capability — the combination that makes <c>SendConfirmed</c> take
+    /// <c>CanFeature.Echo</c> capability — the combination that makes <c>SendConfirmedAsync</c> take
     /// the real-echo-matching path (FR-RAW-031) — and that echoes synchronously from inside
     /// <see cref="Transmit(in CanFrame)"/>, exactly as a real echo-mode adapter does.
     /// </summary>
@@ -97,7 +97,7 @@ public sealed class ControllableBus : ICanBus
 
     /// <summary>
     /// Creates a double whose <see cref="Options"/> are the wrapped bus's own, i.e. no
-    /// <c>Echo</c> capability: <c>SendConfirmed</c> takes the approximated path.
+    /// <c>Echo</c> capability: <c>SendConfirmedAsync</c> takes the approximated path.
     /// Nothing is echoed. <see cref="StallTransmitAsync"/> makes its asynchronous transmit
     /// genuinely asynchronous, which no shipped adapter is (#202).
     /// </summary>

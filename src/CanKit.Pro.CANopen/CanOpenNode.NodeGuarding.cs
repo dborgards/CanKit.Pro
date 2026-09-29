@@ -125,7 +125,7 @@ internal sealed partial class CanOpenNode
         {
             try
             {
-                var conf = await svc.SendConfirmed(frame).ConfigureAwait(false);
+                var conf = await svc.SendConfirmedAsync(frame).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     RaiseBackgroundException(new CanOpenTransportException(

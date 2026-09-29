@@ -89,7 +89,7 @@ namespace CanKit.Pro.RawCan
     }
 
     /// <summary>
-    /// One outstanding <see cref="ICanBusService.SendConfirmed"/> call awaiting an echo match.
+    /// One outstanding <see cref="ICanBusService.SendConfirmedAsync"/> call awaiting an echo match.
     /// Owns the node reference into its <see cref="PendingKey"/>'s FIFO list so it can remove
     /// itself in O(1) on any resolution path (match, timeout, cancellation, bus-off, or service
     /// disposal) without scanning. Exactly one of those paths ever completes <see cref="Tcs"/>;

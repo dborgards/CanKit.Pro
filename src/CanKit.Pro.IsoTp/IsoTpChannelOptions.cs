@@ -57,7 +57,7 @@ public sealed class IsoTpChannelOptions
     /// N_As — maximum time between the sender handing an SF/FF/CF to the driver and the driver
     /// confirming it was sent (ISO 15765-2 §6.5, corresponds to the FR-TP-010 acceptance
     /// criterion). Modelled here as the TX-confirmation timeout the channel uses when calling
-    /// <see cref="RawCan.ICanBusService.SendConfirmed"/>. It bounds the wait for the echo on an
+    /// <see cref="RawCan.ICanBusService.SendConfirmedAsync"/>. It bounds the wait for the echo on an
     /// echo-capable bus and the wait for the driver to accept the frame on any other, so a stalled
     /// frame send always ends within it instead of blocking later sends on the channel.
     /// Defaults to <see cref="DefaultTimeout"/>.

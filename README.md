@@ -29,7 +29,7 @@ currently available.
 
 | Package | What it gives you | Depends on |
 | --- | --- | --- |
-| [`CanKit.Pro.RawCan`](src/CanKit.Pro.RawCan) | Multi-protocol demultiplexing: N independent, filtered, read-only views of one `ICanBus`, reconfigurable at runtime. Plus `SendConfirmed`, a uniform TX-confirmation over hardware echo. | `CanKit.Abstractions` |
+| [`CanKit.Pro.RawCan`](src/CanKit.Pro.RawCan) | Multi-protocol demultiplexing: N independent, filtered, read-only views of one `ICanBus`, reconfigurable at runtime. Plus `SendConfirmedAsync`, a uniform TX-confirmation over hardware echo. | `CanKit.Abstractions` |
 | [`CanKit.Pro.Actor`](src/CanKit.Pro.Actor) | `ProtocolActor`: single-mailbox, single-writer execution with an event-driven timer queue and one background-exception channel. | — |
 | [`CanKit.Pro.Addressing`](src/CanKit.Pro.Addressing) | Validated 11/29-bit CAN IDs, J1939 PGN/priority/PDU/source-address composition, J1939 NAME and PGN catalogues. | — |
 | [`CanKit.Pro.Reliability`](src/CanKit.Pro.Reliability) | Deadlines whose expiry is guaranteed to be checked, and a `BusStateMonitor` that pushes `ErrWarning`/`ErrPassive`/`BusOff` transitions and recovery. | `CanKit.Abstractions`, `CanKit.Pro.Actor` |
@@ -95,7 +95,7 @@ await foreach (var frame in isoTp.Frames.WithCancellation(token))
 
 // "Did it actually go out?" — a real echo match where the bus provides one, driver acceptance
 // otherwise, and flagged so you can tell which you got.
-var tx = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
+var tx = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 if (!tx.Confirmed) Console.WriteLine(tx.FailureReason);  // Timeout, BusOff or Rejected — never a hang
 
 // Timeouts and bus health, on the protocol instance's own single-threaded loop.

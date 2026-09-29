@@ -10,7 +10,7 @@ namespace CanKit.Pro.RawCan
         public event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         public void Dispose() { }
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.RawCan.FilterOverlap> FindOverlappingFilterSubscriptions() { }
-        public System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmed(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmedAsync(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default) { }
         public CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false) { }
         public CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false) { }
     }
@@ -54,7 +54,7 @@ namespace CanKit.Pro.RawCan
         int SubscriptionCount { get; }
         event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         System.Collections.Generic.IReadOnlyList<CanKit.Pro.RawCan.FilterOverlap> FindOverlappingFilterSubscriptions();
-        System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmed(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.RawCan.TxConfirmation> SendConfirmedAsync(CanKit.Abstractions.API.Can.Definitions.CanFrame frame, System.TimeSpan? timeout = default, System.Threading.CancellationToken cancellationToken = default);
         CanKit.Pro.RawCan.ISubscription Subscribe(CanKit.Pro.RawCan.CanIdFilter filter, int? bufferCapacity = default, bool includeEcho = false);
         CanKit.Pro.RawCan.ISubscription Subscribe(System.Func<CanKit.Pro.RawCan.CanFrameEvent, bool>? predicate = null, int? bufferCapacity = default, bool includeEcho = false);
     }

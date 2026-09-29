@@ -68,9 +68,9 @@ internal sealed class ThrowingSubscribeService : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
-    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
-        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+        => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
 
     public void Dispose() { /* wrapper: the test owns and disposes the inner service */ }
 

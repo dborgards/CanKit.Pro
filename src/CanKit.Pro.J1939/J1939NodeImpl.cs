@@ -128,7 +128,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // Dispose cancels these; the callback itself no-ops when the marker is gone (#180).
     private readonly List<IDeadline> _claimEchoGraces = new();
 
-    // How long a timed-out claim's marker stays after SendConfirmed gives up. The frame was
+    // How long a timed-out claim's marker stays after SendConfirmedAsync gives up. The frame was
     // accepted, so the echo can still arrive and has to be recognised as ours; past this
     // the marker is retired by identity. While a newer identical send is outstanding the
     // retirement waits, or the late echo would take that newer marker (#180).
@@ -437,11 +437,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return;
         }
 
-        // Fault only after SendConfirmed has handed the frame to the driver. Completing
+        // Fault only after SendConfirmedAsync has handed the frame to the driver. Completing
         // the loss beside the fire-and-forget start lets a caller dispose on the exception
         // while that handoff is still pending, and the frame is never sent (Codex on #153).
         // The continuation closes over *this* loss. A second loss may replace `_lostClaim`
-        // before SendConfirmed returns; completing whatever is stored then faults the wrong
+        // before SendConfirmedAsync returns; completing whatever is stored then faults the wrong
         // claim and leaves the first one waiting forever (Codex and Bugbot on #153).
         var owed = _lostClaim;
         if (owed is not null)
@@ -548,7 +548,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         RebindTransportOnLoop(J1939Pgn.NullAddress);
 
         // Register the pending claim *before* TX so contending peers that arrive during the
-        // SendConfirmed await are still handled. Arm the arbitration deadline only after the
+        // SendConfirmedAsync await are still handled. Arm the arbitration deadline only after the
         // claim frame is confirmed on the bus — otherwise a failed/slow TX would still let
         // OnClaimAnnounceElapsed commit Claimed.
         _pendingClaim = new PendingClaim(preferredAddress, tcs, deadline: null, ctr)
@@ -933,7 +933,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // 8-byte little-endian NAME payload. PGN 0xEE00 is PDU1 with PS = 0xFF (global).
         // Re-announcements / Cannot-Claim remain fire-and-forget; the initial claim path uses
         // TransmitAddressClaimConfirmed so ClaimAddressAsync cannot succeed without TX confirm.
-        // `afterHandoff` runs back on the actor once SendConfirmed has returned, which is after
+        // `afterHandoff` runs back on the actor once SendConfirmedAsync has returned, which is after
         // the driver accepted the frame -- the loss that owes a Cannot Claim faults from there.
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
@@ -944,7 +944,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private byte[] BuildAddressClaimPayload() => _name.ToBytes();
 
     /// <summary>
-    /// Sends the initial Address Claim with <see cref="ICanBusService.SendConfirmed"/> and
+    /// Sends the initial Address Claim with <see cref="ICanBusService.SendConfirmedAsync"/> and
     /// posts success/failure back onto the actor so the arbitration deadline is armed only
     /// after a confirmed TX.
     /// </summary>
@@ -953,12 +953,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
         var payload = BuildAddressClaimPayload();
         uint canId = J1939Id.ComposePgn(_options.ClaimPriority, J1939Pgn.AddressClaimed, sourceAddress,
             destinationAddress: J1939Pgn.GlobalAddress);
-        // Before it is on the wire: the echo may be back before SendConfirmed returns, and that
+        // Before it is on the wire: the echo may be back before SendConfirmedAsync returns, and that
         // echo is how HandleIncomingAddressClaim tells our claim from a peer with the same NAME.
         // A bus that does not echo never delivers this frame; recording it would leave an entry
         // that later swallows the peer's identical claim (#168).
         var echo = RecordClaimEcho(canId, payload);
-        // Called directly rather than through Task.Run: SendConfirmed's synchronous part is
+        // Called directly rather than through Task.Run: SendConfirmedAsync's synchronous part is
         // the driver hand-off, and its continuation already runs off this loop; a pool hop
         // in front of it bought nothing and cost one per claim round -- a full arbitrary-
         // address scan is 240 of them (#58).
@@ -971,7 +971,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try
         {
             using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-            var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+            var confirmation = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
             if (!confirmation.Confirmed)
             {
                 var ex = new J1939NodeException(
@@ -987,7 +987,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
         catch (Exception ex)
         {
-            // SendConfirmed threw rather than returning a timeout: the scripted and driver
+            // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
             // failures that do this have not put the frame on the wire.
             try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
@@ -1065,7 +1065,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     // Rejected: nothing was handed to the driver. Anything else (timeout, bus-off) already
-    // was, and the echo can still show up after SendConfirmed has given up.
+    // was, and the echo can still show up after SendConfirmedAsync has given up.
     private static bool ClaimEchoMayFollow(TxConfirmFailureReason reason)
         => reason != TxConfirmFailureReason.Rejected;
 
@@ -1190,9 +1190,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 if (message.Payload.Length > 0) message.Payload.Span.CopyTo(payload);
 
                 using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-                // Recorded before it is on the wire: the echo may be back before SendConfirmed returns.
+                // Recorded before it is on the wire: the echo may be back before SendConfirmedAsync returns.
                 RecordOwnFrame(canId, payload);
-                var confirmation = await _service.SendConfirmed(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+                var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
                 if (!confirmation.Confirmed)
                     throw new J1939NodeException(
                         $"J1939 send failed for PGN 0x{message.Pgn:X}: {confirmation.FailureReason}.");
@@ -1331,7 +1331,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void TransmitFrame(uint canId, byte[] payload, Action? afterHandoff = null)
     {
         // Fire-and-forget: address-claim traffic doesn't need a task, but we still want a
-        // background exception if the driver rejects it. SendConfirmed is used consistently
+        // background exception if the driver rejects it. SendConfirmedAsync is used consistently
         // with the rest of the CanKit.Pro stack. No Task.Run hop in front of it (#58).
         // Recorded first, as in SendCoreAsync: a re-announce's echo is this frame coming back,
         // and it must not be arbitrated as a peer that shares our NAME (#168). Same gate as
@@ -1346,7 +1346,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try
         {
             using var frame = CanFrame.Classic(unchecked((int)canId), payload, isExtendedFrame: true);
-            var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+            var confirmation = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
             if (!confirmation.Confirmed)
             {
                 NoteUnconfirmedClaimEcho(echo, ClaimEchoMayFollow(confirmation.FailureReason));

@@ -56,7 +56,7 @@ using var tele = service.Subscribe(CanIdFilter.Range(0x100, 0x1FF));
 
 // "Did it actually go out?" Echo-matched where the bus can,
 // flagged where it can't. Never a hang.
-var tx = await service.SendConfirmed(
+var tx = await service.SendConfirmedAsync(
     CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 
 // Echoes are withheld unless a subscription asks for them, and every
@@ -164,7 +164,7 @@ rebuild, slightly differently and slightly wrong, in each one.
 
     ---
 
-    `SendConfirmed` matches the hardware echo where the adapter provides one and falls back to
+    `SendConfirmedAsync` matches the hardware echo where the adapter provides one and falls back to
     driver acceptance where it does not, flagged so you can tell which answer you got.
 
     [:octicons-arrow-right-24: RawCan](packages/rawcan.md)

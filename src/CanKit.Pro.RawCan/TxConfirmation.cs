@@ -28,7 +28,7 @@ namespace CanKit.Pro.RawCan
     }
 
     /// <summary>
-    /// Result of <see cref="ICanBusService.SendConfirmed"/>: a uniform "was this frame actually
+    /// Result of <see cref="ICanBusService.SendConfirmedAsync"/>: a uniform "was this frame actually
     /// sent" answer regardless of whether the underlying adapter supports hardware TX echo
     /// (arc42 §5.3/§6.3, ADR-7; FR-RAW-030..034).
     /// </summary>

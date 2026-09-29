@@ -29,7 +29,7 @@ using CanKit.Pro.Reliability;
 //      "reader" is your program),
 //   2. gives the reader two subscriptions for two disjoint ranges of CAN IDs,
 //   3. sends frames from the writer and shows which subscription receives what,
-//   4. asks the service "did that frame really go out?" (SendConfirmed).
+//   4. asks the service "did that frame really go out?" (SendConfirmedAsync).
 //
 //   dotnet run --project samples/CanKit.Pro.Sample.Demux
 //   dotnet run --project samples/CanKit.Pro.Sample.Demux -- --pro   (adds the extras)
@@ -75,11 +75,11 @@ await printers;
 Console.WriteLine("   (0x555 matched no subscription, so nobody received it)");
 
 // ── 4. Was it really sent? ─────────────────────────────────────────────────────────────────
-// Transmit only says the driver accepted the frame. SendConfirmed answers the question protocols
+// Transmit only says the driver accepted the frame. SendConfirmedAsync answers the question protocols
 // actually ask: "did it go out?". Where the hardware reports TX echo, the answer is exact; where
 // it cannot, you get the driver's acceptance instead and IsApproximated says so.
 Step("4. Send a frame from the reader and ask for confirmation");
-var confirmation = await service.SendConfirmed(CanFrame.Classic(0x201, new byte[] { 1, 2, 3 }));
+var confirmation = await service.SendConfirmedAsync(CanFrame.Classic(0x201, new byte[] { 1, 2, 3 }));
 Console.WriteLine($"   confirmed={confirmation.Confirmed}, approximated={confirmation.IsApproximated}, " +
                   $"failure reason={confirmation.FailureReason}");
 Console.WriteLine("   (approximated=True: this loopback bus does not report echoes, so the driver's acceptance");

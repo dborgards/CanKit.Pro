@@ -478,7 +478,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
 
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => Array.Empty<FilterOverlap>();
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
         public void Dispose() => StreamFailed.Dispose();
@@ -531,8 +531,8 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => inner.FindOverlappingFilterSubscriptions();
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
-            => inner.SendConfirmed(frame, timeout, cancellationToken);
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+            => inner.SendConfirmedAsync(frame, timeout, cancellationToken);
 
         public void Dispose() { /* the inner service is owned by the test */ }
     }
@@ -1129,7 +1129,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         baseline.Should().NotBe(new CanFrameEvent(frame, isEcho: false, TimeSpan.FromMilliseconds(6)));
     }
 
-    // SendConfirmed's echo matching (FR-RAW-031) reads the bus event directly, not a subscription,
+    // SendConfirmedAsync's echo matching (FR-RAW-031) reads the bus event directly, not a subscription,
     // so withholding echoes from subscribers must not disturb it. Worth pinning: the two paths sit
     // in the same OnFrameObserved and it would be easy to gate both on one flag.
     [Fact]
@@ -1139,7 +1139,7 @@ public class RawCanSubscriptionTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(bus);
         using var sub = service.Subscribe(); // default: no echoes
 
-        var confirmation = await service.SendConfirmed(
+        var confirmation = await service.SendConfirmedAsync(
             CanFrame.Classic(0x700, new byte[] { 1, 2, 3 }),
             TimeSpan.FromSeconds(2));
 

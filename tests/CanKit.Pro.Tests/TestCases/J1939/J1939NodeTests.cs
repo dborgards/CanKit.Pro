@@ -514,7 +514,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.Address.Should().BeNull();
     }
 
-    // SendConfirmed timing out is not the same as a reject: the frame may already be on the
+    // SendConfirmedAsync timing out is not the same as a reject: the frame may already be on the
     // wire. Dropping its marker makes that late echo a remembered equal NAME, and the retry
     // of the same address loses before anyone is actually contending. The echo has to be
     // spent on the send that timed out. The peer after the retry is a real contest.
@@ -680,7 +680,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
     }
 
-    // The echo can be delivered while SendConfirmed is still parked. The timeout that follows
+    // The echo can be delivered while SendConfirmedAsync is still parked. The timeout that follows
     // has nothing to linger: putting the marker back would swallow the next real peer.
     [Fact]
     public async Task A_Claim_Echo_That_Beats_The_Timeout_Is_Not_Put_Back()
@@ -1971,7 +1971,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex on #153: the loss must not fault on the same actor turn that only started the
-    // Cannot Claim. SendConfirmed here does not return until released, so the handoff has not
+    // Cannot Claim. SendConfirmedAsync here does not return until released, so the handoff has not
     // happened. A post queued behind that turn sees the claim still incomplete -- completing
     // it beside the fire-and-forget start would already have faulted it. Releasing forwards
     // the frame, and only then does the claim fault.
@@ -2022,7 +2022,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex and Bugbot on #153: the handoff continuation must fault the loss that started
-    // that send. Claim B is allowed while A's Cannot Claim is still inside SendConfirmed,
+    // that send. Claim B is allowed while A's Cannot Claim is still inside SendConfirmedAsync,
     // and B can lose — and park its own Cannot Claim — before A's send returns. Releasing
     // A completes A only; B stays incomplete until its own send is released.
     [Fact]
@@ -2069,7 +2069,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref cannotClaims).Should().Be(2);
     }
 
-    // The handoff posts back onto the actor. Disposing the node while SendConfirmed is still
+    // The handoff posts back onto the actor. Disposing the node while SendConfirmedAsync is still
     // parked tears that actor down; the post finds nothing to tell and must not escape the
     // fire-and-forget send. Dispose itself still settles the waiting claim.
     [Fact]
@@ -4734,7 +4734,7 @@ public sealed class ScriptedClaimBus : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
-    public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+    public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
     {
         if (frame.IsExtendedFrame)
         {
@@ -4765,7 +4765,7 @@ public sealed class ScriptedClaimBus : ICanBusService
             }
         }
 
-        return await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);
+        return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
     }
 
     public void Dispose() { /* the test owns the inner service */ }

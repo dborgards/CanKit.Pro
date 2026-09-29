@@ -441,10 +441,10 @@ flowchart TB
 
 | L2-Baustein | Lücke | Zweck | Schnittstelle | Erfüllt |
 |-------------|-------|-------|----------------------------|---------|
-| `ICanBusService` | – | Ein Dienst-Objekt pro `ICanBus`; hält Subscriptions, TX-Confirm, Aktoren. | `Subscribe(filter) → ISubscription`, `SendConfirmed(frame) → Task<TxConfirmation>` | `FR-RAW-SVC-*` |
+| `ICanBusService` | – | Ein Dienst-Objekt pro `ICanBus`; hält Subscriptions, TX-Confirm, Aktoren. | `Subscribe(filter) → ISubscription`, `SendConfirmedAsync(frame) → Task<TxConfirmation>` | `FR-RAW-SVC-*` |
 | Multi-Protokoll-Demux | (2) | Ein RX-Strom → N unabhängige gefilterte Consumer, **ohne** konkurrierendes `ReceiveAsync`. **Umgesetzt** im neuen Paket `CanKit.Pro.RawCan` (`ICanBusService`/`CanBusService` + `ISubscription`): je Subscription ein eigener bounded Drop-Oldest-Channel (FR-RAW-011), Fast-Path `CanIdFilter` (ID-Range/Maske) neben generischem `Func<CanFrameEvent,bool>` (FR-RAW-010/013), deterministisches Dispose (FR-RAW-012). Das gelieferte Element ist `CanFrameEvent` = Frame + `IsEcho` + Empfangszeitstempel; Echos werden nur an Subscriptions ausgeliefert, die sie mit `includeEcho: true` angefordert haben (FR-RAW-015, [#23](https://github.com/dborgards/CanKit.Pro/issues/23)). Baut ausschließlich auf `ICanBus.FrameObserved`, kein Adapter-Eingriff. | `ICanBusService.Subscribe(filter, includeEcho) → ISubscription { IAsyncEnumerable<CanFrameEvent> Frames; }` | `FR-RAW-010..013`, `FR-RAW-015` |
 | Frame-Ownership-Vertrag | (1) | Verbindliche Lease-Regeln (siehe 8.1); verhindert Use-after-free/Double-Dispose. **Kernmechanik umgesetzt** (`OwnMemory`-Fix, `CanFrame.Duplicate`, Virtual-Hub-Broadcast per Kopie); ausstehend (upstream): TX-Lease für übrige L0-Adapter; den ISO-TP-Scheduler des Prototyps, der sie ebenfalls brauchte, gibt es nicht mehr. | Vertragsdoku + `OwnMemory`-Fix (Review §1.5) | `FR-RAW-OWN-*` |
-| TX-Confirm | (4) | Einheitliche „gesendet"-Bestätigung, egal ob Hardware-Echo vorhanden. **Umgesetzt** in `CanKit.Pro.RawCan` (`ICanBusService.SendConfirmed`): FIFO-Echo-Matching je (ID, Payload) für gleichzeitige inhaltsgleiche Sendevorgänge (FR-RAW-031), dokumentierte Treiber-Akzeptanz-Approximation ohne Echo (FR-RAW-032), beobachtbare Fehlschläge statt Hängen bei Timeout/BusOff/Ablehnung (FR-RAW-033), konfigurierbarer Timeout je Aufruf (FR-RAW-034). | `TxConfirmation { Confirmed; Timestamp; IsApproximated; FailureReason; }` | `FR-RAW-030..034` |
+| TX-Confirm | (4) | Einheitliche „gesendet"-Bestätigung, egal ob Hardware-Echo vorhanden. **Umgesetzt** in `CanKit.Pro.RawCan` (`ICanBusService.SendConfirmedAsync`): FIFO-Echo-Matching je (ID, Payload) für gleichzeitige inhaltsgleiche Sendevorgänge (FR-RAW-031), dokumentierte Treiber-Akzeptanz-Approximation ohne Echo (FR-RAW-032), beobachtbare Fehlschläge statt Hängen bei Timeout/BusOff/Ablehnung (FR-RAW-033), konfigurierbarer Timeout je Aufruf (FR-RAW-034). | `TxConfirmation { Confirmed; Timestamp; IsApproximated; FailureReason; }` | `FR-RAW-030..034` |
 | Adressierungs-Helfer | – | 11/29-bit, Extended/Mixed/NormalFixed (bislang nur als Einzelfall in `IsoTpEndpoint` vorhanden). **Umgesetzt** als eigenständiges, abhängigkeitsfreies Paket `CanKit.Pro.Addressing`: validierte 11-/29-Bit-ID-Prüfung (`CanIdRange`), allgemeine J1939-PGN/Priorität/PDU-Format/Quelladresse-Komposition/-Dekomposition (`J1939Id`/`J1939Fields`, FR-RAW-040) — verallgemeinert die zuvor auf eine feste Diagnose-PGN beschränkte 29-Bit-Konstruktion aus `IsoTpEndpoint.CreateNormalFixed`. Zusätzlich `CanIdFilter.Overlaps` sowie `ICanBusService.FindOverlappingFilterSubscriptions()` in `CanKit.Pro.RawCan` zur Erkennung überlappender Subscription-Filter (FR-RAW-041, Should); jeder Treffer wird als benannter `FilterOverlap` (beide Subscriptions plus geteilter ID-Bereich) gemeldet. | ID-Bau/-Zerlegung, PGN/Prio-Helfer | `FR-RAW-ADDR-*` |
 | Aktor-/Threading-Modell | (3) | Genau ein Bearbeitungs-Thread/Mailbox pro Protokollinstanz; kein geteilter mutabler State. **Umgesetzt** als eigenständiges, abhängigkeitsfreies Paket `CanKit.Pro.Actor` (siehe ADR-6): ereignisgetriebener Loop (kein Busy-Loop, FR-RAW-022), je Instanz wählbarer Ausführungskontext (`ActorExecutionMode`: `DedicatedThread`/`ThreadPool`/`SynchronizationContext`, FR-RAW-024), `BackgroundExceptionOccurred` als einziger Kanal für Hintergrundfehler (FR-RAW-023). Genutzt von `CanKit.Pro.IsoTp` (`IsoTpChannel`), `CanKit.Pro.J1939Tp`, `CanKit.Pro.J1939` und `CanKit.Pro.CANopen`; `CanKit.Pro.Uds` verwendet ihn nur als optionale Zeitquelle für P2/P2* und serialisiert Anfragen selbst. | `IProtocolActor { Post(msg); PostAsync(msg); Schedule(delay, cb); }` | `FR-RAW-ACTOR-*` |
 | Fehler-/Timeout-Infrastruktur | – | Einheitliche Deadline-Verwaltung (ersetzt verstreute ISO-TP-`Deadline`s) und gepushte Bus-Fehlerzustände. **Umgesetzt** als eigenständiges Paket `CanKit.Pro.Reliability` (siehe ADR-11), aufbauend auf `CanKit.Pro.Actor`: `IDeadlineScheduler`/`DeadlineScheduler`/`Deadline` ist eine wiederverwendbare Deadline-Primitive, deren Ablauf über `IProtocolActor.Schedule` auf dem Aktor-Loop tatsächlich eingeplant, geprüft und gemeldet wird — behebt die Klasse „Deadlines werden gepflegt, aber nie geprüft" (Review §1.1 Punkt 10, FR-RAW-050); die Pending→{Expired\|Completed\|Cancelled}-Auflösung ist per `Interlocked`-CAS genau einmal entscheidbar, Ausnahmen aus `onExpired` laufen über den bestehenden `BackgroundExceptionOccurred`-Kanal (kein zweiter Fehlerkanal). `BusStateMonitor`/`BusStateChangedEventArgs`/`BusStateExtensions` pusht `ICanBus.BusState`-Übergänge (ErrWarning/ErrPassive/BusOff sowie Erholung) an Protokollinstanzen — zuverlässig über einen selbst-rearmenden Poll auf dem Aktor-`Schedule` (Standard 50 ms) statt eines freilaufenden Timers, ergänzt um `ErrorFrameReceived`/`FaultOccurred` als Latenz-Hinweise (FR-RAW-051). Genutzt von `IsoTpChannel` (N_Bs/N_Cr), `CanKit.Pro.J1939`, `CanKit.Pro.J1939Tp` und `CanKit.Pro.CANopen`. FR-RAW-052 (reservierte/ungültige Protokollwerte) ist bewusst nicht als generische L2-Primitive gebaut, sondern als Codec-Aufgabe FR-TP-007 in `IsoTpFrameCodec.DecodeStMin` umgesetzt (reservierte Bereiche → 127 ms). | `IDeadlineScheduler`, `DeadlineScheduler`/`Deadline`, `BusStateMonitor`, `BusStateExtensions` | `FR-RAW-050..051` |
@@ -541,10 +541,10 @@ classDiagram
 
 | Baustein | Zweck | Zustände / Kernmethoden | Status |
 |----------|-------|--------------------------|--------|
-| `IsoTpChannel` | TX/RX-State-Machine je Endpoint; genau ein `ProtocolActor`, RX über eine `ICanBusService`-Subscription, TX über `SendConfirmed`. | TX: `TxStage.SingleOrFirstInFlight/WaitFcInitial/SendingCf/WaitFcBlock`; RX: `_rx` gesetzt bzw. `null` (Reassemblierung läuft/Idle). | umgesetzt (FR-TP-001..018) |
+| `IsoTpChannel` | TX/RX-State-Machine je Endpoint; genau ein `ProtocolActor`, RX über eine `ICanBusService`-Subscription, TX über `SendConfirmedAsync`. | TX: `TxStage.SingleOrFirstInFlight/WaitFcInitial/SendingCf/WaitFcBlock`; RX: `_rx` gesetzt bzw. `null` (Reassemblierung läuft/Idle). | umgesetzt (FR-TP-001..018) |
 | `IsoTpFrameCodec` | Bau/Parsing von SF/FF/CF/FC, STmin-En/Decode, Folgenummern. | `BuildSingleFrame/FirstFrame/ConsecutiveFrame/FlowControl`, `TryParsePci`, `EncodeStMin/DecodeStMin`. | umgesetzt (FR-TP-003..008) |
 | `IsoTpEndpoint` | Adresspaar und Adressierungsart. | `Normal`, `NormalFixed`, `Extended`, `Mixed`. | umgesetzt |
-| `DeadlineScheduler` (`CanKit.Pro.Reliability`) | N_Bs (FC-Wartezeit) und N_Cr (nächster CF); N_As liefert `SendConfirmed`. | `Arm`, `Rearm`, Ablauf auf dem Aktor-Loop. | umgesetzt (FR-TP-010) |
+| `DeadlineScheduler` (`CanKit.Pro.Reliability`) | N_Bs (FC-Wartezeit) und N_Cr (nächster CF); N_As liefert `SendConfirmedAsync`. | `Arm`, `Rearm`, Ablauf auf dem Aktor-Loop. | umgesetzt (FR-TP-010) |
 | `IsoTpFunctionalClient` / `IsoTpFunctionalListener` | Funktionale Adressierung (1:n-Anfragen). | `IsoTp.OpenFunctional(...)`. | umgesetzt (FR-TP-019, Could) |
 
 ---
@@ -623,7 +623,7 @@ sequenceDiagram
     participant HW as Hardware/Treiber
     participant Rx as RX-Loop  [L0/L1]
 
-    Proto->>Svc: SendConfirmed(frame)  (Aufrufer besitzt frame)
+    Proto->>Svc: SendConfirmedAsync(frame)  (Aufrufer besitzt frame)
     Svc->>Svc: TX-Lease: Kopie anlegen falls nötig
     Svc->>Bus: Transmit(in frame)
     Bus->>HW: nativer Write
@@ -642,7 +642,7 @@ sequenceDiagram
 ## 6.4 (d) ISO-TP Multi-Frame-Übertragung (FF → FC/CTS → CF… → PDU)
 
 Ablauf gemäß ISO 15765-2, wie `IsoTpChannel` ihn ausführt: Der Zustand liegt ausschließlich auf
-dem Aktor-Loop; `SendConfirmed` läuft auf dem Thread-Pool und meldet sein Ergebnis per
+dem Aktor-Loop; `SendConfirmedAsync` läuft auf dem Thread-Pool und meldet sein Ergebnis per
 `Post` zurück, sodass der Loop nie auf eine Task wartet.
 
 ```mermaid
@@ -653,13 +653,13 @@ sequenceDiagram
     participant R as Empfänger (ECU)
 
     Note over S: PDU > SF-Kapazität → Segmentierung
-    S->>Svc: SendConfirmed(FF: PCI 0x1, Länge=n, erste Nutzdaten)
+    S->>Svc: SendConfirmedAsync(FF: PCI 0x1, Länge=n, erste Nutzdaten)
     Svc->>R: FF
     Svc-->>S: TX bestätigt (N_As überwacht) → TxStage=WaitFcInitial, N_Bs läuft
     R-->>Svc: FC (FS=CTS, BS=b, STmin=t)
     Svc-->>S: FC über Subscription → BS/STmin des ersten CTS gelten für den ganzen Transfer
     loop Block von BS Frames, Abstand ≥ STmin (Timer auf dem Aktor)
-        S->>Svc: SendConfirmed(CF, SN läuft 1..15,0..)
+        S->>Svc: SendConfirmedAsync(CF, SN läuft 1..15,0..)
         Svc->>R: CF
         Svc-->>S: TX bestätigt → nächster CF nach STmin
     end
@@ -731,7 +731,7 @@ TX-Bestätigungs-Handlern):
 
 ```mermaid
 stateDiagram-v2
-    [*] --> SingleOrFirstInFlight : SendAsync (SF oder FF an SendConfirmed)
+    [*] --> SingleOrFirstInFlight : SendAsync (SF oder FF an SendConfirmedAsync)
     SingleOrFirstInFlight --> [*] : SF bestätigt → Task erfüllt
     SingleOrFirstInFlight --> WaitFcInitial : FF bestätigt<br/>N_Bs läuft
     WaitFcInitial --> SendingCf : FC(CTS)<br/>BS/STmin des ersten CTS übernehmen
@@ -871,7 +871,7 @@ auf `FrameObserved` läuft, aber `FrameReceived` bleibt aus Kompatibilitätsgrü
 Der TX-Lease-Grundsatz (3) ist für den Virtual-Adapter umgesetzt; für die übrigen L0-Adapter
 steht die Umsetzung noch aus (`FR-RAW-005`, Should). Den ISO-TP-Scheduler des Prototyps, für den
 Review §2.1 („Scheduler (ISO-TP)") das Echo-Matching bemängelte, gibt es nicht mehr; `IsoTpChannel`
-konstruiert keine `CanFrame`-Instanzen mit Owner und bestätigt über `SendConfirmed`.
+konstruiert keine `CanFrame`-Instanzen mit Owner und bestätigt über `SendConfirmedAsync`.
 
 **Ziel-Vertrag (L2, `FR-RAW-OWN-*`):**
 
@@ -1130,7 +1130,7 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   Approximation (`IsApproximated=true`).
 - **Konsequenzen:** + protokollunabhängige Confirm-Semantik. − Approximation ist ungenau
   (Jitter), muss dokumentiert werden.
-- **Status:** Umgesetzt in `CanKit.Pro.RawCan` (`ICanBusService.SendConfirmed`). Nutzung von
+- **Status:** Umgesetzt in `CanKit.Pro.RawCan` (`ICanBusService.SendConfirmedAsync`). Nutzung von
   Echo-Matching hängt von **zwei** Bedingungen ab: `CanFeature.Echo` (Hardware-Fähigkeit) UND
   `WorkMode == ChannelWorkMode.Echo` (Session-Opt-in) — reines Vorhandensein der Fähigkeit reicht
   nicht. Ausstehende Bestätigungen werden pro (ID, Payload)-Schlüssel FIFO in einer
