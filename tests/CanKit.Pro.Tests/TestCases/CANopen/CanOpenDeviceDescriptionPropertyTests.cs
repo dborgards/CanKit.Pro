@@ -17,7 +17,14 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 public class CanOpenDeviceDescriptionPropertyTests
 {
     private static string Fixture(string name)
-        => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", Path.GetFileName(name)));
+        => File.ReadAllText(name switch
+        {
+            // Literal segments only: no caller-supplied string reaches Path.Combine.
+            "device.eds" => Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "device.eds"),
+            "quirky.eds" => Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "quirky.eds"),
+            "device.dcf" => Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "device.dcf"),
+            _ => throw new ArgumentOutOfRangeException(nameof(name), name, "Unknown fixture."),
+        });
 
     private static string Mutate(SeededRun run, string text)
     {
