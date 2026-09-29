@@ -713,6 +713,73 @@ public class IsoTpFrameCodecTests
         act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("totalLength");
     }
 
+    // #207: the escape form carries FF_DL above 4095 only. The short form covers 0..4095, so an
+    // escape header announcing a length that fits it is not a First Frame. Deliberately strict:
+    // the standard's text was not checked, and accepting more later is not a breaking change.
+    [Theory]
+    [InlineData(0u, false)]
+    [InlineData(1u, false)]
+    [InlineData(100u, false)]
+    [InlineData(4094u, false)]
+    [InlineData(4095u, false)] // the largest length the short form carries
+    [InlineData(4096u, true)]  // the smallest length only the escape form carries
+    [InlineData(65_536u, true)]
+    [InlineData(0x7FFF_FFFFu, true)]
+    [InlineData(0x8000_0000u, false)] // beyond int.MaxValue: cannot be a PDU length here
+    public void TryParsePci_FirstFrame_CanFd_Escape_Accepts_Only_Lengths_Above_The_Short_Form(uint announced, bool accepted)
+    {
+        var frame = new byte[]
+        {
+            0x10, 0x00,
+            (byte)(announced >> 24), (byte)(announced >> 16), (byte)(announced >> 8), (byte)announced,
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+        };
+        var ep = IsoTpEndpoint.Normal(0x1, 0x2);
+
+        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: true, out var pci).Should().Be(accepted);
+
+        if (accepted)
+        {
+            pci.Type.Should().Be(PciType.FirstFrame);
+            pci.Length.Should().Be((int)announced);
+            pci.DataOffset.Should().Be(6);
+        }
+    }
+
+    // The same boundary with an address-extension byte in front: the escape header and its length
+    // move by one, the rule does not.
+    [Theory]
+    [InlineData(4095u, false)]
+    [InlineData(4096u, true)]
+    public void TryParsePci_FirstFrame_CanFd_Escape_Boundary_Holds_With_An_Address_Extension(uint announced, bool accepted)
+    {
+        var frame = new byte[]
+        {
+            0xAA, 0x10, 0x00,
+            (byte)(announced >> 24), (byte)(announced >> 16), (byte)(announced >> 8), (byte)announced,
+            1, 2, 3, 4, 5, 6, 7, 8, 9,
+        };
+        var ep = IsoTpEndpoint.Extended(0x1, 0x2, targetAddress: 0xAA, sourceAddress: 0x55);
+
+        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: true, out var pci).Should().Be(accepted);
+        if (accepted) pci.DataOffset.Should().Be(7);
+    }
+
+    // What BuildFirstFrame writes, TryParsePci reads back on both sides of the boundary: 4095 in
+    // the short form, 4096 in the escape form.
+    [Theory]
+    [InlineData(4095)]
+    [InlineData(4096)]
+    public void BuildFirstFrame_And_TryParsePci_Round_Trip_Across_The_Escape_Boundary(int totalLength)
+    {
+        var ep = IsoTpEndpoint.Normal(0x1, 0x2);
+        var frame = IsoTpFrameCodec.BuildFirstFrame(ep, totalLength, new byte[] { 1, 2, 3, 4, 5, 6 }, isCanFd: true);
+
+        IsoTpFrameCodec.TryParsePci(frame, ep, isCanFd: true, out var pci).Should().BeTrue();
+        pci.Type.Should().Be(PciType.FirstFrame);
+        pci.Length.Should().Be(totalLength);
+    }
+
     [Fact]
     public void TryParsePci_FirstFrame_CanFd_Escape_ZeroLength_Is_Rejected()
     {

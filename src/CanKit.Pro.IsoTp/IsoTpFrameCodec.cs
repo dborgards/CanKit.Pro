@@ -442,6 +442,14 @@ public static class IsoTpFrameCodec
     /// Never throws <see cref="IndexOutOfRangeException"/> — a truncated frame returns
     /// <c>false</c> with <c>pci</c> set to <see langword="default"/> (fixes review §1.1 point 6).
     /// </summary>
+    /// <remarks>
+    /// A First Frame in the CAN-FD escape form (<c>0x10 0x00</c> followed by a 32-bit FF_DL) is
+    /// accepted only for an FF_DL above 4095: the escape form exists for the lengths the 12-bit
+    /// short form cannot carry, and <c>BuildFirstFrame</c> emits it for no others. A shorter
+    /// length, zero included, is rejected. This is deliberately strict; accepting such a frame
+    /// later would not be a breaking change, since it only turns a <c>false</c> into a
+    /// <c>true</c>.
+    /// </remarks>
     /// <param name="canPayload">Raw CAN data payload (up to 8 bytes for classic CAN, up to 64
     /// bytes for CAN-FD).</param>
     /// <param name="endpoint">Endpoint whose addressing mode decides whether the first payload
@@ -457,7 +465,8 @@ public static class IsoTpFrameCodec
     /// <returns>
     /// <c>true</c> when the frame has enough bytes and a valid PCI nibble; <c>false</c> for
     /// truncated frames, reserved PCI nibbles (&gt; 3), reserved Flow-Status values (&gt; 2),
-    /// escape-form PCIs on classic CAN, or CAN-FD Single-Frame short-form SF_DL values above
+    /// escape-form PCIs on classic CAN, a CAN-FD escape-form First Frame whose FF_DL is not above
+    /// 4095, or CAN-FD Single-Frame short-form SF_DL values above
     /// <see cref="SingleFrameShortFormMaxDataLength"/> for the endpoint's addressing mode
     /// (those lengths must use the <c>0x00 LEN</c> escape — 8..15 without address extension,
     /// 7..15 with extended/mixed addressing).
@@ -545,11 +554,12 @@ public static class IsoTpFrameCodec
                             canPayload[lenStart + 3];
                         if (longLen > int.MaxValue)
                             return false;
-                        // An escape-form FF_DL of zero announces no PDU at all; reject it (#207).
-                        // OPEN QUESTION (#207): escape-form FF_DL 1..4095 is still accepted here;
-                        // whether ISO 15765-2 requires rejecting it is not verified against the
-                        // standard text, so behaviour is deliberately unchanged for that range.
-                        if (longLen == 0)
+                        // The escape form carries the lengths the 12-bit short form cannot: above 4095.
+                        // BuildFirstFrame never emits it below 4096, and a shorter length in it --
+                        // zero included, which announces no PDU at all -- is not a First Frame
+                        // (#207). Deliberately strict: the standard's text was not checked, and
+                        // accepting more later only turns a false into a true.
+                        if (longLen <= MaxClassicFirstFrameLength)
                             return false;
                         pci = new Pci(type, (int)longLen, 0, FlowStatus.ClearToSend, 0, 0, TimeSpan.Zero,
                             pciIndex + 6);
