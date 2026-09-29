@@ -2692,6 +2692,43 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await DrainAsync(clock, actor, first);
     }
 
+    // Codex on #215: a token that is already canceled is answered with a cancellation, also when
+    // the destination is at its limit (where it used to be refused as a rejection), and it does
+    // not reserve a slot: with a limit of 0 the send on the wire holds the only slot, so a leak
+    // would show as a rejection of the send after it.
+    [Fact]
+    public async Task An_Already_Canceled_Send_Is_Canceled_Not_Rejected_And_Reserves_No_Slot()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 1);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var waiting = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2)); // the limit is now reached
+
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        var atLimit = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3), canceled.Token);
+        atLimit.IsCanceled.Should().BeTrue("a canceled token is answered with a cancellation, not a rejection");
+
+        await DrainAsync(clock, actor, first, waiting);
+
+        // Nothing is queued and no slot is held by the canceled sends: the same three fit again.
+        for (int i = 0; i < 3; i++)
+            sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4), canceled.Token).IsCanceled.Should().BeTrue();
+        var again = new[]
+        {
+            sender.SendBamAsync(0xFEC4u, RandomPayload(9, seed: 5)),
+            sender.SendBamAsync(0xFEC5u, RandomPayload(9, seed: 6)),
+        };
+        again.Should().OnlyContain(t => !t.IsFaulted);
+        await DrainAsync(clock, actor, again);
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0);
+    }
+
     // Codex on #215: sends posted to the actor and not yet run are not in the queue, so a limit
     // enforced only there is no bound at all against a producer that outruns the actor. The actor
     // is held busy on a gate, so every send below is made while nothing has run.

@@ -213,6 +213,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// </summary>
     private Task Admit(TxSessionKey key, ReadOnlyMemory<byte> payload, CancellationToken ct, bool isCm)
     {
+        // A token that is already canceled is the caller's answer before there is anything to
+        // admit: it must not be reported as a rejection, nor reserve a slot and copy a PDU only
+        // to have the actor undo both.
+        if (ct.IsCancellationRequested) return Task.FromCanceled(ct);
         byte destination = key.DestinationAddress;
         long limit = (long)_options.MaxQueuedSendsPerDestination + 1; // int.MaxValue + 1 must not wrap
         int admitted;
