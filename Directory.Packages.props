@@ -33,11 +33,12 @@
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
     <!--
-      FluentAssertions is deliberately pinned to the 6.x line: from 8.0.0 onwards it ships under
-      the Xceed commercial license, which does not fit this MIT-licensed project. Do not accept an
-      automated major-version bump here (see .github/dependabot.yml).
+      AwesomeAssertions, not FluentAssertions: from 8.0.0 onwards FluentAssertions ships under the
+      Xceed commercial license, which does not fit this MIT-licensed project. AwesomeAssertions is
+      a community fork of FluentAssertions, published under Apache-2.0 (its nuspec declares that
+      expression). Do not add FluentAssertions back.
     -->
-    <PackageVersion Include="FluentAssertions" Version="6.12.2" />
+    <PackageVersion Include="AwesomeAssertions" Version="9.6.0" />
     <PackageVersion Include="coverlet.collector" Version="10.1.0" />
     <!--
       Polyfill supplies the BCL APIs the test suite uses but netstandard2.0/net48 lack:

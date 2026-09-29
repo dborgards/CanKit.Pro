@@ -1,8 +1,8 @@
 using System;
 using System.Linq;
+using AwesomeAssertions;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Sdo;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -14,7 +15,6 @@ using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
@@ -1031,7 +1031,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         };
 
         master.StartSyncProducer(TimeSpan.FromMilliseconds(20));
-        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(3);
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterThanOrEqualTo(3);
 
         master.StopSyncProducer();
     }
@@ -1067,7 +1067,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         };
 
         producer.StartSyncProducer(TimeSpan.FromMilliseconds(20));
-        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterThanOrEqualTo(
             3,
             "the SYNC producer's own echo is the only path that raises SyncReceived and emits "
             + "synchronous TPDOs on the producing node");
@@ -1418,7 +1418,7 @@ public class CanOpenNodeIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await consumer.SendSyncAsync();
         await consumer.SendSyncAsync();
 
-        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(2);
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterThanOrEqualTo(2);
         consumer.ObjectDictionary.ReadUnsigned(0x2300, 0x00).Should().Be(0xCAFEBABEu);
     }
 

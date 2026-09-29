@@ -1,6 +1,6 @@
 using System;
+using AwesomeAssertions;
 using CanKit.Pro.J1939;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.J1939;

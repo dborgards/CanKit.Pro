@@ -3,11 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.Tests.Infrastructure;
 using CanKit.Pro.Uds;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.Uds;

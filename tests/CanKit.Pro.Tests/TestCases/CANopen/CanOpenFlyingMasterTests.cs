@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -14,7 +15,6 @@ using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
@@ -654,7 +654,7 @@ public partial class CanOpenFlyingMasterTests : IClassFixture<VirtualAdapterFixt
         var frames = rig.Log.Snapshot();
         int resetAt = frames.FindIndex(f => IsNmt(f, NmtCommand.ResetCommunication, slave));
         int startAt = frames.FindIndex(f => IsNmt(f, NmtCommand.Start, 0));
-        resetAt.Should().BeGreaterOrEqualTo(0);
+        resetAt.Should().BeGreaterThanOrEqualTo(0);
         startAt.Should().BeGreaterThan(resetAt);
     }
 

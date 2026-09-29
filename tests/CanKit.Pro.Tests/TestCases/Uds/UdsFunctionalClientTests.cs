@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -13,7 +14,6 @@ using CanKit.Pro.IsoTp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using CanKit.Pro.Uds;
-using FluentAssertions;
 using Xunit;
 using IsoTpFactory = CanKit.Pro.IsoTp.IsoTp;
 

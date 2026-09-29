@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -12,7 +13,6 @@ using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
@@ -355,7 +355,7 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         await producer.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0x01);
 
         // No SYNC, no TriggerTpdoAsync — the event timer alone must drive the emissions.
-        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(3);
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterThanOrEqualTo(3);
         consumer.ObjectDictionary.ReadUnsigned(0x2100, 0x00).Should().Be((uint)0xBEEF);
     }
 

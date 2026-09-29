@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core.Definitions;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.TestCases.Properties;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases;

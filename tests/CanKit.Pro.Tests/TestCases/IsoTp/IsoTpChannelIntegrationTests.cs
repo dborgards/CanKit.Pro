@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -14,7 +15,6 @@ using CanKit.Pro.Actor;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 // Alias the CanKit.Pro.IsoTp namespace root to avoid clashing with this test namespace's
 // trailing "IsoTp" segment, which would otherwise shadow the static factory class.

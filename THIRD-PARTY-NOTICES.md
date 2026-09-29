@@ -52,12 +52,12 @@ These never reach a consumer's application: they are `PrivateAssets`/test-projec
 | [GitVersion.MsBuild](https://github.com/GitTools/GitVersion) | MIT |
 | [xunit](https://github.com/xunit/xunit), xunit.runner.visualstudio | Apache-2.0 |
 | [Microsoft.NET.Test.Sdk](https://github.com/microsoft/vstest) | MIT |
-| [FluentAssertions](https://github.com/fluentassertions/fluentassertions) (6.x) | Apache-2.0 |
+| [AwesomeAssertions](https://github.com/AwesomeAssertions/AwesomeAssertions) | Apache-2.0 |
 | [coverlet.collector](https://github.com/coverlet-coverage/coverlet) | MIT |
 | [semantic-release](https://github.com/semantic-release/semantic-release) and plugins | MIT |
 
-> FluentAssertions is pinned to the 6.x line on purpose: from 8.0.0 it is published under the
-> Xceed commercial license. See the comment in `Directory.Packages.props`.
+> AwesomeAssertions is used instead of FluentAssertions on purpose: from 8.0.0 FluentAssertions is
+> published under the Xceed commercial license. See the comment in `Directory.Packages.props`.
 
 ## Relationship to CanKit.Pro.legacy
 

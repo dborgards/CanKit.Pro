@@ -1,10 +1,10 @@
 using System;
 using System.IO;
 using System.Text;
+using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.Tests.TestCases.Properties;
 using EdsDcfNet.Exceptions;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
