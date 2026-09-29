@@ -433,6 +433,39 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.GetReceptionsInProgress().Should().BeEmpty();
     }
 
+    // #207 -- the same for a First Frame in the CAN-FD escape form announcing a length the short
+    // form carries (up to 4095): the codec refuses it, and the channel, which reads every frame
+    // through the codec, never starts a reception for it. Without the codec's rule the frame
+    // would be taken for a First Frame of a 100-byte PDU (it does not fit a Single Frame of its
+    // CAN_DL, so #56's rule does not catch it) and a reassembly would begin.
+    [Theory]
+    [InlineData(100)]
+    [InlineData(4095)] // the largest length the short form carries
+    public async Task An_Escape_First_Frame_Announcing_A_Short_Form_Length_Starts_No_Reception(int announced)
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+
+        byte[] ff =
+        {
+            0x10, 0x00,
+            (byte)(announced >> 24), (byte)(announced >> 16), (byte)(announced >> 8), (byte)announced,
+            0x11, 0x22,
+        };
+        service.Deliver(new CanFrameView(CanFrameType.CanFd, 0x7E8, ff, FrameFlags.None));
+
+        // Pumped on this thread, then settled on the actor.
+        channel.GetReceptionsInProgress().Should().BeEmpty("the frame is not a First Frame");
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        lock (service.Sent)
+            service.Sent.Should().BeEmpty("a frame that is not a First Frame gets no Flow Control");
+        channel.TryReceiveWithArrival(out _).Should().BeFalse();
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
     // Codex on #150: a Single Frame the demux has buffered is not in the inbox until the reader
     // task and the actor have taken it, and neither runs on the caller's schedule; SettleAsync
     // takes it through on the caller's, so a look at the inbox after it is a look at every
