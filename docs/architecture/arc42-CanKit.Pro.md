@@ -1022,7 +1022,7 @@ flowchart LR
 Die Erstfassung sah vor, dass auch L3/L4 (ISO-TP, UDS, …) über denselben Mechanismus
 (`IIsoTpRegister`) andocken. Das wurde **nicht** so umgesetzt: die CanKit.Pro-Pakete sind
 Bibliotheken mit statischen Fabriken (`IsoTp.Open`, `UdsClient.Create`, `CanOpen.OpenNode`,
-`J1939Node.Open`) auf `ICanBus`/`ICanBusService`; sie brauchen weder Kern-Änderung noch Registry-Eintrag. Damit erfüllen sie den Wortlaut von NFR-010 (SRS: Registrierung über `[CanRegistryEntry]`-Analogon) nicht, wohl aber dessen Zweck (eigenständiges Paket, lose Kopplung); ob der Wortlaut angepasst wird, ist in [#226](https://github.com/dborgards/CanKit.Pro/issues/226) offen.
+`J1939Node.Open`) auf `ICanBus`/`ICanBusService` bzw., beim UDS-Client, einem `IIsoTpChannel`; sie brauchen weder Kern-Änderung noch Registry-Eintrag. NFR-010 (SRS) fordert deshalb genau dieses Muster — eigenständiges Paket, statische Fabrik auf der darunterliegenden Schicht, keine Änderung an `CanKit.Core`, kein Vendor-SDK — und keine Registrierung ([#226](https://github.com/dborgards/CanKit.Pro/issues/226)). Die Registry bleibt Mechanismus der L0-Adapter: sie löst einen Endpoint-String in einen geöffneten Bus auf. Ein Protokollpaket setzt auf einem bereits offenen Bus auf und hat keinen solchen Namen, und die Reflexionskosten (ADR-1) würden ohne Nutzen mitwandern.
 
 ## 8.9 Teststrategie (Virtual-Loopback / Fake)
 
