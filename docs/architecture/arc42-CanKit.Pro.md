@@ -1295,7 +1295,7 @@ Priorisierung: **K** = kritisch, **W** = wichtig, **G** = gering.
 (Stopwatch, BCM, QueuedCanBus, Frame-Ownership, Virtual-Hub) sind behoben (siehe ✅-Markierungen
 oben). Der ISO-TP-Prototyp des Forks ist durch den Neubau `CanKit.Pro.IsoTp` ersetzt (siehe die
 ✅-Zeilen oben). Von den vier strukturellen L2-Lücken ist der Frame-Ownership-Vertrag
-(FR-RAW-001..005) für L1-Kern und Virtual-Adapter upstream umgesetzt (siehe §8.1); Demux,
+(FR-RAW-001..004) für L1-Kern und Virtual-Adapter upstream umgesetzt, FR-RAW-005 (TX-Lease der übrigen L0-Adapter, Should) ist noch offen (siehe §8.1); Demux,
 Threading/Aktor und TX-Confirm sind als `CanKit.Pro.RawCan` und `CanKit.Pro.Actor` umgesetzt und
 tragen die L3/L4-Pakete. Offen ist, was in dieser Tabelle ohne ✅ steht, sowie die Vorbehalte
 des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
