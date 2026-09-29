@@ -130,6 +130,7 @@ public class IsoTpFrameCodecPropertyTests
             pci.BlockSize.Should().Be(bs, because);
             pci.StMinRaw.Should().Be(st, because);
             pci.StMin.Should().Be(IsoTpFrameCodec.DecodeStMin(st), because);
+            pci.DataOffset.Should().Be(ep.AddressExtensionSize + 3, because);
         }
     }
 
