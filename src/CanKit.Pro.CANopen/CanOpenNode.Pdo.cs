@@ -114,7 +114,7 @@ internal sealed partial class CanOpenNode
     /// gate throughout (<see cref="ObjectDictionary.Transaction"/>), so the sequence is one
     /// transaction: the SDO server writes on the same loop, a second configuration queues behind
     /// the whole sequence, and a direct dictionary write on another thread waits for it —
-    /// none of them lands between two of its writes (Codex on #133).
+    /// none of them lands between two of its writes.
     /// </summary>
     private void WritePdoRecords(ushort comm, ushort map, PdoMappingEntry[] entries, uint cobIdWord,
         byte transmissionType, ushort inhibit, ushort eventTimerMs, bool isTpdo, int pdoIndex)
@@ -386,7 +386,7 @@ internal sealed partial class CanOpenNode
         foreach (var entry in rt.Mapping)
         {
             // TryReadRaw snapshots under the OD lock so a concurrent application write cannot
-            // tear the copy (see Bugbot 3600644170).
+            // tear the copy.
             if (!entry.IsDummy && _od.TryReadRaw(entry.Index, entry.Subindex, out var raw))
             {
                 int copy = Math.Min(raw.Length, entry.ByteLength);

@@ -1237,7 +1237,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // 0 = broadcast (all nodes); otherwise apply only when the target is us.
         // Raise NmtCommandReceived only for matching targets — ICanOpenNode documents the
         // event for commands that address this node (or broadcast), not every peer NMT on a
-        // shared bus (Bugbot 3600812708).
+        // shared bus.
         bool forUs = target == 0 || target == _nodeId;
         if (!forUs) return;
         if (ShouldIgnoreOwnNmt(cmd, target)) return;
@@ -1362,7 +1362,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private void HandleSdoServerRequest(byte[] data)
     {
         // CiA 301: SDO is not available in Stopped (or while still Initializing). Drop the
-        // request rather than serving a transfer that should be offline (Bugbot 3600879338).
+        // request rather than serving a transfer that should be offline.
         if (_state is NmtState.Stopped or NmtState.Initializing)
             return;
 
@@ -1468,7 +1468,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // application-side ObjectDictionary.WriteRaw on another thread swaps the entry's
         // backing array without any coordination with the actor loop, and the unlocked
         // copy path used to read _value.Length and then re-dereference _value byte-by-byte,
-        // which can tear when the write lands between those two reads. See Bugbot 3600644170.
+        // which can tear when the write lands between those two reads.
         if (!_od.TryReadRaw(index, subindex, out var value))
         {
             // Race: entry was removed between the TryGet above and this locked snapshot.
@@ -1585,7 +1585,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // below: a hostile / buggy peer can otherwise drive us into an unbounded allocation
                 // (up to 4 GiB) purely by choosing the bytes in the init frame's size field. Beyond
                 // the option cap the CiA 301 "out of memory" abort code (0x05040005) is the right
-                // signal to send back to the peer. See Bugbot 3600644166.
+                // signal to send back to the peer.
                 if (declaredLen > (uint)_options.MaxSdoTransferBytes)
                 {
                     SendSdoServerAbort(index, subindex, SdoAbortCode.OutOfMemory);
@@ -2118,7 +2118,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             // If we did not know the length up front (declared=0), grow lazily — but still
             // enforce MaxSdoTransferBytes so a zero-size init cannot bypass the cap by
-            // streaming unbounded segments (Bugbot 3600783860).
+            // streaming unbounded segments.
             int needed = session.Offset + payload.Length;
             if (needed > _options.MaxSdoTransferBytes)
             {
@@ -2244,7 +2244,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
                 // Propagate so SendNmtCommandAsync / SendSyncAsync / SendEmcyAsync (and any
                 // other awaiters of this Task) observe cancellation instead of a silent
-                // success (Bugbot 3600845875).
+                // success.
                 throw;
             }
             catch (Exception ex)
@@ -2356,7 +2356,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
     /// <summary>
     /// Sends control frames in order on a single background task so Reset bootup (0x00) cannot
-    /// race behind the subsequent Pre-Operational heartbeat (Bugbot 3600879326).
+    /// race behind the subsequent Pre-Operational heartbeat.
     /// </summary>
     private Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
         => SendOrderedControlFrames(onSendCompleted: null, frames);
@@ -2468,8 +2468,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     }
 
     /// <summary>Synchronous, on the actor loop, before the boot-up: the application restores
-    /// its own objects here (Codex on #133 — the event-queue notification can arrive after the
-    /// boot-up). A handler's exception is reported, not propagated: the reset completes.</summary>
+    /// its own objects here (the event-queue notification can arrive after the boot-up). A
+    /// handler's exception is reported, not propagated: the reset completes.</summary>
     private void RaiseApplicationReset(NmtCommand command)
     {
         var handler = ApplicationReset;

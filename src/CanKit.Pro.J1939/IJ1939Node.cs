@@ -134,7 +134,7 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     /// snapshot. In-place mutation of the caller's original buffer after
     /// <c>StartPeriodicSend</c> is NOT observed on the wire — this matches
     /// <see cref="J1939Message"/>'s "payload is copied by the sender" contract
-    /// (Bugbot 3604566680). To change the transmitted data, dispose the returned handle and
+    ///. To change the transmitted data, dispose the returned handle and
     /// start a fresh schedule with a new <see cref="J1939Message"/>.
     /// </para>
     /// </summary>

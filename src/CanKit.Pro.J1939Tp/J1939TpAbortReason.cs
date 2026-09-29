@@ -6,7 +6,7 @@ namespace CanKit.Pro.J1939Tp;
 /// round-trip on the wire without translation; a peer's abort carrying a value outside the
 /// table is surfaced as that value, and 0 -- which the table does not assign -- as
 /// <see cref="Unknown"/>. Nothing outside the table is ever sent: 10..250 are reserved to SAE
-/// and 251..255 belong to J1939-71's definitions (Codex on #145).
+/// and 251..255 belong to J1939-71's definitions.
 /// </summary>
 public enum J1939TpAbortReason : byte
 {

@@ -59,7 +59,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// the one thing a virtual clock cannot observe: OnTick drops a tick whose previous emission
     /// is still in flight, and "in flight" ends on the transport's own loop and the thread pool,
     /// neither of which a test clock governs. Without this a test would have to guess with a
-    /// delay, and guessing wrong drops the tick it was about to assert on (Bugbot on #113).
+    /// delay, and guessing wrong drops the tick it was about to assert on.
     /// </summary>
     internal int PeriodicEmissionsCompleted => Volatile.Read(ref _periodicEmissionsCompleted);
 
@@ -201,7 +201,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // address (the PDU1 PS byte), accepting frames directed to its channel identity or the
         // global address (0xFF), so at 0xFE it still receives BAM traffic. Directed TP.CM to a
         // claimed address cannot arrive until we re-open the channel with that identity
-        // (Bugbot 3600377721). RebindTransportOnLoop does exactly that at each ClaimState
+        //. RebindTransportOnLoop does exactly that at each ClaimState
         // transition; here we just seed the initial placeholder channel.
         try
         {
@@ -284,14 +284,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     // Runs on the actor loop. Tears down `_pendingClaim` when its owning caller cancels the
     // ClaimAddressAsync task, so the arbitration timer cannot later commit the address after
-    // the caller has already observed a cancellation (Bugbot 3600440955).
+    // the caller has already observed a cancellation.
     private void CancelPendingClaimOnLoop(TaskCompletionSource<object?> tcs)
     {
         if (_disposed != 0) return;
         var pending = _pendingClaim;
         if (pending is null)
         {
-            // Bugbot 3600614141: OnClaimAnnounceElapsed can race the cancel post and consume
+            // OnClaimAnnounceElapsed can race the cancel post and consume
             // `_pendingClaim` on its early-return path (its check for TCS-already-completed
             // fires because the token registration called TrySetCanceled *before* posting
             // the cancel). In that case the deadline callback already cleared the pending
@@ -530,10 +530,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // application traffic must not race and go out on the old SA while the wire already
         // advertises a different preferred address. SendCoreAsync gates on ClaimState==Claimed
         // as well, but clearing the address here also makes the Address getter honest during
-        // the arbitration window (Bugbot 3600377725).
+        // the arbitration window.
         WriteAddress(null);
         // Publish Claiming *before* the (potentially long) transport rebind so observers never
-        // see ClaimState==Claimed with Address==null during a re-claim (Bugbot 3600717316).
+        // see ClaimState==Claimed with Address==null during a re-claim.
         SetClaimState(J1939ClaimState.Claiming, preferredAddress, contendingSa: null, contendingName: null);
 
         // An equal NAME heard on some other address was the race with a claim queued behind
@@ -550,7 +550,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Register the pending claim *before* TX so contending peers that arrive during the
         // SendConfirmed await are still handled. Arm the arbitration deadline only after the
         // claim frame is confirmed on the bus — otherwise a failed/slow TX would still let
-        // OnClaimAnnounceElapsed commit Claimed (Bugbot 3600799903).
+        // OnClaimAnnounceElapsed commit Claimed.
         _pendingClaim = new PendingClaim(preferredAddress, tcs, deadline: null, ctr)
         {
             ArbitraryScanStart = scanStart,
@@ -607,7 +607,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         // If the caller already cancelled/faulted the returned task (racing between the
         // deadline callback and CancelPendingClaimOnLoop), do not commit the address — the
-        // caller has already seen a non-success outcome (Bugbot 3600440955). The actor
+        // caller has already seen a non-success outcome. The actor
         // serializes both callbacks, so this only catches the rare interleave where the
         // token registration set TrySetCanceled *before* posting the cancel, and the deadline
         // fired before the cancel post ran.
@@ -616,7 +616,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             _pendingClaim = null;
             pending.Deadline?.Dispose();
             pending.CtRegistration.Dispose();
-            // Bugbot 3600614141: BeginClaim moved us into Claiming and cleared the address /
+            // BeginClaim moved us into Claiming and cleared the address /
             // rebound the TP to 0xFE. Because we are abandoning this pending claim without
             // committing, we MUST roll the state machine back to NotClaimed here — otherwise
             // the subsequent CancelPendingClaimOnLoop (or Dispose) sees no pending claim and
@@ -638,14 +638,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Nobody contested us within the arbitration window: commit the address.
         // Rebind the TP channel to the claimed address so directed TP.CM/TP.DT to us gets
         // accepted (the channel filters TP RX by destination address; a 0xFE placeholder drops
-        // traffic directed to the claimed address — Bugbot 3600377721). If open fails after
+        // traffic directed to the claimed address). If open fails after
         // disposing the placeholder channel, do NOT complete Claimed — multi-frame would be
-        // broken while Address looks valid (Bugbot 3600825931).
+        // broken while Address looks valid.
         if (!RebindTransportOnLoop(preferredAddress))
         {
             // We already announced preferredAddress on the bus; peers may treat it as ours.
             // Broadcast Cannot-Claim (SA 0xFE) so the orphaned announcement is retracted
-            // (Bugbot 3600845832), then leave the node unclaimed.
+            //, then leave the node unclaimed.
             WriteAddress(null);
             SetClaimState(J1939ClaimState.CannotClaim, address: null,
                 contendingSa: null, contendingName: null);
@@ -946,7 +946,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <summary>
     /// Sends the initial Address Claim with <see cref="ICanBusService.SendConfirmed"/> and
     /// posts success/failure back onto the actor so the arbitration deadline is armed only
-    /// after a confirmed TX (Bugbot 3600799903).
+    /// after a confirmed TX.
     /// </summary>
     private void TransmitAddressClaimConfirmed(byte sourceAddress)
     {
@@ -1168,7 +1168,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             throw new ArgumentOutOfRangeException(nameof(message.Priority), message.Priority,
                 "J1939 priority must be in [0, 7].");
 
-        // Gate strictly on ClaimState==Claimed (Bugbot 3600377725): checking only that the
+        // Gate strictly on ClaimState==Claimed: checking only that the
         // address store is non-negative would let application traffic go out on the previous
         // SA during a re-claim, while the wire already advertises a different preferred
         // address. BeginClaim clears the address as well, so both gates fail closed.
@@ -1236,7 +1236,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         }
         catch (ObjectDisposedException) when (HasReclaimCrossed(sa))
         {
-            // Bugbot 3600591980: RebindTransportOnLoop disposed the shared TP channel while
+            // RebindTransportOnLoop disposed the shared TP channel while
             // our multi-frame send was awaiting SendBamAsync / SendCmAsync. That surfaces as
             // ObjectDisposedException from the TP channel; substitute the canonical
             // reclaim-failure so the caller sees the same failure mode as the pre-send gate
@@ -1244,7 +1244,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             throw new J1939NoAddressException();
         }
 
-        // Bugbot 3600591980: in-flight sends MUST honor a concurrent reclaim. SendCoreAsync
+        // In-flight sends MUST honor a concurrent reclaim. SendCoreAsync
         // captured the claim state / SA before awaiting the wire I/O, but ClaimAddressAsync
         // running on the actor loop between the initial gate and this point may have cleared
         // or moved the address (BeginClaim invalidates the address before announcing the new
@@ -1293,14 +1293,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // Every periodic PGN — single-frame and multi-frame alike — is driven by the actor /
         // SendAsync loop in PeriodicSchedule. The earlier attempt to route single-frame
         // payloads through the L1 IPeriodicTx handle was reverted (PR #33): the SW-fallback
-        // path swallowed Transmit exceptions (Bugbot 3604386825), and every attempted work-
+        // path swallowed Transmit exceptions, and every attempted work-
         // around (reclaim-time handle rebind, address-loss teardown on the actor loop,
         // payload snapshot, handle-detach on dispose, …) revealed yet another edge case.
         // Collapsing to one path removes an entire class of races at the cost of the L1
         // jitter optimization — FR-J1939-007 (SRS Should) still holds via the L2 actor /
         // DeadlineScheduler path, which is what IJ1939Node.StartPeriodicSend documents.
         //
-        // Pre-flight claim gate mirrors SendAsync (Bugbot 3600377725): refuse to arm a
+        // Pre-flight claim gate mirrors SendAsync: refuse to arm a
         // schedule without a currently-claimed SA so callers see the same failure mode as
         // a one-shot SendAsync before ClaimAddressAsync completes. Once running, the loop's
         // per-emission SendAsync call re-checks the claim state on every tick, so an
@@ -1445,7 +1445,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         await foreach (var datagram in transport.ReceiveAllAsync(_readerCts.Token).ConfigureAwait(false))
         {
             // Drop datagrams from a channel that has already been replaced by rebind
-            // (we no longer Wait the old reader on the actor — Bugbot 3600717311).
+            // (we no longer Wait the old reader on the actor).
             if (!ReferenceEquals(transport, _transport))
                 return;
 
@@ -1453,7 +1453,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // `IJ1939Node.MessageReceived` documents that handlers run on the node's actor
             // loop; the transport reader is a separate Task, so we must marshal onto the
             // actor before firing the event so single-frame and multi-frame receive paths
-            // share the same thread affinity guarantee (Bugbot 3600440957).
+            // share the same thread affinity guarantee.
             var message = new J1939Message(datagram.Pgn, datagram.Payload,
                 priority: _options.DefaultPriority,
                 sourceAddress: datagram.SourceAddress,
@@ -1474,13 +1474,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// A no-op if the current channel already carries the requested SA.
     /// </summary>
     /// <remarks>
-    /// Bugbot 3600591973: the previous channel MUST be disposed synchronously on the actor
+    /// The previous channel MUST be disposed synchronously on the actor
     /// loop before a new channel is opened. Fire-and-forgetting <c>Dispose</c> in parallel
     /// with opening a fresh channel leaves both TP channels subscribed to the bus at the
     /// same time; broadcast TP.BAM (DA = 0xFF) is accepted by both channels and both fire
     /// reassembled datagrams, so <see cref="MessageReceived"/> sees each multi-frame BAM
     /// once per surviving channel. Dispose itself only cancels the bus subscription (fast);
-    /// we deliberately do not <c>Wait</c> the old reader on the actor (Bugbot 3600717311) —
+    /// we deliberately do not <c>Wait</c> the old reader on the actor —
     /// stale posts are filtered by channel identity instead.
     /// If <c>J1939Tp.Open</c> then fails, the exception is surfaced via
     /// <see cref="BackgroundExceptionOccurred"/> — <c>_transport</c> continues to point at
@@ -1500,10 +1500,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         // Tear down the previous transport BEFORE opening the new one so no window exists
         // where two subscribed channels can both surface the same broadcast TP.BAM
-        // (Bugbot 3600591973). Disposing the channel cancels its bus subscription
+        //. Disposing the channel cancels its bus subscription
         // immediately and completes its inbox. Do NOT Wait on the reader here — that would
         // stall the single ProtocolActor for up to ~2 s and block address-claim handling
-        // (Bugbot 3600717311). Late datagrams from the old reader are dropped via the
+        //. Late datagrams from the old reader are dropped via the
         // ReferenceEquals(transport, _transport) gate in RunTransportReaderAsync.
         if (current is not null)
         {
@@ -1523,7 +1523,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // until the next successful rebind, but single-frame traffic keeps working via
             // the direct service. Surface so the application can react. Callers that must
             // not advertise Claimed without a live TP (claim commit) check the return value
-            // (Bugbot 3600825931).
+            //.
             RaiseBackgroundException(ex);
             return false;
         }
@@ -1762,7 +1762,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         /// <summary>
         /// The round waits the §4.4.4.3 backoff and has announced nothing yet; <see cref="Deadline"/>
         /// is the backoff, and <see cref="StartRound"/> starts the round -- now, when a Request for
-        /// Address Claimed or a contest for the candidate makes waiting pointless (Codex on #153).
+        /// Address Claimed or a contest for the candidate makes waiting pointless.
         /// </summary>
         public Action? StartRound { get; set; }
         public bool BackingOff => StartRound is not null;
@@ -1780,7 +1780,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// automatically) and surfaces failures via
     /// <see cref="J1939NodeImpl.BackgroundExceptionOccurred"/>. The payload is snapshotted
     /// into an owned buffer at construction so in-place caller mutation after Start is not
-    /// observable on the wire (Bugbot 3604566680).
+    /// observable on the wire.
     /// </summary>
     private sealed class PeriodicSchedule : IDisposable
     {
@@ -1804,7 +1804,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
             // Snapshot the caller's payload into an owned array so the wire traffic is
             // frozen at Start-time regardless of whether the caller mutates the buffer that
-            // backs message.Payload afterwards (Bugbot 3604566680). J1939Message.Payload is
+            // backs message.Payload afterwards. J1939Message.Payload is
             // a ReadOnlyMemory<byte> and its ctor doesn't copy, so re-reading it every
             // emission would alias the caller's buffer — J1939Message's own contract is
             // "payload is copied by the sender". We rebuild the message once here with the

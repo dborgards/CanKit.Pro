@@ -10,7 +10,7 @@ namespace CanKit.Pro.IsoTp;
 /// <remarks>
 /// Published when the First Frame is read off the bus, before the channel's protocol actor
 /// has accepted it — so a caller whose deadline fires while the actor is still behind sees the
-/// frame at its arrival, not at its processing (Codex on #143). Several can be pending when
+/// frame at its arrival, not at its processing. Several can be pending when
 /// the actor is behind: a PDU whose frames all sit in the mailbox is still in progress when the
 /// next First Frame is read. The actor withdraws a record on its outcome — the PDU or the abort
 /// in the inbox — or when it refuses the frame (a short First Frame, or one announcing more

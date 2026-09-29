@@ -17,7 +17,7 @@ namespace CanKit.Pro.IsoTp;
 /// demux before it (#146), so a stale-response cutoff keyed on it rejects genuine responses; a
 /// cutoff taken by the caller before it enters the channel, or at the first frame's handoff,
 /// leaves the channel's own transmission as a window in which an earlier request's late response
-/// passes (Codex on #147).
+/// passes.
 /// </remarks>
 public readonly struct IsoTpTransmitStamps : IEquatable<IsoTpTransmitStamps>
 {

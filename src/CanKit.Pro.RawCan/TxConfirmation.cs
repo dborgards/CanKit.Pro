@@ -98,8 +98,7 @@ namespace CanKit.Pro.RawCan
         /// a fast peer's response can be stamped by the demux before it. A caller deciding
         /// whether a received frame can be a response to this transmission at all needs an
         /// instant no later than the frame's wire instant: this one. Taken inside the lock, so
-        /// no wait for another sender's driver call sits between it and the handoff (Codex on
-        /// #147).
+        /// no wait for another sender's driver call sits between it and the handoff.
         /// </remarks>
         public long HostHandoffTimestamp { get; init; }
     }

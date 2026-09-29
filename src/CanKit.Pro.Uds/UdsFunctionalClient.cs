@@ -525,7 +525,7 @@ public sealed class UdsFunctionalClient : IDisposable
     /// TesterPresent to everyone (<c>3E 80</c>): the keep-alive that reaches every ECU with one
     /// frame. With the positive response suppressed, the default, nothing is collected and
     /// <paramref name="window"/> is ignored; without it, every ECU answers, and a
-    /// <paramref name="window"/> to collect them in is required (Codex on #150).
+    /// <paramref name="window"/> to collect them in is required.
     /// </summary>
     /// <exception cref="ArgumentNullException">
     /// <paramref name="suppressPositiveResponse"/> is <c>false</c> and no window was given.

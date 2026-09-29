@@ -62,7 +62,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // datagram or a reassembly-abort fault (bad DT SN / T1·T2 timeout / peer Abort /
     // a new BAM replacing the previous one per J1939-21 §5.10.3) so a blocked
     // ReceiveAsync completes instead of hanging — the FailTx analogue on the RX side (mirrors
-    // IsoTpChannel.AbortRx / Bugbot 3596396508).
+    // IsoTpChannel.AbortRx).
     private readonly Channel<RxInboxItem> _pduInbox;
 
     // Per-session state -- keyed differently for TX and RX because the two directions have
@@ -578,7 +578,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 {
                     // Validate before superseding: a malformed BAM must not cancel an in-progress
                     // session and leave ReceiveAsync hung with no replacement and no inbox fault
-                    // (Bugbot 3596489082). Broadcast has no ack channel to report the drop on.
+                    //. Broadcast has no ack channel to report the drop on.
                     var bamKey = new RxSessionKey(sa, J1939TpKind.Bam);
                     int totalBytes = payload[1] | (payload[2] << 8);
                     int totalPackets = payload[3];
@@ -686,7 +686,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     // Same frame can also terminate our *outbound* TP.CM: peer as responder
                     // aborts while we wait for CTS / send DTs / wait for EOM. HandleRxTxSideResponse
                     // already implements that path, but CTS/EOM routing alone never delivered
-                    // ControlAbort there — SendCmAsync would hang until T2/T3/T4 (Bugbot 3596617262).
+                    // ControlAbort there — SendCmAsync would hang until T2/T3/T4.
                     HandleRxTxSideResponse(sa, dataPgn, payload);
                     break;
                 }
@@ -806,7 +806,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, session.Pgn),
                 destinationAddress: session.PeerAddress);
         }
-        // Fault blocked ReceiveAsync as well as BackgroundExceptionOccurred (Bugbot 3596396508).
+        // Fault blocked ReceiveAsync as well as BackgroundExceptionOccurred.
         AbortRx(new J1939TpAbortException(J1939TpAbortReason.Timeout, session.Pgn,
             $"J1939-TP {session.Kind} RX session timed out ({timerName}) {waitingFor} from 0x{session.PeerAddress:X2}."));
     }
@@ -933,7 +933,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             var bam = J1939TpFrames.BuildBam(pdu.Length, totalPackets, key.Pgn);
             // Do not schedule TP.DT until the BAM announce is TX-confirmed. Otherwise a rejected
-            // BAM can still complete SendBamAsync after the packet spacing once DTs finish (Bugbot 3596183535).
+            // BAM can still complete SendBamAsync after the packet spacing once DTs finish.
             SendTpCm(bam, destinationAddress: J1939TpFrames.GlobalDestinationAddress, session,
                 onConfirmed: () => OnBamAnnounceConfirmed(key));
         }
@@ -1321,7 +1321,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// Aborts in-flight reassembly notification. Mirrors IsoTpChannel.AbortRx / FailTx on the
     /// receive side: raises <see cref="BackgroundExceptionOccurred"/> and enqueues the fault
     /// into the PDU inbox so a blocked <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/>
-    /// completes with the same exception instead of waiting indefinitely (Bugbot 3596396508).
+    /// completes with the same exception instead of waiting indefinitely.
     /// Successful datagrams already in the inbox are unaffected (FIFO); exactly one waiter
     /// consumes the fault item, preserving multi-receive inbox semantics for subsequent PDUs.
     /// Caller is responsible for cancelling/removing the <see cref="RxSession"/> first.
@@ -1510,19 +1510,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         /// </summary>
         public bool HasPendingCts { get; set; }
         public byte PendingCtsNumPackets { get; set; }
-        /// <summary>The stashed CTS asks for a packet already sent: applied as soon as the outstanding DT is confirmed (Codex on #152).</summary>
+        /// <summary>The stashed CTS asks for a packet already sent: applied as soon as the outstanding DT is confirmed.</summary>
         public bool PendingCtsIsRetransmit { get; set; }
         /// <summary>How many CTS for a packet already sent this session has served (#58).</summary>
         public int RetransmitRequests { get; set; }
         /// <summary>
         /// The highest packet ever confirmed sent -- the frontier a retransmit request is told
         /// from the next block by, which the cursor NextSn is not after a partial retransmit
-        /// (Codex on #152). An int: the byte NextSn wraps at 255.
+        ///. An int: the byte NextSn wraps at 255.
         /// </summary>
         public int HighestSentSn { get; set; }
         /// <summary>
         /// Every packet has been confirmed sent at least once: from here on an EndOfMsgAck is a
-        /// valid end whatever block a retransmit left the session in (Bugbot on #152).
+        /// valid end whatever block a retransmit left the session in.
         /// </summary>
         public bool AllPacketsSent { get; set; }
         /// <summary>

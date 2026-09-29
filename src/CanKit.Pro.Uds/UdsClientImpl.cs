@@ -485,7 +485,7 @@ internal sealed class UdsClientImpl : IUdsClient
     /// <summary>
     /// Fire-and-forget under the request lock: the frame goes out without interleaving a real
     /// request, and no response is waited for. The lifetime token is linked so Dispose()
-    /// cancels a wait or send still in progress (Bugbot 3596586770), as ExecuteAsync does.
+    /// cancels a wait or send still in progress, as ExecuteAsync does.
     /// </summary>
     private async Task SendWithoutResponseAsync(byte[] request, CancellationToken cancellationToken)
     {
@@ -1546,7 +1546,7 @@ internal sealed class UdsClientImpl : IUdsClient
 
         // Cancel in-flight ExecuteAsync / SecurityAccessAsync / suppress-TesterPresent first,
         // then wait for the request lock so their finally blocks can Release before we dispose
-        // the semaphore (Bugbot 3596444327 / 3596586770). Disposing while a waiter still holds
+        // the semaphore. Disposing while a waiter still holds
         // the lock races WaitAsync/Release.
         try { _lifetimeCts.Cancel(); } catch { /* already disposed */ }
 
