@@ -2635,6 +2635,259 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             service.Sent.Should().BeEmpty("a dropped First Frame is not answered with Flow Control");
     }
 
+    // #202: a bus whose asynchronous TransmitAsync never completes must not wedge the channel.
+    // The frame's SendConfirmed is bounded by N_As on the approximated path too, so the send
+    // faults with the N_As timeout, drains the bus-TX bookkeeping, and releases the send gate --
+    // the next SendAsync goes through.
+    [Fact]
+    public async Task A_Stalled_Asynchronous_Transmit_Times_Out_And_Does_Not_Wedge_The_Channel()
+    {
+        var session = NewSession();
+        using var busB = OpenClassic(session, 1);
+        using var bus = ControllableBus.Plain(session);
+        bus.StallTransmitAsync = true;
+        using var wire = OpenClassic(session, 2);
+        bus.OnTransmitting = frame => wire.Transmit(frame); // what the sender puts on the wire
+
+        var epA = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        var epB = IsoTpEndpoint.Normal(txCanId: 0x7E8, rxCanId: 0x7E0);
+        var options = new IsoTpChannelOptions
+        {
+            UseCanFd = false,
+            UsePadding = true,
+            NAs = TimeSpan.FromMilliseconds(50),
+        };
+        using var sender = IsoTpFactory.Open(bus, epA, options);
+        using var receiver = IsoTpFactory.Open(busB, epB, FastOptions());
+
+        var first = sender.SendAsync(new byte[] { 1, 2, 3 });
+        var ex = await Assert.ThrowsAsync<IsoTpTimeoutException>(() => first.WaitAsync(ShortTimeout));
+        ex.Timer.Should().Be(IsoTpTimer.NAs);
+
+        bus.StallTransmitAsync = false;
+        await sender.SendAsync(new byte[] { 4, 5, 6 }).WaitAsync(ShortTimeout);
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        (await receiver.ReceiveAsync(cts.Token)).Should().Equal(4, 5, 6);
+    }
+
+    // #205: an injected actor the caller disposed first must not make Dispose throw, and must not
+    // cost it the rest of its cleanup -- the demux subscription is released all the same.
+    [Fact]
+    public void Dispose_After_The_Injected_Actor_Was_Disposed_Does_Not_Throw_And_Releases_The_Subscription()
+    {
+        using var bus = OpenClassic(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+        service.SubscriptionCount.Should().Be(1);
+
+        actor.Dispose();
+
+        channel.Invoking(c => c.Dispose()).Should().NotThrow();
+        service.SubscriptionCount.Should().Be(0, "the rest of Dispose must still run");
+        channel.Invoking(c => c.Dispose()).Should().NotThrow("Dispose is idempotent");
+    }
+
+    // Bugbot on #216: with the injected actor already disposed, Dispose must still release the
+    // SendAsync that is awaiting its outcome -- without reaching into actor state, whose loop the
+    // owner's Dispose may still be joining.
+    [Fact]
+    public async Task Dispose_After_The_Injected_Actor_Was_Disposed_Fails_The_InFlight_Send()
+    {
+        var session = NewSession();
+        using var bus = ControllableBus.Plain(session);
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var options = new IsoTpChannelOptions { UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromMinutes(5) };
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), options, ownsService: false, actor);
+
+        var send = channel.SendAsync(new byte[] { 1, 2, 3 });
+        await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout); // the frame is out, its confirm stalled
+
+        actor.Dispose();
+        channel.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        bus.ReleaseStalledTransmits();
+    }
+
+    // The other await Dispose's fallback must release: SendAsync canceled while a frame's confirm
+    // is still outstanding waits for the bus to go idle, and with the actor gone nothing will
+    // ever say so. The wait is armed on the actor, which is observed (by state, not by time)
+    // before the actor is disposed.
+    [Fact]
+    public async Task Dispose_After_The_Injected_Actor_Was_Disposed_Releases_The_Bus_Idle_Wait()
+    {
+        var session = NewSession();
+        using var bus = ControllableBus.Plain(session);
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var options = new IsoTpChannelOptions { UseCanFd = false, UsePadding = true, NAs = TimeSpan.FromMinutes(5) };
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), options, ownsService: false, actor);
+        using var cts = new CancellationTokenSource();
+
+        var send = channel.SendAsync(new byte[] { 1, 2, 3 }, cts.Token);
+        await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+        cts.Cancel(); // completes the send's outcome; the bus-idle wait is what remains
+
+        var waiterField = typeof(IsoTpChannel).GetField("_busTxIdleWaiter", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var deadline = Stopwatch.StartNew();
+        while (!await actor.PostAsync(() => waiterField.GetValue(channel) is not null))
+        {
+            deadline.Elapsed.Should().BeLessThan(ShortTimeout, "the canceled send must arm the bus-idle wait");
+            await Task.Yield();
+        }
+
+        actor.Dispose();
+        channel.Dispose();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        bus.ReleaseStalledTransmits();
+    }
+
+    // Bugbot on #216: a First Frame announced but not yet handled when the channel is disposed
+    // must not stay reported as a reception in progress.
+    [Fact]
+    public async Task A_First_Frame_Announced_Before_Dispose_Is_Withdrawn_When_Handled_After_It()
+    {
+        var epRecv = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, epRecv, FastOptions(), ownsService: false, actor);
+
+        using var gate = new SemaphoreSlim(0);
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            held.TrySetResult(true);
+            gate.Wait();
+        });
+        await held.Task.WaitAsync(ShortTimeout);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+        channel.GetReceptionsInProgress().Should().HaveCount(1, "announced when taken from the subscription");
+
+        channel.Dispose();
+        gate.Release();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // Codex on #216: a reassembly already under way when the channel is disposed is abandoned
+    // with it, not reported as in progress for ever.
+    [Fact]
+    public async Task A_Reception_Under_Way_Is_Withdrawn_When_The_Channel_Is_Disposed()
+    {
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+        channel.GetReceptionsInProgress(); // takes the First Frame to the actor
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        channel.GetReceptionsInProgress().Should().HaveCount(1, "the actor accepted the First Frame");
+
+        channel.Dispose();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // Codex on #216: the same, when the injected actor was disposed first and can no longer run
+    // the channel's cleanup -- the published records are withdrawn without it.
+    [Fact]
+    public async Task A_Reception_Under_Way_Is_Withdrawn_When_The_Injected_Actor_Was_Disposed_First()
+    {
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+        channel.GetReceptionsInProgress();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+        channel.GetReceptionsInProgress().Should().HaveCount(1);
+
+        actor.Dispose();
+        channel.Dispose();
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // Codex on #216: a First Frame that arrives once the channel is disposed must not be
+    // announced by a later caller-side pump -- with the actor gone, nothing would withdraw it.
+    [Fact]
+    public void A_First_Frame_Arriving_After_Dispose_Is_Not_Announced()
+    {
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+        actor.Dispose();
+        channel.Dispose();
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // #206: a frame that was already on its way to the actor when the channel was disposed
+    // completes no PDU and raises no DatagramReceived. The channel is disposed with the actor
+    // held, and the frame -- pumped into the mailbox beforehand -- runs only afterwards.
+    // There is no signal for "the handler was not called", so the absence is observed over a
+    // bounded wait; a false pass needs the handler's thread-pool item to be delayed past it,
+    // a false failure is impossible.
+    [Fact]
+    public async Task A_Frame_Handled_After_Dispose_Raises_No_DatagramReceived()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+        var raised = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => raised.TrySetResult(true);
+
+        using var gate = new SemaphoreSlim(0);
+        var held = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            held.TrySetResult(true);
+            gate.Wait();
+        });
+        await held.Task.WaitAsync(ShortTimeout);
+
+        // A Single Frame, taken off the subscription and posted behind the held actor.
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x03, 0xAA, 0xBB, 0xCC, 0, 0, 0, 0 }, FrameFlags.None));
+        channel.GetReceptionsInProgress();
+
+        channel.Dispose();
+        gate.Release();
+        await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
+
+        var winner = await Task.WhenAny(raised.Task, Task.Delay(TimeSpan.FromMilliseconds(500)));
+        winner.Should().NotBeSameAs(raised.Task, "no handler may start once the channel is disposed");
+    }
+
     private static async Task<IReadOnlyList<IsoTpReceptionInProgress>> WaitForReceptionsAsync(
         IIsoTpChannel channel, int count)
     {

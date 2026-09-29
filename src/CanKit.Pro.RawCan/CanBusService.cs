@@ -323,10 +323,16 @@ namespace CanKit.Pro.RawCan
 
             return useEcho
                 ? await SendWithEchoConfirmAsync(frame, effectiveTimeout, cancellationToken).ConfigureAwait(false)
-                : await SendApproximatedAsync(frame, cancellationToken).ConfigureAwait(false);
+                : await SendApproximatedAsync(frame, effectiveTimeout, cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task<TxConfirmation> SendApproximatedAsync(CanFrame frame, CancellationToken cancellationToken)
+        /// <summary>
+        /// Raised, for tests, when the fault of a transmit the timeout had already abandoned has
+        /// been observed -- the only signal that no unobserved-task-exception is left behind.
+        /// </summary>
+        internal Action<Exception> AbandonedTransmitFaultObserved { get; set; } = static _ => { };
+
+        private async Task<TxConfirmation> SendApproximatedAsync(CanFrame frame, TimeSpan timeout, CancellationToken cancellationToken)
         {
             // FR-RAW-032: best-effort approximation -- confirmed as soon as the driver accepts the
             // frame, explicitly marked IsApproximated so callers can never mistake this for a real
@@ -341,7 +347,27 @@ namespace CanKit.Pro.RawCan
             // runtime declines to inline it the reading is what it would have been anyway.
             var stamp = new HandoffStamp(_hostTimestamp);
             var handoffStart = stamp.Now();
-            var accepted = await _bus.TransmitAsync(frame, cancellationToken)
+            //
+            // The driver is handed a private copy, never the caller's frame (Codex and Bugbot on
+            // #216): the contract lets the caller dispose its TX lease as soon as this call
+            // completes, and when the timeout below wins the driver's asynchronous operation may
+            // still be running -- reading a buffer that has meanwhile been released or reused. The
+            // copy is a few bytes; the echo path is unaffected (its Transmit is synchronous).
+            var copy = frame.Data.ToArray();
+            var detached = frame.FrameKind == CanFrameType.CanFd
+                ? CanFrame.Fd(frame.ID, copy, BRS: frame.BitRateSwitch, ESI: frame.ErrorStateIndicator,
+                    isExtendedFrame: frame.IsExtendedFrame, isErrorFrame: frame.IsErrorFrame)
+                : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
+                    isRemoteFrame: frame.IsRemoteFrame, isErrorFrame: frame.IsErrorFrame);
+            //
+            // The driver's token is ours, linked to the caller's: when the timeout wins it is
+            // cancelled, so a driver that honours cancellation stops the abandoned operation
+            // instead of putting a stale frame on the wire behind whatever the caller sends next
+            // (Codex on #216). One that does not cannot be stopped from here, and waiting for it
+            // would bring back the hang this bound exists to remove (#202); the timed-out result
+            // is what tells the caller the frame may or may not have gone out.
+            using var transmitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var transmit = _bus.TransmitAsync(detached, transmitCts.Token)
                 .ContinueWith(
                     static (completed, state) =>
                     {
@@ -355,8 +381,48 @@ namespace CanKit.Pro.RawCan
                     stamp,
                     CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default)
-                .ConfigureAwait(false);
+                    TaskScheduler.Default);
+
+            // FR-RAW-033 / #202: "never hangs" holds on this path too. Every v0.5.6 adapter
+            // completes TransmitAsync synchronously, so this bound only ever matters for a custom
+            // ICanBus whose TransmitAsync is genuinely asynchronous -- and there it is what stops
+            // a task that never completes from wedging the caller (ISO-TP's SendAsync included).
+            // The timeout resolves as a timed-out confirmation, exactly as on the echo path. The
+            // frame may still reach the wire after that; the caller has no way to know, which is
+            // what an unconfirmed send means.
+            int accepted;
+            if (transmit.IsCompleted)
+            {
+                accepted = await transmit.ConfigureAwait(false);
+            }
+            else
+            {
+                // Ends on the timeout or on the caller's own cancellation, whichever is first: a
+                // caller who cancels a stalled send must not have to wait the timeout out and then
+                // be told "timed out" (Bugbot on #216).
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                waitCts.CancelAfter(timeout);
+                var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var registration = waitCts.Token.Register(
+                    static state => ((TaskCompletionSource<bool>)state!).TrySetResult(true), expired);
+                var winner = await Task.WhenAny(transmit, expired.Task).ConfigureAwait(false);
+                if (!ReferenceEquals(winner, transmit))
+                {
+                    // Nobody will await the abandoned task; observe its fault so a late driver
+                    // failure does not surface as an unobserved task exception.
+                    _ = transmit.ContinueWith(
+                        t => AbandonedTransmitFaultObserved.Invoke(t.Exception!.GetBaseException()),
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                    transmitCts.Cancel();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return new TxConfirmation { Confirmed = false, IsApproximated = false, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.Timeout };
+                }
+
+                accepted = await transmit.ConfigureAwait(false);
+            }
+
             var handoff = stamp.Value;
             return accepted > 0
                 ? new TxConfirmation { Confirmed = true, IsApproximated = true, Timestamp = DateTime.UtcNow, FailureReason = TxConfirmFailureReason.None, HostTransmitTimestamp = handoff, HostHandoffTimestamp = handoffStart }

@@ -61,10 +61,10 @@ public sealed class ControllableBus : ICanBus
     private readonly IBusRTOptionsConfigurator _options;
     private int _disposed;
 
-    private ControllableBus(ICanBus configurationSource, EchoDelivery echoDelivery)
+    private ControllableBus(ICanBus configurationSource, EchoDelivery echoDelivery, bool echoCapable = true)
     {
         _configurationSource = configurationSource;
-        _options = new EchoCapableOptions(configurationSource.Options);
+        _options = echoCapable ? new EchoCapableOptions(configurationSource.Options) : configurationSource.Options;
         EchoMode = echoDelivery;
         DeferredEchoes = new DeferredEchoQueue(frame => RaiseObserved(frame, isEcho: true));
         // What a healthy CAN controller reports; tests move it from here.
@@ -94,6 +94,45 @@ public sealed class ControllableBus : ICanBus
     /// </remarks>
     public static ControllableBus DeferredEchoCapable(string session)
         => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo), EchoDelivery.Deferred);
+
+    /// <summary>
+    /// Creates a double whose <see cref="Options"/> are the wrapped bus's own, i.e. no
+    /// <c>Echo</c> capability: <c>SendConfirmed</c> takes the approximated path.
+    /// Nothing is echoed. <see cref="StallTransmitAsync"/> makes its asynchronous transmit
+    /// genuinely asynchronous, which no shipped adapter is (#202).
+    /// </summary>
+    public static ControllableBus Plain(string session)
+        => new(VirtualAdapterFixture.Open(session, 0), EchoDelivery.Synchronous, echoCapable: false)
+        {
+            EchoAcceptedFrames = false,
+        };
+
+    private TaskCompletionSource<int>? _stall;
+    private readonly TaskCompletionSource<CanFrame> _firstAsyncTransmit = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>
+    /// While set, <see cref="TransmitAsync(CanFrame, CancellationToken)"/> returns a task that
+    /// completes only on <see cref="ReleaseStalledTransmits"/>.
+    /// </summary>
+    public bool StallTransmitAsync
+    {
+        get => Volatile.Read(ref _stall) is not null;
+        set => Interlocked.Exchange(ref _stall, value ? new(TaskCreationOptions.RunContinuationsAsynchronously) : null);
+    }
+
+    /// <summary>Completes every stalled asynchronous transmit as accepted and stops stalling.</summary>
+    public void ReleaseStalledTransmits() => Interlocked.Exchange(ref _stall, null)?.TrySetResult(1);
+
+    /// <summary>Faults every stalled asynchronous transmit and stops stalling.</summary>
+    public void FaultStalledTransmits(Exception error) => Interlocked.Exchange(ref _stall, null)?.TrySetException(error);
+
+    private readonly TaskCompletionSource<CancellationToken> _firstAsyncTransmitToken = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes with the token the first <c>TransmitAsync</c> call was handed.</summary>
+    public Task<CancellationToken> FirstAsyncTransmitToken => _firstAsyncTransmitToken.Task;
+
+    /// <summary>Completes with the frame the first <c>TransmitAsync</c> call was handed.</summary>
+    public Task<CanFrame> FirstAsyncTransmit => _firstAsyncTransmit.Task;
 
     /// <summary>Whether <see cref="Transmit(in CanFrame)"/> reports the frame as accepted.</summary>
     public bool AcceptTransmit { get; set; } = true;
@@ -203,7 +242,11 @@ public sealed class ControllableBus : ICanBus
     public int Transmit(ArraySegment<CanFrame> frames, int timeOut = 0) => Transmit((IEnumerable<CanFrame>)frames, timeOut);
 
     public Task<int> TransmitAsync(CanFrame frame, CancellationToken cancellationToken = default)
-        => Task.FromResult(Transmit(frame));
+    {
+        _firstAsyncTransmit.TrySetResult(frame);
+        _firstAsyncTransmitToken.TrySetResult(cancellationToken);
+        return Volatile.Read(ref _stall) is { } stall ? stall.Task : Task.FromResult(Transmit(frame));
+    }
 
     public Task<int> TransmitAsync(IEnumerable<CanFrame> frames, int timeOut = 0, CancellationToken cancellationToken = default)
         => Task.FromResult(Transmit(frames, timeOut));

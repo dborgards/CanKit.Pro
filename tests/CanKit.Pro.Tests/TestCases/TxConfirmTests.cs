@@ -322,6 +322,161 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5));
     }
 
+    // FR-RAW-033 / #202: "never hangs" holds on the approximated path too. A custom bus whose
+    // TransmitAsync never completes resolves as a timed-out confirmation instead of hanging. No
+    // lower bound on the elapsed time is asserted: the only failure of interest is the hang, and
+    // that is bounded by ShortTimeout rather than measured against a clock.
+    [Fact]
+    public async Task NonEcho_Bus_Times_Out_Observably_When_TransmitAsync_Never_Completes()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+
+        var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+            .WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeFalse();
+        result.IsApproximated.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        bus.ReleaseStalledTransmits();
+    }
+
+    // Codex and Bugbot on #216: when the timeout wins, the driver's operation may still be running
+    // while the caller -- entitled to, once SendConfirmed completes -- disposes its TX lease. The
+    // driver must have been handed a frame that does not depend on that lease.
+    [Fact]
+    public async Task A_Timed_Out_Approximated_Send_Leaves_The_Driver_A_Frame_Independent_Of_The_Callers_Lease()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+
+        var payload = new byte[] { 1, 2, 3, 4 };
+        var owner = new ScrubbedOwner((byte[])payload.Clone());
+        using var lease = CanFrame.Classic(0x123, owner);
+
+        var result = await service.SendConfirmed(lease, TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        result.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        lease.Dispose(); // what the caller may now do
+
+        owner.Disposed.Should().BeTrue("the caller's lease is released");
+        var handed = await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+        handed.Data.ToArray().Should().Equal(payload, "the driver's copy survives the caller's release");
+        bus.ReleaseStalledTransmits();
+    }
+
+    // The transmit a timed-out send abandons may still fail later; nobody awaits it, so the
+    // service must observe it itself, or the fault surfaces as an unobserved task exception.
+    [Fact]
+    public async Task A_Late_Fault_Of_The_Abandoned_Transmit_Is_Observed()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        var observed = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.AbandonedTransmitFaultObserved = e => observed.TrySetResult(e);
+        var marker = new InvalidOperationException("late driver failure");
+
+        (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+            .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        bus.FaultStalledTransmits(marker);
+
+        (await observed.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(marker);
+    }
+
+    // The private copy handed to the driver is the same frame: kind, identifier, flags, payload.
+    [Fact]
+    public async Task The_Drivers_Copy_Is_The_Same_Frame_For_Every_Kind()
+    {
+        var frames = new[]
+        {
+            CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }),
+            CanFrame.Classic(0x1ABCDE, new byte[] { 4 }, isExtendedFrame: true),
+            CanFrame.Classic(0x321, ReadOnlyMemory<byte>.Empty, isRemoteFrame: true),
+            CanFrame.Fd(0x456, new byte[12], BRS: true, ESI: false, isExtendedFrame: false),
+            CanFrame.Fd(0x1FEDCB, new byte[] { 9, 8, 7, 6 }, BRS: false, ESI: true, isExtendedFrame: true),
+        };
+
+        foreach (var original in frames)
+        {
+            using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+            using var service = new CanBusService(bus);
+
+            (await service.SendConfirmed(original, ShortTimeout)).Confirmed.Should().BeTrue();
+
+            var handed = await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+            handed.FrameKind.Should().Be(original.FrameKind);
+            handed.ID.Should().Be(original.ID);
+            handed.Flags.Should().Be(original.Flags);
+            handed.Data.ToArray().Should().Equal(original.Data.ToArray());
+        }
+    }
+
+    private sealed class ScrubbedOwner : System.Buffers.IMemoryOwner<byte>
+    {
+        private readonly byte[] _buffer;
+        public ScrubbedOwner(byte[] buffer) => _buffer = buffer;
+        public bool Disposed { get; private set; }
+        public Memory<byte> Memory => _buffer;
+        public void Dispose()
+        {
+            Disposed = true;
+            for (var i = 0; i < _buffer.Length; i++) _buffer[i] = 0xFF; // a returned pool buffer gets reused
+        }
+    }
+
+    // Codex on #216: a timed-out send asks the driver to stop the transmit it abandoned, so a
+    // cooperative bus does not put a stale frame on the wire behind the caller's next send.
+    [Fact]
+    public async Task A_Timed_Out_Approximated_Send_Cancels_The_Drivers_Transmit()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+
+        (await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMilliseconds(50))
+            .WaitAsync(ShortTimeout)).FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+
+        (await bus.FirstAsyncTransmitToken.WaitAsync(ShortTimeout)).IsCancellationRequested.Should().BeTrue();
+    }
+
+    // Bugbot on #216: cancelling a stalled send is a cancellation, immediately -- not a timeout
+    // reported after the full timeout has run out. The timeout here is far beyond ShortTimeout,
+    // so a send that waited for it would trip the hang bound instead of completing.
+    [Fact]
+    public async Task Cancelling_A_Stalled_Approximated_Send_Cancels_It_Instead_Of_Waiting_For_The_Timeout()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+        using var cts = new CancellationTokenSource();
+
+        var send = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromMinutes(5), cts.Token);
+        await bus.FirstAsyncTransmit.WaitAsync(ShortTimeout);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send.WaitAsync(ShortTimeout));
+        send.IsCanceled.Should().BeTrue();
+        bus.ReleaseStalledTransmits();
+    }
+
+    // #202: the bound must not turn an asynchronous but timely acceptance into a timeout.
+    [Fact]
+    public async Task NonEcho_Bus_Confirms_When_An_Asynchronous_TransmitAsync_Completes_In_Time()
+    {
+        using var bus = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        bus.StallTransmitAsync = true;
+        using var service = new CanBusService(bus);
+
+        var send = service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1 }), ShortTimeout);
+        bus.ReleaseStalledTransmits();
+        var result = await send.WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue();
+        result.IsApproximated.Should().BeTrue();
+    }
+
     // FR-RAW-034 (Should): the timeout is configurable per call, not a single hardcoded value --
     // a longer configured timeout measurably takes longer to fail than a shorter one. Coarse
     // comparison since CI timing is noisy; not a tight tolerance.

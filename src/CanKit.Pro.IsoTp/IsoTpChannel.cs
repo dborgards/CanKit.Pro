@@ -107,6 +107,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private int _disposed;
 
+    // What the current SendAsync is awaiting, published for Dispose's fallback when the actor is
+    // already gone (#205). Completing a TaskCompletionSource is thread-safe; the actor-owned state
+    // behind it is not touched. A stale reference only ever completes something nobody awaits.
+    private TaskCompletionSource<IsoTpTransmitStamps>? _sendCompletion;
+    private TaskCompletionSource<object?>? _idleWait;
+
     /// <summary>
     /// Maximum PDU length this channel will transmit or reassemble — the same codec limit
     /// outbound <see cref="SendAsync"/> enforces via <see cref="IsoTpFrameCodec"/>
@@ -229,6 +235,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             ThrowIfDisposed();
             var tcs = new TaskCompletionSource<IsoTpTransmitStamps>(TaskCreationOptions.RunContinuationsAsynchronously);
             var pduBytes = pdu.ToArray();
+            Volatile.Write(ref _sendCompletion, tcs);
             CancellationTokenRegistration ctr = cancellationToken.CanBeCanceled
                 ? cancellationToken.Register(static state =>
                 {
@@ -260,6 +267,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // SendAsync race frames onto the bus (Bugbot 3596212788). Skip on dispose:
                 // no subsequent SendAsync can run, and bus-TX confirmations may never post
                 // back onto a torn-down actor (Bugbot 3596468541).
+                //
+                // Not unbounded while the channel lives (#202): every frame's SendConfirmed is
+                // bounded by N_As on both the echo and the approximated path, so a confirm that
+                // never comes back still posts a timed-out outcome and drains _busTxInFlight.
+                // That bound is what keeps this wait -- made with _sendGate held -- from wedging
+                // the channel; it does not take a token of its own.
                 if (Volatile.Read(ref _disposed) == 0)
                     await WaitForBusTxIdleAsync().ConfigureAwait(false);
             }
@@ -492,7 +505,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // Fail any in-flight SendAsync so its caller doesn't hang forever waiting for a TCS the
         // now-disposed actor will never complete. Also release any bus-TX idle waiter that would
         // otherwise block SendAsync's finally path after CancelInFlightSend.
-        _actor.Post(() =>
+        void FailInFlightSend()
         {
             var tx = _tx;
             _tx = null;
@@ -500,11 +513,49 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             var idle = _busTxIdleWaiter;
             _busTxIdleWaiter = null;
             idle?.TrySetResult(null);
-        });
+
+            // A reassembly under way dies with the channel: its deadline is cancelled and its
+            // record withdrawn, so GetReceptionsInProgress does not keep reporting a transfer
+            // nobody will complete (Codex on #216). Posted behind any frame already queued, so
+            // that frame is handled first (and dropped by the disposed guard).
+            var rx = _rx;
+            if (rx is not null)
+            {
+                rx.CancelDeadline();
+                _rx = null;
+                WithdrawReception(rx.Announce);
+            }
+        }
+
+        try
+        {
+            _actor.Post(FailInFlightSend);
+        }
+        catch (ObjectDisposedException)
+        {
+            // An injected actor its owner already disposed (#205): Dispose must still be safe to
+            // call and must still run the rest of its cleanup below. Actor state (_tx,
+            // _busTxIdleWaiter) is not touched from here -- the owner's Dispose may still be
+            // joining a loop that is running (Bugbot on #216). What the awaiting SendAsync waits
+            // on is thread-safe to complete, and is all that has to be released.
+            Volatile.Read(ref _sendCompletion)?.TrySetException(new ObjectDisposedException(nameof(IsoTpChannel)));
+            Volatile.Read(ref _idleWait)?.TrySetResult(null);
+        }
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
         _subscription.Dispose();
+
+        // Whatever is still published is withdrawn last: the reader has stopped, the subscription
+        // is closed, and under the pump lock no caller-side pump is mid-way through announcing a
+        // frame (later ones refuse, above). Needed when the actor is gone and can no longer run
+        // the cleanup it was asked to (Codex on #216); the published records are a lock-free
+        // snapshot any thread may update, unlike _rx, which stays untouched here.
+        lock (_pumpGate)
+        {
+            foreach (var reception in Volatile.Read(ref _receptionsInProgress))
+                WithdrawReception(reception);
+        }
         // Actor.Dispose drains the FailTx/idle-waiter post above (FinalDrain), so the in-flight
         // SendAsync can leave its await and enter WaitForBusTxIdleAsync / Release. An injected
         // actor is not ours to dispose -- the caller may still be running other channels on it --
@@ -557,6 +608,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         lock (_pumpGate)
         {
+            // A disposed channel takes nothing more off the subscription: a First Frame ingested
+            // now would be announced and then posted to an actor that no longer runs it, and
+            // nothing would ever withdraw the announcement (Codex on #216).
+            if (Volatile.Read(ref _disposed) != 0)
+                return;
+
             while (_subscription.TryRead(out var frameEvent))
             {
                 try
@@ -863,6 +920,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             return Task.CompletedTask;
 
         var waiter = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Volatile.Write(ref _idleWait, waiter);
         try
         {
             _actor.Post(() =>
@@ -1079,6 +1137,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private void HandleReceivedFrame(byte[] payload, bool isCanFd, long frameArrival,
         IsoTpReceptionInProgress? announce)
     {
+        // Frames still in the mailbox when the channel is disposed are drained by the owned
+        // actor's final drain; they must not complete a PDU nobody can receive any more (#206).
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            // A First Frame the reader already announced must not stay reported as in progress.
+            if (announce is not null) WithdrawReception(announce);
+            return;
+        }
+
         if (!IsoTpFrameCodec.TryParsePci(payload, _endpoint, isCanFd, out var pci))
             return; // truncated / reserved: drop silently (bounds-safe per FR-TP-007)
 
@@ -1489,12 +1556,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
 
         var handler = DatagramReceived;
-        if (handler is null)
+        if (handler is null || Volatile.Read(ref _disposed) != 0)
             return;
 
         var endpoint = _endpoint;
         _ = Task.Run(() =>
         {
+            // No disposed check here: a start racing Dispose cannot be excluded without holding a
+            // lock across the handler, and the check above already stops emission once
+            // disposal has begun (#206).
             try
             {
                 handler.Invoke(this, new IsoTpDatagramReceivedEventArgs(endpoint, pdu));
