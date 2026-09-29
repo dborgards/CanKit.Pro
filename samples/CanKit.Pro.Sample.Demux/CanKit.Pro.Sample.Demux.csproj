@@ -3,6 +3,8 @@
   <ItemGroup>
     <ProjectReference Include="../../src/CanKit.Pro.Addressing/CanKit.Pro.Addressing.csproj" />
     <ProjectReference Include="../../src/CanKit.Pro.RawCan/CanKit.Pro.RawCan.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.Actor/CanKit.Pro.Actor.csproj" />
+    <ProjectReference Include="../../src/CanKit.Pro.Reliability/CanKit.Pro.Reliability.csproj" />
   </ItemGroup>
 
   <ItemGroup>

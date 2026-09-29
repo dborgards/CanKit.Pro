@@ -31,7 +31,12 @@ namespace CanKit.Sample.CanOpenBusScan
                 return 0;
             }
 
-            var endpoint = GetArg(args, "--endpoint") ?? "virtual://canopen-scan/0";
+            // --demo: two simulated devices on a virtual bus, so the tool has something to find
+            // without hardware. Node 5 sends heartbeats; node 9 stays silent and answers SDO only.
+            var demo = HasFlag(args, "--demo");
+            var endpoint = demo
+                ? DemoNetwork.ScannerEndpoint
+                : GetArg(args, "--endpoint") ?? "virtual://canopen-scan/0";
             var bitrate = GetIntArg(args, "--bitrate", 500_000, minimum: 1);
             var listenMilliseconds = GetIntArg(args, "--heartbeat-ms",
                 (int)CanOpenDiscovery.DefaultListenWindow.TotalMilliseconds, minimum: 1);
@@ -55,6 +60,7 @@ namespace CanKit.Sample.CanOpenBusScan
             {
                 using var bus = CanBus.Open(endpoint, cfg =>
                     cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitrate));
+                using var demoNetwork = demo ? await DemoNetwork.StartAsync().ConfigureAwait(false) : null;
 
                 Console.WriteLine($"CANopen discovery on {endpoint} at {bitrate} bit/s.");
                 Console.WriteLine("No CANopen node is open while listening, so nothing is transmitted.");
@@ -435,8 +441,12 @@ namespace CanKit.Sample.CanOpenBusScan
             Console.WriteLine(
                 "Usage: CanOpenBusScan [--endpoint <endpoint>] [--bitrate 500000] " +
                 "[--heartbeat-ms 2000] [--sdo-timeout-ms 500] [--client-node 127] " +
-                "[--peer-description <eds-or-dcf>] [--active-scan]");
+                "[--peer-description <eds-or-dcf>] [--active-scan] [--demo]");
             Console.WriteLine();
+            Console.WriteLine(
+                "--demo needs no hardware: it starts two simulated devices on a virtual bus (node 5 " +
+                "sends heartbeats, node 9 is silent) and scans that. Try it plain, then with " +
+                "--active-scan, to see what listening alone misses.");
             Console.WriteLine(
                 "The default is listen-only (#131 decision 3): CanOpenDiscovery.ListenAsync " +
                 "collects heartbeats and boot-up during --heartbeat-ms (default 2000). One of " +
@@ -449,6 +459,51 @@ namespace CanKit.Sample.CanOpenBusScan
                 "printed from 1018h:00–04, which is allowed without a peer " +
                 "file. With --peer-description, only objects the file lists are read. An EDS " +
                 "is used for every node; a DCF is used only for the node-id it was commissioned for.");
+        }
+
+        /// <summary>
+        /// Two simulated CANopen devices for <c>--demo</c>: node 5 produces heartbeats (found by
+        /// listening), node 9 produces nothing (found only by an active scan's SDO probe).
+        /// </summary>
+        private sealed class DemoNetwork : IDisposable
+        {
+            public const string ScannerEndpoint = "virtual://canopen-scan-demo/0";
+            private const int HeartbeatMilliseconds = 100;
+
+            private readonly ICanBus _busTalkative;
+            private readonly ICanBus _busSilent;
+            private readonly ICanOpenNode _talkative;
+            private readonly ICanOpenNode _silent;
+
+            private DemoNetwork()
+            {
+                _busTalkative = OpenBus("virtual://canopen-scan-demo/1");
+                _busSilent = OpenBus("virtual://canopen-scan-demo/2");
+                _talkative = CanOpen.OpenNode(_busTalkative, nodeId: 5);
+                _silent = CanOpen.OpenNode(_busSilent, nodeId: 9);
+                _talkative.StartHeartbeatProducer(TimeSpan.FromMilliseconds(HeartbeatMilliseconds));
+            }
+
+            public static async Task<DemoNetwork> StartAsync()
+            {
+                Console.WriteLine("Demo: simulated devices on the virtual bus: node 5 (heartbeat) and node 9 (silent).");
+                var network = new DemoNetwork();
+                // A node announces itself with one boot-up message right after it starts. Let that
+                // pass before the scan begins listening, so node 9 really is silent.
+                await Task.Delay(300).ConfigureAwait(false);
+                return network;
+            }
+
+            public void Dispose()
+            {
+                _talkative.Dispose();
+                _silent.Dispose();
+                _busTalkative.Dispose();
+                _busSilent.Dispose();
+            }
+
+            private static ICanBus OpenBus(string endpoint) =>
+                CanBus.Open(endpoint, cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(500_000));
         }
 
         private sealed class SdoReadResult
