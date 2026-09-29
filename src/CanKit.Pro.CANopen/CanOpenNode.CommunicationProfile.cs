@@ -232,7 +232,7 @@ internal sealed partial class CanOpenNode
     /// device description declared, the placeholders 1000h/1018h and the application objects
     /// among them. Without a description the node has no power-on source for those: what the
     /// application put into 1000h, 1018h or its own objects stays across a reset, as FR-CO-019
-    /// and the README say (Bugbot on #135). Reset Communication restores the communication
+    /// and the README say. Reset Communication restores the communication
     /// profile area (1000h–1FFFh) only; Reset Node restores all of them (CiA 301 §7.3.2.2.1).
     /// </summary>
     private bool IsRestorableObject(ushort index)
@@ -748,7 +748,7 @@ internal sealed partial class CanOpenNode
     /// not hold has no power-on value and is left alone. Each write applies to the runtime
     /// through the ordinary hook, inline because this runs on the actor loop. One transaction
     /// under the dictionary's write gate, so the snapshot a "save" takes on another thread sees
-    /// all restored values or all live ones, never a mix (Bugbot on #133).
+    /// all restored values or all live ones, never a mix.
     /// </summary>
     private void RestoreValues(Dictionary<uint, byte[]> values, bool communicationOnly)
     {

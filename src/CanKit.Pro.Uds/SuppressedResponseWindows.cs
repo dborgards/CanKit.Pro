@@ -8,8 +8,8 @@ namespace CanKit.Pro.Uds;
 /// The response windows still open from earlier sends, per service: how long a peer may still
 /// answer a request whose answer nobody is waiting for -- a suppressed send, or a functional
 /// request whose collection window ended before the peer's P2 did. The next request for the
-/// same service waits such a window out rather than taking the late answer as its own (Codex
-/// on #150). One entry per service, since a send for another service in between must not
+/// same service waits such a window out rather than taking the late answer as its own.
+/// One entry per service, since a send for another service in between must not
 /// shorten the first's window; a later window for the same service replaces an earlier one
 /// only if it ends later.
 /// </summary>
@@ -49,7 +49,7 @@ internal sealed class SuppressedResponseWindows
     /// Extends the window for <paramref name="sid"/> to <paramref name="until"/> only if one is
     /// noted and was still open at <paramref name="arrival"/>: a 0x78 that arrived after a
     /// window's deadline answers nothing the window still covers, and must not revive it
-    /// (Codex on #150).
+    ///.
     /// </summary>
     public void ExtendIfOpenAt(byte sid, long arrival, long until)
     {
@@ -63,7 +63,7 @@ internal sealed class SuppressedResponseWindows
     /// <summary>
     /// Puts the window for <paramref name="sid"/> back to what <see cref="TryGetDeadline"/>
     /// reported before a note that turned out to be for nothing -- a send the channel refused
-    /// before transmitting (Codex on #150).
+    /// before transmitting.
     /// </summary>
     public void Restore(byte sid, bool had, long until)
     {

@@ -145,7 +145,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// driver and when it was transmitted (<see cref="IsoTpTransmitStamps"/>, zero where the
     /// driver reports neither). A response that arrived before the handoff answers something
     /// else -- the subscription is made before the send, and a frame from between the two is
-    /// not this request's -- and is left out (Codex on #150); a caller keeping its own deadline
+    /// not this request's -- and is left out; a caller keeping its own deadline
     /// from a response, such as UDS P2* from an NRC 0x78, anchors it no earlier than the
     /// handoff for the same reason.
     /// </summary>
@@ -211,7 +211,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// <summary>
     /// As <see cref="SendAsync"/>, returning when the frame was handed to the driver and when
     /// it was transmitted (<see cref="IsoTpTransmitStamps"/>, zero where the driver reports
-    /// neither), for a caller that keeps a deadline from the transmission (Codex on #150).
+    /// neither), for a caller that keeps a deadline from the transmission.
     /// </summary>
     public Task<IsoTpTransmitStamps> SendWithTransmitStampAsync(ReadOnlyMemory<byte> pdu, CancellationToken cancellationToken = default)
     {
@@ -341,11 +341,11 @@ public sealed class IsoTpFunctionalClient : IDisposable
         {
             // Window expired normally — not a caller-initiated cancellation.
             //
-            // Bugbot 3604648050: replies that arrived on the subscription channel *before*
+            // Replies that arrived on the subscription channel *before*
             // the deadline may still be sitting unread when WithCancellation throws OCE.
             // We must surface those before returning.
             //
-            // Bugbot 3604785766: a naive post-CancelAfter TryRead loop would also admit
+            // A naive post-CancelAfter TryRead loop would also admit
             // frames written *after* the deadline. Dispose the subscription first so the
             // service stops delivering and the channel writer is completed; only then
             // drain whatever was already buffered. Dispose is idempotent with the caller's

@@ -148,6 +148,21 @@ These are published libraries, so the public surface is a promise:
 - New public types need a matching section in the package's `README.md`, which ships inside
   the `.nupkg` and is what people actually read on nuget.org.
 
+## Comments: the why, not the history
+
+A comment is read as current, so it goes stale silently when it describes how the code got there.
+
+- Say what the code does and why, in the present tense. Public XML documentation states the
+  current contract only: no review-bot names, no review-comment ids, no "the fork" or upstream
+  version pins. Consumers read it in IntelliSense and in the API reference, where the history means
+  nothing.
+- An inline comment may carry one issue or pull-request link (`#123`) as the pointer to its
+  history. Do not copy review-comment ids (Bugbot, Codex): the linked pull request already holds
+  them, and an id stops resolving when the thread does.
+- A decision that spans several files (echo semantics, one clock per component, event delivery) is
+  a candidate for an ADR in `docs/decisions/`; the comments then point there.
+- Tidy this when you touch a file anyway. It does not justify a sweeping pull request.
+
 ## Reporting bugs
 
 Use the issue templates. A reproduction on `virtual://` endpoints is worth a great deal: it can go

@@ -11,20 +11,18 @@ namespace CanKit.Pro.RawCan;
 /// <para>
 /// <b>Why these are declared here rather than used from the enum.</b> CanKit reserves the 6000
 /// range for transport and protocol errors and defines <c>TransportOperationFailed = 6001</c>.
-/// The four values below continue that range, but they are not (yet) members of the published
-/// <see cref="CanKitErrorCode"/> — they were added inside the CanKit.Pro.legacy fork, and
-/// CanKit.Pro no longer forks CanKit. Declaring them as constants of the enum type keeps the
-/// numeric contract identical to what the fork produced and to what upstream would produce:
-/// should CanKit adopt these codes, <c>ErrorCode == CanKitErrorCode.ProtocolTimeout</c> starts
-/// being true for already-compiled callers, with nothing here to change but this file's removal.
+/// The four values below continue that range, but they are not members of the published
+/// <see cref="CanKitErrorCode"/>. Declaring them as constants of the enum type gives them a
+/// stable numeric contract: should CanKit define these codes with the same numbers,
+/// <c>ErrorCode == CanKitErrorCode.ProtocolTimeout</c> starts being true for already-compiled
+/// callers, with nothing to change but removing this file.
 /// </para>
 ///
 /// <para>
-/// The trade-off is that <c>ErrorCode.ToString()</c> renders the number rather than a name until
-/// that happens. Callers who want a name have the exception type itself, which is always more
-/// specific than the code (<c>IsoTpTimeoutException</c> even names which ISO 15765-2 timer
-/// expired). Upstreaming these four members to CanKit is tracked as follow-up work; see
-/// docs/upstream-candidates.md.
+/// The trade-off is that <c>ErrorCode.ToString()</c> renders the number rather than a name.
+/// Callers who want a name have the exception type itself, which is always more specific than
+/// the code (<c>IsoTpTimeoutException</c> even names which ISO 15765-2 timer expired).
+/// docs/upstream-candidates.md lists these codes as a candidate for CanKit itself.
 /// </para>
 ///
 /// <para>

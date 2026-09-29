@@ -42,7 +42,7 @@ public readonly struct IsoTpEndpoint : IEquatable<IsoTpEndpoint>
     /// address (from the peer's perspective, we are the target of frames they send back, so
     /// they write our source address into the AE byte). Storing this separately from the
     /// outbound <see cref="AddressExtension"/> is required for correct RX filtering when the
-    /// two differ (Bugbot 3594960802). For <see cref="IsoTpAddressingMode.Mixed"/> and
+    /// two differ. For <see cref="IsoTpAddressingMode.Mixed"/> and
     /// <see cref="IsoTpAddressingMode.Normal"/>/<see cref="IsoTpAddressingMode.NormalFixed"/>
     /// this equals <see cref="AddressExtension"/>.
     /// </remarks>

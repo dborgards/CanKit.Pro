@@ -132,7 +132,7 @@ public interface IIsoTpChannel : IDisposable
     /// <see cref="GetReceptionsInProgress"/>. For a decision taken at a deadline — is a
     /// response there, was there a 0x78 — what the inbox does not hold after this did not
     /// arrive before the call; without it, a frame stamped in time can still be on its way
-    /// through the channel's actor when the deadline fires (Codex on #150). Called on the
+    /// through the channel's actor when the deadline fires. Called on the
     /// channel's own actor — from a <c>BackgroundExceptionOccurred</c> handler — it returns at
     /// once and the frames on their way are handled after the current work item: they queue
     /// behind frames already in the mailbox, and handling them inline would reorder the two.
@@ -144,7 +144,7 @@ public interface IIsoTpChannel : IDisposable
     /// faults enqueued by <c>AbortRx</c> — and returns how many were dropped. Also silently
     /// aborts any in-flight multi-frame reassembly on the actor so leftover consecutive frames
     /// cannot finish and enqueue a stale PDU after a higher-layer timeout/cancel
-    /// (Bugbot 3596444314). Higher layers (e.g. UDS) call this after a cancelled/timed-out wait
+    ///. Higher layers (e.g. UDS) call this after a cancelled/timed-out wait
     /// so a late peer PDU or a leftover abort fault cannot be consumed as the answer to a later
     /// request.
     /// </summary>
@@ -157,7 +157,7 @@ public interface IIsoTpChannel : IDisposable
     /// inspects the inbox before discarding — routing an NRC 0x78 to its window — the stamp
     /// taken before the inspection makes the two one step: everything the discard drops was
     /// inspected, and a frame arriving between the inspection and the discard is kept for the
-    /// caller's next read instead of vanishing (Codex on #150).
+    /// caller's next read instead of vanishing.
     /// </summary>
     int DiscardPendingPdus(long arrivedBefore);
 

@@ -53,7 +53,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private readonly IsoTpEndpoint _endpoint;
     private readonly IsoTpChannelOptions _options;
     // Cached at construction so a negative / unencodable LocalStMin fails Open instead of
-    // throwing on the actor loop mid-FF (which left ReceiveAsync hung — Bugbot 3597312227).
+    // throwing on the actor loop mid-FF (which left ReceiveAsync hung).
     private readonly byte _localStMinRaw;
 
     private readonly IProtocolActor _actor;
@@ -65,7 +65,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // Bounded receive inbox for consumers. Drop-oldest so a stalled reader never stalls the RX
     // state machine (mirrors the L2 Subscription policy). Items are either a fully reassembled
     // PDU or a reassembly-abort fault (N_Cr / SN mismatch / SF·FF supersede) so a blocked
-    // ReceiveAsync completes instead of hanging (Bugbot 3596134684 / 3596527680 / FR-TP-010) —
+    // ReceiveAsync completes instead of hanging (FR-TP-010) —
     // the FailTx analogue on the RX side.
     private readonly Channel<RxInboxItem> _pduInbox;
 
@@ -79,7 +79,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // Count of SendFrameOnBus → SendConfirmed operations still outstanding (actor-loop only).
     // Cancelled SendAsync must hold _sendGate until this drains so a subsequent send cannot
     // interleave frames with an aborted PDU that already submitted work to the bus
-    // (Bugbot 3596212788).
+    //.
     private int _busTxInFlight;
 
     // Set when a SendAsync caller is waiting for _busTxInFlight to reach zero (actor-loop only).
@@ -264,9 +264,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 ctr.Dispose();
                 // Hold the gate until any SendConfirmed already submitted for this PDU finishes.
                 // CancelInFlightSend completes the TCS immediately but must not let the next
-                // SendAsync race frames onto the bus (Bugbot 3596212788). Skip on dispose:
+                // SendAsync race frames onto the bus. Skip on dispose:
                 // no subsequent SendAsync can run, and bus-TX confirmations may never post
-                // back onto a torn-down actor (Bugbot 3596468541).
+                // back onto a torn-down actor.
                 //
                 // Not unbounded while the channel lives (#202): every frame's SendConfirmed is
                 // bounded by N_As on both the echo and the approximated path, so a confirm that
@@ -282,7 +282,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         finally
         {
             // Dispose may tear down the gate after FailTx unblocks us but before Release runs
-            // (Bugbot 3596468541). Swallow ODE so shutdown stays clean.
+            //. Swallow ODE so shutdown stays clean.
             try { _sendGate.Release(); }
             catch (ObjectDisposedException) { /* channel disposed */ }
         }
@@ -566,7 +566,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         _readerCts.Dispose();
 
         // Do not dispose _sendGate while an in-flight SendAsync still holds it — Release would
-        // then throw ObjectDisposedException (Bugbot 3596468541). Wait briefly for that caller
+        // then throw ObjectDisposedException. Wait briefly for that caller
         // to finish its finally path; timed-out Wait leaves the gate held and Dispose still
         // proceeds (Release then no-ops via the catch in SendAsync).
         try { _sendGate.Wait(TimeSpan.FromSeconds(2)); }
@@ -656,7 +656,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // skip this frame silently (matches ISO 15765-2 §5.2.4.4 semantics for a foreign
         // address-extension on the same CAN-ID).
         //
-        // Fix (Bugbot 3594960802): filter on the *RX* address extension. For Extended
+        // Fix: filter on the *RX* address extension. For Extended
         // addressing that is the local node's source address (which the peer writes into
         // the AE byte when it addresses us), NOT our outbound target-address byte.
         // For Mixed addressing the two are the same, so this is unchanged there.
@@ -711,7 +711,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     private void BeginSendOnLoop(byte[] pdu, TaskCompletionSource<IsoTpTransmitStamps> tcs, CancellationToken ct)
     {
-        // Fix (Bugbot 3594960794): the send may have been canceled between when the caller
+        // Fix: the send may have been canceled between when the caller
         // posted us and when the actor got around to running us -- CancelInFlightSend may have
         // even already completed `tcs` synchronously (and/or posted actor-side cleanup that
         // saw _tx==null). In either case the outbound frame must never hit the wire;
@@ -741,7 +741,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             return;
         }
 
-        // Fix (Bugbot 3594960783): any synchronous throw from the codec (bad endpoint / bad
+        // Fix: any synchronous throw from the codec (bad endpoint / bad
         // length / etc.) must clear _tx and fail the TCS. Otherwise the actor's own
         // BackgroundException handler swallows the throw, the awaiting SendAsync never
         // completes, and _tx stays pinned to the dead operation -- so the next SendAsync
@@ -800,7 +800,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         tx.Offset = firstChunk.Length;
         tx.NextSn = IsoTpFrameCodec.FirstConsecutiveSequenceNumber;
         // Stay in SingleOrFirstInFlight until FF is TX-confirmed. N_Bs is armed only after that
-        // confirmation (Bugbot 3596580056), matching block-FC waits that arm N_Bs after the last
+        // confirmation, matching block-FC waits that arm N_Bs after the last
         // CF of a block is confirmed. Early peer FC is deferred until confirm (see OnSendConfirmed).
         tx.State = TxStage.SingleOrFirstInFlight;
         tx.WaitFramesReceived = 0;
@@ -926,7 +926,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             _actor.Post(() =>
             {
                 // Channel dispose may have raced past the Volatile check above; do not arm a
-                // waiter that Dispose's FailTx post already missed (Bugbot 3596468541).
+                // waiter that Dispose's FailTx post already missed.
                 if (Volatile.Read(ref _disposed) != 0 || _busTxInFlight == 0)
                 {
                     waiter.TrySetResult(null);
@@ -1004,7 +1004,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             case TxExpect.FirstFrameConfirm:
                 {
                     var tx = expected;
-                    // Fix (Bugbot 3596580056): N_Bs starts after FF TX-confirm, not when FF is
+                    // Fix: N_Bs starts after FF TX-confirm, not when FF is
                     // handed to the driver. Apply any FC that arrived during the confirm wait
                     // only now so CF cannot race ahead of FF on the wire.
                     tx.State = TxStage.WaitFcInitial;
@@ -1030,7 +1030,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                         tx.CfsInCurrentBlock++;
                         if (tx.CfsInCurrentBlock >= tx.BlockSize)
                         {
-                            // Fix (Bugbot 3597408323): peer may answer FC after the last CF of
+                            // Fix: peer may answer FC after the last CF of
                             // the block is on the wire but before our TX-confirm completes.
                             // Those FCs were deferred while State==SendingCf; apply them now
                             // instead of arming N_Bs and timing out on an already-received FC.
@@ -1106,7 +1106,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         // Complete the caller's await immediately (any thread). BeginSendOnLoop may still be
         // sitting in the actor mailbox ahead of our cleanup work item; completing `tcs` here
-        // lets that begin observe tcs.Task.IsCompleted and refuse to emit (Bugbot 3594960794).
+        // lets that begin observe tcs.Task.IsCompleted and refuse to emit.
         tcs.TrySetCanceled(ct);
 
         // Hop to the actor to tear down any TX state that begin already published. Safe if
@@ -1190,7 +1190,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         // A racing SF starts a fresh PDU: abort any in-flight reassembly (matches ISO 15765-2
         // §6.5.2's "an unexpected N_PCI type shall abort reception"). Must go through AbortRx —
-        // a silent _rx clear leaves ReceiveAsync parked on an empty inbox (Bugbot 3596527680).
+        // a silent _rx clear leaves ReceiveAsync parked on an empty inbox.
         if (_rx is not null)
         {
             AbortRx(new IsoTpException(
@@ -1233,14 +1233,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         // A new FF aborts any half-built reassembly (ISO 15765-2 §6.5.5). AbortRx so a blocked
         // ReceiveAsync observes the drop — including when the new FF is then refused with
-        // FC(OVFLW) and no replacement session is started (Bugbot 3596527680).
+        // FC(OVFLW) and no replacement session is started.
         if (_rx is not null)
         {
             AbortRx(new IsoTpException(
                 "ISO-TP First Frame aborted in-flight multi-frame reception."));
         }
 
-        // Cap reassembly allocation to the codec limit for this frame kind (Bugbot 3596212802)
+        // Cap reassembly allocation to the codec limit for this frame kind
         // and to MaxReceivePduLength (#26): a CAN-FD escape FF can announce up to int.MaxValue;
         // refuse with FC(OVFLW) and do not allocate.
         if (pci.Length > MaxPduLength || pci.Length > _options.MaxReceivePduLength)
@@ -1296,7 +1296,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         {
             // Sequence-number mismatch (FR-TP-002 negative case). Abort reception: surface via
             // BackgroundExceptionOccurred and fault any blocked ReceiveAsync (FailTx analogue)
-            // so the waiter does not hang on _pduInbox (Bugbot 3596134684). The peer sender
+            // so the waiter does not hang on _pduInbox. The peer sender
             // will hit its own N_Cr / missing-FC path independently.
             AbortRx(new IsoTpException(
                 $"ISO-TP CF sequence-number mismatch: expected {rx.ExpectedSn}, got {pci.SequenceNumber}."));
@@ -1308,7 +1308,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // CAN_DL validation (ISO 15765-2 §9.8, #27): a Consecutive Frame that is not the last
         // carries RX_DL bytes, the CAN_DL the First Frame set; the last one carries at least the
         // remaining bytes and no more than RX_DL. Anything else — a shortened CF whose 4 bytes
-        // would shift everything after it, a PCI-only CF (Bugbot 3596378393) — is ignored: not
+        // would shift everything after it, a PCI-only CF — is ignored: not
         // copied, no SN or BS advance, N_Cr untouched, as if it had not arrived.
         bool isLast = remaining <= rx.RxDl - pci.DataOffset;
         bool conforming = isLast
@@ -1365,9 +1365,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             return; // FC with no matching pending TX: drop (matches ISO 15765-2 §6.5.5.2).
 
         // FF handed to the driver but not yet TX-confirmed: defer FC until FirstFrameConfirm so
-        // we neither arm N_Bs early nor emit CF before FF confirm (Bugbot 3596580056).
+        // we neither arm N_Bs early nor emit CF before FF confirm.
         // Queue (not overwrite) so multiple Wait FCs in this window still count toward WftMax
-        // (Bugbot 3597408331).
+        //.
         if (deferIfBusy && tx.State == TxStage.SingleOrFirstInFlight && tx.Offset > 0)
         {
             (tx.DeferredFcs ??= new List<Pci>()).Add(pci);
@@ -1376,7 +1376,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         // Last CF of a block may still be awaiting TX-confirm (State==SendingCf) when the peer
         // already answers with FC. Defer until ConsecutiveFrameConfirm enters WaitFcBlock
-        // (Bugbot 3597408323); also queue so Wait counting is preserved (Bugbot 3597408331).
+        //; also queue so Wait counting is preserved.
         if (deferIfBusy && tx.State == TxStage.SendingCf)
         {
             (tx.DeferredFcs ??= new List<Pci>()).Add(pci);
@@ -1429,7 +1429,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// <summary>
     /// Applies Flow-Control frames that arrived while FF/CF TX-confirm was still outstanding,
     /// in arrival order so Wait counting toward <see cref="IsoTpChannelOptions.WftMax"/> is
-    /// preserved (Bugbot 3597408331). Arms N_Bs when nothing was deferred.
+    /// preserved. Arms N_Bs when nothing was deferred.
     /// </summary>
     private void ApplyDeferredFlowControlsOrArmNBs(TxState tx)
     {
@@ -1480,8 +1480,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// Aborts in-flight multi-frame reassembly. Mirrors <see cref="FailTx"/> on the receive side:
     /// clears RX state, raises <see cref="BackgroundExceptionOccurred"/>, and enqueues the fault
     /// into the PDU inbox so a blocked <see cref="ReceiveAsync"/>/<see cref="ReceiveAllAsync"/>
-    /// completes with the same exception instead of waiting indefinitely (Bugbot 3596134684 /
-    /// 3596527680 — also covers SF/FF supersede and FF→OVFLW that would otherwise clear
+    /// completes with the same exception instead of waiting indefinitely (also covers SF/FF supersede and FF→OVFLW that would otherwise clear
     /// <c>_rx</c> silently). Successful PDUs already in the inbox are unaffected (FIFO); exactly
     /// one waiter consumes the fault item, preserving multi-receive inbox semantics for
     /// subsequent PDUs.
@@ -1552,7 +1551,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // Enqueue first so ReceiveAsync/ReceiveAllAsync can observe the PDU even if a
         // DatagramReceived handler blocks. Raise the event off the actor loop so a sync wait
         // on ReceiveAsync / SendAsync / DiscardPendingPdus cannot deadlock the mailbox
-        // (Bugbot 3596580061).
+        //.
         _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
 
         var handler = DatagramReceived;
@@ -1668,8 +1667,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
         /// <summary>
         /// Flow-Control frames that arrived while FF/last-CF-of-block TX confirmation was still
-        /// outstanding (Bugbot 3596580056 / 3597408323). Kept as a list so multiple Wait FCs in
-        /// that window still count toward WftMax (Bugbot 3597408331).
+        /// outstanding. Kept as a list so multiple Wait FCs in
+        /// that window still count toward WftMax.
         /// </summary>
         public List<Pci>? DeferredFcs { get; set; }
 
