@@ -111,14 +111,16 @@ public sealed class CanOpenDeviceDescription
     // cannot evaluate without a node ID -- in an integer header entry such as VendorNumber
     // (dborgards/eds-dcf-net#577). To a caller that is one failure, "not a readable description",
     // so it is reported as EdsParseException (#220) with the original as the inner exception.
+    // Only that failure is wrapped: opening the file can throw NotSupportedException too (an
+    // unsupported path syntax), and that is the caller's error, not a parse failure.
     // Drop this when the parser reports it that way itself.
-    private static T Read<T>(Func<T> read)
+    internal static T Read<T>(Func<T> read)
     {
         try
         {
             return read();
         }
-        catch (NotSupportedException ex)
+        catch (NotSupportedException ex) when (ex.Message.IndexOf("$NODEID", StringComparison.Ordinal) >= 0)
         {
             throw new EdsParseException("The device description cannot be read: " + ex.Message, ex);
         }

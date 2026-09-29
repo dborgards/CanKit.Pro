@@ -492,6 +492,16 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         dcf.NodeId.Should().Be(5);
     }
 
+    // Only the $NODEID failure is wrapped: a NotSupportedException from elsewhere in the read,
+    // such as opening a file by an unsupported path syntax, keeps its type.
+    [Fact]
+    public void An_Unrelated_NotSupportedException_Is_Not_Turned_Into_A_Parse_Failure()
+    {
+        FluentActions.Invoking(() => CanOpenDeviceDescription.Read<int>(
+                () => throw new NotSupportedException("The given path's format is not supported.")))
+            .Should().Throw<NotSupportedException>();
+    }
+
     // Null content is the caller's error, reported before the parser is reached and not folded
     // into the parse failure below (#220).
     [Fact]
