@@ -143,7 +143,7 @@ Zero-Copy) erhöhen den Aufwand für Q4 und für einen sicheren **Frame-Ownershi
 |----|---------------|-----------|
 | CON-TFM | Multi-Target `netstandard2.0; net10.0` (`src/Directory.Build.props`). | API muss auf dem kleinsten gemeinsamen Nenner (netstandard2.0) verfügbar sein; TFM-Weichen via `#if NET5_0_OR_GREATER` (in den Paketen bisher nur die `IsExternalInit`-Shims). Die `netstandard2.0`-Assets laufen in der Testmatrix auf `net48` (Windows-Leg von `ci.yml`). |
 | CON-PINV | Vendor-Zugriff via **P/Invoke** in `Native/*.cs`, je Adapter eine `*.Fake.cs`-Spiegelung. | Native-Schicht ist plattform- und bitness-abhängig; Fake ermöglicht hardwarelose Builds (`-c Fake` → `DefineConstants=FAKE`). |
-| CON-SDK | Externe Vendor-SDKs (z. B. `Peak.PCANBasic.NET`, Kvaser `canlib`, ZLG, Vector XL). | NuGet-Abhängigkeiten pro Adapter, also upstream. Kein CanKit.Pro-Paket referenziert ein Vendor-SDK; `CanKit.Pro.IsoTp` hängt nur an `CanKit.Abstractions` und BCL-Polyfills (Review §1.1/16 behoben, FR-TP-020). |
+| CON-SDK | Externe Vendor-SDKs (z. B. `Peak.PCANBasic.NET`, Kvaser `canlib`, ZLG, Vector XL). | NuGet-Abhängigkeiten pro Adapter, also upstream. Kein CanKit.Pro-Paket referenziert ein Vendor-SDK; `CanKit.Pro.IsoTp` hängt an `CanKit.Abstractions`, den L2-Paketen `CanKit.Pro.Actor`, `.RawCan` und `.Reliability` sowie BCL-Polyfills, an keinem Vendor-SDK (Review §1.1/16 behoben, FR-TP-020). |
 | CON-LANG | `LangVersion=14`, `Nullable=enable`, `EnableNETAnalyzers`; Warnungen sind unter `CI=true` Fehler (`Directory.Build.props`). Code-Stil prüft `dotnet format --verify-no-changes` als eigener Schritt. | Moderne C#-Sprachfeatures (record struct, collection expressions); netstandard2.0 braucht `IsExternalInit`-Shims. |
 | CON-UNSAFE | `AllowUnsafeBlocks` in Codec/Transport (`FrameCodec` nutzt `Unsafe.CopyBlockUnaligned`). | Performante Frame-Erzeugung, aber erhöhter Review-Bedarf (Bounds-Sicherheit). |
 | CON-DOC | `GenerateDocumentationFile=true`, zweisprachige (EN/ZH) XML-Doku. | Öffentliche API ist doppelt dokumentiert; Typos in der API sind Breaking Changes nach 1.0 (Review §3). |
@@ -1022,7 +1022,7 @@ flowchart LR
 Die Erstfassung sah vor, dass auch L3/L4 (ISO-TP, UDS, …) über denselben Mechanismus
 (`IIsoTpRegister`) andocken. Das wurde **nicht** so umgesetzt: die CanKit.Pro-Pakete sind
 Bibliotheken mit statischen Fabriken (`IsoTp.Open`, `UdsClient.Create`, `CanOpen.OpenNode`,
-`J1939Node.Open`) auf `ICanBus`/`ICanBusService`; sie brauchen weder Kern-Änderung noch Registry-Eintrag.
+`J1939Node.Open`) auf `ICanBus`/`ICanBusService`; sie brauchen weder Kern-Änderung noch Registry-Eintrag. Damit erfüllen sie den Wortlaut von NFR-010 (SRS: Registrierung über `[CanRegistryEntry]`-Analogon) nicht, wohl aber dessen Zweck (eigenständiges Paket, lose Kopplung); ob der Wortlaut angepasst wird, ist in [#226](https://github.com/dborgards/CanKit.Pro/issues/226) offen.
 
 ## 8.9 Teststrategie (Virtual-Loopback / Fake)
 
@@ -1287,7 +1287,7 @@ Priorisierung: **K** = kritisch, **W** = wichtig, **G** = gering.
 | W | **`BitTimingSolver.FromSamplePoint`**: `Clamp` wirft statt `continue` bei kleinen NTQ. | Gesamte Timing-Suche crasht für bestimmte Limits. | ungültige NTQ überspringen (`continue`). | §2.5 |
 | W | **`CanEndpoint.Parse` lowercased Host**: `zlg://USBCANFD-200U` → `usbcanfd-200u`; Sonderzeichen werfen. | Adapter müssen case-insensitiv sein (nicht garantiert); Namen mit Leerzeichen scheitern. | Host case-preserving parsen; Namensregeln dokumentieren. | §2.5 |
 | G | **Typos in öffentlicher API**: Namespace `Excpetions`, `ReadTImeOutMs`, `ExceptionOccured`. | Nach 1.0 nur als Breaking Change korrigierbar. | Vor 1.0 bereinigen. | §3 |
-| G | ✅ *Behoben (mit dem Neubau).* **ISO-TP-Packaging**: `Peak.PCANBasic.NET`-Referenz + `Description=TODO`; gemischte Namespaces. | ISO-TP-NuGet zog grundlos PEAK-Paket; Namespaces inkonsistent. | `CanKit.Pro.IsoTp` referenziert nur `CanKit.Abstractions` und BCL-Polyfills, hat eine ausgefüllte `Description` und einen einzigen Namespace `CanKit.Pro.IsoTp`. FR-TP-020 führt `eng/verify-requirements-traceability.py` als bekannte Lücke: keine Prüfung kontrolliert die Abhängigkeitsliste. | §1.1/16, §3 |
+| G | ✅ *Behoben (mit dem Neubau).* **ISO-TP-Packaging**: `Peak.PCANBasic.NET`-Referenz + `Description=TODO`; gemischte Namespaces. | ISO-TP-NuGet zog grundlos PEAK-Paket; Namespaces inkonsistent. | `CanKit.Pro.IsoTp` referenziert kein Vendor-SDK (nur `CanKit.Abstractions`, die L2-Pakete `CanKit.Pro.Actor`/`.RawCan`/`.Reliability` und BCL-Polyfills), hat eine ausgefüllte `Description` und einen einzigen Namespace `CanKit.Pro.IsoTp`. FR-TP-020 führt `eng/verify-requirements-traceability.py` als bekannte Lücke: keine Prüfung kontrolliert die Abhängigkeitsliste. | §1.1/16, §3 |
 | G | **Zeitbasis gemischt** (`DateTime.Now` vs. `UtcNow`) und Copy-Paste-Logtexte („Vector CAN bus", „ControlCAN poll loop"). | Korrelation erschwert; irreführende Logs. | Einheitlich UTC; Logtexte korrigieren. | §2.4, §2.5 |
 | G | ✅ *Behoben (Default-Branch ist `main`).* **CI-Trigger tot** (`branches:[main]`, Default `master`); kein ISO-TP-Workflow. | Push-Trigger feuerte nicht; Transport ungetestet. | Alle Workflows triggern auf `main`, dem Default-Branch dieses Repositories; die ISO-TP-Tests laufen im Testschritt von `ci.yml` mit der übrigen Suite. | §3, §4 |
 
