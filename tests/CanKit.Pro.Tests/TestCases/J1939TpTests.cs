@@ -2661,8 +2661,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex on #215: the payload was copied before the limit check, so a producer outrunning a
     // stalled destination paid a full PDU allocation for every send it made only to be refused.
-    // Measured, because "allocates no PDU" is the claim: the fixed cost of a rejection (the
-    // exception, its message, the faulted task) is far below the 1785 bytes a copy adds.
+    // Measured, because "allocates no PDU" is the claim. The fixed cost of a rejection (the
+    // exception, its message, the faulted task) differs by runtime -- about 0.9 KB on net10 and
+    // about 1.9 KB on net48, which a bound on the absolute figure tripped over -- so the payload
+    // size is varied instead: a refused send of 1785 bytes must cost what a refused send of 9
+    // bytes costs, and only a copy of the PDU makes the two differ (by the size difference).
     // GetAllocatedBytesForCurrentThread is exact for this thread, and the rejection is decided
     // synchronously on it.
     [Fact]
@@ -2677,17 +2680,24 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
         await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
 
-        var payload = RandomPayload(J1939TpFrames.MaxTpPayloadLength, seed: 2);
+        var small = RandomPayload(9, seed: 2);
+        var large = RandomPayload(J1939TpFrames.MaxTpPayloadLength, seed: 3);
         const int warmup = 50;
         const int measured = 500;
-        for (var i = 0; i < warmup; i++) sender.SendBamAsync(0xFEC1u, payload).IsFaulted.Should().BeTrue();
 
-        var before = GC.GetAllocatedBytesForCurrentThread();
-        for (var i = 0; i < measured; i++) _ = sender.SendBamAsync(0xFEC1u, payload);
-        var perSend = (GC.GetAllocatedBytesForCurrentThread() - before) / (double)measured;
+        double PerRejectedSend(byte[] payload)
+        {
+            for (var i = 0; i < warmup; i++) sender.SendBamAsync(0xFEC1u, payload).IsFaulted.Should().BeTrue();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < measured; i++) _ = sender.SendBamAsync(0xFEC1u, payload);
+            return (GC.GetAllocatedBytesForCurrentThread() - before) / (double)measured;
+        }
 
-        perSend.Should().BeLessThan(J1939TpFrames.MaxTpPayloadLength,
-            "a refused send must be decided before its payload is copied");
+        var forSmall = PerRejectedSend(small);
+        var forLarge = PerRejectedSend(large);
+
+        (forLarge - forSmall).Should().BeLessThan((large.Length - small.Length) / 4.0,
+            $"a refused send must be decided before its payload is copied (small {forSmall:F0} B, large {forLarge:F0} B per send)");
 
         await DrainAsync(clock, actor, first);
     }
