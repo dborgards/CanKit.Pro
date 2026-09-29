@@ -60,16 +60,36 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // are bounded by CanOpenNodeOptions.EventQueueCapacity with drop-oldest. HeartbeatTimeout,
     // NodeGuardingTimeout and EmcyReceived share that queue — same order, same thread — but are
     // never the event that is discarded: a guarding consumer that misses one treats a silent
-    // peer as alive (#170). They can make the queue longer than the capacity. The wake-up is a
-    // single coalesced signal, not one token per event: a drop removes the event and leaves no
-    // token behind, and a burst while the pump is busy does not allocate. BackgroundExceptionOccurred
-    // stays synchronous and is not part of this queue.
+    // peer as alive (#170). They can make the queue longer than the capacity, but not without
+    // bound (#201): a timeout already waiting for the same producer absorbs the next one (the
+    // handler will learn the peer is silent either way), an EMCY identical to one already
+    // waiting is absorbed likewise, but only while nothing else about that producer has been
+    // queued since -- error, reset, error is three events, not two -- and a producer that keeps a further EventQueueCapacity
+    // distinct EMCYs waiting has the surplus discarded and counted, reported once per burst on
+    // BackgroundExceptionOccurred. The wake-up is a single coalesced signal, not one token per
+    // event: a drop removes the event and leaves no token behind, and a burst while the pump is
+    // busy does not allocate. BackgroundExceptionOccurred stays synchronous and is not part of
+    // this queue.
     private readonly object _eventLock = new();
     private readonly LinkedList<PendingEvent> _pendingEvents = new();
     private readonly SemaphoreSlim _eventWake = new(0, 1);
     private LinkedListNode<PendingEvent>? _oldestNonCritical;
     private int _pendingNonCritical;
     private long _submittedEventCount;
+    private readonly Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>> _pendingKeyed = new();
+    // Per producer node-id: the last event still waiting that says something about the producer's
+    // state -- a heartbeat or guarding response, an EMCY, but not a timeout. A waiting critical
+    // event absorbs an identical one only while no such event was queued behind it, so "error,
+    // reset, error" and "silent, alive, silent" reach the handler as three events and not as two,
+    // while a heartbeat timeout and a node-guarding timeout for the same node do not keep each
+    // other apart. An event that was dropped to make room is no longer waiting and does not count:
+    // the handler will never see it (#201).
+    private readonly LinkedListNode<PendingEvent>?[] _lastForProducer = new LinkedListNode<PendingEvent>?[256];
+    private long _enqueueOrdinal;
+    private readonly int[] _pendingEmcyPerProducer = new int[256];
+    private readonly bool[] _emcyOverflowReported = new bool[256];
+    private long _coalescedEventCount;
+    private long _emcyOverflowCount;
     private bool _eventPumpCompleted;
     private readonly Task _eventPumpTask;
 
@@ -740,7 +760,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     }
 
     private void EnqueueEvent(Action raise, bool critical = false)
+        => EnqueueEvent(raise, critical, key: null, emcyProducer: -1);
+
+    /// <param name="raise">Delivers the event to its subscribers.</param>
+    /// <param name="critical">A timeout or an EMCY: never discarded to make room.</param>
+    /// <param name="key">For a critical event: an identical event still waiting absorbs this
+    /// one. Null for events that must each be delivered.</param>
+    /// <param name="emcyProducer">The EMCY producer this event belongs to, or -1. At most
+    /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> events per producer wait at once.</param>
+    /// <param name="producer">The node-id this event is about, or -1. An event that is not folded
+    /// moves that node's sequence on, which is what stops a later identical one from folding
+    /// into an earlier one across it.</param>
+    private void EnqueueEvent(Action raise, bool critical, EventKey? key, int emcyProducer, int producer = -1)
     {
+        int reportOverflowOf = -1;
+        bool discarded = false;
         lock (_eventLock)
         {
             if (_eventPumpCompleted) return;
@@ -754,18 +788,70 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     _pendingEvents.Remove(drop);
                     _pendingNonCritical--;
                     _oldestNonCritical = next;
+                    // What separated two identical critical events may be exactly what was
+                    // dropped: the handler will never see it, so they are one event now.
+                    if (drop.Value.Producer is >= 0 and var dropped)
+                        ReconcileProducer(dropped);
                 }
-                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false));
+                var added = _pendingEvents.AddLast(new PendingEvent(raise, critical: false, key: null, emcyProducer: -1, producer, ++_enqueueOrdinal));
                 _oldestNonCritical ??= added;
                 _pendingNonCritical++;
+                if (producer >= 0) _lastForProducer[producer] = added;
             }
             else
             {
-                _pendingEvents.AddLast(new PendingEvent(raise, critical: true));
+                // An identical event is already waiting: the handler will see it, and nothing
+                // it could learn from a second copy is lost (#201).
+                if (key is { } k && producer >= 0
+                    && _pendingKeyed.TryGetValue(k.Identity, out var waiting)
+                    && (_lastForProducer[producer] is not { } newest || newest.Value.Ordinal <= waiting.Value.Ordinal))
+                {
+                    _coalescedEventCount++;
+                    // A timeout reports the consumer's current settings. If they changed while it
+                    // waited, the handler should see the newest, not the ones that were superseded;
+                    // an EMCY that folds is identical, so there is nothing to update.
+                    if (k.IsTimeout) waiting.Value = waiting.Value.WithRaise(raise);
+                    return;
+                }
+                if (emcyProducer >= 0)
+                {
+                    if (_pendingEmcyPerProducer[emcyProducer] >= _options.EventQueueCapacity)
+                    {
+                        _emcyOverflowCount++;
+                        if (!_emcyOverflowReported[emcyProducer])
+                        {
+                            _emcyOverflowReported[emcyProducer] = true;
+                            reportOverflowOf = emcyProducer;
+                        }
+                        discarded = true;
+                    }
+                    else
+                    {
+                        _pendingEmcyPerProducer[emcyProducer]++;
+                    }
+                }
+                if (!discarded)
+                {
+                    // A timeout is looked up by producer but does not itself say anything new about
+                    // the producer's state, so it is not recorded against it.
+                    int tracked = key is { IsTimeout: true } ? -1 : producer;
+                    var queued = _pendingEvents.AddLast(new PendingEvent(raise, critical: true, key, emcyProducer, tracked, ++_enqueueOrdinal));
+                    if (key is { } keyed) _pendingKeyed[keyed.Identity] = queued;
+                    if (tracked >= 0) _lastForProducer[tracked] = queued;
+                }
             }
-            _submittedEventCount++;
-            SignalEventQueue();
+            if (!discarded)
+            {
+                _submittedEventCount++;
+                SignalEventQueue();
+            }
         }
+
+        // Outside the lock: the subscriber runs synchronously on this thread.
+        if (reportOverflowOf >= 0)
+            RaiseBackgroundException(new InvalidOperationException(
+                $"EMCY producer 0x{reportOverflowOf:X2} has {_options.EventQueueCapacity} emergencies waiting for a " +
+                "slow EmcyReceived handler; further ones from it are discarded until its backlog drains."));
     }
 
     /// <summary>Wakes the pump if it is idle. Called under <see cref="_eventLock"/>. A second
@@ -790,6 +876,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             var node = _pendingEvents.First;
             if (node is null) return null;
             _pendingEvents.RemoveFirst();
+            // A newer identical event may have replaced this one's entry; only remove our own.
+            if (node.Value.Key is { } key && _pendingKeyed.TryGetValue(key.Identity, out var entry)
+                && ReferenceEquals(entry, node))
+                _pendingKeyed.Remove(key.Identity);
+            if (node.Value.Producer is >= 0 and var about && ReferenceEquals(_lastForProducer[about], node))
+                _lastForProducer[about] = null;
+            if (node.Value.EmcyProducer is >= 0 and var producer
+                && --_pendingEmcyPerProducer[producer] == 0)
+                _emcyOverflowReported[producer] = false;
             if (!node.Value.Critical)
             {
                 _pendingNonCritical--;
@@ -799,6 +894,63 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             return node.Value.Raise;
         }
+    }
+
+    /// <summary>
+    /// Re-applies the folding rule to what is waiting for <paramref name="producer"/> after an
+    /// event about it was dropped to make room. Walks the queue in order: an identical critical
+    /// event that no heartbeat, guarding response or EMCY now separates from an earlier one is
+    /// folded into it, exactly as it would have been had the dropped event never been queued.
+    /// Also records the newest event left that says something about the producer's state. Called
+    /// under <see cref="_eventLock"/>; cost is one pass over the queue, and only when the event
+    /// dropped was about a producer.
+    /// </summary>
+    private void ReconcileProducer(int producer)
+    {
+        var absorbers = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
+        var newest = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
+        LinkedListNode<PendingEvent>? lastTracked = null;
+
+        for (var node = _pendingEvents.First; node is not null;)
+        {
+            var next = node.Next;
+            var waiting = node.Value;
+            if (waiting.Key is { } key && key.ProducerId == producer)
+            {
+                if (absorbers.TryGetValue(key.Identity, out var survivor))
+                {
+                    _pendingEvents.Remove(node);
+                    _coalescedEventCount++;
+                    // As when folding at enqueue time: the survivor reports the newest settings.
+                    if (key.IsTimeout) survivor.Value = survivor.Value.WithRaise(waiting.Raise);
+                    // A survivor always remains for this key, so the producer's count cannot reach
+                    // zero here and the burst report stays as it was.
+                    if (waiting.EmcyProducer is >= 0 and var emcy)
+                        --_pendingEmcyPerProducer[emcy];
+                }
+                else
+                {
+                    bool tracked = !key.IsTimeout;
+                    if (tracked)
+                    {
+                        absorbers.Clear();
+                        lastTracked = node;
+                    }
+                    absorbers[key.Identity] = node;
+                    newest[key.Identity] = node;
+                }
+            }
+            else if (waiting.Producer == producer)
+            {
+                absorbers.Clear();
+                lastTracked = node;
+            }
+            node = next;
+        }
+
+        foreach (var entry in newest)
+            _pendingKeyed[entry.Key] = entry.Value;
+        _lastForProducer[producer] = lastTracked;
     }
 
     private static LinkedListNode<PendingEvent>? NextNonCritical(LinkedListNode<PendingEvent>? node)
@@ -835,16 +987,77 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         get { lock (_eventLock) return _pendingEvents.Count; }
     }
 
+    /// <summary>Test seam: critical events absorbed by an identical one already waiting.</summary>
+    internal long CoalescedEventCount
+    {
+        get { lock (_eventLock) return _coalescedEventCount; }
+    }
+
+    /// <summary>Test seam: EMCYs discarded because their producer already had
+    /// <see cref="CanOpenNodeOptions.EventQueueCapacity"/> waiting.</summary>
+    internal long EmcyOverflowCount
+    {
+        get { lock (_eventLock) return _emcyOverflowCount; }
+    }
+
     private readonly struct PendingEvent
     {
-        public PendingEvent(Action raise, bool critical)
+        public PendingEvent(Action raise, bool critical, EventKey? key, int emcyProducer, int producer, long ordinal)
         {
             Raise = raise;
             Critical = critical;
+            Key = key;
+            EmcyProducer = emcyProducer;
+            Producer = producer;
+            Ordinal = ordinal;
         }
+
+        public PendingEvent WithRaise(Action raise)
+            => new(raise, Critical, Key, EmcyProducer, Producer, Ordinal);
 
         public Action Raise { get; }
         public bool Critical { get; }
+        public EventKey? Key { get; }
+        public int EmcyProducer { get; }
+        public int Producer { get; }
+        public long Ordinal { get; }
+    }
+
+    /// <summary>Identity of a critical event for coalescing: what it is, who raised it and, for
+    /// an EMCY, the whole 8-byte payload.</summary>
+    private readonly struct EventKey
+    {
+        private readonly byte _kind;
+        private readonly byte _producer;
+        private readonly ulong _payload;
+
+        private EventKey(byte kind, byte producer, ulong payload)
+        {
+            _kind = kind;
+            _producer = producer;
+            _payload = payload;
+        }
+
+        public bool IsTimeout => _kind is 1 or 2;
+
+        public byte ProducerId => _producer;
+
+        public static EventKey HeartbeatTimeout(byte producer) => new(1, producer, 0);
+
+        public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
+
+        public static EventKey Emcy(EmcyMessage msg)
+        {
+            ulong payload = msg.ErrorCode | ((ulong)msg.ErrorRegister << 16);
+            var mfr = msg.ManufacturerSpecific;
+            for (int i = 0; i < mfr.Length && i < EmcyMessage.ManufacturerFieldLength; i++)
+                payload |= (ulong)mfr[i] << (24 + 8 * i);
+            return new EventKey(3, msg.ProducerNodeId, payload);
+        }
+
+        /// <summary>The fields that make two keys the same event, as a tuple so that keys can be
+        /// compared and hashed without members of their own.</summary>
+        public (byte, byte, ulong) Identity => (_kind, _producer, _payload);
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
@@ -1154,15 +1367,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             return;
 
         if (data.Length == 0) return; // nothing to look at — can't even read the CS byte
+        int wireLength = data.Length;
         if (data.Length < 8)
         {
             // Match the symmetric client-side handling (see HandleSdoClientResponse): pad
-            // trailing-zero-stripped SDO frames to 8 bytes rather than dropping them, since
-            // SdoFrames' decoders are happy to read the shorter versions and the trailing
-            // bytes are always unused/zero in the current MVP frame formats. Prior behaviour
-            // left a well-formed but short client initiate lingering on the wire until its
-            // client-side timeout, which is exactly the bug Copilot flagged for the client
-            // path — this keeps the server path from having the mirror-image problem.
+            // trailing-zero-stripped SDO frames to 8 bytes rather than dropping them. That is
+            // right for the initiate and control frames, whose unused bytes are zero by
+            // definition. It is not right for a segment, whose bytes are data: a segment shorter
+            // than its own n field declares is refused below instead of being completed with
+            // bytes the peer never sent (#203). Prior behaviour left a well-formed but short
+            // client initiate lingering on the wire until its client-side timeout, which is
+            // exactly the bug Copilot flagged for the client path — this keeps the server path
+            // from having the mirror-image problem.
             var padded = new byte[8];
             Buffer.BlockCopy(data, 0, padded, 0, data.Length);
             data = padded;
@@ -1180,6 +1396,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // Client's segment for an in-flight download.
         if ((cs & 0xE0) == SdoFrames.CcsDownloadSegmentBase && _sdoServer is { InDownload: true } dl)
         {
+            if (!SdoFrames.SegmentIsComplete(wireLength, cs))
+            {
+                SendSdoServerAbort(dl.Index, dl.Subindex, SdoAbortCode.DataTypeLengthMismatch);
+                return;
+            }
             HandleServerDownloadSegment(dl, data);
             return;
         }
@@ -1744,6 +1965,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (!_sdoClients.TryGetValue(serverNodeId, out var session)) return;
         if (session.TimedOut) return; // decided already; only the pending send's outcome is awaited
         if (data.Length == 0) return; // nothing to look at — can't even read the CS byte
+        int wireLength = data.Length;
         if (data.Length < 8)
         {
             // Real-world ECUs sometimes strip trailing zero bytes under DLC-padding rules
@@ -1751,8 +1973,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // is happy to decode as long as it can reach the fields it needs, so pad the
             // frame to 8 bytes rather than silently dropping it and letting the client hang
             // on its SDO deadline. Trailing zeros are semantically the same as "unused
-            // bytes" in every SDO frame layout in the MVP (index/sub, abort code, expedited
-            // payload with n = 4 − DLC-4, segment payload with n = 7 − (DLC-1)).
+            // bytes" in the index/sub, abort-code and expedited-payload layouts. They are not
+            // in a segment, whose bytes are data: one that is shorter than its own n field
+            // declares is refused in the upload-segment branch below (#203).
             var padded = new byte[8];
             Buffer.BlockCopy(data, 0, padded, 0, data.Length);
             data = padded;
@@ -1882,6 +2105,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // Upload segment 0x00/0x10/0x0X/0x1X.
         if ((cs & 0xE0) != SdoFrames.ScsUploadSegmentBase) return;
         {
+            if (!SdoFrames.SegmentIsComplete(wireLength, cs))
+            {
+                AbortClient(session, SdoAbortCode.DataTypeLengthMismatch);
+                return;
+            }
             var (payload, last, toggle) = SdoFrames.ReadSegment(data);
             if (toggle != session.Toggle)
             {
@@ -2196,7 +2424,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatReceived?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        }, critical: false, key: null, emcyProducer: -1, producer);
     }
 
     private void RaiseHeartbeatTimeout(byte producer, TimeSpan timeout)
@@ -2206,7 +2434,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { HeartbeatTimeout?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true);
+        }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
     }
 
     private void RaiseEmcyReceived(EmcyMessage msg, DateTime ts)
@@ -2216,7 +2444,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             try { EmcyReceived?.Invoke(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true);
+        }, critical: true, EventKey.Emcy(msg), msg.ProducerNodeId, msg.ProducerNodeId);
     }
 
     private void RaiseSyncReceived(DateTime ts)
