@@ -117,22 +117,28 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         // stalled host).
         var received = new List<byte>();
         var subBlocks = 0;
+        // Every gap can time out, including the one after the final segment, whose abort is then
+        // read as the end frame; both reads go through here.
+        void FailIfAborted(byte[] frame)
+        {
+            if (frame[0] != SdoFrames.CsAbort)
+                return;
+            var (abortIndex, abortSubindex) = SdoFrames.ReadIndex(frame);
+            // The abort may be dequeued after a later peer frame was sent; idle time is
+            // measured from the last one that preceded its arrival.
+            var lastPeerFrame = peerFrames.Last(t => t <= tap.LastArrival);
+            Assert.Fail(
+                "the server must not time out a transfer whose peer keeps answering, but it aborted " +
+                $"0x{abortIndex:X4}:{abortSubindex:X2} with code 0x{SdoFrames.ReadAbortCode(frame):X8} " +
+                $"after {subBlocks} of {segments} sub-blocks, {Ms(lastPeerFrame, tap.LastArrival)} ms " +
+                $"after the last frame the peer sent, {Ms(transferStart, tap.LastArrival)} ms into the " +
+                $"transfer (SdoServerTimeout {serverTimeout.TotalMilliseconds} ms, gap {gap.TotalMilliseconds} ms)");
+        }
+
         while (true)
         {
             var seg = tap.Next(ShortTimeout);
-            if (seg[0] == SdoFrames.CsAbort)
-            {
-                var (abortIndex, abortSubindex) = SdoFrames.ReadIndex(seg);
-                // The abort may be dequeued after a later peer frame was sent; idle time is
-                // measured from the last one that preceded its arrival.
-                var lastPeerFrame = peerFrames.Last(t => t <= tap.LastArrival);
-                Assert.Fail(
-                    "the server must not time out a transfer whose peer keeps answering, but it aborted " +
-                    $"0x{abortIndex:X4}:{abortSubindex:X2} with code 0x{SdoFrames.ReadAbortCode(seg):X8} " +
-                    $"after {subBlocks} of {segments} sub-blocks, {Ms(lastPeerFrame, tap.LastArrival)} ms " +
-                    $"after the last frame the peer sent, {Ms(transferStart, tap.LastArrival)} ms into the " +
-                    $"transfer (SdoServerTimeout {serverTimeout.TotalMilliseconds} ms, gap {gap.TotalMilliseconds} ms)");
-            }
+            FailIfAborted(seg);
             (seg[0] & 0x7F).Should().Be(1, "blksize 1 restarts the seqno at 1 for every sub-block");
             received.AddRange(seg.Skip(1));
             subBlocks++;
@@ -147,6 +153,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         subBlocks.Should().Be(segments);
 
         var end = tap.Next(ShortTimeout);
+        FailIfAborted(end);
         (end[0] & 0xE3).Should().Be(SdoBlockFrames.ScsBlockUploadEndBase);
         SdoBlockFrames.ReadEndUnusedBytes(end[0]).Should().Be(0, "175 bytes fill 25 segments exactly");
         Send(rawBus, CanOpenCobId.SdoRx(0x02),
