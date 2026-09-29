@@ -189,7 +189,10 @@ cd CanKit.Pro
 dotnet run --project samples/CanKit.Pro.Sample.Demux
 ```
 
-No hardware needed — it runs on the loopback adapter.
+No hardware needed — it runs on the loopback adapter. The
+[other samples](https://github.com/dborgards/CanKit.Pro/tree/main/samples) cover ISO-TP, UDS, J1939
+and CANopen; each one explains its steps as it runs, and `dotnet run --project <sample> -- --pro`
+adds a section of extras for professionals.
 
 ## The protocol layers
 

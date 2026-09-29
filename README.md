@@ -112,6 +112,10 @@ A runnable version, needing no hardware:
 dotnet run --project samples/CanKit.Pro.Sample.Demux
 ```
 
+The other layers — ISO-TP, UDS, J1939, CANopen — have samples too. [`samples/`](samples/README.md)
+says which to read first; each has a beginner path that explains its steps as it runs and, behind
+`-- --pro`, extras for professionals.
+
 ## Documentation
 
 The project website, [dborgards.github.io/CanKit.Pro](https://dborgards.github.io/CanKit.Pro/),
