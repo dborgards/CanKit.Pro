@@ -105,7 +105,7 @@ master.ObjectDictionary.AddU16(0x2100, 0x00, 0x0000);
 master.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, bitLength: 16),
     cobId: CanOpenCobId.TpdoDefault(nodeId: 0x11, pdoIndex: 1));
 
-var received = new SemaphoreSlim(0);
+using var received = new SemaphoreSlim(0);
 EventHandler<RpdoReceivedEventArgs> onRpdo = (_, e) =>
 {
     Console.WriteLine($"   PDO on COB-ID 0x{e.CobId:X3}: {BitConverter.ToString(e.Payload)} -> " +
