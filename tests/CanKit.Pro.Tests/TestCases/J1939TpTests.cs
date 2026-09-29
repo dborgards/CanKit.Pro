@@ -2960,13 +2960,52 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0);
     }
 
+    // Codex on #215: the slot was given back before the outcome was published, so an Admit on
+    // another thread could get in between: accepted while the previous send's task was still
+    // pending (a duplicate would slip through, and the bound was exceeded). The hook runs where
+    // that window was; a second thread takes the gate there and records what it sees. With
+    // release and publish under the gate it cannot get in until the task is complete.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Admission_Cannot_Observe_A_Released_Slot_While_The_Send_Is_Still_Pending(int how)
+    {
+        var gate = new object();
+        var completion = new J1939TpChannel.TxCompletion(gate, () => { });
+        bool? completedWhenAdmitGotIn = null;
+        completion.BetweenReleaseAndPublish = () =>
+        {
+            var probe = Task.Run(() =>
+            {
+                lock (gate) completedWhenAdmitGotIn = completion.Task.IsCompleted;
+            });
+            // Blocked on the gate for as long as the completing thread holds it.
+            probe.Wait(TimeSpan.FromMilliseconds(200));
+            completion.BetweenReleaseAndPublish = null;
+        };
+
+        _ = how switch
+        {
+            0 => completion.TrySetResult(null),
+            1 => completion.TrySetException(new InvalidOperationException()),
+            2 => completion.TrySetCanceled(),
+            _ => completion.TrySetCanceled(new CancellationToken(true)),
+        };
+
+        for (var i = 0; i < 100 && completedWhenAdmitGotIn is null; i++) await Task.Delay(10);
+        completedWhenAdmitGotIn.Should().BeTrue(
+            "the slot is free only once the outcome is published; an Admit that gets in earlier is accepted while the send is pending");
+    }
+
     // A send can be completed more than once (a cancel racing a result, a dispose after a fault);
     // the slot it held must come back exactly once, or a later send is admitted past the limit.
     [Fact]
     public async Task A_Completion_Gives_Its_Slot_Back_Exactly_Once_However_Often_It_Is_Completed()
     {
         int released = 0;
-        var completion = new J1939TpChannel.TxCompletion(() => Interlocked.Increment(ref released));
+        var completion = new J1939TpChannel.TxCompletion(new object(), () => Interlocked.Increment(ref released));
 
         completion.TrySetResult(null).Should().BeTrue();
         completion.TrySetException(new InvalidOperationException()).Should().BeFalse("already completed");

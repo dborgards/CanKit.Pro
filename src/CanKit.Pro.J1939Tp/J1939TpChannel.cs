@@ -248,7 +248,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 $"{admitted} sends to it are already pending (on the wire, waiting or not yet started); " +
                 $"MaxQueuedSendsPerDestination = {_options.MaxQueuedSendsPerDestination}."));
         }
-        var tcs = new TxCompletion(() => ReleaseSlot(key));
+        var tcs = new TxCompletion(_admissionLock, () => ReleaseSlot(key));
         try
         {
             // Everything from here on can throw (a token whose source is disposed, a disposed
@@ -1407,31 +1407,45 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     }
 
     /// <summary>
-    /// The completion of one send. Completing it gives the destination's admission slot back
-    /// <em>before</em> the caller's task completes, on whichever thread completes it, so a caller
-    /// that awaits a send and sends again at the limit is never refused by a release still to run.
+    /// The completion of one send. Completing it gives the destination's admission slot back and
+    /// publishes the outcome in one step under the admission lock: a caller that awaits a send and
+    /// sends again at the limit is never refused by a release still to run, and a concurrent
+    /// <see cref="Admit"/> never sees the slot free while the previous send's task is still
+    /// pending (which would let a duplicate through and exceed the bound). Continuations run
+    /// asynchronously, so no caller code runs under the lock.
     /// </summary>
     internal sealed class TxCompletion
     {
         private readonly TaskCompletionSource<object?> _tcs =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly object _gate;
         private readonly Action _release;
         private int _released;
 
+        /// <param name="gate">The lock <see cref="Admit"/> takes; release and publish happen under it.</param>
         /// <param name="release">Gives the slot back; runs once, however often the send is completed.</param>
-        public TxCompletion(Action release) => _release = release;
+        public TxCompletion(object gate, Action release)
+        {
+            _gate = gate;
+            _release = release;
+        }
+
+        /// <summary>Runs under the gate between the release and the publish; a test seam.</summary>
+        internal Action? BetweenReleaseAndPublish { get; set; }
 
         public Task Task => _tcs.Task;
 
-        public bool TrySetResult(object? result) { Release(); return _tcs.TrySetResult(result); }
-        public bool TrySetException(Exception ex) { Release(); return _tcs.TrySetException(ex); }
-        public bool TrySetCanceled() { Release(); return _tcs.TrySetCanceled(); }
-        public bool TrySetCanceled(CancellationToken token) { Release(); return _tcs.TrySetCanceled(token); }
+        public bool TrySetResult(object? result) { lock (_gate) { Release(); Announce(); return _tcs.TrySetResult(result); } }
+        public bool TrySetException(Exception ex) { lock (_gate) { Release(); Announce(); return _tcs.TrySetException(ex); } }
+        public bool TrySetCanceled() { lock (_gate) { Release(); Announce(); return _tcs.TrySetCanceled(); } }
+        public bool TrySetCanceled(CancellationToken token) { lock (_gate) { Release(); Announce(); return _tcs.TrySetCanceled(token); } }
 
         private void Release()
         {
             if (Interlocked.Exchange(ref _released, 1) == 0) _release();
         }
+
+        private void Announce() => BetweenReleaseAndPublish?.Invoke();
     }
 
     private void ReleaseSlot(TxSessionKey key)
