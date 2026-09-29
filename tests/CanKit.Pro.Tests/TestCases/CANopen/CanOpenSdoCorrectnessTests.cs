@@ -96,7 +96,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
 
         // For the failure message below: when the transfer began and when the peer spoke.
         var transferStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        var peerFrames = new List<long> { transferStart }; // one entry per frame the peer has sent
+        // One entry per frame the peer sends, taken just *before* the send: a frame's arrival can then
+        // never precede its entry, even if this thread is descheduled after the send returns.
+        var peerFrames = new List<long> { transferStart };
         static long Ms(long from, long to) => (to - from) * 1000 / System.Diagnostics.Stopwatch.Frequency;
 
         Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildBlockUploadInit(
@@ -105,9 +107,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         (initResp[0] & 0xE0).Should().Be(SdoBlockFrames.ScsBlockUploadInitResponseBase);
 
         await Task.Delay(gap); // first idle period: initiate response -> start
+        peerFrames.Add(System.Diagnostics.Stopwatch.GetTimestamp());
         Send(rawBus, CanOpenCobId.SdoRx(0x02),
             SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
-        peerFrames.Add(System.Diagnostics.Stopwatch.GetTimestamp());
 
         // #240: this assertion failed once on a CI runner without saying where. An abort is
         // reported with the sub-block it interrupted, its code and how long the peer had really
@@ -145,9 +147,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             bool last = (seg[0] & 0x80) != 0;
 
             await Task.Delay(gap); // idle period: segment -> our sub-block ACK
+            peerFrames.Add(System.Diagnostics.Stopwatch.GetTimestamp());
             Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildSubBlockAck(
                 SdoBlockFrames.CcsBlockUploadSubBlockAck, lastAckedSeq: 1, nextBlockSize: 1));
-            peerFrames.Add(System.Diagnostics.Stopwatch.GetTimestamp());
             if (last) break;
         }
         subBlocks.Should().Be(segments);
