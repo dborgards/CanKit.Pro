@@ -293,7 +293,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
             : CanFrame.Classic(unchecked((int)_txEndpoint.TxCanId), payload,
                 isExtendedFrame: _options.IsExtendedCanId);
 
-        var confirmation = await _service.SendConfirmed(frame, _options.NAs, ct)
+        var confirmation = await _service.SendConfirmedAsync(frame, _options.NAs, ct)
             .ConfigureAwait(false);
 
         if (!confirmation.Confirmed)

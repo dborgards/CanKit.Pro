@@ -85,18 +85,18 @@ heartbeat or node-guarding consumer explicitly registered for the local node id.
 layer follows is that an explicitly configured or explicitly addressed frame outranks a guess about
 who sent it.
 
-`SendConfirmed` is independent of this: it matches echoes on the bus event itself, so withholding
+`SendConfirmedAsync` is independent of this: it matches echoes on the bus event itself, so withholding
 them from subscribers does not affect TX confirmation.
 
 ## TX-Confirm
 
-`SendConfirmed` gives a uniform "was this frame actually sent" answer regardless of whether the
+`SendConfirmedAsync` gives a uniform "was this frame actually sent" answer regardless of whether the
 bus has hardware TX echo enabled:
 
 ```csharp
 // Bus opened with CanFeature.Echo + WorkMode = ChannelWorkMode.Echo -> real echo matching.
 // Otherwise -> confirmed as soon as the driver accepts the frame (TxConfirmation.IsApproximated).
-var result = await service.SendConfirmed(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
+var result = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 
 if (result.Confirmed)
 {
@@ -110,7 +110,7 @@ else
 
 Concurrent, byte-identical sends are matched to their own confirmation in FIFO order, never
 cross-matched (FR-RAW-031). The per-call timeout is configurable (FR-RAW-034); disposing the
-service cancels any outstanding `SendConfirmed` calls rather than leaving them to time out.
+service cancels any outstanding `SendConfirmedAsync` calls rather than leaving them to time out.
 
 A confirmation carries two host-monotonic readings that bracket the driver call, taken inside
 the service's send lock: `HostHandoffTimestamp` immediately before it and `HostTransmitTimestamp`

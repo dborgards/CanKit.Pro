@@ -27,7 +27,7 @@ namespace CanKit.Pro.IsoTp;
 /// actor's loop thread — no locks needed inside the state machines.</description></item>
 /// <item><description>RX frames from the demux subscription are marshaled onto the actor via
 /// <see cref="IProtocolActor.Post(Action)"/>; TX confirmations from
-/// <see cref="ICanBusService.SendConfirmed"/> run on the thread-pool and post their outcome back
+/// <see cref="ICanBusService.SendConfirmedAsync"/> run on the thread-pool and post their outcome back
 /// onto the actor.</description></item>
 /// <item><description>The subscription reader is a single <see cref="Task"/> that ends when the
 /// subscription completes (i.e. the channel or the owning service is disposed) — no busy loop
@@ -38,7 +38,7 @@ namespace CanKit.Pro.IsoTp;
 /// <para>The channel does not construct <see cref="CanFrame"/> instances that own memory:
 /// frames are built with plain <see cref="ReadOnlyMemory{Byte}"/> payloads (backed by
 /// stack- or heap-allocated arrays), so there is no <see cref="IDisposable"/> ownership to
-/// forward to <see cref="ICanBusService.SendConfirmed"/> — matching the plain-payload variant
+/// forward to <see cref="ICanBusService.SendConfirmedAsync"/> — matching the plain-payload variant
 /// of the frame factory.</para>
 /// </remarks>
 internal sealed class IsoTpChannel : IIsoTpChannel
@@ -76,7 +76,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // TX state (only accessed on the actor loop). All null/zero while idle.
     private TxState? _tx;
 
-    // Count of SendFrameOnBus → SendConfirmed operations still outstanding (actor-loop only).
+    // Count of SendFrameOnBus → SendConfirmedAsync operations still outstanding (actor-loop only).
     // Cancelled SendAsync must hold _sendGate until this drains so a subsequent send cannot
     // interleave frames with an aborted PDU that already submitted work to the bus
     //.
@@ -262,13 +262,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             finally
             {
                 ctr.Dispose();
-                // Hold the gate until any SendConfirmed already submitted for this PDU finishes.
+                // Hold the gate until any SendConfirmedAsync already submitted for this PDU finishes.
                 // CancelInFlightSend completes the TCS immediately but must not let the next
                 // SendAsync race frames onto the bus. Skip on dispose:
                 // no subsequent SendAsync can run, and bus-TX confirmations may never post
                 // back onto a torn-down actor.
                 //
-                // Not unbounded while the channel lives (#202): every frame's SendConfirmed is
+                // Not unbounded while the channel lives (#202): every frame's SendConfirmedAsync is
                 // bounded by N_As on both the echo and the approximated path, so a confirm that
                 // never comes back still posts a timed-out outcome and drains _busTxInFlight.
                 // That bound is what keeps this wait -- made with _sendGate held -- from wedging
@@ -831,8 +831,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         ConsecutiveFrameConfirm,
     }
 
-    // Non-blocking fire: SendConfirmed runs on the thread pool and posts its outcome back on the
-    // actor. The actor loop is never blocked on a Task.await (SendConfirmed can wait up to N_As
+    // Non-blocking fire: SendConfirmedAsync runs on the thread pool and posts its outcome back on the
+    // actor. The actor loop is never blocked on a Task.await (SendConfirmedAsync can wait up to N_As
     // for an echo). Both the success handler and the fault handler are named methods on TxState
     // so a canceled/timed-out send that we already failed doesn't touch _tx twice.
     private void SendFrameOnBus(byte[] payload, TxExpect expectTx)
@@ -864,7 +864,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // taken inside that lock, replaces it in OnSendConfirmed (Codex on #147).
                 if (expected is not null)
                     expected.LastFrameHandoffTimestamp = Stopwatch.GetTimestamp();
-                var c = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
+                var c = await _service.SendConfirmedAsync(frame, timeout).ConfigureAwait(false);
                 confirmation = c;
             }
             catch (Exception ex)
@@ -1530,7 +1530,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         {
             try
             {
-                var conf = await _service.SendConfirmed(frame, timeout).ConfigureAwait(false);
+                var conf = await _service.SendConfirmedAsync(frame, timeout).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     RaiseBackgroundException(new IsoTpException(

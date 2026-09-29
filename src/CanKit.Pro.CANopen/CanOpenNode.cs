@@ -2209,7 +2209,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
         Action<CanOpenTransportException?>? onSendCompleted = null)
     {
-        // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmed for
+        // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via
         // BackgroundExceptionOccurred. An SDO client request also passes onSendCompleted, which
@@ -2221,7 +2221,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             CanOpenTransportException? failure = null;
             try
             {
-                var conf = await _service.SendConfirmed(frame, cancellationToken: cancellationToken)
+                var conf = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
@@ -2380,7 +2380,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                     try
                     {
                         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-                        var conf = await _service.SendConfirmed(frame).ConfigureAwait(false);
+                        var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
                         if (!conf.Confirmed)
                         {
                             var unconfirmed = new CanOpenTransportException(

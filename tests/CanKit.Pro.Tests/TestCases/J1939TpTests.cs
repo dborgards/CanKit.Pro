@@ -3382,11 +3382,11 @@ internal sealed class FrameConsumptionCountingBusService : ICanBusService
     /// </summary>
     public Action<CanFrame>? OnSendConfirmed { get; set; }
 
-    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         OnSendConfirmed?.Invoke(frame);
-        return _inner.SendConfirmed(frame, timeout, cancellationToken);
+        return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
     }
 
     public void Dispose() => _inner.Dispose();
@@ -3477,9 +3477,9 @@ internal sealed class DisposalRecordingBusService : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
-    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
-        => _inner.SendConfirmed(frame, timeout, cancellationToken);
+        => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
 
     public void Dispose()
     {
@@ -3489,7 +3489,7 @@ internal sealed class DisposalRecordingBusService : ICanBusService
 }
 
 /// <summary>
-/// Test double: rejects every TP.CM frame at SendConfirmed, forwards everything else.
+/// Test double: rejects every TP.CM frame at SendConfirmedAsync, forwards everything else.
 /// Used to prove BAM/RTS TX failure fails the send TCS (Bugbot 3596183535).
 /// </summary>
 internal sealed class RejectTpCmBusService : ICanBusService
@@ -3516,7 +3516,7 @@ internal sealed class RejectTpCmBusService : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => _inner.FindOverlappingFilterSubscriptions();
 
-    public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+    public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
         if (frame.IsExtendedFrame)
@@ -3534,7 +3534,7 @@ internal sealed class RejectTpCmBusService : ICanBusService
             }
         }
 
-        return _inner.SendConfirmed(frame, timeout, cancellationToken);
+        return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
     }
 
     public void Dispose() { /* leaveOpen wrappers do not own the inner service */ }

@@ -175,7 +175,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
             bool includeEcho = false)
             => new Sub(_frames);
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
@@ -1119,7 +1119,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
     // --------------------------------------------------------------------------------
     // Bugbot 3594960783 (HIGH), the reachable half — when a send fails *after* the actor has
-    // taken ownership of the PDU (here: the bus layer throws out of SendConfirmed), the channel
+    // taken ownership of the PDU (here: the bus layer throws out of SendConfirmedAsync), the channel
     // must (1) fault the awaiting SendAsync with that exact exception, (2) release the send-gate
     // and clear _tx, and (3) stay usable — rather than reporting the failure only through
     // BackgroundExceptionOccurred and hanging every future SendAsync behind the gate.
@@ -1304,7 +1304,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         var sendTask = sender.SendAsync(new byte[] { 0xAA, 0xBB });
         confirmStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
-            "SendConfirmed must be parked so Dispose races an in-flight SendAsync");
+            "SendConfirmedAsync must be parked so Dispose races an in-flight SendAsync");
 
         // Dispose while SendAsync still holds _sendGate (awaiting confirmation / idle drain).
         Action dispose = () => sender.Dispose();
@@ -1320,10 +1320,10 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
     // --------------------------------------------------------------------------------
     // Bugbot 3596212788 (HIGH) — cancelling SendAsync must not release _sendGate while a
-    // SendConfirmed started by SendFrameOnBus is still outstanding. Otherwise a subsequent
+    // SendConfirmedAsync started by SendFrameOnBus is still outstanding. Otherwise a subsequent
     // SendAsync can put a new PDU on the wire while the aborted PDU's frame is still TX'ing.
     //
-    // Arrangement: wrap the bus service so the first SendConfirmed blocks until we release it;
+    // Arrangement: wrap the bus service so the first SendConfirmedAsync blocks until we release it;
     // cancel the in-flight SF send, start a second SendAsync concurrently, and assert the
     // second PDU does not appear on the peer until the first confirmation is released.
     // --------------------------------------------------------------------------------
@@ -1362,18 +1362,18 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var cancelledSend = sender.SendAsync(new byte[] { 0xAA, 0xBB }, cts.Token);
 
         firstConfirmStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
-            "the first SendConfirmed must be parked inside our delaying wrapper");
+            "the first SendConfirmedAsync must be parked inside our delaying wrapper");
 
         cts.Cancel();
 
         // cancelledSend awaits WaitForBusTxIdleAsync after the OCE, so it must NOT complete while
-        // we still hold the first SendConfirmed — that is the gate-hold under test.
+        // we still hold the first SendConfirmedAsync — that is the gate-hold under test.
         var cancelFinished = cancelledSend.WaitAsync(TimeSpan.FromMilliseconds(200));
         Func<Task> stillHeld = () => cancelFinished;
         await stillHeld.Should().ThrowAsync<TimeoutException>(
-            "cancelled SendAsync must keep the send gate until its in-flight SendConfirmed finishes");
+            "cancelled SendAsync must keep the send gate until its in-flight SendConfirmedAsync finishes");
 
-        // Second send starts while the aborted PDU's SendConfirmed is still held. Under the bug
+        // Second send starts while the aborted PDU's SendConfirmedAsync is still held. Under the bug
         // the gate is already free and this SF (DL=3) hits the bus immediately; under the fix it
         // must wait until we release the first confirmation.
         var secondSend = sender.SendAsync(new byte[] { 0x11, 0x22, 0x33 });
@@ -1394,7 +1394,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await actor.PostAsync(() => { }).WaitAsync(ShortTimeout);
         await Task.Delay(100);
         framesToPeer.Should().Be(0,
-            "no SF may hit the peer while the aborted send's SendConfirmed is still parked");
+            "no SF may hit the peer while the aborted send's SendConfirmedAsync is still parked");
 
         holdFirstConfirm.Release();
 
@@ -1552,7 +1552,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var sendTask = sender.SendAsync(pdu);
 
         confirmStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
-            "FF SendConfirmed must be parked so Wait FCs arrive during SingleOrFirstInFlight");
+            "FF SendConfirmedAsync must be parked so Wait FCs arrive during SingleOrFirstInFlight");
         await ffSeen.Task.WaitAsync(ShortTimeout);
 
         // Pump WftMax+1 Wait FCs while FF confirm is still held — all must be queued and
@@ -2251,7 +2251,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>
-    /// Test double: the first <see cref="ICanBusService.SendConfirmed"/> call throws the supplied
+    /// Test double: the first <see cref="ICanBusService.SendConfirmedAsync"/> call throws the supplied
     /// exception instead of transmitting; every later call is forwarded to the inner service
     /// untouched. Models the L2/driver layer failing outright — as opposed to reporting a
     /// <see cref="TxConfirmation"/> that says the send failed — which is the one failure a
@@ -2287,11 +2287,11 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             if (Interlocked.Increment(ref _calls) == 1) throw _failure;
-            return _inner.SendConfirmed(frame, timeout, cancellationToken);
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
         }
 
         public void Dispose() { /* wrapper: the test owns and disposes the inner service */ }
@@ -2326,7 +2326,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             // Put the frame on the wire for real, then let the requested confirm timeout
@@ -2349,7 +2349,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>
     /// Test double: forwards every <see cref="ICanBusService"/> call to an inner service, but
-    /// parks <see cref="ICanBusService.SendConfirmed"/> until <paramref name="release"/> is
+    /// parks <see cref="ICanBusService.SendConfirmedAsync"/> until <paramref name="release"/> is
     /// signaled so cancel/gate / deferred-FC races are deterministic.
     /// </summary>
     /// <remarks>
@@ -2392,7 +2392,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             bool hold = Interlocked.Increment(ref _confirmCount) == 1;
@@ -2406,7 +2406,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
                     throw new TimeoutException("test release gate was never signaled");
             }
 
-            var result = await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);
+            var result = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
 
             if (hold && _holdAfterTransmit)
             {
@@ -2422,7 +2422,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>
-    /// Parks <see cref="ICanBusService.SendConfirmed"/> only for Consecutive Frames, and only
+    /// Parks <see cref="ICanBusService.SendConfirmedAsync"/> only for Consecutive Frames, and only
     /// after the frame has been transmitted — so a peer FC can arrive while TX state is still
     /// <c>SendingCf</c> (Bugbot 3597408323).
     /// </summary>
@@ -2458,14 +2458,14 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
             => _inner.FindOverlappingFilterSubscriptions();
 
-        public async Task<TxConfirmation> SendConfirmed(CanFrame frame, TimeSpan? timeout = null,
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
             // Copy PCI before await — ReadOnlySpan cannot live across await points.
             byte[] payload = frame.Data.ToArray();
             bool isCf = payload.Length > 0 && (payload[0] >> 4) == 0x2;
 
-            var result = await _inner.SendConfirmed(frame, timeout, cancellationToken).ConfigureAwait(false);
+            var result = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
 
             if (isCf)
             {
@@ -2669,7 +2669,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // #202: a bus whose asynchronous TransmitAsync never completes must not wedge the channel.
-    // The frame's SendConfirmed is bounded by N_As on the approximated path too, so the send
+    // The frame's SendConfirmedAsync is bounded by N_As on the approximated path too, so the send
     // faults with the N_As timeout, drains the bus-TX bookkeeping, and releases the send gate --
     // the next SendAsync goes through.
     [Fact]

@@ -6,7 +6,7 @@ ISO 15765-2 (ISO-TP) implementation for [CanKit](https://github.com/pkuyo/CanKit
 1. **Codec** — deterministic, side-effect-free builders and parsers for the four ISO-TP PCI frame
    types (Single Frame, First Frame, Consecutive Frame, Flow Control) on classic CAN and CAN-FD.
 2. **Runtime (`IIsoTpChannel`)** — an actor-driven channel that composes on top of the CanKit.Pro
-   L2 services (`CanKit.Pro.RawCan` demux + `SendConfirmed`, `CanKit.Pro.Actor`, `CanKit.Pro.Reliability`
+   L2 services (`CanKit.Pro.RawCan` demux + `SendConfirmedAsync`, `CanKit.Pro.Actor`, `CanKit.Pro.Reliability`
    deadlines). Segments outbound PDUs into SF/FF/CFs, honors peer Flow Control (BS/STmin/Wait/
    Overflow) and enforces N_As/N_Bs/N_Cr timers, reassembles inbound PDUs (SN-checked), and delivers
    them via `ReceiveAsync` / `ReceiveAllAsync` / `DatagramReceived`.

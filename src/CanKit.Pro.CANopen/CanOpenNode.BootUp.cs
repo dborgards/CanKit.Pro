@@ -362,7 +362,7 @@ internal sealed partial class CanOpenNode
     /// Sends one NMT frame. An unconfirmed send (timeout, bus-off, rejection) is reported here
     /// and comes back as <see langword="false"/>. A throw other than cancellation leaves this
     /// task faulted; <see cref="EnqueueNmt"/> reports it and still completes with false.
-    /// <c>SendConfirmed</c> throws <see cref="ObjectDisposedException"/> for a disposed service
+    /// <c>SendConfirmedAsync</c> throws <see cref="ObjectDisposedException"/> for a disposed service
     /// and rethrows the bus (<see cref="CanKitException"/> from a device adapter, and whatever
     /// else the driver raised, including <see cref="InvalidOperationException"/>).
     /// </summary>
@@ -373,7 +373,7 @@ internal sealed partial class CanOpenNode
         {
             try
             {
-                var conf = await _service.SendConfirmed(frame).ConfigureAwait(false);
+                var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
                 if (conf.Confirmed) return true;
                 RaiseBackgroundException(new CanOpenTransportException(
                     $"CANopen frame TX on COB-ID 0x{CanOpenCobId.NmtCommand:X3} failed: {conf.FailureReason}."));

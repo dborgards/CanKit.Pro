@@ -925,7 +925,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // only raising BackgroundExceptionOccurred while leaving the session registered.
             SendTpCm(rts, destinationAddress: key.DestinationAddress, session);
             // Now wait for CTS with T3 (initial), per §5.10.2.4. Armed immediately: a fast peer
-            // may already have CTS'd before the RTS SendConfirmed continuation runs.
+            // may already have CTS'd before the RTS SendConfirmedAsync continuation runs.
             session.State = TxStage.WaitCts;
             session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
         }
@@ -1044,7 +1044,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         else if (control == J1939TpFrames.ControlEomAck)
         {
             // Accept EOM once the last DT has been handed to SendControlFrame. On a fast Virtual
-            // loopback the peer can emit EndOfMsgAck before our SendConfirmed callback runs
+            // loopback the peer can emit EndOfMsgAck before our SendConfirmedAsync callback runs
             // OnCmDtConfirmed (SendingDt → WaitEom). Do NOT treat NextSn >= TotalPackets alone as
             // sufficient: CTS for the final SN sets NextSn to TotalPackets before any DT is queued.
             bool lastDtOnWire = session.State == TxStage.SendingDt && session.LastDtQueued;
@@ -1257,7 +1257,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             try
             {
-                var confirmation = await _service.SendConfirmed(frame).ConfigureAwait(false);
+                var confirmation = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
                 if (!confirmation.Confirmed)
                 {
                     // TX rejection / timeout at L2 -- surface via the owning session (if any),
@@ -1527,7 +1527,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public bool AllPacketsSent { get; set; }
         /// <summary>
         /// Set when <see cref="TrySendNextCmDt"/> queues the final TP.DT (SN == TotalPackets).
-        /// Used to accept an early EndOfMsgAck that races ahead of SendConfirmed → WaitEom.
+        /// Used to accept an early EndOfMsgAck that races ahead of SendConfirmedAsync → WaitEom.
         /// </summary>
         public bool LastDtQueued { get; set; }
         public byte PendingCtsNextSn { get; set; }
