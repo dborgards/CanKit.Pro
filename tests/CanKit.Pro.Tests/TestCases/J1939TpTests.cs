@@ -2896,12 +2896,16 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
-#if NETFRAMEWORK
-    // Bugbot on #215: CancellationToken.Register on a token whose source is disposed throws on
-    // .NET Framework (modern .NET returns an empty registration instead, so there is nothing
-    // to roll back there). It ran after the slot was reserved and outside the rollback.
+    // Bugbot on #215 assumed CancellationToken.Register throws for a token whose source is
+    // disposed on .NET Framework. It does not by default (only with the legacy
+    // ThrowExceptionIfDisposedCancellationTokenSource switch), so a test built on that premise
+    // never sees the throw: the send is accepted and, on a frozen clock, never completes -- the
+    // net48 leg hung on exactly that. What holds on every runtime is the behaviour asserted here:
+    // such a token is an ordinary one that can never cancel, the send goes out, and its slot comes
+    // back when it completes. (The rollback for a failing Register is the same try block as the
+    // one a failing Post takes, which A_Send_That_Fails_After_Admission_Gives_Its_Slot_Back covers.)
     [Fact]
-    public async Task A_Token_Whose_Source_Is_Disposed_Does_Not_Leak_The_Slot()
+    public async Task A_Token_Whose_Source_Is_Disposed_Sends_Normally_And_Releases_Its_Slot()
     {
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
@@ -2912,13 +2916,15 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var token = cts.Token;
         cts.Dispose();
 
+        // With a limit of 0 the destination holds one send at a time: a slot kept by an earlier
+        // send would refuse the next one.
         for (int i = 0; i < 3; i++)
         {
-            Func<Task> send = () => sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1), token);
-            await send.Should().ThrowAsync<ObjectDisposedException>($"attempt {i}");
+            var send = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1 + i), token);
+            send.IsFaulted.Should().BeFalse($"round {i}: the token is accepted");
+            await DrainAsync(clock, actor, send);
         }
     }
-#endif
 
     // Cancelling a send in the middle of the queue unlinks exactly that entry: the others keep
     // their order and both still go out.
