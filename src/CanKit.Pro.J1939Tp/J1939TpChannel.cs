@@ -73,8 +73,21 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // two sessions to one destination would interleave frames a receiver cannot tell apart --
     // J1939-21 has one BAM per source at a time and one CM connection per (SA, DA) pair. The
     // queue is what makes IJ1939TpChannel's "one PDU at a time per destination" true.
-    private readonly Dictionary<byte, Queue<PendingTx>> _txQueues = new();
+    private readonly Dictionary<byte, LinkedList<PendingTx>> _txQueues = new();
+    // The queued entry of each waiting send, so a cancelled one is unlinked in O(1) and the head
+    // leaves in O(1): a list would shift every remaining entry per send drained (#204).
+    private readonly Dictionary<TxCompletion, LinkedListNode<PendingTx>> _queuedNodes = new();
     private readonly Dictionary<RxSessionKey, RxSession> _rxSessions = new();
+
+    // Sends admitted per destination and not yet completed: posted to the actor and not yet run,
+    // waiting in _txQueues, or on the wire. Unlike the maps above this is touched from callers'
+    // threads, under _admissionLock, because the limit has to hold before a send is posted (#204):
+    // the mailbox is unbounded and holds each pending send's whole PDU.
+    private readonly object _admissionLock = new();
+    private readonly Dictionary<byte, int> _admitted = new();
+    // The (destination, PGN) of every admitted send, so a duplicate is told from a full
+    // destination at the call: one send per key is pending at a time, as before the limit.
+    private readonly HashSet<TxSessionKey> _admittedKeys = new();
 
     private int _disposed;
 
@@ -173,13 +186,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         ThrowIfDisposed();
         ValidateSendPayload(pgn, payload.Length);
 
-        var pduBytes = payload.ToArray();
-        var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var key = new TxSessionKey(J1939Pgn.GlobalAddress, pgn);
 
-        RegisterCancellation(tcs, cancellationToken, key);
-        _actor.Post(() => BeginTxOnLoop(key, pduBytes, tcs, isCm: false));
-        return tcs.Task;
+        return Admit(key, payload, cancellationToken, isCm: false);
     }
 
     /// <inheritdoc />
@@ -192,12 +201,67 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 "TP.CM requires a specific destination address; use SendBamAsync for broadcasts.");
         ValidateSendPayload(pgn, payload.Length);
 
-        var pduBytes = payload.ToArray();
-        var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var key = new TxSessionKey(destinationAddress, pgn);
 
-        RegisterCancellation(tcs, cancellationToken, key);
-        _actor.Post(() => BeginTxOnLoop(key, pduBytes, tcs, isCm: true));
+        return Admit(key, payload, cancellationToken, isCm: true);
+    }
+
+    /// <summary>
+    /// Admits a send: reserves one of the destination's slots (the send on the wire plus
+    /// <see cref="J1939TpOptions.MaxQueuedSendsPerDestination"/> waiting ones) before anything is
+    /// posted, so a producer outrunning the actor is refused at the call instead of piling up in
+    /// the mailbox (#204). The slot is given back when the send's task completes, however it does.
+    /// The payload is copied only once the slot is reserved: a rejected send, which is what a
+    /// producer outrunning a stalled destination makes in bulk, allocates no PDU.
+    /// </summary>
+    private Task Admit(TxSessionKey key, ReadOnlyMemory<byte> payload, CancellationToken ct, bool isCm)
+    {
+        // A token that is already canceled is the caller's answer before there is anything to
+        // admit: it must not be reported as a rejection, nor reserve a slot and copy a PDU only
+        // to have the actor undo both.
+        if (ct.IsCancellationRequested) return Task.FromCanceled(ct);
+        byte destination = key.DestinationAddress;
+        long limit = (long)_options.MaxQueuedSendsPerDestination + 1; // int.MaxValue + 1 must not wrap
+        int admitted;
+        bool duplicate;
+        lock (_admissionLock)
+        {
+            // A duplicate is a caller's programming conflict, not queue pressure, so it is
+            // decided first and keeps its established error however full the destination is.
+            duplicate = _admittedKeys.Contains(key);
+            _admitted.TryGetValue(destination, out admitted);
+            if (!duplicate && admitted < limit)
+            {
+                _admitted[destination] = admitted + 1;
+                _admittedKeys.Add(key);
+            }
+        }
+        if (duplicate)
+        {
+            return Task.FromException(new InvalidOperationException(
+                $"A J1939-TP {(isCm ? "TP.CM" : "TP.BAM")} session for destination 0x{destination:X2} PGN 0x{key.Pgn:X} is already in flight."));
+        }
+        if (admitted >= limit)
+        {
+            return Task.FromException(new J1939TpSendRejectedException(
+                $"J1939-TP send to destination 0x{destination:X2} PGN 0x{key.Pgn:X} rejected: " +
+                $"{admitted} sends to it are already pending (on the wire, waiting or not yet started); " +
+                $"MaxQueuedSendsPerDestination = {_options.MaxQueuedSendsPerDestination}."));
+        }
+        var tcs = new TxCompletion(_admissionLock, () => ReleaseSlot(key));
+        try
+        {
+            // Everything from here on can throw (a token whose source is disposed, a disposed
+            // actor); the slot is reserved, so any failure gives it back.
+            var pdu = payload.ToArray();
+            RegisterCancellation(tcs, ct, key);
+            _actor.Post(() => BeginTxOnLoop(key, pdu, tcs, isCm));
+        }
+        catch
+        {
+            tcs.TrySetCanceled(); // gives the slot back; the caller gets the exception, not a task
+            throw;
+        }
         return tcs.Task;
     }
 
@@ -217,14 +281,14 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 $"J1939-TP payload length must be in [{J1939TpFrames.MinTpPayloadLength}, {J1939TpFrames.MaxTpPayloadLength}] bytes.");
     }
 
-    private void RegisterCancellation(TaskCompletionSource<object?> tcs, CancellationToken ct, TxSessionKey key)
+    private void RegisterCancellation(TxCompletion tcs, CancellationToken ct, TxSessionKey key)
     {
         if (!ct.CanBeCanceled) return;
         // Hop cancellation onto the actor so we clean up the session state under the single-writer
         // discipline (rather than racing the actor from whatever thread cancels the token).
         var registration = ct.Register(static state =>
         {
-            var (self, k, t, token) = ((J1939TpChannel, TxSessionKey, TaskCompletionSource<object?>, CancellationToken))state!;
+            var (self, k, t, token) = ((J1939TpChannel, TxSessionKey, TxCompletion, CancellationToken))state!;
             try
             {
                 self._actor.Post(() => self.CancelTxOnLoop(k, t, token));
@@ -248,7 +312,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// session was already opened with the peer (RTS / DTs on the wire), emit a TP.CM Connection
     /// Abort so the peer does not keep waiting on T1/T2/T3. BAM has no abort channel.
     /// </summary>
-    private void CancelTxOnLoop(TxSessionKey key, TaskCompletionSource<object?> tcs, CancellationToken token)
+    private void CancelTxOnLoop(TxSessionKey key, TxCompletion tcs, CancellationToken token)
     {
         if (_txSessions.TryGetValue(key, out var session) && ReferenceEquals(session.Tcs, tcs))
         {
@@ -269,8 +333,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             return;
         }
         // Not on the wire yet: still queued behind another session to the same destination, or
-        // never started. Either way the caller's token decides; a queued entry stays in the
-        // queue as completed and EndTx skips it when its turn comes.
+        // never started. Either way the caller's token decides. A queued entry is removed on the
+        // spot (#204), so it stops holding its PDU and stops counting against
+        // MaxQueuedSendsPerDestination; cancel-then-resend cannot pile entries up.
+        RemoveQueued(tcs);
         tcs.TrySetCanceled(token);
     }
 
@@ -393,6 +459,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
         }
         _txQueues.Clear();
+        _queuedNodes.Clear();
         foreach (var kv in _rxSessions)
             kv.Value.Cancel();
         _rxSessions.Clear();
@@ -754,7 +821,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // =========================================================================================
     // TX side
     // =========================================================================================
-    private void BeginTxOnLoop(TxSessionKey key, byte[] pdu, TaskCompletionSource<object?> tcs, bool isCm)
+    private void BeginTxOnLoop(TxSessionKey key, byte[] pdu, TxCompletion tcs, bool isCm)
     {
         if (_disposed != 0)
         {
@@ -774,8 +841,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (HasSessionTo(key.DestinationAddress))
         {
             if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue))
-                _txQueues[key.DestinationAddress] = queue = new Queue<PendingTx>();
-            queue.Enqueue(new PendingTx(key, pdu, tcs, isCm));
+                _txQueues[key.DestinationAddress] = queue = new LinkedList<PendingTx>();
+            _queuedNodes[tcs] = queue.AddLast(new PendingTx(key, pdu, tcs, isCm));
             return;
         }
         StartTx(key, pdu, tcs, isCm);
@@ -800,6 +867,28 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         return false;
     }
 
+    /// <summary>Entries held in the TX queues. Actor-loop state: read it there.</summary>
+    internal int QueuedSendCount
+    {
+        get
+        {
+            return _queuedNodes.Count;
+        }
+    }
+
+    /// <summary>
+    /// Drops the queued entry that belongs to <paramref name="tcs"/>, if there is one; a send that
+    /// is not queued (already started, already gone, not yet run) is left alone. Actor-loop state.
+    /// </summary>
+    internal void RemoveQueued(TxCompletion tcs)
+    {
+        if (!_queuedNodes.TryGetValue(tcs, out var node)) return;
+        _queuedNodes.Remove(tcs);
+        var queue = node.List!;
+        queue.Remove(node);
+        if (queue.Count == 0) _txQueues.Remove(node.Value.Key.DestinationAddress);
+    }
+
     /// <summary>
     /// Removes a finished TX session and starts the next send queued for its destination, if
     /// any. Every path that ends a session goes through here so the queue cannot stall.
@@ -808,17 +897,22 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         _txSessions.Remove(key);
         if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
-        while (queue.Count > 0)
+        PendingTx? start = null;
+        while (start is null && queue.Count > 0)
         {
-            var next = queue.Dequeue();
-            if (next.Tcs.Task.IsCompleted) continue; // cancelled while waiting
-            StartTx(next.Key, next.Pdu, next.Tcs, next.IsCm);
-            break;
+            var next = queue.First!.Value;
+            queue.RemoveFirst();
+            _queuedNodes.Remove(next.Tcs);
+            // A cancel that could not be posted to the actor (it was being disposed) completes
+            // the waiter without unlinking it, so an entry can still be queued after its caller
+            // has seen the cancellation; it must not go on the wire.
+            if (!next.Tcs.Task.IsCompleted) start = next;
         }
         if (queue.Count == 0) _txQueues.Remove(key.DestinationAddress);
+        if (start is not null) StartTx(start.Key, start.Pdu, start.Tcs, start.IsCm);
     }
 
-    private void StartTx(TxSessionKey key, byte[] pdu, TaskCompletionSource<object?> tcs, bool isCm)
+    private void StartTx(TxSessionKey key, byte[] pdu, TxCompletion tcs, bool isCm)
     {
         int totalPackets = J1939TpFrames.TotalPackets(pdu.Length);
         var session = new TxSession(key, pdu, totalPackets, tcs, isCm);
@@ -1315,12 +1409,66 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public override int GetHashCode() => unchecked((SourceAddress * 397) ^ (int)Kind);
     }
 
+    /// <summary>
+    /// The completion of one send. Completing it gives the destination's admission slot back and
+    /// publishes the outcome in one step under the admission lock: a caller that awaits a send and
+    /// sends again at the limit is never refused by a release still to run, and a concurrent
+    /// <see cref="Admit"/> never sees the slot free while the previous send's task is still
+    /// pending (which would let a duplicate through and exceed the bound). Continuations run
+    /// asynchronously, so no caller code runs under the lock.
+    /// </summary>
+    internal sealed class TxCompletion
+    {
+        private readonly TaskCompletionSource<object?> _tcs =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly object _gate;
+        private readonly Action _release;
+        private int _released;
+
+        /// <summary>Creates the completion of one admitted send.</summary>
+        /// <param name="gate">The lock <see cref="Admit"/> takes; release and publish happen under it.</param>
+        /// <param name="release">Gives the slot back; runs once, however often the send is completed.</param>
+        public TxCompletion(object gate, Action release)
+        {
+            _gate = gate;
+            _release = release;
+        }
+
+        /// <summary>Runs under the gate between the release and the publish; a test seam.</summary>
+        internal Action? BetweenReleaseAndPublish { get; set; }
+
+        public Task Task => _tcs.Task;
+
+        public bool TrySetResult(object? result) { lock (_gate) { Release(); Announce(); return _tcs.TrySetResult(result); } }
+        public bool TrySetException(Exception ex) { lock (_gate) { Release(); Announce(); return _tcs.TrySetException(ex); } }
+        public bool TrySetCanceled() { lock (_gate) { Release(); Announce(); return _tcs.TrySetCanceled(); } }
+        public bool TrySetCanceled(CancellationToken token) { lock (_gate) { Release(); Announce(); return _tcs.TrySetCanceled(token); } }
+
+        private void Release()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0) _release();
+        }
+
+        private void Announce() => BetweenReleaseAndPublish?.Invoke();
+    }
+
+    private void ReleaseSlot(TxSessionKey key)
+    {
+        byte destination = key.DestinationAddress;
+        lock (_admissionLock)
+        {
+            _admittedKeys.Remove(key);
+            if (_admitted[destination] == 1) _admitted.Remove(destination);
+            else _admitted[destination]--;
+        }
+    }
+
     private enum TxStage : byte { WaitCts, SendingDt, WaitEom }
 
     /// <summary>A send waiting for its destination's session slot (see <see cref="_txQueues"/>).</summary>
     private sealed class PendingTx
     {
-        public PendingTx(TxSessionKey key, byte[] pdu, TaskCompletionSource<object?> tcs, bool isCm)
+        public PendingTx(TxSessionKey key, byte[] pdu, TxCompletion tcs, bool isCm)
         {
             Key = key;
             Pdu = pdu;
@@ -1330,13 +1478,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
         public TxSessionKey Key { get; }
         public byte[] Pdu { get; }
-        public TaskCompletionSource<object?> Tcs { get; }
+        public TxCompletion Tcs { get; }
         public bool IsCm { get; }
     }
 
     private sealed class TxSession
     {
-        public TxSession(TxSessionKey key, byte[] pdu, int totalPackets, TaskCompletionSource<object?> tcs, bool isCm)
+        public TxSession(TxSessionKey key, byte[] pdu, int totalPackets, TxCompletion tcs, bool isCm)
         {
             Key = key;
             Pdu = pdu;
@@ -1349,7 +1497,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public TxSessionKey Key { get; }
         public byte[] Pdu { get; }
         public int TotalPackets { get; }
-        public TaskCompletionSource<object?> Tcs { get; }
+        public TxCompletion Tcs { get; }
         public bool IsCm { get; }
         public TxStage State { get; set; }
         public byte NextSn { get; set; }

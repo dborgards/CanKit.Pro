@@ -2556,6 +2556,549 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
     private static readonly TimeSpan InFlightSpacing = TimeSpan.FromMilliseconds(50);
 
+    // #204: the per-destination queue is bounded. A BAM on a frozen clock holds the global
+    // destination's slot for as long as the test wants, so sends with other PGNs queue behind it.
+    private static J1939TpChannel QueueSender(ProtocolActor actor, ICanBusService service, int maxQueued)
+        => new(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing, maxQueuedSendsPerDestination: maxQueued),
+            ownsService: false, actor);
+
+    // Advances the frozen clock one spacing at a time, but only once the actor has armed the
+    // next spacing timer: a step taken before that is lost, and the send would stall.
+    private static async Task DrainAsync(VirtualClock clock, ProtocolActor actor, params Task[] sends)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!sends.All(t => t.IsCompleted))
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException("The queued sends did not drain.");
+            await clock.SettleAsync();
+            if (await actor.NextTimerDelayAsync() == InFlightSpacing)
+                await clock.AdvanceAsync(InFlightSpacing);
+            else
+                await Task.Yield();
+        }
+        await Task.WhenAll(sends).WaitAsync(ShortTimeout);
+    }
+
+    [Fact]
+    public async Task A_Send_Beyond_The_Queue_Limit_Is_Rejected_At_Once_And_Sends_Within_It_Still_Queue()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 2);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var waiting1 = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        var waiting2 = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3));
+        var excess = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4));
+
+        // The rejection needs no clock advance and no actor turn: it is decided at the call.
+        excess.IsFaulted.Should().BeTrue("the excess send is refused when it is made");
+        Func<Task> act = async () => await excess.WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<J1939TpSendRejectedException>()
+            .WithMessage("*MaxQueuedSendsPerDestination = 2*");
+        first.IsCompleted.Should().BeFalse("the send on the wire is unaffected");
+        waiting1.IsCompleted.Should().BeFalse("a send within the limit queues as before");
+        waiting2.IsCompleted.Should().BeFalse("a send within the limit queues as before");
+
+        await DrainAsync(clock, actor, first, waiting1, waiting2);
+    }
+
+    [Fact]
+    public async Task Cancelled_Queued_Sends_Leave_The_Queue_And_Do_Not_Count_Against_The_Limit()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 1);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        // Cancel-then-resend of the same key while the head is stuck: with a limit of 1 a round
+        // is only admitted if the previous round's entry is gone.
+        for (int round = 0; round < 3; round++)
+        {
+            using var cancel = new CancellationTokenSource();
+            var queued = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 10 + round), cancel.Token);
+            await clock.SettleAsync();
+            queued.IsCompleted.Should().BeFalse($"round {round}: the send waits, the limit is not yet reached");
+            cancel.Cancel();
+            Func<Task> wait = async () => await queued.WaitAsync(ShortTimeout);
+            await wait.Should().ThrowAsync<OperationCanceledException>();
+            await clock.SettleAsync();
+        }
+
+        var entries = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+        entries.Should().Be(0, "a cancelled send releases its entry and its PDU at once");
+
+        var survivor = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 20));
+        await clock.SettleAsync();
+        survivor.IsCompleted.Should().BeFalse("the freed capacity admits a send");
+        await DrainAsync(clock, actor, first, survivor);
+    }
+
+    [Fact]
+    public async Task A_Limit_Of_Zero_Admits_No_Waiting_Send()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        Func<Task> act = async () => await sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2)).WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<J1939TpSendRejectedException>();
+        first.IsCompleted.Should().BeFalse();
+    }
+
+    // Codex on #215: the payload was copied before the limit check, so a producer outrunning a
+    // stalled destination paid a full PDU allocation for every send it made only to be refused.
+    // Measured, because "allocates no PDU" is the claim. The fixed cost of a rejection (the
+    // exception, its message, the faulted task) differs by runtime -- about 0.9 KB on net10 and
+    // about 1.9 KB on net48, which a bound on the absolute figure tripped over -- so the payload
+    // size is varied instead: a refused send of 1785 bytes must cost what a refused send of 9
+    // bytes costs, and only a copy of the PDU makes the two differ (by the size difference).
+    // GetAllocatedBytesForCurrentThread is exact for this thread, and the rejection is decided
+    // synchronously on it.
+    [Fact]
+    public async Task A_Rejected_Send_Does_Not_Copy_Its_Payload()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        var small = RandomPayload(9, seed: 2);
+        var large = RandomPayload(J1939TpFrames.MaxTpPayloadLength, seed: 3);
+        const int warmup = 50;
+        const int measured = 500;
+
+        double PerRejectedSend(byte[] payload)
+        {
+            for (var i = 0; i < warmup; i++) sender.SendBamAsync(0xFEC1u, payload).IsFaulted.Should().BeTrue();
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < measured; i++) _ = sender.SendBamAsync(0xFEC1u, payload);
+            return (GC.GetAllocatedBytesForCurrentThread() - before) / (double)measured;
+        }
+
+        var forSmall = PerRejectedSend(small);
+        var forLarge = PerRejectedSend(large);
+
+        (forLarge - forSmall).Should().BeLessThan((large.Length - small.Length) / 4.0,
+            $"a refused send must be decided before its payload is copied (small {forSmall:F0} B, large {forLarge:F0} B per send)");
+
+        await DrainAsync(clock, actor, first);
+    }
+
+    // Codex on #215: a token that is already canceled is answered with a cancellation, also when
+    // the destination is at its limit (where it used to be refused as a rejection), and it does
+    // not reserve a slot: with a limit of 0 the send on the wire holds the only slot, so a leak
+    // would show as a rejection of the send after it.
+    [Fact]
+    public async Task An_Already_Canceled_Send_Is_Canceled_Not_Rejected_And_Reserves_No_Slot()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 1);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var waiting = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2)); // the limit is now reached
+
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        var atLimit = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3), canceled.Token);
+        atLimit.IsCanceled.Should().BeTrue("a canceled token is answered with a cancellation, not a rejection");
+
+        await DrainAsync(clock, actor, first, waiting);
+
+        // Nothing is queued and no slot is held by the canceled sends: the same three fit again.
+        for (int i = 0; i < 3; i++)
+            sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4), canceled.Token).IsCanceled.Should().BeTrue();
+        var again = new[]
+        {
+            sender.SendBamAsync(0xFEC4u, RandomPayload(9, seed: 5)),
+            sender.SendBamAsync(0xFEC5u, RandomPayload(9, seed: 6)),
+        };
+        again.Should().OnlyContain(t => !t.IsFaulted);
+        await DrainAsync(clock, actor, again);
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0);
+    }
+
+    // Codex on #215: admission ran before the actor's duplicate check, so a second send for the
+    // (destination, PGN) that is already pending was refused as queue pressure once the
+    // destination was full. It is a caller's conflict, and keeps InvalidOperationException.
+    [Fact]
+    public async Task A_Duplicate_Send_Keeps_Its_Error_When_The_Destination_Is_Full()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        var duplicate = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 2));
+        duplicate.IsFaulted.Should().BeTrue();
+        duplicate.Exception!.InnerException.Should().BeOfType<InvalidOperationException>(
+            "the same (destination, PGN) is already pending: a conflict, not a full queue");
+        var other = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 3));
+        other.Exception!.InnerException.Should().BeOfType<J1939TpSendRejectedException>(
+            "a different PGN at a full destination is still refused as queue pressure");
+
+        await DrainAsync(clock, actor, first);
+
+        // The key was released with the send: the same PGN is admitted again.
+        var again = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 4));
+        again.IsFaulted.Should().BeFalse();
+        await DrainAsync(clock, actor, again);
+    }
+
+    // The same for a connection-mode send, whose duplicate error names TP.CM.
+    [Fact]
+    public async Task A_Duplicate_Cm_Send_Names_Its_Kind_When_The_Destination_Is_Full()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        // The RTS goes out and the session waits for a CTS nobody sends, so it stays pending.
+        var first = sender.SendCmAsync(0xFEC0u, destinationAddress: 0x20, RandomPayload(20, seed: 1));
+        await clock.SettleAsync();
+
+        var duplicate = sender.SendCmAsync(0xFEC0u, destinationAddress: 0x20, RandomPayload(20, seed: 2));
+        duplicate.IsFaulted.Should().BeTrue();
+        duplicate.Exception!.InnerException.Should().BeOfType<InvalidOperationException>()
+            .Which.Message.Should().Contain("TP.CM");
+
+        sender.Dispose();
+        first.IsCompleted.Should().BeTrue("disposing the channel ends the pending send");
+    }
+
+    // RemoveQueued is a no-op for a send that is not in a queue: one that already started, is
+    // already gone, or whose cancellation ran before its start (the token fired mid-admission).
+    [Fact]
+    public async Task Removing_A_Send_That_Is_Not_Queued_Leaves_The_Queue_Alone()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 2);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var waiting = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        await clock.SettleAsync();
+
+        var after = await actor.PostAsync(() =>
+        {
+            sender.RemoveQueued(new J1939TpChannel.TxCompletion(new object(), () => { }));
+            return sender.QueuedSendCount;
+        }).WaitAsync(ShortTimeout);
+
+        after.Should().Be(1, "the queued send is untouched by removing one that was never queued");
+        await DrainAsync(clock, actor, first, waiting);
+    }
+
+    // Codex on #215: sends posted to the actor and not yet run are not in the queue, so a limit
+    // enforced only there is no bound at all against a producer that outruns the actor. The actor
+    // is held busy on a gate, so every send below is made while nothing has run.
+    [Fact]
+    public async Task Sends_Not_Yet_Started_By_The_Actor_Count_Against_The_Queue_Limit()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 2);
+
+        using var gate = new ManualResetEventSlim();
+        var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            occupied.SetResult(true);
+            gate.Wait(ShortTimeout);
+        });
+        await occupied.Task.WaitAsync(ShortTimeout);
+
+        // One on the wire plus two waiting are admitted, though none has reached the actor.
+        var admitted = new[]
+        {
+            sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1)),
+            sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2)),
+            sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3)),
+        };
+        var excess = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4));
+        excess.IsFaulted.Should().BeTrue("the fourth send is refused at the call, while the actor has run nothing");
+        excess.Exception!.InnerException.Should().BeOfType<J1939TpSendRejectedException>();
+        admitted.Should().OnlyContain(t => !t.IsCompleted);
+
+        gate.Set();
+        await DrainAsync(clock, actor, admitted);
+
+        // Completion gave every slot back: the same three fit again.
+        var again = new[]
+        {
+            sender.SendBamAsync(0xFEC4u, RandomPayload(9, seed: 5)),
+            sender.SendBamAsync(0xFEC5u, RandomPayload(9, seed: 6)),
+            sender.SendBamAsync(0xFEC6u, RandomPayload(9, seed: 7)),
+        };
+        again.Should().OnlyContain(t => !t.IsFaulted);
+        await DrainAsync(clock, actor, again);
+    }
+
+    // Codex on #215: the admission limit is the option plus one, and int.MaxValue + 1 wrapped to a
+    // negative number that refused every send.
+    [Fact]
+    public async Task The_Largest_Queue_Limit_Does_Not_Overflow_The_Admission_Limit()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: int.MaxValue);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        var second = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+
+        first.IsFaulted.Should().BeFalse();
+        second.IsFaulted.Should().BeFalse();
+        await DrainAsync(clock, actor, first, second);
+    }
+
+    // Codex and Bugbot on #215: a send that fails after its slot is reserved -- here the actor
+    // is gone, so posting throws -- must give the slot back. With a limit of 0 one leaked slot
+    // would turn every later send into a rejection.
+    [Fact]
+    public async Task A_Send_That_Fails_After_Admission_Gives_Its_Slot_Back()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+        actor.Dispose();
+
+        for (int i = 0; i < 3; i++)
+        {
+            Func<Task> send = () => sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+            await send.Should().ThrowAsync<ObjectDisposedException>(
+                $"attempt {i}: the failure is the actor's, not a rejection by a slot an earlier attempt kept");
+        }
+    }
+
+    // Bugbot on #215 assumed CancellationToken.Register throws for a token whose source is
+    // disposed on .NET Framework. It does not by default (only with the legacy
+    // ThrowExceptionIfDisposedCancellationTokenSource switch), so a test built on that premise
+    // never sees the throw: the send is accepted and, on a frozen clock, never completes -- the
+    // net48 leg hung on exactly that. What holds on every runtime is the behaviour asserted here:
+    // such a token is an ordinary one that can never cancel, the send goes out, and its slot comes
+    // back when it completes. (The rollback for a failing Register is the same try block as the
+    // one a failing Post takes, which A_Send_That_Fails_After_Admission_Gives_Its_Slot_Back covers.)
+    [Fact]
+    public async Task A_Token_Whose_Source_Is_Disposed_Sends_Normally_And_Releases_Its_Slot()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+        var cts = new CancellationTokenSource();
+        var token = cts.Token;
+        cts.Dispose();
+
+        // With a limit of 0 the destination holds one send at a time: a slot kept by an earlier
+        // send would refuse the next one.
+        for (int i = 0; i < 3; i++)
+        {
+            var send = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1 + i), token);
+            send.IsFaulted.Should().BeFalse($"round {i}: the token is accepted");
+            await DrainAsync(clock, actor, send);
+        }
+    }
+
+    // Cancelling a send in the middle of the queue unlinks exactly that entry: the others keep
+    // their order and both still go out.
+    [Fact]
+    public async Task Cancelling_A_Send_In_The_Middle_Of_The_Queue_Keeps_The_Others_In_Order()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 3);
+        var announced = new List<uint>();
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (J1939Pgn.IsTransportCm(fields.Pgn))
+                lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        using var cancel = new CancellationTokenSource();
+        var before = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        var middle = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3), cancel.Token);
+        var after = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4));
+        await clock.SettleAsync();
+        cancel.Cancel();
+        Func<Task> wait = async () => await middle.WaitAsync(ShortTimeout);
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(2);
+
+        await DrainAsync(clock, actor, first, before, after);
+        lock (announced) announced.Should().Equal(0xFEC0u, 0xFEC1u, 0xFEC3u);
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0,
+            "every entry that was queued has left the queue, sent or cancelled");
+    }
+
+    // Bugbot on #215: a cancel that cannot be posted to the actor (it is being disposed) completes
+    // the waiter without unlinking its entry. The entry then reaches the head of the queue
+    // already completed and must be skipped, not sent after its caller saw the cancellation.
+    // The completion is forced from the actor loop through the queue's own bookkeeping.
+    [Fact]
+    public async Task A_Queued_Send_Completed_Without_Being_Unlinked_Is_Skipped_When_Its_Turn_Comes()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 3);
+        var announced = new List<uint>();
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (J1939Pgn.IsTransportCm(fields.Pgn))
+                lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var abandoned = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        var after = sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3));
+        var abandonedLast = sender.SendBamAsync(0xFEC3u, RandomPayload(9, seed: 4)); // nothing follows it
+        await clock.SettleAsync();
+
+        await actor.PostAsync(() =>
+        {
+            var nodes = (System.Collections.IDictionary)typeof(J1939TpChannel)
+                .GetField("_queuedNodes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(sender)!;
+            foreach (System.Collections.DictionaryEntry entry in nodes)
+            {
+                // PendingTx and its key are private to the channel, hence reflection.
+                var pending = entry.Value!.GetType().GetProperty("Value")!.GetValue(entry.Value)!;
+                var key = pending.GetType().GetProperty("Key")!.GetValue(pending)!;
+                if ((uint)key.GetType().GetProperty("Pgn")!.GetValue(key)! is 0xFEC1u or 0xFEC3u)
+                    ((J1939TpChannel.TxCompletion)entry.Key).TrySetCanceled();
+            }
+            return 0;
+        }).WaitAsync(ShortTimeout);
+        abandoned.IsCanceled.Should().BeTrue("its waiter was completed while the entry stayed queued");
+        abandonedLast.IsCanceled.Should().BeTrue();
+
+        await DrainAsync(clock, actor, first, after);
+        lock (announced) announced.Should().Equal(new[] { 0xFEC0u, 0xFEC2u },
+            "the completed entry is skipped, not transmitted");
+        (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0);
+    }
+
+    // Codex on #215: the slot was given back before the outcome was published, so an Admit on
+    // another thread could get in between: accepted while the previous send's task was still
+    // pending (a duplicate would slip through, and the bound was exceeded). The hook runs where
+    // that window was; a second thread takes the gate there and records what it sees. With
+    // release and publish under the gate it cannot get in until the task is complete.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task Admission_Cannot_Observe_A_Released_Slot_While_The_Send_Is_Still_Pending(int how)
+    {
+        var gate = new object();
+        var completion = new J1939TpChannel.TxCompletion(gate, () => { });
+        bool? completedWhenAdmitGotIn = null;
+        completion.BetweenReleaseAndPublish = () =>
+        {
+            var probe = Task.Run(() =>
+            {
+                lock (gate) completedWhenAdmitGotIn = completion.Task.IsCompleted;
+            });
+            // Blocked on the gate for as long as the completing thread holds it.
+            probe.Wait(TimeSpan.FromMilliseconds(200));
+            completion.BetweenReleaseAndPublish = null;
+        };
+
+        _ = how switch
+        {
+            0 => completion.TrySetResult(null),
+            1 => completion.TrySetException(new InvalidOperationException()),
+            2 => completion.TrySetCanceled(),
+            _ => completion.TrySetCanceled(new CancellationToken(true)),
+        };
+
+        for (var i = 0; i < 100 && completedWhenAdmitGotIn is null; i++) await Task.Delay(10);
+        completedWhenAdmitGotIn.Should().BeTrue(
+            "the slot is free only once the outcome is published; an Admit that gets in earlier is accepted while the send is pending");
+    }
+
+    // A send can be completed more than once (a cancel racing a result, a dispose after a fault);
+    // the slot it held must come back exactly once, or a later send is admitted past the limit.
+    [Fact]
+    public async Task A_Completion_Gives_Its_Slot_Back_Exactly_Once_However_Often_It_Is_Completed()
+    {
+        int released = 0;
+        var completion = new J1939TpChannel.TxCompletion(new object(), () => Interlocked.Increment(ref released));
+
+        completion.TrySetResult(null).Should().BeTrue();
+        completion.TrySetException(new InvalidOperationException()).Should().BeFalse("already completed");
+        completion.TrySetCanceled().Should().BeFalse();
+        completion.TrySetCanceled(new CancellationToken(true)).Should().BeFalse();
+
+        released.Should().Be(1);
+        await completion.Task.WaitAsync(ShortTimeout);
+    }
+
+    [Fact]
+    public void Options_Default_The_Queue_Limit_To_Eight_And_Reject_A_Negative_One()
+    {
+        new J1939TpOptions().MaxQueuedSendsPerDestination.Should().Be(8);
+
+        Action with = () => new J1939TpOptions().With(maxQueuedSendsPerDestination: -1);
+        with.Should().Throw<ArgumentOutOfRangeException>()
+            .Which.ParamName.Should().Be("maxQueuedSendsPerDestination");
+
+        using var bus = Open(NewSession(), 0);
+        Action open = () => J1939TpFactory.Open(bus, sourceAddress: 0x84,
+            options: new J1939TpOptions { MaxQueuedSendsPerDestination = -1 });
+        open.Should().Throw<ArgumentOutOfRangeException>()
+            .Which.ParamName.Should().Be(nameof(J1939TpOptions.MaxQueuedSendsPerDestination));
+
+        new J1939TpOptions().With(maxQueuedSendsPerDestination: 0).MaxQueuedSendsPerDestination.Should().Be(0);
+    }
+
     private static J1939TpChannel BamSenderOn(ProtocolActor actor, ICanBusService service)
         => new(service, sourceAddress: 0x10,
             new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor);

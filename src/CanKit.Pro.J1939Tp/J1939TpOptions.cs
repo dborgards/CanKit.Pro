@@ -87,6 +87,21 @@ public sealed class J1939TpOptions
     public int ReceiveBufferCapacity { get; init; } = 32;
 
     /// <summary>
+    /// How many sends may wait for their destination's session slot, per destination address,
+    /// behind the one on the wire; a send the channel has accepted but not yet started counts as
+    /// waiting, so the bound holds against a producer that outruns the channel. A send that would
+    /// exceed it faults at the call, before its PDU is queued anywhere, with
+    /// <see cref="J1939TpSendRejectedException"/>; every BAM goes to the global address, so this
+    /// also bounds the BAMs waiting on the channel. Each waiting send holds its whole PDU (up to
+    /// 1785 bytes) and, against a peer that never answers, drains at T3 pace, so an unbounded
+    /// queue grows in memory and latency with the producer (#204). Default 8; 0 admits no
+    /// waiting send at all. There is no overall queue deadline: the caller's
+    /// <see cref="System.Threading.CancellationToken"/> bounds the wait, and a cancelled send
+    /// leaves the queue at once.
+    /// </summary>
+    public int MaxQueuedSendsPerDestination { get; init; } = 8;
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that want to tweak one field of a shared default template.
     /// </summary>
@@ -102,7 +117,8 @@ public sealed class J1939TpOptions
         byte? priority = null,
         byte? maxPacketsPerCts = null,
         int? receiveBufferCapacity = null,
-        int? maxRetransmitRequests = null)
+        int? maxRetransmitRequests = null,
+        int? maxQueuedSendsPerDestination = null)
     {
         if (maxPacketsPerCts is 0)
             throw new ArgumentOutOfRangeException(nameof(maxPacketsPerCts), maxPacketsPerCts,
@@ -110,6 +126,10 @@ public sealed class J1939TpOptions
         if (maxRetransmitRequests < 0)
             throw new ArgumentOutOfRangeException(nameof(maxRetransmitRequests), maxRetransmitRequests,
                 "MaxRetransmitRequests must be >= 0 (0 serves none).");
+
+        if (maxQueuedSendsPerDestination < 0)
+            throw new ArgumentOutOfRangeException(nameof(maxQueuedSendsPerDestination), maxQueuedSendsPerDestination,
+                "MaxQueuedSendsPerDestination must be >= 0 (0 admits no waiting send).");
 
         return new()
         {
@@ -122,6 +142,7 @@ public sealed class J1939TpOptions
             MaxPacketsPerCts = maxPacketsPerCts ?? MaxPacketsPerCts,
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
             MaxRetransmitRequests = maxRetransmitRequests ?? MaxRetransmitRequests,
+            MaxQueuedSendsPerDestination = maxQueuedSendsPerDestination ?? MaxQueuedSendsPerDestination,
         };
     }
 
@@ -143,5 +164,8 @@ public sealed class J1939TpOptions
         if (MaxRetransmitRequests < 0)
             throw new ArgumentOutOfRangeException(nameof(MaxRetransmitRequests), MaxRetransmitRequests,
                 "MaxRetransmitRequests must be >= 0 (0 serves none).");
+        if (MaxQueuedSendsPerDestination < 0)
+            throw new ArgumentOutOfRangeException(nameof(MaxQueuedSendsPerDestination), MaxQueuedSendsPerDestination,
+                "MaxQueuedSendsPerDestination must be >= 0 (0 admits no waiting send).");
     }
 }
