@@ -1425,6 +1425,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         private readonly Action _release;
         private int _released;
 
+        /// <summary>Creates the completion of one admitted send.</summary>
         /// <param name="gate">The lock <see cref="Admit"/> takes; release and publish happen under it.</param>
         /// <param name="release">Gives the slot back; runs once, however often the send is completed.</param>
         public TxCompletion(object gate, Action release)
