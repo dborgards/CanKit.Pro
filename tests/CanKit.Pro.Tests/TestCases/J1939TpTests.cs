@@ -2729,6 +2729,37 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         (await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout)).Should().Be(0);
     }
 
+    // Codex on #215: admission ran before the actor's duplicate check, so a second send for the
+    // (destination, PGN) that is already pending was refused as queue pressure once the
+    // destination was full. It is a caller's conflict, and keeps InvalidOperationException.
+    [Fact]
+    public async Task A_Duplicate_Send_Keeps_Its_Error_When_The_Destination_Is_Full()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        var duplicate = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 2));
+        duplicate.IsFaulted.Should().BeTrue();
+        duplicate.Exception!.InnerException.Should().BeOfType<InvalidOperationException>(
+            "the same (destination, PGN) is already pending: a conflict, not a full queue");
+        var other = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 3));
+        other.Exception!.InnerException.Should().BeOfType<J1939TpSendRejectedException>(
+            "a different PGN at a full destination is still refused as queue pressure");
+
+        await DrainAsync(clock, actor, first);
+
+        // The key was released with the send: the same PGN is admitted again.
+        var again = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 4));
+        again.IsFaulted.Should().BeFalse();
+        await DrainAsync(clock, actor, again);
+    }
+
     // Codex on #215: sends posted to the actor and not yet run are not in the queue, so a limit
     // enforced only there is no bound at all against a producer that outruns the actor. The actor
     // is held busy on a gate, so every send below is made while nothing has run.

@@ -85,6 +85,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // the mailbox is unbounded and holds each pending send's whole PDU.
     private readonly object _admissionLock = new();
     private readonly Dictionary<byte, int> _admitted = new();
+    // The (destination, PGN) of every admitted send, so a duplicate is told from a full
+    // destination at the call: one send per key is pending at a time, as before the limit.
+    private readonly HashSet<TxSessionKey> _admittedKeys = new();
 
     private int _disposed;
 
@@ -220,10 +223,23 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         byte destination = key.DestinationAddress;
         long limit = (long)_options.MaxQueuedSendsPerDestination + 1; // int.MaxValue + 1 must not wrap
         int admitted;
+        bool duplicate;
         lock (_admissionLock)
         {
+            // A duplicate is a caller's programming conflict, not queue pressure, so it is
+            // decided first and keeps its established error however full the destination is.
+            duplicate = _admittedKeys.Contains(key);
             _admitted.TryGetValue(destination, out admitted);
-            if (admitted < limit) _admitted[destination] = admitted + 1;
+            if (!duplicate && admitted < limit)
+            {
+                _admitted[destination] = admitted + 1;
+                _admittedKeys.Add(key);
+            }
+        }
+        if (duplicate)
+        {
+            return Task.FromException(new InvalidOperationException(
+                $"A J1939-TP {(isCm ? "TP.CM" : "TP.BAM")} session for destination 0x{destination:X2} PGN 0x{key.Pgn:X} is already in flight."));
         }
         if (admitted >= limit)
         {
@@ -232,7 +248,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 $"{admitted} sends to it are already pending (on the wire, waiting or not yet started); " +
                 $"MaxQueuedSendsPerDestination = {_options.MaxQueuedSendsPerDestination}."));
         }
-        var tcs = new TxCompletion(() => ReleaseSlot(destination));
+        var tcs = new TxCompletion(() => ReleaseSlot(key));
         try
         {
             // Everything from here on can throw (a token whose source is disposed, a disposed
@@ -1419,10 +1435,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
     }
 
-    private void ReleaseSlot(byte destination)
+    private void ReleaseSlot(TxSessionKey key)
     {
+        byte destination = key.DestinationAddress;
         lock (_admissionLock)
         {
+            _admittedKeys.Remove(key);
             if (_admitted[destination] == 1) _admitted.Remove(destination);
             else _admitted[destination]--;
         }
