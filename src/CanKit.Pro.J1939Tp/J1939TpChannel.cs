@@ -862,7 +862,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         if (!_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return false;
         foreach (var pending in queue)
         {
-            if (pending.Key.Equals(key)) return true;
+            if (pending.Key.Equals(key) && !pending.Tcs.Task.IsCompleted) return true;
         }
         return false;
     }
@@ -876,8 +876,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
     }
 
-    /// <summary>Drops the queued entry that belongs to <paramref name="tcs"/>, if there is one.</summary>
-    private void RemoveQueued(TxCompletion tcs)
+    /// <summary>
+    /// Drops the queued entry that belongs to <paramref name="tcs"/>, if there is one; a send that
+    /// is not queued (already started, already gone, not yet run) is left alone. Actor-loop state.
+    /// </summary>
+    internal void RemoveQueued(TxCompletion tcs)
     {
         if (!_queuedNodes.TryGetValue(tcs, out var node)) return;
         _queuedNodes.Remove(tcs);

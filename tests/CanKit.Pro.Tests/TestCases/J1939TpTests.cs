@@ -2760,6 +2760,55 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await DrainAsync(clock, actor, again);
     }
 
+    // The same for a connection-mode send, whose duplicate error names TP.CM.
+    [Fact]
+    public async Task A_Duplicate_Cm_Send_Names_Its_Kind_When_The_Destination_Is_Full()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 0);
+
+        // The RTS goes out and the session waits for a CTS nobody sends, so it stays pending.
+        var first = sender.SendCmAsync(0xFEC0u, destinationAddress: 0x20, RandomPayload(20, seed: 1));
+        await clock.SettleAsync();
+
+        var duplicate = sender.SendCmAsync(0xFEC0u, destinationAddress: 0x20, RandomPayload(20, seed: 2));
+        duplicate.IsFaulted.Should().BeTrue();
+        duplicate.Exception!.InnerException.Should().BeOfType<InvalidOperationException>()
+            .Which.Message.Should().Contain("TP.CM");
+
+        sender.Dispose();
+        first.IsCompleted.Should().BeTrue("disposing the channel ends the pending send");
+    }
+
+    // RemoveQueued is a no-op for a send that is not in a queue: one that already started, is
+    // already gone, or whose cancellation ran before its start (the token fired mid-admission).
+    [Fact]
+    public async Task Removing_A_Send_That_Is_Not_Queued_Leaves_The_Queue_Alone()
+    {
+        using var clock = new VirtualClock();
+        using var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = QueueSender(actor, service, maxQueued: 2);
+
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        var waiting = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        await clock.SettleAsync();
+
+        var after = await actor.PostAsync(() =>
+        {
+            sender.RemoveQueued(new J1939TpChannel.TxCompletion(new object(), () => { }));
+            return sender.QueuedSendCount;
+        }).WaitAsync(ShortTimeout);
+
+        after.Should().Be(1, "the queued send is untouched by removing one that was never queued");
+        await DrainAsync(clock, actor, first, waiting);
+    }
+
     // Codex on #215: sends posted to the actor and not yet run are not in the queue, so a limit
     // enforced only there is no bound at all against a producer that outruns the actor. The actor
     // is held busy on a gate, so every send below is made while nothing has run.
