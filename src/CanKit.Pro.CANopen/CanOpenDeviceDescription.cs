@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using EdsDcfNet;
 using EdsDcfNet.Diagnostics;
+using EdsDcfNet.Exceptions;
 using EdsDcfNet.Models;
 
 namespace CanKit.Pro.CANopen;
@@ -71,31 +72,56 @@ public sealed class CanOpenDeviceDescription
 
     /// <summary>Reads an EDS or DCF file; the extension decides which (<c>.dcf</c> is a DCF,
     /// anything else an EDS).</summary>
-    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The file is not a readable description.</exception>
+    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The file is not a readable
+    /// description, including one with a value the parser cannot evaluate: a <c>$NODEID</c>
+    /// formula in an integer header entry such as <c>VendorNumber</c>.</exception>
     public static CanOpenDeviceDescription Load(string path)
     {
         if (path is null) throw new ArgumentNullException(nameof(path));
         if (string.Equals(Path.GetExtension(path), ".dcf", StringComparison.OrdinalIgnoreCase))
         {
-            var dcf = CanOpenFile.Dcf.ReadFileWithDiagnostics(path);
+            var dcf = Read(() => CanOpenFile.Dcf.ReadFileWithDiagnostics(path));
             return new CanOpenDeviceDescription(null, dcf.Model, dcf.Diagnostics);
         }
-        var eds = CanOpenFile.Eds.ReadFileWithDiagnostics(path);
+        var eds = Read(() => CanOpenFile.Eds.ReadFileWithDiagnostics(path));
         return new CanOpenDeviceDescription(eds.Model, null, eds.Diagnostics);
     }
 
     /// <summary>Parses EDS content.</summary>
+    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The content is not a readable
+    /// description, as for <see cref="Load"/>.</exception>
     public static CanOpenDeviceDescription ParseEds(string content)
     {
-        var eds = CanOpenFile.Eds.ReadStringWithDiagnostics(content ?? throw new ArgumentNullException(nameof(content)));
+        var text = content ?? throw new ArgumentNullException(nameof(content));
+        var eds = Read(() => CanOpenFile.Eds.ReadStringWithDiagnostics(text));
         return new CanOpenDeviceDescription(eds.Model, null, eds.Diagnostics);
     }
 
     /// <summary>Parses DCF content.</summary>
+    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The content is not a readable
+    /// description, as for <see cref="Load"/>.</exception>
     public static CanOpenDeviceDescription ParseDcf(string content)
     {
-        var dcf = CanOpenFile.Dcf.ReadStringWithDiagnostics(content ?? throw new ArgumentNullException(nameof(content)));
+        var text = content ?? throw new ArgumentNullException(nameof(content));
+        var dcf = Read(() => CanOpenFile.Dcf.ReadStringWithDiagnostics(text));
         return new CanOpenDeviceDescription(null, dcf.Model, dcf.Diagnostics);
+    }
+
+    // EdsDcfNet throws NotSupportedException, not EdsParseException, for a $NODEID formula it
+    // cannot evaluate without a node ID -- in an integer header entry such as VendorNumber
+    // (dborgards/eds-dcf-net#577). To a caller that is one failure, "not a readable description",
+    // so it is reported as EdsParseException (#220) with the original as the inner exception.
+    // Drop this when the parser reports it that way itself.
+    private static T Read<T>(Func<T> read)
+    {
+        try
+        {
+            return read();
+        }
+        catch (NotSupportedException ex)
+        {
+            throw new EdsParseException("The device description cannot be read: " + ex.Message, ex);
+        }
     }
 
     /// <summary>
