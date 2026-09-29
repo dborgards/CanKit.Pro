@@ -17,7 +17,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 public class CanOpenDeviceDescriptionPropertyTests
 {
     private static string Fixture(string name)
-        => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", name));
+        => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", Path.GetFileName(name)));
 
     private static string Mutate(SeededRun run, string text)
     {
@@ -108,33 +108,28 @@ public class CanOpenDeviceDescriptionPropertyTests
     {
         var because = run.Tag(iteration, "mutated input:\n" + mutated);
         CanOpenDeviceDescription? description = null;
-        try
-        {
-            description = load();
-        }
-        catch (EdsParseException)
-        {
+        var thrown = Record.Exception(() => description = load());
+
+        if (thrown is EdsParseException)
             return; // the documented failure
-        }
-        catch (NotSupportedException ex) when (ex.Message.Contains("$NODEID formula", StringComparison.Ordinal))
-        {
-            // Known defect, tracked in #220: a malformed $NODEID value escapes as
-            // NotSupportedException instead of EdsParseException. Only that exact failure is
-            // tolerated; remove this catch when #220 is resolved.
+
+        // Known defect, tracked in #220: a malformed $NODEID value escapes as NotSupportedException
+        // instead of EdsParseException. Only that exact failure is tolerated; remove this branch
+        // when #220 is resolved.
+        if (thrown is NotSupportedException && thrown.Message.Contains("$NODEID formula", StringComparison.Ordinal))
             return;
-        }
-        catch (Exception ex)
-        {
-            Assert.Fail($"{ex.GetType().FullName} escaped the loader instead of EdsParseException: {ex.Message}\n{because}");
-        }
+
+        if (thrown is not null)
+            Assert.Fail($"{thrown.GetType().FullName} escaped the loader instead of EdsParseException: {thrown.Message}\n{because}");
+        var loaded = description!;
 
         var query = () =>
         {
-            _ = description.Objects.Objects.Count;
-            _ = description.DeviceInfo;
-            _ = description.ParseDiagnostics.Count;
-            _ = description.Contains(0x1000, 0);
-            _ = description.Contains(0x2000, 1);
+            _ = loaded.Objects.Objects.Count;
+            _ = loaded.DeviceInfo;
+            _ = loaded.ParseDiagnostics.Count;
+            _ = loaded.Contains(0x1000, 0);
+            _ = loaded.Contains(0x2000, 1);
         };
         query.Should().NotThrow(because);
     }
