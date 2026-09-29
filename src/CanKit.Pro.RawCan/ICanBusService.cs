@@ -162,10 +162,14 @@ namespace CanKit.Pro.RawCan
         /// returns/completes — <see cref="ICanBusService"/> never disposes it.
         /// </param>
         /// <param name="timeout">
-        /// Maximum time to wait for an echo before failing with
-        /// <see cref="TxConfirmFailureReason.Timeout"/> (FR-RAW-034); null uses
-        /// <see cref="CanBusService.DefaultConfirmTimeout"/>. Ignored on the approximated path
-        /// (driver acceptance is synchronous/immediate). Must be positive.
+        /// Maximum time to wait before failing with <see cref="TxConfirmFailureReason.Timeout"/>
+        /// (FR-RAW-034); null uses <see cref="CanBusService.DefaultConfirmTimeout"/>. On the echo
+        /// path it bounds the wait for the echo; on the approximated path it bounds the wait for
+        /// the driver to accept the frame (<see cref="ICanBus.TransmitAsync(CanFrame, System.Threading.CancellationToken)"/>),
+        /// which every current adapter completes immediately, so it only bites for a bus whose
+        /// asynchronous transmit stalls. A frame reported as timed out may still reach the wire
+        /// later (the bus is asked to cancel the transmit, but a driver that ignores that cannot
+        /// be stopped). Must be positive.
         /// </param>
         /// <param name="cancellationToken">
         /// Caller-supplied cancellation; cancels the returned task per standard .NET convention,

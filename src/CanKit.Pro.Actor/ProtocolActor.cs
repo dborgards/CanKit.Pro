@@ -240,7 +240,8 @@ namespace CanKit.Pro.Actor
             ActorExecutionMode mode,
             SynchronizationContext? synchronizationContext,
             ITimeSource? timeSource,
-            TimeSpan? shutdownTimeout)
+            TimeSpan? shutdownTimeout,
+            Action<ProtocolActor>? beforeLoopStart = null)
         {
             if (mode == ActorExecutionMode.SynchronizationContext)
             {
@@ -259,19 +260,37 @@ namespace CanKit.Pro.Actor
             // counts as live; the loop's own finally is what takes it back down.
             EnterLoopCount();
 
-            if (mode == ActorExecutionMode.DedicatedThread)
+            // Starting can fail (no thread could be created, out of memory). Then no loop exists
+            // whose finally would undo the count or dispose what the field initialisers created,
+            // and the constructor's caller has no instance to Dispose -- so it is undone here.
+            // Nothing is released twice: once the loop has been handed to the scheduler nothing
+            // in this block can throw any more, and from then on the loop owns the release.
+            try
             {
-                // A genuine System.Threading.Thread, not an async Task with LongRunning: only a
-                // real dedicated thread guarantees every iteration -- across every await-equivalent
-                // wait point -- keeps running on that exact same thread (FR-RAW-024's verification
-                // criterion). An async loop resumed via the thread pool after a wait has no such
-                // guarantee, since nothing marshals its continuation back to one specific thread.
-                _dedicatedThread = new Thread(RunLoopBlocking) { IsBackground = true, Name = "CanKit.Pro.Actor" };
-                _dedicatedThread.Start();
+                // Test seam: the only way to make a start fail on demand. Null in production.
+                beforeLoopStart?.Invoke(this);
+
+                if (mode == ActorExecutionMode.DedicatedThread)
+                {
+                    // A genuine System.Threading.Thread, not an async Task with LongRunning: only a
+                    // real dedicated thread guarantees every iteration -- across every await-equivalent
+                    // wait point -- keeps running on that exact same thread (FR-RAW-024's verification
+                    // criterion). An async loop resumed via the thread pool after a wait has no such
+                    // guarantee, since nothing marshals its continuation back to one specific thread.
+                    _dedicatedThread = new Thread(RunLoopBlocking) { IsBackground = true, Name = "CanKit.Pro.Actor" };
+                    _dedicatedThread.Start();
+                }
+                else
+                {
+                    _loopTask = Task.Run(RunLoopAsync);
+                }
             }
-            else
+            catch
             {
-                _loopTask = Task.Run(RunLoopAsync);
+                ExitLoopCount();
+                _stopCts.Dispose();
+                _signal.Dispose();
+                throw;
             }
         }
 
