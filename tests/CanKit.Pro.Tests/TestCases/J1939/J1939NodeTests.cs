@@ -514,6 +514,35 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.Address.Should().BeNull();
     }
 
+    // The claim transmit is fire-and-forget and the arbitration deadline is armed only from its
+    // callback. A send that throws instead of returning a confirmation must still reach
+    // OnClaimAnnounceTxFailed, or ClaimAddressAsync never completes. CanBusService.Dispose
+    // cancels a pending send, so cancellation is one of those throws, not just the
+    // InvalidOperationException a driver raises.
+    [Theory]
+    [InlineData(ScriptedClaimBus.ReleaseKind.Throw)]
+    [InlineData(ScriptedClaimBus.ReleaseKind.Cancel)]
+    public async Task A_Claim_Transmit_That_Throws_Fails_The_Claim_Instead_Of_Hanging_It(
+        ScriptedClaimBus.ReleaseKind how)
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.HoldFirstClaim);
+        using var node = J1939Node.Open(scripted, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+
+        var claim = node.ClaimAddressAsync(0x11);
+        await scripted.Held.AsTaskWithTimeout(ShortTimeout);
+        scripted.Release(how);
+
+        Func<Task> failed = () => claim.WithTimeout(ShortTimeout);
+        var thrown = await failed.Should().ThrowAsync<J1939NodeException>();
+        thrown.Which.Should().NotBeOfType<J1939CannotClaimException>();
+        node.ClaimState.Should().Be(J1939ClaimState.NotClaimed);
+    }
+
     // SendConfirmedAsync timing out is not the same as a reject: the frame may already be on the
     // wire. Dropping its marker makes that late echo a remembered equal NAME, and the retry
     // of the same address loses before anyone is actually contending. The echo has to be
@@ -4641,6 +4670,8 @@ public sealed class ScriptedClaimBus : ICanBusService
         Rejected,
         Throw,
         Timeout,
+        // What CanBusService.Dispose does to a send that is still waiting for its confirmation.
+        Cancel,
     }
 
     private readonly ICanBusService _inner;
@@ -4753,6 +4784,8 @@ public sealed class ScriptedClaimBus : ICanBusService
                             return Rejected();
                         case ReleaseKind.Timeout:
                             return TimedOut();
+                        case ReleaseKind.Cancel:
+                            throw new TaskCanceledException("address claim transmit cancelled");
                         default:
                             throw new InvalidOperationException("address claim transmit failed");
                     }

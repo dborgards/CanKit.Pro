@@ -9,6 +9,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939Tp;
@@ -985,20 +986,22 @@ internal sealed class J1939NodeImpl : IJ1939Node
             try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
-        catch (ObjectDisposedException ex)
-        {
-            // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
-            // failures that do this have not put the frame on the wire.
-            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
-            catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
-        }
-        catch (InvalidOperationException ex)
-        {
-            // SendConfirmedAsync threw rather than returning a timeout: the scripted and driver
-            // failures that do this have not put the frame on the wire.
-            try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
-            catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
-        }
+        // SendConfirmedAsync threw rather than returning a timeout. The claim has to fail on every
+        // one of these: the arbitration deadline is armed only from the success callback, so a
+        // throw nobody reports leaves ClaimAddressAsync pending in Claiming for good. Cancellation
+        // is the one CanBusService.Dispose produces for a send still waiting for its confirmation;
+        // CanKitException is what a device adapter raises. The scripted and driver failures that
+        // throw have not put the frame on the wire.
+        catch (ObjectDisposedException ex) { PostClaimAnnounceTxThrew(preferred, ex, echo); }
+        catch (InvalidOperationException ex) { PostClaimAnnounceTxThrew(preferred, ex, echo); }
+        catch (OperationCanceledException ex) { PostClaimAnnounceTxThrew(preferred, ex, echo); }
+        catch (CanKitException ex) { PostClaimAnnounceTxThrew(preferred, ex, echo); }
+    }
+
+    private void PostClaimAnnounceTxThrew(byte preferred, Exception ex, ClaimEcho? echo)
+    {
+        try { _actor.Post(() => OnClaimAnnounceTxFailed(preferred, ex, echo, mayStillEcho: false)); }
+        catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
     }
 
     private void SetClaimState(J1939ClaimState state, byte? address, byte? contendingSa,
