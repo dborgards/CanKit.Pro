@@ -279,9 +279,9 @@ public class DeadlineTests
 
         public void Post(Action work) => throw new NotSupportedException();
 
-        public Task PostAsync(Action work) => throw new NotSupportedException();
+        public Task PostAsync(Action work, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<T> PostAsync<T>(Func<T> work) => throw new NotSupportedException();
+        public Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
 #pragma warning disable CS0067
         public event EventHandler<Exception>? BackgroundExceptionOccurred;

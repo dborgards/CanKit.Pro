@@ -51,6 +51,10 @@ using var timeout = actor.Schedule(TimeSpan.FromMilliseconds(150), () => channel
   unrelated caller thread, never lost as an unobserved task exception. `PostAsync` failures
   surface through the returned task instead, since the caller is already positioned to observe
   them by awaiting.
+- **`PostAsync` can be withdrawn while it is still queued.** A `CancellationToken` cancelled before
+  the call, or while the item waits in the mailbox, cancels the returned task at once and the work
+  never runs. Work that has already started is never interrupted: it runs through and the task
+  reports its result, so a half-finished work item never breaks the single-writer discipline.
 - **Configurable execution context** (FR-RAW-024): `ActorExecutionMode.DedicatedThread` (default)
   pins the loop to one real `Thread` for its entire lifetime — demonstrably the same thread for
   every callback. `ActorExecutionMode.ThreadPool` is cheaper for many short-lived instances but

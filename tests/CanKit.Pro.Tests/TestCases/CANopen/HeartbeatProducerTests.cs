@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.Actor;
@@ -136,8 +137,8 @@ public class HeartbeatProducerTests
         public event EventHandler<Exception>? BackgroundExceptionOccurred { add { } remove { } }
 
         public void Post(Action work) => work();
-        public Task PostAsync(Action work) { work(); return Task.CompletedTask; }
-        public Task<T> PostAsync<T>(Func<T> work) => Task.FromResult(work());
+        public Task PostAsync(Action work, CancellationToken cancellationToken = default) { work(); return Task.CompletedTask; }
+        public Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default) => Task.FromResult(work());
 
         public IDisposable Schedule(TimeSpan delay, Action callback)
         {
