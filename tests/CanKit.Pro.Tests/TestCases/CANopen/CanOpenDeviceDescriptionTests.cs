@@ -492,6 +492,19 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         dcf.NodeId.Should().Be(5);
     }
 
+    // Null content is the caller's error, reported before the parser is reached and not folded
+    // into the parse failure below (#220).
+    [Fact]
+    public void Null_Input_Is_An_ArgumentNullException_On_Every_Way_In()
+    {
+        FluentActions.Invoking(() => CanOpenDeviceDescription.ParseEds(null!))
+            .Should().Throw<ArgumentNullException>();
+        FluentActions.Invoking(() => CanOpenDeviceDescription.ParseDcf(null!))
+            .Should().Throw<ArgumentNullException>();
+        FluentActions.Invoking(() => CanOpenDeviceDescription.Load(null!))
+            .Should().Throw<ArgumentNullException>();
+    }
+
     // EdsDcfNet raises NotSupportedException, not EdsParseException, for a $NODEID formula in an
     // integer header entry (eds-dcf-net#577): there is no node ID to evaluate it with. The loader
     // reports it as the documented failure with the original as the inner exception (#220), on
