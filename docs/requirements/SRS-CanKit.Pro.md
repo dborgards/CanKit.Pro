@@ -22,8 +22,15 @@ Review `docs/reviews/2026-07-14-deep-code-review.md`)
 > | `FR-RAW-020..024` (Threading/Aktor-Modell) | `CanKit.Pro.Actor` |
 > | `FR-RAW-040..041` (Adressierung, Filter-Overlap) | `CanKit.Pro.Addressing` + `CanKit.Pro.RawCan` |
 > | `FR-RAW-050..051` (Deadlines, Bus-State) | `CanKit.Pro.Reliability` |
+> | `FR-TP-001..020` (ISO-TP) | `CanKit.Pro.IsoTp` |
+> | `FR-TP-030..035` (J1939-TP) | `CanKit.Pro.J1939Tp` |
+> | `FR-UDS-001..012` | `CanKit.Pro.Uds` |
+> | `FR-CO-001..034` | `CanKit.Pro.CANopen` |
+> | `FR-J1939-001..007` | `CanKit.Pro.J1939` |
 >
-> Alles Übrige (L3/L4: ISO-TP, J1939-TP, UDS, CANopen, …) ist weiterhin Ziel, nicht Ist.
+> Damit ist jede Anforderungsfamilie dieses Dokuments einem Paket dieses Repositories zugeordnet
+> (Ausnahme: `FR-RAW-001..005`, siehe oben). Welche einzelne Anforderung durch einen Test belegt
+> ist, sagt `eng/verify-requirements-traceability.py`; „umgesetzt" heißt hier nicht „verifiziert".
 
 ---
 
@@ -121,7 +128,7 @@ Siehe Abschnitt 3.
 
 ### 2.4 Randbedingungen (Übersicht)
 
-Siehe Abschnitt 6 (`CON-xxx`). Zentral: Multi-Targeting (netstandard2.0, net8.0, net8.0-windows), P/Invoke-basierte Vendor-SDKs, plattformabhängiges Zeitverhalten.
+Siehe Abschnitt 6 (`CON-xxx`). Zentral: Multi-Targeting (`netstandard2.0`, `net10.0`), P/Invoke-basierte Vendor-SDKs (upstream in CanKit), plattformabhängiges Zeitverhalten.
 
 ### 2.5 Annahmen & Abhängigkeiten
 
@@ -240,7 +247,7 @@ Ist-Zustand (15.09.2026): ausgeliefert als `CanKit.Pro.IsoTp`. Die folgenden Anf
 | FR-TP-010 | Das System MUSS alle ISO-TP-Zeitüberwachungen (N_As, N_Bs, N_Cr mind.) aktiv prüfen und bei Überschreitung den Sende-/Empfangsvorgang mit einem für den Aufrufer beobachtbaren Fehler abschließen. | Must | Integrationstest: künstlich verzögerte/ausbleibende Gegenstelle löst innerhalb der konfigurierten Deadline einen Fehler statt eines hängenden Tasks aus. | Review §1.1 Punkt 10 |
 | FR-TP-011 | Das System MUSS Flow-Control „Wait“ (FS=WT) nur bis zu einer konfigurierbaren Obergrenze (WFTmax) akzeptieren und danach den Vorgang abbrechen. | Must | Unit-Test: Gegenstelle sendet WT häufiger als WFTmax → Abbruch mit Fehler. | ISO 15765-2 §6.3 (WFTmax); Review §1.1 Punkt 10 |
 | FR-TP-012 | Das System MUSS auf Overflow-Flow-Control (FS=OVFLW) den laufenden Sendevorgang mit einem beobachtbaren Fehlerergebnis abschließen statt ihn nur intern als „Failed“ zu markieren. | Must | Unit-Test: FS=OVFLW-Antwort führt zu fehlgeschlagenem `SendAsync`-Task innerhalb definierter Zeit. | Review §1.1 Punkt 10 |
-| FR-TP-013 | Das System MUSS auf `netstandard2.0`-Zielplattformen denselben korrekten TX-Warteschlangen-Ablauf wie auf `net8.0` liefern (Korrektur der invertierten `TryPeek`-Polyfill-Logik). | Must | Unit-Test explizit gegen `netstandard2.0`-Build: TX-Queue liefert bei leerer Queue kein Element ohne Ausnahme, bei gefüllter Queue das erwartete Element. | Review §1.1 Punkt 11 |
+| FR-TP-013 | Das System MUSS auf `netstandard2.0`-Zielplattformen denselben korrekten TX-Warteschlangen-Ablauf wie auf `net10.0` liefern (Ursprung: Korrektur der invertierten `TryPeek`-Polyfill-Logik des Fork-Prototyps; das Polyfill gibt es in diesem Baum nicht mehr). | Must | Unit-Test explizit gegen `netstandard2.0`-Build: TX-Queue liefert bei leerer Queue kein Element ohne Ausnahme, bei gefüllter Queue das erwartete Element. | Review §1.1 Punkt 11 |
 | FR-TP-014 | Das System MUSS mehrere gleichzeitig „in flight“ befindliche Frames mit identischem Inhalt (z. B. gepaddete Consecutive Frames) im Deadline-/Confirm-Tracking unterstützen, ohne abzustürzen. | Must | Unit-Test: zwei inhaltsgleiche Frames gleichzeitig in Bearbeitung, keine Ausnahme, korrekte getrennte Zeitüberwachung. | Review §1.1 Punkt 12; siehe auch FR-RAW-031 |
 | FR-TP-015 | Das System MUSS den ISO-TP-internen Frame-Buffer über den in FR-RAW-002 definierten Ownership-Vertrag beziehen (kein direktes `ArrayPool.Rent` ohne Rückgabe, keine Frames > 8 Byte für Classic-CAN). | Must | Unit-Test: SF-Erzeugung für Classic-CAN erzeugt gültigen ≤8-Byte-Frame ohne `ArgumentOutOfRangeException`; Speicher-Leak-Test über N Sendevorgänge. | Review §1.1 Punkt 13 |
 | FR-TP-016 | Das System MUSS das in FR-RAW-020..023 definierte Threading-Modell für den ISO-TP-Scheduler umsetzen: ereignisgetrieben statt Busy-Loop, synchronisierter Zugriff auf Kanalregister, konsistente Fehlerweiterleitung. | Must | Wie FR-RAW-022/023, angewandt auf `IsoTpScheduler`. | Review §1.1 Punkt 9, 14, 15 |
@@ -345,7 +352,7 @@ Ist-Zustand (15.09.2026): ausgeliefert als `CanKit.Pro.J1939`, aufbauend auf `Ca
 | NFR-001 | Periodisches Senden (L1 `IPeriodicTx`/L2-Scheduling) MUSS auf Windows und Linux einen Jitter innerhalb eines dokumentierten Toleranzbandes einhalten (Zielwert projektspezifisch festzulegen, z. B. < 1 ms bei Software-Timing). | Must | Performance-Test: Zeitstempelmessung von N periodischen Sendungen, Jitter-Histogramm. | NFR-Vorgabe „Echtzeit/Jitter“ |
 | NFR-002 | Das System MUSS auf macOS keinen Busy-Loop im Software-Timing-Pfad ausführen; bei fehlender `clock_nanosleep`-Verfügbarkeit MUSS auf `Thread.Sleep`-Fallback umgeschaltet werden (Korrektur Review §2.3). | Must | Unit-/Integrationstest auf macOS-Runner: CPU-Auslastung eines aktiven periodischen Senders bleibt in normalem Bereich, kein Sende-Sturm. | Review §2.3 (`SoftwarePeriodicTx`, verschluckte `EntryPointNotFoundException`) |
 | NFR-003 | ISO-TP-STmin-Einhaltung MUSS innerhalb einer dokumentierten Genauigkeit (z. B. ±1 ms oder Adapter-Auflösung) eingehalten werden. | Must | Integrationstest: gemessene Inter-Frame-Zeit von Consecutive Frames vs. konfiguriertes STmin. | ISO 15765-2 |
-| NFR-004 | Das System MUSS auf allen deklarierten Ziel-Frameworks (`netstandard2.0`, `net8.0`, `net8.0-windows`) funktional äquivalentes Verhalten für L2/L3-Kernlogik liefern (keine plattformspezifischen Logikfehler wie die invertierte `TryPeek`-Polyfill). | Must | CI-Testmatrix über alle drei TFMs mit identischen Testergebnissen für L2/L3-Kernszenarien. | Review §1.1 Punkt 11; CON-001 |
+| NFR-004 | Das System MUSS auf allen deklarierten Ziel-Frameworks (`netstandard2.0`, `net10.0`) funktional äquivalentes Verhalten für L2/L3-Kernlogik liefern (keine plattformspezifischen Logikfehler wie die invertierte `TryPeek`-Polyfill). | Must | CI-Testmatrix über beide TFMs (`net10.0`; `netstandard2.0` ausgeführt als `net48` im Windows-Leg) mit identischen Testergebnissen für L2/L3-Kernszenarien. | Review §1.1 Punkt 11; CON-001 |
 | NFR-005 | Vendor-adapterabhängige L0/L1-Funktionalität (Kvaser, PCAN, Vector, ControlCAN) MUSS auf ihre jeweils unterstützten Plattformen (i. d. R. Windows) beschränkt bleiben und darf auf nicht unterstützten Plattformen einen klaren Fehler statt eines unspezifizierten Crashs liefern. | Must | Buildmatrix-/Smoke-Test je Plattform. | CON-002 |
 | NFR-006 | Fehlerzustände (Bus-Off, Timeout, Verbindungsabbruch) MÜSSEN in L2/L3/L4 konsistent über strukturierte Ausnahmen/Ergebnistypen kommuniziert werden, nicht durch stillschweigend verlorene oder auf falschem Thread geworfene Exceptions (Korrektur Review §1.1 Punkt 15, §2.2). | Must | Unit-Tests je Fehlerpfad; Regressionstest gegen „Exception im falschen Kontext“-Befunde. | Review §1.1 Punkt 15; §2.2 |
 | NFR-007 | Ressourcenkritische Pfade (Frame-Erzeugung/-Versand in L2/L3 bei hoher Bus-Last) SOLLTEN Allokationen minimieren (Pooling gemäß Ownership-Vertrag, kein `ArrayPool.Rent` ohne Rückgabe). | Should | Benchmark: Allokationsmessung (Bytes/Frame) für ISO-TP-SF/CF-Pfad vor/nach Umsetzung. | Review §1.1 Punkt 13 |
@@ -361,13 +368,13 @@ Ist-Zustand (15.09.2026): ausgeliefert als `CanKit.Pro.J1939`, aufbauend auf `Ca
 
 | ID | Randbedingung | Art | Quelle |
 |---|---|---|---|
-| CON-001 | Alle L2/L3-Pakete MÜSSEN mindestens `netstandard2.0`, `net8.0` und `net8.0-windows` als Ziel-Frameworks unterstützen (gemäß `src/Directory.Build.props`). | technisch | `src/Directory.Build.props` |
+| CON-001 | Alle L2/L3-Pakete MÜSSEN mindestens `netstandard2.0` und `net10.0` als Ziel-Frameworks unterstützen (gemäß `src/Directory.Build.props`). | technisch | `src/Directory.Build.props` |
 | CON-002 | Vendor-Adapter-Integrationen (PCAN, Kvaser, Vector, ControlCAN) basieren auf P/Invoke gegen proprietäre native SDKs/DLLs; L2/L3-Komponenten dürfen diese Abhängigkeiten nicht direkt referenzieren, sondern ausschließlich über `ICanBus`/`ITransceiver`-Abstraktionen nutzen. | technisch | Review §1.1 Punkt 16 (Negativbeispiel: ISO-TP referenziert `Peak.PCANBasic.NET` grundlos) |
 | CON-003 | Lizenzbedingungen der Vendor-SDKs (Peak PCANBasic, Kvaser CANlib, Vector XL-Driver) sind proprietär; Distribution/Verwendung dieser SDKs unterliegt Drittanbieter-Lizenzen, die außerhalb der Kontrolle dieses Projekts liegen. | rechtlich | `CanKit.Adapter.PCAN.csproj` (`Peak.PCANBasic.NET`-Referenz) |
-| CON-004 | Neue Pakete (L3/L4) MÜSSEN, solange sie funktional unvollständig sind, klar als experimentell gekennzeichnet oder von der Release-Pipeline ausgeschlossen werden (`IsPackable=false`), analog der Review-Empfehlung für den aktuellen ISO-TP-Stand. | organisatorisch | Review §1.1, Empfehlung Pkt. 1 |
+| CON-004 | Neue Pakete (L3/L4) MÜSSEN, solange sie funktional unvollständig sind, klar als experimentell gekennzeichnet oder von der Release-Pipeline ausgeschlossen werden (`IsPackable=false`), analog der Review-Empfehlung für den damaligen ISO-TP-Prototyp (heute ausgeliefert als `CanKit.Pro.IsoTp`). | organisatorisch | Review §1.1, Empfehlung Pkt. 1 |
 | CON-005 | Das Projekt verwendet MIT-Lizenzierung (`PackageLicenseExpression` in `Directory.Build.props`); neue L3/L4-Pakete MÜSSEN dieselbe Lizenz führen, sofern keine abweichende vertragliche Regelung entgegensteht. | rechtlich/organisatorisch | `src/Directory.Build.props` |
-| CON-006 | CI-Workflows testen aktuell projektweise über `.slnf`-Filterdateien (z. B. `CanKitAdapters.slnf`, `CanKitTransports.slnf`); neue L3/L4-Pakete MÜSSEN in eine passende `.slnf`-Datei mit eigenem CI-Workflow aufgenommen werden. | organisatorisch | Review §4 („ISO-TP-Projekt hat keinen eigenen Workflow“) |
-| CON-007 | Der Standard-Git-Branch ist `master`; Release-/Paket-Pipelines MÜSSEN konsistent auf diesen Branch referenzieren. | organisatorisch | Review §3, §5 Pkt. 9 (`nuget-pipeline.yml` Branch-Trigger-Fehler) |
+| CON-006 | Die CI baut und testet die gesamte Solution in einem Workflow (`.github/workflows/ci.yml`, ohne `.slnf`-Filterdateien); neue L3/L4-Pakete MÜSSEN in `CanKit.Pro.sln` aufgenommen werden und damit im Build- und Testlauf von `ci.yml` erscheinen. | organisatorisch | Review §4 („ISO-TP-Projekt hat keinen eigenen Workflow“); `.github/workflows/ci.yml` |
+| CON-007 | Der Standard-Git-Branch ist `main`; Release-/Paket-Pipelines MÜSSEN konsistent auf diesen Branch referenzieren. | organisatorisch | Review §3, §5 Pkt. 9 (Branch-Trigger-Fehler des Vorgängers); `.github/workflows/*.yml` |
 
 ---
 
@@ -400,7 +407,7 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 | FR-RAW-020..024 | L2 – Protokollinstanz-Aktor/Scheduler, ausgeliefert als `CanKit.Pro.Actor` (`IProtocolActor`/`ProtocolActor`); L3 und L4 laufen darauf, `IsoTpScheduler` existiert nicht mehr | Stress-/Nebenläufigkeitstest |
 | FR-RAW-030..034 | L2 – *TX-Confirm-Abstraktion* (umgesetzt in `CanKit.Pro.RawCan`), aufbauend auf L1 `CanFeature.Echo`, `ITransceiver.Transmit` | Virtual-Loopback-Integrationstest (mit/ohne Echo) |
 | FR-RAW-040..041 | L2 – *Adressierungs-Helfer* (umgesetzt als eigenständiges `CanKit.Pro.Addressing`: `CanIdRange`, `J1939Id`/`J1939Fields`; FR-RAW-041 als `CanIdFilter.Overlaps`/`ICanBusService.FindOverlappingFilterSubscriptions()` in `CanKit.Pro.RawCan`, Ergebnis je Treffer als benannter `FilterOverlap` mit beiden Subscriptions und dem geteilten ID-Bereich) | Unit-Test |
-| FR-RAW-050..052 | L2 – *Fehler-/Timeout-Infrastruktur* (FR-RAW-050/051 umgesetzt als eigenständiges `CanKit.Pro.Reliability`: `IDeadlineScheduler`/`DeadlineScheduler`/`Deadline` als aktorgetriebene Deadline-Primitive, deren Ablauf über `IProtocolActor.Schedule` tatsächlich geprüft und gemeldet wird (FR-RAW-050); `BusStateMonitor`/`BusStateChangedEventArgs`/`BusStateExtensions` für gepushte `ICanBus.BusState`-Übergänge (FR-RAW-051), aufbauend auf `CanKit.Pro.Actor` und L1 `ICanBus.BusState`). FR-RAW-052 (reservierte/ungültige Protokollwerte) bleibt **zurückgestellt** und dem künftigen ISO-TP-Codec-Fix FR-TP-007 zugeordnet (Review §1.1 Punkt 6), da protokollspezifisch statt generische L2-Primitive. | Unit-Test, Integrationstest |
+| FR-RAW-050..052 | L2 – *Fehler-/Timeout-Infrastruktur* (FR-RAW-050/051 umgesetzt als eigenständiges `CanKit.Pro.Reliability`: `IDeadlineScheduler`/`DeadlineScheduler`/`Deadline` als aktorgetriebene Deadline-Primitive, deren Ablauf über `IProtocolActor.Schedule` tatsächlich geprüft und gemeldet wird (FR-RAW-050); `BusStateMonitor`/`BusStateChangedEventArgs`/`BusStateExtensions` für gepushte `ICanBus.BusState`-Übergänge (FR-RAW-051), aufbauend auf `CanKit.Pro.Actor` und L1 `ICanBus.BusState`). FR-RAW-052 (reservierte/ungültige Protokollwerte) ist bewusst keine generische L2-Primitive, sondern als protokollspezifische Codec-Aufgabe FR-TP-007 in `IsoTpFrameCodec.DecodeStMin` umgesetzt (Review §1.1 Punkt 6; reservierte STmin-Bereiche → 127 ms). | Unit-Test, Integrationstest |
 | FR-TP-001..020 | L3 – ISO-TP-Transport, `CanKit.Pro.IsoTp` (`IsoTpChannel`, `IsoTpFrameCodec`, `Pci`; Deadlines aus `CanKit.Pro.Reliability`) | Unit-Test (Codec/Timing), Virtual-Loopback-Integrationstest, HIL-Stichprobe |
 | FR-TP-030..035 | L3 – J1939-Transport, ausgeliefert als `CanKit.Pro.J1939Tp` (`J1939TpChannel`, `J1939TpFrames`, `J1939TpAbortReason`) | Virtual-Loopback-Integrationstest |
 | FR-UDS-001..012 | L4 – UDS-Client, ausgeliefert als `CanKit.Pro.Uds` (`UdsClientImpl` auf `IIsoTpChannel`) | Virtual-Loopback-Integrationstest, HIL-Stichprobe |
