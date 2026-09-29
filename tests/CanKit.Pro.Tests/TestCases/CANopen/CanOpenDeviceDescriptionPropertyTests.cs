@@ -122,12 +122,6 @@ public class CanOpenDeviceDescriptionPropertyTests
         if (thrown is EdsParseException)
             return; // the documented failure
 
-        // Known defect, tracked in #220: a malformed $NODEID value escapes as NotSupportedException
-        // instead of EdsParseException. Only that exact failure is tolerated; remove this branch
-        // when #220 is resolved.
-        if (thrown is NotSupportedException && thrown.Message.IndexOf("$NODEID formula", StringComparison.Ordinal) >= 0)
-            return;
-
         if (thrown is not null)
             Assert.Fail($"{thrown.GetType().FullName} escaped the loader instead of EdsParseException: {thrown.Message}\n{because}");
         var loaded = description!;

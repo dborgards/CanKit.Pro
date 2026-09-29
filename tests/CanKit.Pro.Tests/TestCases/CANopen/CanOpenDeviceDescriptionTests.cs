@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
@@ -11,6 +12,7 @@ using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
+using EdsDcfNet.Exceptions;
 using FluentAssertions;
 using Xunit;
 
@@ -488,5 +490,62 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         var dcf = CanOpenDeviceDescription.ParseDcf(File.ReadAllText(Fixture("device.dcf")));
         dcf.Dcf.Should().NotBeNull();
         dcf.NodeId.Should().Be(5);
+    }
+
+    // Only the $NODEID failure is wrapped: a NotSupportedException from elsewhere in the read,
+    // such as opening a file by an unsupported path syntax, keeps its type.
+    [Fact]
+    public void An_Unrelated_NotSupportedException_Is_Not_Turned_Into_A_Parse_Failure()
+    {
+        FluentActions.Invoking(() => CanOpenDeviceDescription.Read<int>(
+                () => throw new NotSupportedException("The given path's format is not supported.")))
+            .Should().Throw<NotSupportedException>();
+    }
+
+    // Null content is the caller's error, reported before the parser is reached and not folded
+    // into the parse failure below (#220).
+    [Fact]
+    public void Null_Input_Is_An_ArgumentNullException_On_Every_Way_In()
+    {
+        FluentActions.Invoking(() => CanOpenDeviceDescription.ParseEds(null!))
+            .Should().Throw<ArgumentNullException>();
+        FluentActions.Invoking(() => CanOpenDeviceDescription.ParseDcf(null!))
+            .Should().Throw<ArgumentNullException>();
+        FluentActions.Invoking(() => CanOpenDeviceDescription.Load(null!))
+            .Should().Throw<ArgumentNullException>();
+    }
+
+    // EdsDcfNet raises NotSupportedException, not EdsParseException, for a $NODEID formula in an
+    // integer header entry (eds-dcf-net#577): there is no node ID to evaluate it with. The loader
+    // reports it as the documented failure with the original as the inner exception (#220), on
+    // every way in: EDS and DCF, content and file. The rows also cover the forms around it: the
+    // bare name, an offset, and a dangling "+" the standard's grammar does not allow.
+    [Theory]
+    [InlineData("$NODEID", false)]
+    [InlineData("$NODEID+0x10", false)]
+    [InlineData("$NODEID+", false)]
+    [InlineData("$NODEID+0x10", true)]
+    public void A_NodeId_Formula_In_An_Integer_Header_Entry_Is_Reported_As_A_Parse_Failure(string vendorNumber, bool isDcf)
+    {
+        var text = Regex.Replace(File.ReadAllText(Fixture(isDcf ? "device.dcf" : "device.eds")),
+            "(?m)^VendorNumber=.*$", "VendorNumber=" + vendorNumber);
+        text.Should().Contain("VendorNumber=" + vendorNumber, "the replacement must have taken effect");
+
+        Action parse = () => _ = isDcf ? CanOpenDeviceDescription.ParseDcf(text) : CanOpenDeviceDescription.ParseEds(text);
+        var thrown = parse.Should().Throw<EdsParseException>().Which;
+        thrown.InnerException.Should().BeOfType<NotSupportedException>("the original is kept");
+        thrown.Message.Should().Contain("$NODEID");
+
+        var path = Path.GetTempPath() + Guid.NewGuid().ToString("N") + (isDcf ? ".dcf" : ".eds");
+        File.WriteAllText(path, text);
+        try
+        {
+            Action load = () => _ = CanOpenDeviceDescription.Load(path);
+            load.Should().Throw<EdsParseException>().Which.InnerException.Should().BeOfType<NotSupportedException>();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 }
