@@ -1,7 +1,7 @@
 using System;
+using AwesomeAssertions;
 using CanKit.Pro.IsoTp;
 using CanKit.Pro.Tests.TestCases.Properties;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.IsoTp;
@@ -37,7 +37,7 @@ public class IsoTpFrameCodecPropertyTests
 
             var frame = IsoTpFrameCodec.BuildSingleFrame(ep, data, fd, padding, padByte);
 
-            frame.Length.Should().BeLessOrEqualTo(fd ? 64 : 8, because);
+            frame.Length.Should().BeLessThanOrEqualTo(fd ? 64 : 8, because);
             if (padding) (fd ? IsValidFdLength(frame.Length) : frame.Length == 8).Should().BeTrue(because);
             if (ep.UsesAddressExtension) frame[0].Should().Be(ep.AddressExtension, because);
 
@@ -165,7 +165,7 @@ public class IsoTpFrameCodecPropertyTests
 
             (ea <= 0x7F || ea is >= 0xF1 and <= 0xF9).Should().BeTrue(because);
             // Sub-millisecond codes (0xF1..0xF9) sort above 0x7F, so compare the decoded durations.
-            IsoTpFrameCodec.DecodeStMin(ea).Should().BeLessOrEqualTo(IsoTpFrameCodec.DecodeStMin(eb), because);
+            IsoTpFrameCodec.DecodeStMin(ea).Should().BeLessThanOrEqualTo(IsoTpFrameCodec.DecodeStMin(eb), because);
         }
     }
 
@@ -202,7 +202,7 @@ public class IsoTpFrameCodecPropertyTests
             {
                 case PciType.SingleFrame:
                     pci.Length.Should().BeGreaterThan(0, because);
-                    (pci.DataOffset + pci.Length).Should().BeLessOrEqualTo(payload.Length, because);
+                    (pci.DataOffset + pci.Length).Should().BeLessThanOrEqualTo(payload.Length, because);
                     break;
                 case PciType.FirstFrame:
                     pci.Length.Should().BeGreaterThan(0, because);

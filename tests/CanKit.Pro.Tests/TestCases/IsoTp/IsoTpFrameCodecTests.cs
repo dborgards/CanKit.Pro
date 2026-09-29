@@ -1,7 +1,7 @@
 using System;
 using System.Linq;
+using AwesomeAssertions;
 using CanKit.Pro.IsoTp;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.IsoTp;
@@ -37,7 +37,7 @@ public class IsoTpFrameCodecTests
 
         unpadded.Length.Should().Be(4);
         padded.Length.Should().Be(8); // classic CAN always pads to 8
-        padded.Length.Should().BeLessOrEqualTo(IsoTpFrameCodec.ClassicCanMaxData); // FR-TP-015
+        padded.Length.Should().BeLessThanOrEqualTo(IsoTpFrameCodec.ClassicCanMaxData); // FR-TP-015
     }
 
     [Fact]

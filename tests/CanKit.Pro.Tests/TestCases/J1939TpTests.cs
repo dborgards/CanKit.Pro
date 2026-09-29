@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -12,7 +13,6 @@ using CanKit.Pro.Addressing;
 using CanKit.Pro.J1939Tp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 // The factory class and its namespace share a name, and this test now lives under CanKit.Pro,
 // so plain `J1939Tp` binds to the namespace. Aliasing is what the ISO-TP tests already do.
@@ -1516,7 +1516,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await secondGrantSeen.Task.AsTaskWithTimeout(ShortTimeout);
         lock (grants)
         {
-            grants.Should().HaveCountGreaterOrEqualTo(2);
+            grants.Should().HaveCountGreaterThanOrEqualTo(2);
             grants.Should().OnlyContain(g => g == 2,
                 "every CTS grant must be capped at the originator's RTS-advertised maximum of 2");
         }

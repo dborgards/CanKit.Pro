@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -7,7 +8,6 @@ using CanKit.Core;
 using CanKit.Core.Definitions;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases;

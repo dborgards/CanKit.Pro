@@ -1,8 +1,8 @@
 using System;
 using System.Reflection;
 using System.Threading;
+using AwesomeAssertions;
 using CanKit.Pro.Actor;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases;

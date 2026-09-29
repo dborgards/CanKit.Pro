@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
@@ -12,7 +13,6 @@ using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
@@ -390,7 +390,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         producer.ObjectDictionary.WriteUnsigned(0x1006, 0x00, 20_000);
         producer.ObjectDictionary.WriteUnsigned(0x1005, 0x00, CanOpenCobId.Sync | CanOpenCobId.SyncGenerateBit);
 
-        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(2);
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterThanOrEqualTo(2);
         producer.ObjectDictionary.WriteUnsigned(0x1005, 0x00, CanOpenCobId.Sync);
     }
 
@@ -828,7 +828,7 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
         producer.ObjectDictionary.WriteUnsigned(0x1005, 0x00, 0x0F0);
         producer.StartSyncProducer(TimeSpan.FromMilliseconds(20));
 
-        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterOrEqualTo(2);
+        (await enough.Task.WithTimeoutAsync(ShortTimeout)).Should().BeGreaterThanOrEqualTo(2);
         producer.ObjectDictionary.ReadUnsigned(0x1005, 0x00).Should().Be(CanOpenCobId.SyncGenerateBit | 0x0F0);
         producer.StopSyncProducer();
     }

@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -16,7 +17,6 @@ using CanKit.Pro.J1939;
 using CanKit.Pro.J1939Tp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.J1939;
@@ -3563,7 +3563,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         List<TimeSpan> snapshot;
         lock (stampsLock) snapshot = new List<TimeSpan>(stamps);
-        snapshot.Count.Should().BeGreaterOrEqualTo(requiredEmissions);
+        snapshot.Count.Should().BeGreaterThanOrEqualTo(requiredEmissions);
 
         // Every emission sits on its slot -- no earlier, and not on a later one either (which a
         // schedule that restarted its period after each send would have drifted onto).
@@ -4390,7 +4390,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         // We tolerate at most one already-in-flight emission slipping past the state
         // transition. Anything more means the loop kept sending under a stale SA.
-        (countAfterQuiet - countAfterLoss).Should().BeLessOrEqualTo(1,
+        (countAfterQuiet - countAfterLoss).Should().BeLessThanOrEqualTo(1,
             "the periodic loop must stop putting frames on the wire within ~2 periods " +
             "after the owner loses its claim; otherwise stale-SA frames would keep going " +
             "out under the previous address (Bugbot 3603876664)");
@@ -4523,7 +4523,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var readyDeadline = DateTime.UtcNow + ShortTimeout;
         while (Volatile.Read(ref newSaStamps) < 3 && DateTime.UtcNow < readyDeadline)
             await Task.Delay(10);
-        Volatile.Read(ref newSaStamps).Should().BeGreaterOrEqualTo(3,
+        Volatile.Read(ref newSaStamps).Should().BeGreaterThanOrEqualTo(3,
             "the schedule must resume under the reclaimed SA so downstream ECUs continue " +
             "to observe the PGN under the new (correct) source address");
     }

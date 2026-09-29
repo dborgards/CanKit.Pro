@@ -1,4 +1,5 @@
 using System;
+using AwesomeAssertions;
 using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Sdo;
@@ -7,7 +8,6 @@ using CanKit.Pro.J1939;
 using CanKit.Pro.J1939Tp;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Uds;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases;

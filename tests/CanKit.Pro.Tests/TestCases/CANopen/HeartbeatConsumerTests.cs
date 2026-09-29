@@ -1,10 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using AwesomeAssertions;
 using CanKit.Pro.CANopen.Heartbeat;
 using CanKit.Pro.Reliability;
 using CanKit.Pro.Tests.Infrastructure;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;

@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
+using AwesomeAssertions;
 using CanKit.Pro.J1939;
-using FluentAssertions;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.J1939;
