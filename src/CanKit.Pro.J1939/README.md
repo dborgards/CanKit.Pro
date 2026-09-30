@@ -143,7 +143,7 @@ public surface can still change until then. See
 
 ## What is validated, and what is not
 
-**Validated:** PGN send and receive, SPN extraction and its indicator values, address claiming and its fallback, Request-PGN and periodic sends, by the test suite in `tests/CanKit.Pro.Tests`, between nodes of this implementation over `CanKit.Adapter.Virtual`.
+**Validated:** PGN send and receive, SPN extraction and its indicator values, address claiming and its fallback, Request-PGN and periodic sends, by the test suite in `tests/CanKit.Pro.Tests`, between nodes of this implementation over `CanKit.Adapter.Virtual`, directly or through a controllable bus double.
 
 **Not validated:** Address-claim arbitration against third-party ECUs and behaviour on a real J1939 network. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 

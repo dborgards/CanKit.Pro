@@ -21,9 +21,9 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
 
 ## What is validated, and what is not
 
-**Validated:** The frame codec (unit and property tests), and the channel over `CanKit.Adapter.Virtual` loopback: segmentation, Flow Control (BS, STmin, Wait, Overflow), the N_As/N_Bs/N_Cr timers, reassembly, functional addressing and CAN-FD, by the test suite in `tests/CanKit.Pro.Tests`. STmin spacing is measured on the loopback with CI-tolerant bounds.
+**Validated:** The frame codec (unit and property tests), and the channel over `CanKit.Adapter.Virtual`, directly or through a controllable bus double: segmentation, Flow Control (BS, STmin, Wait, Overflow), the N_As/N_Bs/N_Cr timers, reassembly, functional addressing and CAN-FD, by the test suite in `tests/CanKit.Pro.Tests`. STmin pacing is tested on a clock the test drives, so the interval is checked exactly and no real elapsed time is measured.
 
-**Not validated:** Conformance to ISO 15765-2 as a tester or a foreign ISO-TP stack would judge it, and STmin spacing on real adapters, where it also carries the adapter's own latency. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+**Not validated:** Conformance to ISO 15765-2 as a tester or a foreign ISO-TP stack would judge it, and STmin spacing in real time, on any host or adapter, where it carries scheduling and adapter latency. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
 ## Scope
 

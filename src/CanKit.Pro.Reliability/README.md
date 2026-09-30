@@ -14,7 +14,7 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 
 ## What is validated, and what is not
 
-**Validated:** Deadline expiry and the bus-state monitor, by the test suite in `tests/CanKit.Pro.Tests`, on a virtual clock and with bus states set in software on the virtual bus.
+**Validated:** Deadline expiry and the bus-state monitor, by the test suite in `tests/CanKit.Pro.Tests`, largely on a virtual clock, and with bus states set by a software-controlled bus double (`ControllableBus`, built on a virtual-adapter session) rather than reported by an adapter.
 
 **Not validated:** Bus-off and error-passive transitions as a real controller produces them. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 

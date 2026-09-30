@@ -10,7 +10,7 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 
 ## What is validated, and what is not
 
-**Validated:** TP.BAM and TP.CM sessions, the T1–T4 timers, Connection Abort codes and retransmission, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation over `CanKit.Adapter.Virtual`.
+**Validated:** TP.BAM and TP.CM sessions, the T1–T4 timers, Connection Abort codes and retransmission, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation over `CanKit.Adapter.Virtual`, directly or through a controllable bus double.
 
 **Not validated:** Interoperation with third-party J1939 nodes and J1939-21 conformance testing. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
