@@ -1,7 +1,7 @@
 # Versioning: 1.3.0 is the first stable release
 
-**Status:** accepted, 2026-09-12. Resolves
-[#61](https://github.com/dborgards/CanKit.Pro/issues/61).
+**Status:** accepted, 2026-09-12; carried out with the release of 1.3.0 on 2026-09-30, see
+[Outcome](#outcome) at the end. Resolves [#61](https://github.com/dborgards/CanKit.Pro/issues/61).
 
 ## Context
 
@@ -183,3 +183,35 @@ versions.
 Normal SemVer. A breaking change costs a major version; a deprecation is an `[Obsolete]` member
 that a later major removes. The API approval tests are what make an accidental break visible in
 the pull request that causes it.
+
+## Outcome
+
+Written on 2026-09-30, after the release; the text above is left as decided.
+
+1.3.0 was released on 2026-09-30: tag `v1.3.0`, all nine packages on nuget.org, and the changelog
+commit `chore(release): 1.3.0` on `main`.
+
+Against the checklist:
+
+1. Every `type: bug` issue was closed. The two issues open at the time, [#246](https://github.com/dborgards/CanKit.Pro/issues/246)
+   (documentation) and [#240](https://github.com/dborgards/CanKit.Pro/issues/240) (a test that failed
+   once on CI), are not of that type.
+2. [#52](https://github.com/dborgards/CanKit.Pro/issues/52) was closed with the normative negative tests.
+3. [#23](https://github.com/dborgards/CanKit.Pro/issues/23), [#37](https://github.com/dborgards/CanKit.Pro/issues/37),
+   [#44](https://github.com/dborgards/CanKit.Pro/issues/44) and [#82](https://github.com/dborgards/CanKit.Pro/issues/82)
+   had landed.
+4. The approval baselines were gone through for shapes that are hard to change later. That review was not
+   line by line, and it led to three further breaking changes before the tag: `SendConfirmed` became
+   `SendConfirmedAsync` ([#238](https://github.com/dborgards/CanKit.Pro/pull/238)), and `IProtocolActor.PostAsync`
+   ([#242](https://github.com/dborgards/CanKit.Pro/pull/242)) and `IIsoTpChannel.SettleAsync`
+   ([#244](https://github.com/dborgards/CanKit.Pro/pull/244)) gained a `CancellationToken`.
+5. Each package README states what is validated and what is not
+   ([#245](https://github.com/dborgards/CanKit.Pro/pull/245)).
+
+The pipeline dry run described above failed on its first attempt: the version-resolution step ran
+`git push --dry-run` against GitHub in a job that deliberately holds no credentials
+([#243](https://github.com/dborgards/CanKit.Pro/pull/243)). It passed after that fix, and 1.3.0 was cut from
+the commit it had passed on.
+
+The `breaking -> minor` override in `.releaserc.json` was reverted to `major` in the change that adds this
+section, together with the texts that described the window as open.

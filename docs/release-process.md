@@ -32,13 +32,13 @@ Conventional Commits since the last tag: a `fix` bumps the patch, a `feat` the m
 `BREAKING CHANGE:` footer the major. It then writes the changelog, creates the tag, publishes the
 GitHub Release and pushes the packages. It only runs on `main`.
 
-!!! note "Until 1.3.0, a breaking change bumps the minor"
+!!! note "Since 1.3.0, a breaking change bumps the major"
 
-    `.releaserc.json` currently maps `breaking` to a **minor** release, so that the API
-    corrections on the way to 1.3.0 cannot publish 2.0.0 by accident. This is temporary and is
-    on the release checklist in
-    [Versioning](decisions/0001-versioning-and-api-stability.md);
-    `eng/verify-release-config.mjs` fails the build if the override outlives 1.3.0.
+    `.releaserc.json` maps `breaking` to **major** again. Until 1.3.0 it mapped to minor, so that the API
+    corrections before that release could not publish 2.0.0 by accident; how that came about is in
+    [Versioning](decisions/0001-versioning-and-api-stability.md).
+    `eng/verify-release-config.mjs` fails the build if the mapping is anything but major now that
+    1.3.0 is in the changelog.
 
 **GitVersion** answers *"what version is this commit?"* — for builds that are not releases. A
 pull-request build or a CI artifact from `main` between releases gets a real, ordered SemVer
@@ -131,7 +131,7 @@ Each plugin runs in the order it appears in `.releaserc.json`, within each lifec
 
 ```
 analyze        →  nothing to release? stop here
-verifyRelease  →  refuse a version below 1.3.0 while the ADR window is open  (exec)
+verifyRelease  →  re-check the release configuration for the version about to go out  (exec)
 prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
                →  verify the nine packages `verify` packed     (@semantic-release/exec, prepareCmd)
                →  changelog committed and PUSHED to main       (@semantic-release/git)
@@ -289,17 +289,12 @@ From the Actions tab: **Release → Run workflow**, leaving *dry run* checked. I
 version, builds, tests and packs, and prints the release notes it would write — without tagging,
 publishing, or requesting a NuGet credential.
 
-!!! warning "A dry run cannot succeed before 1.3.0"
+!!! note "A dry run has something to say only when a release is pending"
 
-    The `verify` job refuses any version that is not 1.3.0 while the pre-1.3.0 window is open, and
-    the commit analyser computes a patch version until a `feat` commit lands. So a dry run today
-    stops at the version gate, having proved only that version resolution works.
-
-    This is the gate doing its job, not a fault to route around: it refuses to release before the
-    checklist in [Versioning](decisions/0001-versioning-and-api-stability.md) is done, and a dry
-    run goes through the same gate as a real one on purpose. The first dry run that exercises the
-    whole path is the one taken once the version reaches 1.3.0, and 1.3.0 should not be cut until
-    that has been green.
+    The version is resolved from the commits since the last tag. If none of them releases (`docs:`,
+    `test:`, `chore:`, `ci:`, `refactor:`, `style:`), a dry run resolves no version and reports that there
+    is nothing to release; the build, test and pack steps still run. It prints a version once a `feat`,
+    a `fix`, a `perf` or a breaking commit has landed.
 
 Locally, the same analysis without a token, and without the workflow's gates:
 

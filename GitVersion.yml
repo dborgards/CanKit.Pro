@@ -72,12 +72,12 @@ branches:
     # artifact list reads exactly like one. With the label it is `1.2.4-ci.12` and says so, which
     # is the whole of what this needs to fix.
     #
-    # Increment stays Patch. Raising it to Minor while the work heads for 1.3.0 would name CI
-    # artifacts after the version they are heading for -- but `increment` is unconditional, so it
-    # would go on producing 1.4.0-ci.N after 1.3.0 ships instead of 1.3.1-ci.N, and nothing would
-    # restore it. One temporary override with a machine-enforced expiry (breaking -> minor, in
-    # .releaserc.json) is a debt worth carrying; a second one, for nothing but the cosmetics of an
-    # artifact name, is not.
+    # Increment stays Patch. Raising it to Minor while the work headed for 1.3.0 would have named CI
+    # artifacts after the version they were heading for -- but `increment` is unconditional, so it
+    # would have gone on producing 1.4.0-ci.N after 1.3.0 shipped instead of 1.3.1-ci.N, and nothing
+    # would restore it. The one temporary override this repository carried, with a machine-enforced
+    # expiry (breaking -> minor, in .releaserc.json), was worth its cost; a second one, for nothing
+    # but the cosmetics of an artifact name, was not.
     label: ci
     increment: Patch
   pull-request:

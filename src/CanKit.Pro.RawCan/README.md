@@ -4,11 +4,10 @@ Raw-CAN service layer for [CanKit](https://github.com/pkuyo/CanKit): multi-proto
 demultiplexing / subscriptions (arc42 §5.3, ADR-5; SRS FR-RAW-010..015) and a TX-confirm
 abstraction (arc42 §6.3, ADR-7; SRS FR-RAW-030..034).
 
-Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
-the API had been reviewed. **1.3.0 will be the first release whose API is stable**; until it is
-tagged there is no listed version to install, so the `dotnet add package` line below resolves
-nothing and the withdrawn releases come back only on an exact version pin. The public surface
-can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
+Status: **1.3.0 is the first stable release**: from 1.3.0 on the public API follows SemVer, so a breaking
+change costs a major version. 1.0.0 – 1.2.3 were published as stable before the API had been reviewed
+against the specifications; they are unlisted and deprecated on nuget.org and should not be used. See
+[Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
 ## What is validated, and what is not
 

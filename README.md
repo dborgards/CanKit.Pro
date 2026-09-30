@@ -48,14 +48,11 @@ Everything targets `netstandard2.0` and `net10.0`.
 
 ## Status
 
-The 1.0.0 – 1.2.3 releases are **withdrawn from nuget.org**: they were published as stable before the API
-had been reviewed against the specifications. **1.3.0 will be the first release whose API is
-stable**, and the surface can still change until it is tagged — see
-[Versioning](docs/decisions/0001-versioning-and-api-stability.md) for what that window is for.
-
-Which means there is **nothing to install from nuget.org until 1.3.0 ships**: the `dotnet add
-package` lines below have no listed version to resolve, and a withdrawn release comes back only
-on an exact version pin. Build from source in the meantime.
+**1.3.0 is the first stable release.** From 1.3.0 on the public API follows SemVer: a breaking change costs a
+major version, and a deprecation is an `[Obsolete]` member that a later major removes. The 1.0.0 – 1.2.3
+releases were published as stable before the API had been reviewed against the specifications; they are
+unlisted and deprecated on nuget.org and should not be used. See
+[Versioning](docs/decisions/0001-versioning-and-api-stability.md) for how that came about.
 
 ## Install
 
