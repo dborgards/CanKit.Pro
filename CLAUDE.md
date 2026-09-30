@@ -239,10 +239,12 @@ say so. Twice in one wave that phrasing turned an obvious fix into a wait.
 
 ## Versioning
 
-Until the `v1.3.0` tag, `docs/decisions/0001-versioning-and-api-stability.md` governs: breaking
-changes are allowed, they map to a **minor** bump, and no `[Obsolete]` shim is introduced to dodge
-one. `eng/verify-release-config.mjs` enforces both ends of that and fails the build if the rule
-and the changelog disagree.
+1.3.0 is out (`v1.3.0`), so the window that `docs/decisions/0001-versioning-and-api-stability.md`
+describes is closed and SemVer holds. A breaking change needs the `!` and a `BREAKING CHANGE:` footer in
+the commit message and publishes a **major** version: `.releaserc.json` maps `breaking` to `major`, and
+`eng/verify-release-config.mjs` fails the build if it maps to anything else. A deprecation is an
+`[Obsolete]` member that a later major removes. The decision record stays as the account of how 1.3.0
+came about.
 
 ## Upstream
 

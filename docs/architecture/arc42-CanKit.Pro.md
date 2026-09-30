@@ -151,7 +151,7 @@ Zero-Copy) erhöhen den Aufwand für Q4 und für einen sicheren **Frame-Ownershi
 ## 2.2 Organisatorische Randbedingungen
 
 - **OSS-Paket** (MIT, `LICENSE`), als NuGet-Pakete gemeinsam versioniert und veröffentlicht. Die
-  Releases 1.0.0 – 1.2.3 sind zurückgezogen; 1.3.0 wird der erste Release mit stabiler API
+  Releases 1.0.0 – 1.2.3 sind zurückgezogen; 1.3.0 ist der erste Release mit stabiler API
   (README § Status, `docs/decisions/0001-versioning-and-api-stability.md`).
 - **Eine CI über die gesamte Solution** (`.github/workflows/ci.yml`; Trigger: Push auf `main`,
   Pull Requests, `merge_group`). Die adapterweisen Pfadfilter und Solution-Filter der Erstfassung

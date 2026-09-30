@@ -5,17 +5,14 @@ directly on top of `CanKit.Pro.IsoTp`'s `IIsoTpChannel`, so anything that speaks
 (virtual loopback, PCAN, SocketCAN, Vector, Kvaser, ZLG, ControlCAN, ...) can be driven with
 the same client.
 
-Status: 1.0.0 – 1.2.3 are **withdrawn from nuget.org** — they were published as stable before
-the API had been reviewed. **1.3.0 will be the first release whose API is stable**. Until it is
-tagged there is no listed version to install, so the `dotnet add package` line below resolves
-nothing and the withdrawn releases come back only on an exact version pin. The
-public surface can still change until then — `SendRawAsync`, the timing options and the
-NRC-mapping types most of all. See
+Status: **1.3.0 is the first stable release**: from 1.3.0 on the public API follows SemVer, so a breaking
+change costs a major version. 1.0.0 – 1.2.3 were published as stable before the API had been reviewed
+against the specifications; they are unlisted and deprecated on nuget.org and should not be used. See
 [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
 ## What is validated, and what is not
 
-**Validated:** Each service listed under *Service coverage* (some of them thinly), negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — a scripted ECU simulation in this repository whose responses each test defines — over `CanKit.Adapter.Virtual`.
+**Validated:** Each service listed under *Service coverage* (some of them thinly), negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — a scripted ECU simulation in this repository whose responses each test defines — over `CanKit.Adapter.Virtual`. The thinnest coverage is the mapping of negative response codes onto `UdsNegativeResponseCode`: only a few codes are asserted by name. `SendRawAsync` and the timing options are exercised heavily, but likewise only against the simulation.
 
 **Not validated:** Any real ECU, whose timing, negative-response usage and deviations from the standard the simulation does not reproduce, and conformance as a tester would judge it. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
