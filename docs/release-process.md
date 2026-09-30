@@ -293,8 +293,10 @@ publishing, or requesting a NuGet credential.
 
     The version is resolved from the commits since the last tag. If none of them releases (`docs:`,
     `test:`, `chore:`, `ci:`, `refactor:`, `style:`), a dry run resolves no version and reports that there
-    is nothing to release; the build, test and pack steps still run. It prints a version once a `feat`,
-    a `fix`, a `perf` or a breaking commit has landed.
+    is nothing to release. Build and test still run, but the Pack and Upload steps are skipped, because
+    they need a version: such a dry run does not exercise package creation. It resolves a version once a
+    commit of a releasing type has landed: `feat`, `fix`, `perf`, `revert`, `build(deps)`, or any breaking
+    commit.
 
 Locally, the same analysis without a token, and without the workflow's gates:
 
