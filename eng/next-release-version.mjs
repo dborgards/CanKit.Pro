@@ -5,8 +5,15 @@
 // This is not a full `semantic-release --dry-run`. That loads the GitHub and git plugins,
 // which check push permission and want a write token. The version is decided only by the
 // commit analyser, so that is the only plugin invoked. No token, no pack, no push.
+//
+// One check is not a plugin's, though: before any plugin runs, semantic-release itself runs
+// `git push --dry-run` against the repository URL, dry run or not, and aborts with
+// EGITNOPERMISSION if that fails. The `verify` job deliberately has no credentials, so the URL
+// given below is this checkout rather than GitHub: pushing HEAD to the branch it already is
+// needs no network, no token, and changes nothing.
 
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import semanticRelease from 'semantic-release';
 
 const config = JSON.parse(readFileSync(new URL('../.releaserc.json', import.meta.url), 'utf8'));
@@ -22,6 +29,7 @@ const result = await semanticRelease(
     // GitHub Actions sets CI=true; without this the library demands a write token even though
     // nothing here publishes. The analyser only needs the git history.
     ci: false,
+    repositoryUrl: fileURLToPath(new URL('..', import.meta.url)),
     branches: config.branches,
     tagFormat: config.tagFormat,
     plugins: versionPlugins,
