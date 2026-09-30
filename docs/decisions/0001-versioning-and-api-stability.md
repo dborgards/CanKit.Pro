@@ -205,6 +205,7 @@ Against the checklist:
    `SendConfirmedAsync` ([#238](https://github.com/dborgards/CanKit.Pro/pull/238)), and `IProtocolActor.PostAsync`
    ([#242](https://github.com/dborgards/CanKit.Pro/pull/242)) and `IIsoTpChannel.SettleAsync`
    ([#244](https://github.com/dborgards/CanKit.Pro/pull/244)) gained a `CancellationToken`.
+   The maintainer took the surface as it then stood over as final by starting the release.
 5. Each package README states what is validated and what is not
    ([#245](https://github.com/dborgards/CanKit.Pro/pull/245)).
 

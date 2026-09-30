@@ -12,7 +12,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** Each service listed under *Service coverage* (some of them thinly), negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — a scripted ECU simulation in this repository whose responses each test defines — over `CanKit.Adapter.Virtual`.
+**Validated:** Each service listed under *Service coverage* (some of them thinly), negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — a scripted ECU simulation in this repository whose responses each test defines — over `CanKit.Adapter.Virtual`. The thinnest coverage is the mapping of negative response codes onto `UdsNegativeResponseCode`: only a few codes are asserted by name. `SendRawAsync` and the timing options are exercised heavily, but likewise only against the simulation.
 
 **Not validated:** Any real ECU, whose timing, negative-response usage and deviations from the standard the simulation does not reproduce, and conformance as a tester would judge it. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
