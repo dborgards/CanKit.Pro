@@ -473,7 +473,7 @@ classDiagram
         +ReceiveAsync(ct) Task~byte[]~
         +ReceiveWithArrivalAsync(ct) Task~IsoTpReceivedPdu~
         +ReceiveAllAsync(ct) IAsyncEnumerable~byte[]~
-        +SettleAsync() Task
+        +SettleAsync(ct) Task
         +event DatagramReceived
         +event BackgroundExceptionOccurred
     }

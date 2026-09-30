@@ -75,7 +75,8 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   `SettleAsync` drains it the same way and completes once the actor has taken everything
   queued so far, without dropping anything: for a decision taken at a deadline, what the inbox
   does not hold after it did not arrive before the call — a Single Frame stamped in time can
-  otherwise still be on its way when the deadline fires. `DiscardPendingPdus(long)` drops what
+  otherwise still be on its way when the deadline fires. A `CancellationToken` ends the wait,
+  not the settling: what the demux buffered has been handed to the actor by then. `DiscardPendingPdus(long)` drops what
   arrived before the caller's own stamp rather than before now, so a caller that reads the
   inbox after taking the stamp and discards after reading has seen everything it drops, and a
   frame from between the read and the discard is kept.

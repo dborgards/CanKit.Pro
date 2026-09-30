@@ -357,8 +357,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     }
 
     /// <inheritdoc />
-    /// <inheritdoc />
-    public Task SettleAsync()
+    public Task SettleAsync(CancellationToken cancellationToken = default)
     {
         if (Volatile.Read(ref _disposed) != 0) return Task.CompletedTask;
         // What the demux has buffered goes to the actor now rather than after the reader's
@@ -372,7 +371,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (_actor is ProtocolActor { IsOnCurrentActor: true }) return Task.CompletedTask;
         try
         {
-            return _actor.PostAsync(() => { });
+            return _actor.PostAsync(() => { }, cancellationToken);
         }
         catch (ObjectDisposedException)
         {
