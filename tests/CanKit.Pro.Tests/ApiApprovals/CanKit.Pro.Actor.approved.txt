@@ -10,8 +10,8 @@ namespace CanKit.Pro.Actor
     {
         event System.EventHandler<System.Exception> BackgroundExceptionOccurred;
         void Post(System.Action work);
-        System.Threading.Tasks.Task PostAsync(System.Action work);
-        System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work);
+        System.Threading.Tasks.Task PostAsync(System.Action work, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work, System.Threading.CancellationToken cancellationToken = default);
         System.IDisposable Schedule(System.TimeSpan delay, System.Action callback);
     }
     public sealed class ProtocolActor : CanKit.Pro.Actor.IProtocolActor, System.IDisposable
@@ -21,8 +21,8 @@ namespace CanKit.Pro.Actor
         public event System.EventHandler<System.Exception>? BackgroundExceptionOccurred;
         public void Dispose() { }
         public void Post(System.Action work) { }
-        public System.Threading.Tasks.Task PostAsync(System.Action work) { }
-        public System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work) { }
+        public System.Threading.Tasks.Task PostAsync(System.Action work, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<T> PostAsync<T>(System.Func<T> work, System.Threading.CancellationToken cancellationToken = default) { }
         public System.IDisposable Schedule(System.TimeSpan delay, System.Action callback) { }
     }
 }

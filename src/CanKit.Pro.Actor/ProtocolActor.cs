@@ -187,7 +187,7 @@ namespace CanKit.Pro.Actor
         /// <remarks>
         /// <para>
         /// Lets a public sync API safely detect that it is already on the actor loop and run the
-        /// requested work inline instead of routing it through <see cref="PostAsync(Action)"/> and
+        /// requested work inline instead of routing it through <see cref="PostAsync(Action, CancellationToken)"/> and
         /// synchronously waiting on the returned task — which would deadlock the loop against
         /// itself. External callers still take the marshal-through-mailbox path exactly as
         /// before.
@@ -302,50 +302,130 @@ namespace CanKit.Pro.Actor
         }
 
         /// <inheritdoc />
-        public Task PostAsync(Action work)
+        public Task PostAsync(Action work, CancellationToken cancellationToken = default)
         {
             if (work is null) throw new ArgumentNullException(nameof(work));
-            var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
-            PostInternal(
-                () =>
+            if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+            var call = new WithdrawableCall<object?>(cancellationToken);
+            return PostWithdrawable(call, () =>
+            {
+                // Disposed on every path out, including the one where the token withdrew the item.
+                using (call)
                 {
+                    if (!call.TryStart()) return;
                     try
                     {
                         work();
-                        tcs.TrySetResult(null);
+                        call.Completion.TrySetResult(null);
                     }
                     catch (Exception ex)
                     {
-                        tcs.TrySetException(ex);
+                        call.Completion.TrySetException(ex);
                     }
-                },
-                // If the marshal itself fails (SynchronizationContext mode, Send throws before
-                // ever invoking the wrapped work above), the wrapper's own try/catch never runs,
-                // so nothing would otherwise complete this task -- it would hang forever even
-                // though PostAsync failures are documented to surface via the returned task.
-                onDispatchFailure: ex => tcs.TrySetException(ex));
-            return tcs.Task;
+                }
+            });
         }
 
         /// <inheritdoc />
-        public Task<T> PostAsync<T>(Func<T> work)
+        public Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default)
         {
             if (work is null) throw new ArgumentNullException(nameof(work));
-            var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            PostInternal(
-                () =>
+            if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<T>(cancellationToken);
+            var call = new WithdrawableCall<T>(cancellationToken);
+            return PostWithdrawable(call, () =>
+            {
+                using (call)
                 {
+                    if (!call.TryStart()) return;
                     try
                     {
-                        tcs.TrySetResult(work());
+                        call.Completion.TrySetResult(work());
                     }
                     catch (Exception ex)
                     {
-                        tcs.TrySetException(ex);
+                        call.Completion.TrySetException(ex);
                     }
-                },
-                onDispatchFailure: ex => tcs.TrySetException(ex));
-            return tcs.Task;
+                }
+            });
+        }
+
+        private Task<T> PostWithdrawable<T>(WithdrawableCall<T> call, Action work)
+        {
+            try
+            {
+                PostInternal(
+                    work,
+                    // If the marshal itself fails (SynchronizationContext mode, Send throws before
+                    // ever invoking the wrapped work), the wrapper's own try/catch never runs, so
+                    // nothing would otherwise complete this task -- it would hang forever even
+                    // though PostAsync failures are documented to surface via the returned task.
+                    onDispatchFailure: ex =>
+                    {
+                        call.Fail(ex);
+                        call.Dispose();
+                    });
+            }
+            catch
+            {
+                // Refused before anything was enqueued (the actor was disposed): no wrapper will
+                // ever run to release the registration on the caller's token, and no task is
+                // returned to hold it either. A long-lived token would keep this call alive.
+                call.Dispose();
+                throw;
+            }
+
+            return call.Completion.Task;
+        }
+
+        /// <summary>
+        /// One <c>PostAsync</c> call that its token can still withdraw. The mailbox item and the
+        /// token's callback race for a single transition out of "queued": whichever wins decides
+        /// whether the work runs (the loop won, the token is too late) or is skipped and its task
+        /// cancelled (the token won). Exactly one of the two, so work that has started is never
+        /// reported as cancelled, and work that was reported as cancelled never runs.
+        /// </summary>
+        private sealed class WithdrawableCall<T> : IDisposable
+        {
+            private const int Queued = 0, Started = 1, Withdrawn = 2;
+
+            private readonly CancellationToken _token;
+            private readonly CancellationTokenRegistration _registration;
+            private int _state;
+
+            internal WithdrawableCall(CancellationToken token)
+            {
+                _token = token;
+                Completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+                // A token that can never be cancelled needs no registration and allocates none.
+                _registration = token.CanBeCanceled ? token.Register(Withdraw) : default;
+            }
+
+            internal TaskCompletionSource<T> Completion { get; }
+
+            /// <summary>Claims the work for the loop; <c>false</c> if the token withdrew it first.</summary>
+            internal bool TryStart() => Interlocked.CompareExchange(ref _state, Started, Queued) == Queued;
+
+            /// <summary>
+            /// Faults the task because the marshal failed before the work could start -- unless the
+            /// token withdrew the item first, in which case the task is (or is about to be)
+            /// cancelled and a fault must not overtake that. Decided by the same transition
+            /// <see cref="TryStart"/> and <see cref="Withdraw"/> race for, not by whichever of
+            /// <see cref="TaskCompletionSource{TResult}.TrySetCanceled()"/> and
+            /// <see cref="TaskCompletionSource{TResult}.TrySetException(Exception)"/> gets there first.
+            /// </summary>
+            internal void Fail(Exception exception)
+            {
+                if (Interlocked.CompareExchange(ref _state, Started, Queued) != Withdrawn)
+                    Completion.TrySetException(exception);
+            }
+
+            private void Withdraw()
+            {
+                if (Interlocked.CompareExchange(ref _state, Withdrawn, Queued) == Queued)
+                    Completion.TrySetCanceled(_token);
+            }
+
+            public void Dispose() => _registration.Dispose();
         }
 
         private void PostInternal(Action work, Action<Exception>? onDispatchFailure)

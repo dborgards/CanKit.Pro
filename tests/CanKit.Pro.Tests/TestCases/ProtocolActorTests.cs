@@ -83,6 +83,95 @@ public class ProtocolActorTests
     }
 
     [Fact]
+    public async Task PostAsync_With_An_Already_Cancelled_Token_Is_Cancelled_And_Never_Runs()
+    {
+        using var actor = new ProtocolActor();
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var ran = false;
+
+        var plain = actor.PostAsync(() => ran = true, cts.Token);
+        var generic = actor.PostAsync(() => ran = true, cts.Token);
+
+        (await Record.ExceptionAsync(() => plain)).Should().BeAssignableTo<OperationCanceledException>();
+        (await Record.ExceptionAsync(() => generic)).Should().BeAssignableTo<OperationCanceledException>();
+        await actor.PostAsync(() => 0);
+        ran.Should().BeFalse("a token cancelled before the call withdraws the work");
+    }
+
+    [Fact]
+    public async Task PostAsync_Cancelled_While_Queued_Releases_The_Caller_At_Once_And_Skips_The_Work()
+    {
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread);
+        using var release = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        actor.Post(() => { started.Set(); release.Wait(); });
+        started.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+
+        using var cts = new CancellationTokenSource();
+        var ran = 0;
+        var plain = actor.PostAsync(() => Interlocked.Increment(ref ran), cts.Token);
+        var generic = actor.PostAsync(() => Interlocked.Increment(ref ran), cts.Token);
+
+        cts.Cancel();
+
+        // Both tasks are released while the loop is still blocked: cancelling does not wait for
+        // the item's turn in the mailbox.
+        (await Record.ExceptionAsync(() => WithinTenSeconds(plain))).Should().BeAssignableTo<OperationCanceledException>();
+        (await Record.ExceptionAsync(() => WithinTenSeconds(generic))).Should().BeAssignableTo<OperationCanceledException>();
+
+        release.Set();
+        await actor.PostAsync(() => 0);
+        ran.Should().Be(0, "an item withdrawn while queued is skipped when its turn comes");
+    }
+
+    [Fact]
+    public async Task PostAsync_Cancelled_After_The_Work_Started_Does_Not_Interrupt_It()
+    {
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread);
+        using var release = new ManualResetEventSlim();
+        using var started = new ManualResetEventSlim();
+        using var cts = new CancellationTokenSource();
+
+        var task = actor.PostAsync(() =>
+        {
+            started.Set();
+            release.Wait();
+            return 42;
+        }, cts.Token);
+        started.Wait(TimeSpan.FromSeconds(10)).Should().BeTrue();
+
+        // Past the point where the token can withdraw the item: the work runs through and the
+        // task reports its result instead of a cancellation.
+        cts.Cancel();
+        release.Set();
+
+        (await task).Should().Be(42);
+        (await actor.PostAsync(() => 7)).Should().Be(7);
+    }
+
+    // A cancelled-while-queued task that is never released would otherwise hang the run instead of
+    // failing it. Task.WaitAsync does not exist on every target framework this suite runs on.
+    private static async Task WithinTenSeconds(Task task)
+    {
+        var finished = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(10)));
+        if (!ReferenceEquals(finished, task)) throw new TimeoutException("the task was not released");
+        await task;
+    }
+
+    [Fact]
+    public async Task PostAsync_With_A_Live_Token_Behaves_Like_Without_One()
+    {
+        using var actor = new ProtocolActor();
+        using var cts = new CancellationTokenSource();
+
+        (await actor.PostAsync(() => 5, cts.Token)).Should().Be(5);
+        await actor.PostAsync(() => { }, cts.Token);
+        Func<Task> act = () => actor.PostAsync<int>(() => throw new InvalidOperationException("boom"), cts.Token);
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom");
+    }
+
+    [Fact]
     public async Task PostAsync_Propagates_Exception_Through_The_Returned_Task_Without_Raising_BackgroundEvent()
     {
         using var actor = new ProtocolActor();
@@ -217,6 +306,35 @@ public class ProtocolActorTests
         Func<Task> act = () => actor.PostAsync(() => { });
 
         await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public void PostAsync_On_A_Disposed_Actor_Throws_Synchronously_Also_With_A_Live_Token()
+    {
+        var actor = new ProtocolActor();
+        actor.Dispose();
+        using var cts = new CancellationTokenSource();
+
+        // Not a returned task that never completes: the refusal is the call's own exception,
+        // exactly as without a token.
+        Action plain = () => { _ = actor.PostAsync(() => { }, cts.Token); };
+        Action generic = () => { _ = actor.PostAsync(() => 0, cts.Token); };
+        plain.Should().Throw<ObjectDisposedException>();
+        generic.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task PostAsync_With_A_Live_Token_Faults_Its_Task_When_SynchronizationContext_Send_Throws()
+    {
+        using var actor = new ProtocolActor(ActorExecutionMode.SynchronizationContext, new AlwaysThrowingSynchronizationContext());
+        using var cts = new CancellationTokenSource();
+
+        Func<Task> plain = () => actor.PostAsync(() => { }, cts.Token);
+        Func<Task> generic = () => actor.PostAsync(() => 0, cts.Token);
+
+        // A fault, not a hang and not a cancellation: the token was never cancelled.
+        await plain.Should().ThrowAsync<InvalidOperationException>();
+        await generic.Should().ThrowAsync<InvalidOperationException>();
     }
 
     [Fact]

@@ -330,10 +330,10 @@ public class BusStateMonitorTests : IClassFixture<VirtualAdapterFixture>
 
         public IDisposable Schedule(TimeSpan delay, Action callback) => new NeverDue();
 
-        public Task PostAsync(Action work)
+        public Task PostAsync(Action work, CancellationToken cancellationToken = default)
             => throw new NotSupportedException("The monitor only uses Post and Schedule; an ask would need a real loop.");
 
-        public Task<T> PostAsync<T>(Func<T> work)
+        public Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default)
             => throw new NotSupportedException("The monitor only uses Post and Schedule; an ask would need a real loop.");
 
 #pragma warning disable CS0067 // Nothing is run on the caller's behalf here, so this never fires.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
 
@@ -23,7 +24,7 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// <para>
 /// <b>Why two round-trips.</b> <see cref="ProtocolActor"/>'s loop runs
 /// <c>wait → DrainMailbox → DrainPendingTimerInserts → FireDueTimers</c>. A single
-/// <see cref="IProtocolActor.PostAsync(Action)"/> completes during the drain, so awaiting it can
+/// <see cref="IProtocolActor.PostAsync(Action, CancellationToken)"/> completes during the drain, so awaiting it can
 /// resume while that same iteration is still inside <c>FireDueTimers</c>. The second one is
 /// drained in the <em>next</em> iteration, which the loop reaches only after the first
 /// iteration's timer callbacks have returned — so awaiting it is a proof that they did, resting

@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace CanKit.Pro.Actor
@@ -30,13 +31,26 @@ namespace CanKit.Pro.Actor
         /// <paramref name="work"/> is surfaced through the returned task's fault, not through
         /// <see cref="BackgroundExceptionOccurred"/> — the caller is already positioned to observe
         /// it by awaiting.
+        /// <para>
+        /// <paramref name="cancellationToken"/> withdraws <paramref name="work"/> for as long as it
+        /// has not started: a token cancelled before the call, or while the item waits in the
+        /// mailbox, cancels the returned task at once and the work never runs. Work that has
+        /// already started is never interrupted — it runs to completion, and cancelling then has no
+        /// effect on the task's outcome, so the mailbox's single-writer discipline (FR-RAW-021) is
+        /// not weakened by a half-finished work item.
+        /// </para>
         /// </summary>
-        Task PostAsync(Action work);
+        /// <param name="work">The work to run on the mailbox loop.</param>
+        /// <param name="cancellationToken">Withdraws the work while it is still queued.</param>
+        Task PostAsync(Action work, CancellationToken cancellationToken = default);
 
         /// <summary>
-        /// Same as <see cref="PostAsync(Action)"/> but returns <paramref name="work"/>'s result.
+        /// Same as <see cref="PostAsync(Action, CancellationToken)"/> but returns
+        /// <paramref name="work"/>'s result.
         /// </summary>
-        Task<T> PostAsync<T>(Func<T> work);
+        /// <param name="work">The work to run on the mailbox loop.</param>
+        /// <param name="cancellationToken">Withdraws the work while it is still queued.</param>
+        Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Schedules <paramref name="callback"/> to run on the actor's mailbox loop once
@@ -52,8 +66,8 @@ namespace CanKit.Pro.Actor
         /// Raised whenever a posted work item (via <see cref="Post"/>) or a scheduled callback
         /// (via <see cref="Schedule"/>) throws — the actor's single, defined channel for
         /// background exceptions (FR-RAW-023). The mailbox loop keeps running afterward; one
-        /// failing item never stops the actor. Never raised for <see cref="PostAsync(Action)"/>/
-        /// <see cref="PostAsync{T}(Func{T})"/> failures, which surface through their own returned
+        /// failing item never stops the actor. Never raised for <see cref="PostAsync(Action, CancellationToken)"/>/
+        /// <see cref="PostAsync{T}(Func{T}, CancellationToken)"/> failures, which surface through their own returned
         /// task instead.
         /// </summary>
         event EventHandler<Exception> BackgroundExceptionOccurred;
