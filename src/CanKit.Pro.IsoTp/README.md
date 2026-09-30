@@ -19,6 +19,12 @@ public surface can still change until then. See
 [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 CAN-FD long-payload cases still get the least coverage of the two halves.
 
+## What is validated, and what is not
+
+**Validated:** The frame codec (unit and property tests), and the channel over `CanKit.Adapter.Virtual` loopback: segmentation, Flow Control (BS, STmin, Wait, Overflow), the N_As/N_Bs/N_Cr timers, reassembly, functional addressing and CAN-FD, by the test suite in `tests/CanKit.Pro.Tests`. STmin spacing is measured on the loopback with CI-tolerant bounds.
+
+**Not validated:** Conformance to ISO 15765-2 as a tester or a foreign ISO-TP stack would judge it, and STmin spacing on real adapters, where it also carries the adapter's own latency. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+
 ## Scope
 
 - `IsoTpFrameCodec` — bounds-safe PCI parser, `BuildSingleFrame` / `BuildFirstFrame` /

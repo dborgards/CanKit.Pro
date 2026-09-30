@@ -13,6 +13,12 @@ public surface can still change until then — `SendRawAsync`, the timing option
 NRC-mapping types most of all. See
 [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
+## What is validated, and what is not
+
+**Validated:** The services listed under *Service coverage*, negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — an ECU simulation written in this repository from the same reading of ISO 14229-1 as the client — over `CanKit.Adapter.Virtual`.
+
+**Not validated:** Any real ECU, whose timing, negative-response usage and deviations from the standard the simulation does not reproduce, and conformance as a tester would judge it. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+
 ## Service coverage (SRS FR-UDS-001..012)
 
 | SRS ID | Service | MVP support |

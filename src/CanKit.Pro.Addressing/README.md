@@ -12,6 +12,12 @@ tagged there is no listed version to install, so the `dotnet add package` line b
 nothing and the withdrawn releases come back only on an exact version pin. The public surface
 can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
+## What is validated, and what is not
+
+**Validated:** CAN-ID limits and construction, J1939 PGN/priority/PDU/source-address composition and decomposition, NAME fields and PGN classification, by unit tests in the test suite in `tests/CanKit.Pro.Tests`, against the values of the J1939 tables as this repository reads them.
+
+**Not validated:** The results have not been compared with a third-party J1939 implementation. The package handles no frames on a bus, so hardware does not apply to it.
+
 This generalizes logic that previously only existed as one hard-coded case inside
 `IsoTpEndpoint.CreateNormalFixed` (a single fixed diagnostics PGN) into reusable helpers any
 protocol layer (ISO-TP, J1939, CANopen, ...) can call directly.
