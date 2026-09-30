@@ -9,7 +9,7 @@ public surface can still change until then. See
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — by the test suite in `tests/CanKit.Pro.Tests`, against peers written for the tests (for example `PeerSdoLaboratory`) over `CanKit.Adapter.Virtual`.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 

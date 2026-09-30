@@ -14,7 +14,7 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 
 **Validated:** Demultiplexing and subscriptions, filter overlap, TX confirmation and concurrency, by the test suite in `tests/CanKit.Pro.Tests`, over `CanKit.Adapter.Virtual` and in-repository bus doubles.
 
-**Not validated:** The behaviour of real adapters. TX echo as SocketCAN, Kvaser and Vector deliver it is modelled by a test double (`EchoWorlds`), not observed on those adapters; the "accepted by the driver" approximation for adapters without echo has not been checked against a real driver. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+**Not validated:** The behaviour of real adapters. TX echo as SocketCAN, Kvaser and Vector deliver it is modelled by a test double (`ControllableBus.EchoCapable`), not observed on those adapters; the "accepted by the driver" approximation for adapters without echo has not been checked against a real driver. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
 One `ICanBusService` wraps one `ICanBus` and turns its single `FrameObserved` RX stream into
 N independent, filtered, read-only `ISubscription`s — so several protocol instances (ISO-TP,

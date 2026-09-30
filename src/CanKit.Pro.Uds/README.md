@@ -15,7 +15,7 @@ NRC-mapping types most of all. See
 
 ## What is validated, and what is not
 
-**Validated:** The services listed under *Service coverage*, negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — an ECU simulation written in this repository from the same reading of ISO 14229-1 as the client — over `CanKit.Adapter.Virtual`.
+**Validated:** Each service listed under *Service coverage* (some of them thinly), negative-response handling and the timing options, by the test suite in `tests/CanKit.Pro.Tests`, against `SimulatedUdsEcu` — a scripted ECU simulation in this repository whose responses each test defines — over `CanKit.Adapter.Virtual`.
 
 **Not validated:** Any real ECU, whose timing, negative-response usage and deviations from the standard the simulation does not reproduce, and conformance as a tester would judge it. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 

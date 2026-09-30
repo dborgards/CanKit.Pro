@@ -14,7 +14,7 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 
 ## What is validated, and what is not
 
-**Validated:** CAN-ID limits and construction, J1939 PGN/priority/PDU/source-address composition and decomposition, NAME fields and PGN classification, by unit tests in the test suite in `tests/CanKit.Pro.Tests`, against the values of the J1939 tables as this repository reads them.
+**Validated:** CAN-ID limits and construction, J1939 PGN/priority/PDU/source-address composition and decomposition, NAME fields and PGN classification, by unit tests in `tests/CanKit.Pro.Tests`, against the values of the J1939 tables as this repository reads them.
 
 **Not validated:** The results have not been compared with a third-party J1939 implementation. The package handles no frames on a bus, so hardware does not apply to it.
 
