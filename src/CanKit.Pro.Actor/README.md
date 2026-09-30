@@ -13,7 +13,7 @@ can still change until then. See [Versioning](https://github.com/dborgards/CanKi
 
 ## What is validated, and what is not
 
-**Validated:** Single-mailbox ordering and the single-writer discipline in all three execution modes, the timer queue, the background-exception channel, dispose semantics and cancellation of a queued `PostAsync`, by the test suite in `tests/CanKit.Pro.Tests`. Much of the time-dependent behaviour is tested on a virtual clock; the rest measures real elapsed time.
+**Validated:** Mailbox ordering (dedicated-thread mode), serialization under concurrent callers (dedicated-thread and thread-pool modes), and, for the synchronization-context mode, marshaling through the supplied context, failure surfacing, timers and dispose — not its ordering or concurrent serialization. Also the timer queue, the background-exception channel, dispose semantics and cancellation of a queued `PostAsync`, by the test suite in `tests/CanKit.Pro.Tests`. Much of the time-dependent behaviour is tested on a virtual clock; the rest measures real elapsed time.
 
 **Not validated:** Real-time scheduling on a loaded production host: timers carry the operating system's scheduling latency and there is no hard real-time guarantee. The package handles no CAN frames, so hardware and foreign stacks do not apply to it.
 
