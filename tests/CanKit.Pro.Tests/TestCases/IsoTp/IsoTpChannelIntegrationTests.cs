@@ -496,6 +496,67 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         pdu.FirstFrameArrivalTimestamp.Should().Be(arrival, "the stamp is the demux's, not the settle's");
     }
 
+    // The token ends the wait for the actor, not the settling: a caller that gives up on the wait
+    // (its own deadline passed, its operation was cancelled) is not held behind whatever the
+    // channel's actor is busy with.
+    [Fact]
+    public async Task Settle_With_An_Already_Cancelled_Token_Is_Cancelled()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var ex = await Record.ExceptionAsync(() => channel.SettleAsync(cts.Token).WaitAsync(ShortTimeout));
+
+        ex.Should().BeAssignableTo<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task Settle_Cancelled_While_The_Actor_Is_Busy_Releases_The_Caller_At_Once()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread);
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+        using var release = new ManualResetEventSlim();
+        using var busy = new ManualResetEventSlim();
+        actor.Post(() => { busy.Set(); release.Wait(); });
+        busy.Wait(ShortTimeout).Should().BeTrue("the actor must be inside the blocking item");
+
+        using var cts = new CancellationTokenSource();
+        var settle = channel.SettleAsync(cts.Token);
+        settle.IsCompleted.Should().BeFalse("the settle waits behind the item the actor is busy with");
+
+        cts.Cancel();
+
+        // Released while the actor is still blocked: not when it eventually gets to the wait.
+        var ex = await Record.ExceptionAsync(() => settle.WaitAsync(ShortTimeout));
+        ex.Should().BeAssignableTo<OperationCanceledException>();
+
+        release.Set();
+    }
+
+    [Fact]
+    public async Task Settle_With_A_Live_Token_Takes_A_Buffered_Frame_Through_Like_Without_One()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
+        using var cts = new CancellationTokenSource();
+
+        byte[] sf = { 0x03, 0x7F, 0x3E, 0x78, 0x00, 0x00, 0x00, 0x00 };
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, sf, FrameFlags.None), Stopwatch.GetTimestamp());
+
+        await channel.SettleAsync(cts.Token).WaitAsync(ShortTimeout);
+
+        channel.TryReceiveWithArrival(out var pdu).Should().BeTrue("settling took the frame through");
+        pdu.Pdu.Should().Equal(0x7F, 0x3E, 0x78);
+    }
+
     // Codex on #150: a discard given the caller's stamp drops what arrived before it and keeps
     // what arrived since -- so a caller that read the inbox after taking the stamp has seen
     // everything the discard drops, and a frame from between the read and the discard is not
