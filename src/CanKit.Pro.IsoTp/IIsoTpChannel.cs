@@ -136,8 +136,15 @@ public interface IIsoTpChannel : IDisposable
     /// channel's own actor — from a <c>BackgroundExceptionOccurred</c> handler — it returns at
     /// once and the frames on their way are handled after the current work item: they queue
     /// behind frames already in the mailbox, and handling them inline would reorder the two.
+    /// <para>
+    /// <paramref name="cancellationToken"/> ends the wait, not the settling: what the demux had
+    /// buffered has been handed to the actor by then and is handled as usual. A token cancelled
+    /// before the call, or while the wait is still queued behind the actor's other work, cancels
+    /// the returned task; once the actor has reached the wait it completes normally.
+    /// </para>
     /// </summary>
-    Task SettleAsync();
+    /// <param name="cancellationToken">Ends the wait for the actor to catch up.</param>
+    Task SettleAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Drains every buffered inbox item — both completed PDUs and pending reassembly-abort
