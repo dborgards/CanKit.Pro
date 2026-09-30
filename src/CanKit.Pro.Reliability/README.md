@@ -12,6 +12,12 @@ tagged there is no listed version to install, so the `dotnet add package` line b
 nothing and the withdrawn releases come back only on an exact version pin. The public surface
 can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
+## What is validated, and what is not
+
+**Validated:** Deadline expiry and the bus-state monitor, by the test suite in `tests/CanKit.Pro.Tests`, largely on a virtual clock, and with bus states set by a software-controlled bus double (`ControllableBus`, built on a virtual-adapter session) rather than reported by an adapter.
+
+**Not validated:** Bus-off and error-passive transitions as a real controller produces them. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+
 This package depends only on `CanKit.Abstractions` (for `ICanBus`/`BusState`) and `CanKit.Pro.Actor` (for
 `IProtocolActor`). Every protocol instance already runs on a `ProtocolActor` (FR-RAW-020), so a
 deadline is not an independent standalone timer — it is scheduled through the actor's own

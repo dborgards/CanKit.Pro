@@ -11,6 +11,12 @@ tagged there is no listed version to install, so the `dotnet add package` line b
 nothing and the withdrawn releases come back only on an exact version pin. The public surface
 can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
+## What is validated, and what is not
+
+**Validated:** Mailbox ordering (dedicated-thread mode), serialization under concurrent callers (dedicated-thread and thread-pool modes), and, for the synchronization-context mode, marshaling through the supplied context, failure surfacing, timers and dispose — not its ordering or concurrent serialization. Also the timer queue, the background-exception channel, dispose semantics and cancellation of a queued `PostAsync`, by the test suite in `tests/CanKit.Pro.Tests`. Much of the time-dependent behaviour is tested on a virtual clock; the rest measures real elapsed time.
+
+**Not validated:** Real-time scheduling on a loaded production host: timers carry the operating system's scheduling latency and there is no hard real-time guarantee. The package handles no CAN frames, so hardware and foreign stacks do not apply to it.
+
 This package has **no dependency on any other CanKit package** — it is a plain, reusable
 single-writer executor plus an event-driven timer queue. Protocol layers compose it; it does not
 know about CAN frames, buses, or adapters.

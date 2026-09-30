@@ -8,6 +8,12 @@ tagged there is no listed version to install, so the `dotnet add package` line b
 nothing and the withdrawn releases come back only on an exact version pin. The public surface
 can still change until then. See [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
+## What is validated, and what is not
+
+**Validated:** TP.BAM and TP.CM sessions, the T1–T4 timers, Connection Abort codes and retransmission, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation over `CanKit.Adapter.Virtual`, directly or through a controllable bus double.
+
+**Not validated:** Interoperation with third-party J1939 nodes and J1939-21 conformance testing. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+
 - **TP.BAM** (Broadcast Announce Message) — one sender pushes an up-to-1785-byte PDU to every node on the bus, no acknowledgement (FR-TP-030).
 - **TP.CM** (Connection Mode: RTS / CTS / EndOfMsgAck / Connection Abort) — point-to-point, with block-size negotiation and end-of-message acknowledgement (FR-TP-031).
 

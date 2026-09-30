@@ -141,6 +141,12 @@ nothing and the withdrawn releases come back only on an exact version pin. The
 public surface can still change until then. See
 [Versioning](https://github.com/dborgards/CanKit.Pro/blob/main/docs/decisions/0001-versioning-and-api-stability.md).
 
+## What is validated, and what is not
+
+**Validated:** PGN send and receive, SPN extraction and its indicator values, address claiming and its fallback, Request-PGN and periodic sends, by the test suite in `tests/CanKit.Pro.Tests`, between nodes of this implementation over `CanKit.Adapter.Virtual`, directly or through a controllable bus double.
+
+**Not validated:** Address-claim arbitration against third-party ECUs and behaviour on a real J1939 network. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
+
 ## Install
 
 ```bash
