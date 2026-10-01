@@ -897,8 +897,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     {
         // The spacing timer of a BAM holds the session -- and its payload -- until it fires, which
         // with a long spacing outlives a cancel by that long.
-        if (_txSessions.TryGetValue(key, out var ended)) ended.SpacingTimer?.Dispose();
-        _txSessions.Remove(key);
+        if (_txSessions.TryGetValue(key, out var ended))
+        {
+            ended.ReleaseSpacingTimer();
+            _txSessions.Remove(key);
+        }
         if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
         PendingTx? start = null;
         while (start is null && queue.Count > 0)
@@ -947,9 +950,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // different session. Every step therefore carries the session it belongs to and acts only
     // while that very instance is the registered one -- the key alone cannot tell them apart.
     private bool IsCurrentBamSession(TxSession session)
-        => !session.IsCm
-           && _txSessions.TryGetValue(session.Key, out var current)
-           && ReferenceEquals(current, session);
+        => _txSessions.TryGetValue(session.Key, out var current) && ReferenceEquals(current, session);
 
     private void OnBamAnnounceConfirmed(TxSession session)
     {
@@ -1572,10 +1573,17 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public bool LastDtQueued { get; set; }
         public byte PendingCtsNextSn { get; set; }
 
+        public void ReleaseSpacingTimer()
+        {
+            SpacingTimer?.Dispose();
+            SpacingTimer = null;
+        }
+
         public void Cancel()
         {
             Deadline?.Dispose();
             Deadline = null;
+            ReleaseSpacingTimer();
             Tcs.TrySetCanceled();
         }
 
@@ -1583,6 +1591,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             Deadline?.Dispose();
             Deadline = null;
+            ReleaseSpacingTimer();
             Tcs.TrySetException(ex);
         }
     }

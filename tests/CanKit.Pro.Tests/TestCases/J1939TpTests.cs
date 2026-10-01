@@ -3454,6 +3454,82 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("EndOfMsgAck");
     }
 
+    // The same release when the whole channel goes: a BAM in flight on a borrowed actor must not
+    // leave its spacing timer -- and so its session and payload -- behind.
+    [Fact]
+    public async Task Disposing_The_Channel_Releases_The_Spacing_Timer_Of_A_Bam_In_Flight()
+    {
+        var spacing = TimeSpan.FromMinutes(10);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
+
+        var send = sender.SendBamAsync(0xFECBu, RandomPayload(21, seed: 251));
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+
+        sender.Dispose();
+        Func<Task> failed = async () => await send.WithTimeout(ShortTimeout);
+        await failed.Should().ThrowAsync<ObjectDisposedException>();
+
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "the spacing timer is released with the session, not left to fire in ten minutes");
+    }
+
+    // And the TP.DT confirmation: a DT of a cancelled BAM can still be in flight when the same PGN
+    // is sent again, and its confirmation, arriving afterwards, belongs to the old session. The
+    // sequence-number check in the handler also holds this one, so the test pins the outcome, not
+    // the instance check alone (the announce test above does that).
+    [Fact]
+    public async Task A_Late_Dt_Confirmation_Of_A_Cancelled_Bam_Does_Not_Advance_The_Next_Bam()
+    {
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 252); // 3 TP.DT
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dtSequence = new List<byte>();
+        bus.OnTransmitting = frame =>
+        {
+            if (J1939Id.Decompose((uint)frame.ID).Pgn != J1939Pgn.TpDt) return;
+            lock (dtSequence) dtSequence.Add(frame.Data.Span[0]);
+        };
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+
+        using var cts = new CancellationTokenSource();
+        var first = sender.SendBamAsync(pgn, payload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // announce
+        bus.DeferredEchoes.ReleaseNext();
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        await clock.AdvanceAsync(InFlightSpacing);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        cts.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        var second = sender.SendBamAsync(pgn, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the new announce
+
+        bus.DeferredEchoes.ReleaseNext(); // the cancelled BAM's DT 1
+        await actor.PostAsync(() => 0);
+        bus.DeferredEchoes.ReleaseNext(); // the new announce
+        for (int sent = 0; sent < 3; sent++)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+            await clock.AdvanceAsync(InFlightSpacing);
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(4 + sent, ShortTimeout);
+            bus.DeferredEchoes.ReleaseNext();
+        }
+        await second.WaitAsync(ShortTimeout);
+
+        lock (dtSequence)
+            dtSequence.Should().Equal(new byte[] { 1, 1, 2, 3 },
+                "the old session's DT 1, then the new session's own three");
+    }
+
     [Theory]
     [InlineData(nameof(J1939TpOptions.T1), 0)]
     [InlineData(nameof(J1939TpOptions.T1), -1)]
