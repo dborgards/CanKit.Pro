@@ -895,6 +895,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// </summary>
     private void EndTx(TxSessionKey key)
     {
+        // The spacing timer of a BAM holds the session -- and its payload -- until it fires, which
+        // with a long spacing outlives a cancel by that long.
+        if (_txSessions.TryGetValue(key, out var ended)) ended.SpacingTimer?.Dispose();
         _txSessions.Remove(key);
         if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
         PendingTx? start = null;
@@ -954,7 +957,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // BAM sender: the packet spacing between BAM and first DT, then between subsequent DTs.
         session.State = TxStage.SendingDt;
         session.NextSn = 1;
-        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
+        session.SpacingTimer = _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
     }
 
     private void HandleRxTxSideResponse(byte sa, uint dataPgn, byte[] payload)
@@ -984,9 +987,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     // A fast peer can hold right after the last DT of a block, before our
                     // confirmation of that DT has run -- the same early-response race a
                     // non-zero CTS is stashed for. The hold is remembered and takes effect when
-                    // the block ends: T4 then, not T3.
-                    if (session.State == TxStage.SendingDt && session.BlockRemaining == 1
-                        && session.NextSn != session.TotalPackets)
+                    // the block ends: T4 then, not T3. After the message's last packet the
+                    // confirmation waits for the EndOfMsgAck under T3 and never reads it.
+                    if (session.State == TxStage.SendingDt && session.BlockRemaining == 1)
                         session.HoldPending = true;
                     return;
                 }
@@ -1137,7 +1140,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
         session.NextSn = (byte)nextSn;
         // The spacing between two consecutive BAM DTs (J1939-21 §5.10.3, 50..200 ms).
-        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
+        session.SpacingTimer = _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
     }
 
     private void TrySendNextCmDt(TxSessionKey key)
@@ -1536,6 +1539,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         public byte NextSn { get; set; }
         public int BlockRemaining { get; set; }
         public IDeadline? Deadline { get; set; }
+        /// <summary>The armed packet-spacing timer of a BAM; released when the session ends.</summary>
+        public IDisposable? SpacingTimer { get; set; }
 
         /// <summary>
         /// Set when a CTS for the next block arrives before the last DT of the current block has

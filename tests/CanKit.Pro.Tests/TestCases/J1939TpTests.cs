@@ -3285,7 +3285,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
     // The BAM chain is driven by timers and confirmations that outlive a cancel. Cancelling and
     // sending the same PGN again inside the packet spacing puts a second session under the same
-    // key while the first one's timer is still armed; that timer must not drive the new session.
+    // key; nothing of the first one -- its timer, or a confirmation still in flight -- may drive
+    // the new session. Two lines of defence hold that (the timer is released with the session, and
+    // every step checks it belongs to the registered instance); the test fails only without both.
     [Fact]
     public async Task A_Cancelled_Bam_Does_Not_Drive_The_Next_Bam_Of_The_Same_Pgn()
     {
@@ -3315,10 +3317,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
 
         var second = sender.SendBamAsync(pgn, payload);
-        // The first session's timer is still armed; the second one's joins it once its announce
-        // is confirmed. Only then do both fire on the same advance.
-        while (await actor.PostAsync(() => actor.PendingTimerCount) < 2)
-            await Task.Yield();
+        // The second announce is out; its spacing timer is armed once that is confirmed.
+        await WaitForTransmitCount(bus, 2);
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
 
         await DrainAsync(clock, actor, second);
 
@@ -3326,6 +3327,131 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             dtSequence.Should().Equal(new byte[] { 1, 2, 3 },
                 "the stale timer of the cancelled BAM must not send a TP.DT for the new one");
         lock (background) background.Should().BeEmpty();
+    }
+
+    // The spacing timer of a BAM holds its session and payload until it fires. Cancelling must
+    // release it: with a long spacing, every cancelled BAM would otherwise stay reachable for
+    // that long.
+    [Fact]
+    public async Task Cancelling_A_Bam_Releases_Its_Spacing_Timer()
+    {
+        var spacing = TimeSpan.FromMinutes(10);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
+
+        using var cts = new CancellationTokenSource();
+        var send = sender.SendBamAsync(0xFECBu, RandomPayload(21, seed: 249), cts.Token);
+        await clock.WaitUntilTimerArmedAsync(actor, spacing, ShortTimeout);
+
+        cts.Cancel();
+        Func<Task> cancelled = async () => await send.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "the cancelled BAM's spacing timer is released, not left to fire in ten minutes");
+    }
+
+    // The other half of the same race: the announce of a cancelled BAM is still unconfirmed when
+    // the same PGN is sent again, and its confirmation arrives after the new session is
+    // registered under the same key. It belongs to the old session and must not start the new
+    // session's chain a second time.
+    [Fact]
+    public async Task A_Late_Announce_Confirmation_Of_A_Cancelled_Bam_Does_Not_Start_The_Next_Bam()
+    {
+        const uint pgn = 0xFECAu;
+        var payload = RandomPayload(21, seed: 250); // 3 TP.DT
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dtSequence = new List<byte>();
+        bus.OnTransmitting = frame =>
+        {
+            if (J1939Id.Decompose((uint)frame.ID).Pgn != J1939Pgn.TpDt) return;
+            lock (dtSequence) dtSequence.Add(frame.Data.Span[0]);
+        };
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+
+        using var cts = new CancellationTokenSource();
+        var first = sender.SendBamAsync(pgn, payload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // its announce, confirmation held
+        cts.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        var second = sender.SendBamAsync(pgn, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the new announce
+
+        bus.DeferredEchoes.ReleaseNext(); // the cancelled BAM's announce
+        await actor.PostAsync(() => 0);
+        bus.DeferredEchoes.ReleaseNext(); // the new one
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        // Every TP.DT confirmation is held too; release them as they appear.
+        for (int sent = 0; sent < 3; sent++)
+        {
+            await clock.AdvanceAsync(InFlightSpacing);
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(3 + sent, ShortTimeout);
+            bus.DeferredEchoes.ReleaseNext();
+            if (sent < 2) await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+        }
+        await second.WaitAsync(ShortTimeout);
+
+        lock (dtSequence)
+            dtSequence.Should().Equal(new byte[] { 1, 2, 3 });
+    }
+
+    // A hold while the last packet of the message is outstanding has nothing to hold: the
+    // EndOfMsgAck is what the sender waits for next, under T3.
+    [Fact]
+    public async Task A_Cts_Hold_While_The_Last_Packet_Is_Outstanding_Leaves_T3_For_The_EndOfMsgAck()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC4u;
+        var payload = RandomPayload(14, seed: 11); // two packets, one block
+        var options = new J1939TpOptions().With(
+            t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
+            ownsService: false, actor);
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var send = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1
+        bus.DeferredEchoes.ReleaseNext();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // DT 2, the last, held
+
+        var hold = new byte[8];
+        hold[0] = J1939TpFrames.ControlCts;
+        hold[2] = 0x03;
+        hold[3] = hold[4] = 0xFF;
+        hold[5] = (byte)(pgn & 0xFF);
+        hold[6] = (byte)((pgn >> 8) & 0xFF);
+        hold[7] = (byte)((pgn >> 16) & 0xFF);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(hold));
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, hold), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+
+        bus.DeferredEchoes.ReleaseNext();
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
+        await clock.AdvanceAsync(options.T3);
+
+        Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Message.Should().Contain("EndOfMsgAck");
     }
 
     [Theory]
