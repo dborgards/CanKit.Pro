@@ -152,6 +152,15 @@ public sealed class J1939TpOptions
     /// </summary>
     internal void Validate()
     {
+        // A negative timer makes Arm throw after the session is registered and the RTS is on the
+        // wire, which leaves a send with no deadline and its destination blocked; reject it here.
+        RequirePositive(nameof(T1), T1);
+        RequirePositive(nameof(T2), T2);
+        RequirePositive(nameof(T3), T3);
+        RequirePositive(nameof(T4), T4);
+        if (BamPacketSpacing < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(BamPacketSpacing), BamPacketSpacing,
+                "BamPacketSpacing must not be negative.");
         if (MaxPacketsPerCts == 0)
             throw new ArgumentOutOfRangeException(nameof(MaxPacketsPerCts), MaxPacketsPerCts,
                 "MaxPacketsPerCts must be in [1, 255]; 0 is not a valid CTS grant size.");
@@ -167,5 +176,11 @@ public sealed class J1939TpOptions
         if (MaxQueuedSendsPerDestination < 0)
             throw new ArgumentOutOfRangeException(nameof(MaxQueuedSendsPerDestination), MaxQueuedSendsPerDestination,
                 "MaxQueuedSendsPerDestination must be >= 0 (0 admits no waiting send).");
+    }
+
+    private static void RequirePositive(string name, TimeSpan value)
+    {
+        if (value <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(name, value, name + " must be greater than zero.");
     }
 }

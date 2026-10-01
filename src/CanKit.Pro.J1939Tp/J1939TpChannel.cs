@@ -935,17 +935,26 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // Do not schedule TP.DT until the BAM announce is TX-confirmed. Otherwise a rejected
             // BAM can still complete SendBamAsync after the packet spacing once DTs finish.
             SendTpCm(bam, destinationAddress: J1939TpFrames.GlobalDestinationAddress, session,
-                onConfirmed: () => OnBamAnnounceConfirmed(key));
+                onConfirmed: () => OnBamAnnounceConfirmed(session));
         }
     }
 
-    private void OnBamAnnounceConfirmed(TxSessionKey key)
+    // A BAM chain is driven by timers and send confirmations that outlive a cancel: the caller can
+    // cancel and send the same PGN again within the packet spacing, and the same key then names a
+    // different session. Every step therefore carries the session it belongs to and acts only
+    // while that very instance is the registered one -- the key alone cannot tell them apart.
+    private bool IsCurrentBamSession(TxSession session)
+        => !session.IsCm
+           && _txSessions.TryGetValue(session.Key, out var current)
+           && ReferenceEquals(current, session);
+
+    private void OnBamAnnounceConfirmed(TxSession session)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || session.IsCm) return;
+        if (!IsCurrentBamSession(session)) return;
         // BAM sender: the packet spacing between BAM and first DT, then between subsequent DTs.
         session.State = TxStage.SendingDt;
         session.NextSn = 1;
-        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(key));
+        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
     }
 
     private void HandleRxTxSideResponse(byte sa, uint dataPgn, byte[] payload)
@@ -966,6 +975,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // Stay in WaitCts until a non-zero CTS resumes the transfer.
             if (numPackets == 0)
             {
+                // Only a sender waiting for a CTS has anything to hold. After the last DT (T3
+                // for the EndOfMsgAck) or mid-block (T3 follows the block) the running timer
+                // stays: swapping it for a T4 whose expiry is ignored in those states left the
+                // send without any timer at all.
+                if (session.State != TxStage.WaitCts) return;
                 session.Deadline?.Dispose();
                 session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(key));
                 return;
@@ -1083,19 +1097,19 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
     }
 
-    private void TrySendNextBamDt(TxSessionKey key)
+    private void TrySendNextBamDt(TxSession session)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || session.IsCm) return;
+        if (!IsCurrentBamSession(session)) return;
         int offset = (session.NextSn - 1) * J1939TpFrames.DtDataBytes;
         byte sn = session.NextSn;
         var dt = J1939TpFrames.BuildDt(sn, session.Pdu, offset);
         SendControlFrame(J1939Pgn.TpDt, dt, destinationAddress: J1939TpFrames.GlobalDestinationAddress,
-            session, onConfirmed: () => OnBamDtConfirmed(key, sn));
+            session, onConfirmed: () => OnBamDtConfirmed(session, sn));
     }
 
-    private void OnBamDtConfirmed(TxSessionKey key, byte confirmedSn)
+    private void OnBamDtConfirmed(TxSession session, byte confirmedSn)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || session.IsCm) return;
+        if (!IsCurrentBamSession(session)) return;
         if (session.NextSn != confirmedSn) return; // stale confirmation
 
         // Compute the next SN as an int first: for a maximum-length PDU (TotalPackets=255) the
@@ -1106,13 +1120,13 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             // BAM has no ack -- complete once every DT has been transmitted.
             session.Tcs.TrySetResult(null);
-            EndTx(key);
+            EndTx(session.Key);
             return;
         }
 
         session.NextSn = (byte)nextSn;
         // The spacing between two consecutive BAM DTs (J1939-21 §5.10.3, 50..200 ms).
-        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(key));
+        _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
     }
 
     private void TrySendNextCmDt(TxSessionKey key)

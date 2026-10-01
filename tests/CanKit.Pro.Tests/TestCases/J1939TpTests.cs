@@ -1462,6 +1462,91 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("T4");
     }
 
+    // T4 is the hold timer after a CTS with numPackets = 0, and it only means something while the
+    // sender waits for a CTS. A hold that arrives after the last DT must leave the running T3 for
+    // the EndOfMsgAck alone: swapping it for a T4 whose expiry is ignored in that state left the
+    // send without any timer, and every later send to that destination queued behind it.
+    [Fact]
+    public async Task A_Cts_Hold_After_The_Last_Dt_Leaves_The_EndOfMsgAck_Timer_Running()
+    {
+        var session = NewSession();
+        using var senderBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+
+        const byte senderSa = 0x05;
+        const byte peerSa = 0x06;
+        const uint pgn = 0xFF05u;
+        const uint probePgn = 0xFF06u;
+        var payload = RandomPayload(21, seed: 41); // 3 packets
+
+        // Distinct values, so the armed timer names which one is running.
+        var options = new J1939TpOptions().With(
+            t2: TimeSpan.FromSeconds(5),
+            t3: TimeSpan.FromSeconds(2),
+            t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(new CanBusService(senderBus), sourceAddress: senderSa,
+            options, ownsService: true, actor);
+
+        var rtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lastDtSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeCtsSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peerBus.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != senderSa) return;
+            var data = e.CanFrame.Data.Span;
+            if (J1939Pgn.IsTransportCm(fields.Pgn) && data.Length >= 8)
+            {
+                if (data[0] == J1939TpFrames.ControlRts && J1939TpFrames.ReadDataPgn(data) == pgn)
+                    rtsSeen.TrySetResult(null);
+                if (data[0] == J1939TpFrames.ControlCts && J1939TpFrames.ReadDataPgn(data) == probePgn)
+                    probeCtsSeen.TrySetResult(null);
+            }
+            else if (fields.Pgn == J1939Pgn.TpDt && data.Length >= 1 && data[0] == 3)
+            {
+                lastDtSeen.TrySetResult(null);
+            }
+        };
+
+        var send = sender.SendCmAsync(pgn, destinationAddress: peerSa, payload);
+        await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        var cmId = (int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, senderSa);
+        peerBus.Transmit(CanFrame.Classic(cmId, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn),
+            isExtendedFrame: true));
+        await lastDtSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        // The last DT on the wire is not proof the timer for the EndOfMsgAck is armed yet.
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
+
+        var hold = new byte[8];
+        hold[0] = J1939TpFrames.ControlCts;
+        hold[1] = 0x00;
+        hold[2] = 0x04;
+        hold[3] = 0xFF;
+        hold[4] = 0xFF;
+        hold[5] = (byte)(pgn & 0xFF);
+        hold[6] = (byte)((pgn >> 8) & 0xFF);
+        hold[7] = (byte)((pgn >> 16) & 0xFF);
+        peerBus.Transmit(CanFrame.Classic(cmId, hold, isExtendedFrame: true));
+
+        // The channel reads its frames in order: its answer to this RTS is proof the hold above
+        // has been handled, without any wall time standing in for it.
+        var probe = J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: probePgn);
+        peerBus.Transmit(CanFrame.Classic(cmId, probe, isExtendedFrame: true));
+        await probeCtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        await clock.AdvanceAsync(options.T3);
+
+        Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.Timeout);
+        ex.Message.Should().Contain("EndOfMsgAck");
+    }
+
     // FR-TP-031: the receiver must cap its CTS grant at the originator's RTS-advertised
     // maximum (here 2), even though its own MaxPacketsPerCts (16) is larger — and keep the
     // cap on every subsequent block's CTS.
@@ -3097,6 +3182,87 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             .Which.ParamName.Should().Be(nameof(J1939TpOptions.MaxQueuedSendsPerDestination));
 
         new J1939TpOptions().With(maxQueuedSendsPerDestination: 0).MaxQueuedSendsPerDestination.Should().Be(0);
+    }
+
+    // The BAM chain is driven by timers and confirmations that outlive a cancel. Cancelling and
+    // sending the same PGN again inside the packet spacing puts a second session under the same
+    // key while the first one's timer is still armed; that timer must not drive the new session.
+    [Fact]
+    public async Task A_Cancelled_Bam_Does_Not_Drive_The_Next_Bam_Of_The_Same_Pgn()
+    {
+        const uint pgn = 0xFECBu;
+        var payload = RandomPayload(21, seed: 248); // 3 TP.DT
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        var dtSequence = new List<byte>();
+        bus.OnTransmitting = frame =>
+        {
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (fields.Pgn != J1939Pgn.TpDt) return;
+            lock (dtSequence) dtSequence.Add(frame.Data.Span[0]);
+        };
+        var background = new List<Exception>();
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+        sender.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+
+        using var cts = new CancellationTokenSource();
+        var first = sender.SendBamAsync(pgn, payload, cts.Token);
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout);
+
+        cts.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        var second = sender.SendBamAsync(pgn, payload);
+        // The first session's timer is still armed; the second one's joins it once its announce
+        // is confirmed. Only then do both fire on the same advance.
+        while (await actor.PostAsync(() => actor.PendingTimerCount) < 2)
+            await Task.Yield();
+
+        await DrainAsync(clock, actor, second);
+
+        lock (dtSequence)
+            dtSequence.Should().Equal(new byte[] { 1, 2, 3 },
+                "the stale timer of the cancelled BAM must not send a TP.DT for the new one");
+        lock (background) background.Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(nameof(J1939TpOptions.T1), 0)]
+    [InlineData(nameof(J1939TpOptions.T1), -1)]
+    [InlineData(nameof(J1939TpOptions.T2), 0)]
+    [InlineData(nameof(J1939TpOptions.T2), -1)]
+    [InlineData(nameof(J1939TpOptions.T3), 0)]
+    [InlineData(nameof(J1939TpOptions.T3), -1)]
+    [InlineData(nameof(J1939TpOptions.T4), 0)]
+    [InlineData(nameof(J1939TpOptions.T4), -1)]
+    [InlineData(nameof(J1939TpOptions.BamPacketSpacing), -1)]
+    public void A_Timer_Option_That_Cannot_Arm_Is_Rejected_At_Open(string option, int milliseconds)
+    {
+        var value = TimeSpan.FromMilliseconds(milliseconds);
+        var options = option switch
+        {
+            nameof(J1939TpOptions.T1) => new J1939TpOptions { T1 = value },
+            nameof(J1939TpOptions.T2) => new J1939TpOptions { T2 = value },
+            nameof(J1939TpOptions.T3) => new J1939TpOptions { T3 = value },
+            nameof(J1939TpOptions.T4) => new J1939TpOptions { T4 = value },
+            _ => new J1939TpOptions { BamPacketSpacing = value },
+        };
+
+        using var bus = Open(NewSession(), 0);
+        Action open = () => J1939TpFactory.Open(bus, sourceAddress: 0x85, options: options);
+        open.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be(option);
+    }
+
+    [Fact]
+    public void A_Zero_Bam_Packet_Spacing_Is_Still_Accepted()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var channel = J1939TpFactory.Open(bus, sourceAddress: 0x86,
+            options: new J1939TpOptions { BamPacketSpacing = TimeSpan.Zero });
+        channel.Should().NotBeNull();
     }
 
     private static J1939TpChannel BamSenderOn(ProtocolActor actor, ICanBusService service)
