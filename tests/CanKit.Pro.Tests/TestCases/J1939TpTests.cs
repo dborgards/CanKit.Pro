@@ -3464,7 +3464,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
-        var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
             new J1939TpOptions().With(bamPacketSpacing: spacing), ownsService: false, actor);
 
         var send = sender.SendBamAsync(0xFECBu, RandomPayload(21, seed: 251));
@@ -3528,6 +3528,37 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         lock (dtSequence)
             dtSequence.Should().Equal(new byte[] { 1, 1, 2, 3 },
                 "the old session's DT 1, then the new session's own three");
+    }
+
+    // The same late confirmation with no successor: nothing is registered under the key any more,
+    // and the cancelled BAM's announce confirmation must not start a chain for it.
+    [Fact]
+    public async Task A_Late_Announce_Confirmation_Of_A_Cancelled_Bam_With_No_Successor_Sends_Nothing()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dtCount = 0;
+        bus.OnTransmitting = frame =>
+        {
+            if (J1939Id.Decompose((uint)frame.ID).Pgn == J1939Pgn.TpDt) Interlocked.Increment(ref dtCount);
+        };
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+
+        using var cts = new CancellationTokenSource();
+        var send = sender.SendBamAsync(0xFECAu, RandomPayload(21, seed: 253), cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // its announce, confirmation held
+        cts.Cancel();
+        Func<Task> cancelled = async () => await send.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+
+        bus.DeferredEchoes.ReleaseNext();
+        await actor.PostAsync(() => 0);
+        await clock.AdvanceAsync(InFlightSpacing);
+
+        (await actor.NextTimerDelayAsync()).Should().BeNull("no chain was started for the cancelled BAM");
+        Volatile.Read(ref dtCount).Should().Be(0);
     }
 
     [Theory]

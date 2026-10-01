@@ -1583,7 +1583,6 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         {
             Deadline?.Dispose();
             Deadline = null;
-            ReleaseSpacingTimer();
             Tcs.TrySetCanceled();
         }
 
