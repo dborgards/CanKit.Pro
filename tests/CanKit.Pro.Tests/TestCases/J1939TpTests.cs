@@ -1547,6 +1547,105 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("EndOfMsgAck");
     }
 
+    // A hold can arrive right after the last DT of a block, before this side has seen the
+    // confirmation of that DT -- a fast peer on a loopback bus. It is the same early response a
+    // non-zero CTS is stashed for, so the hold takes effect when the block ends: T4, not T3.
+    [Fact]
+    public async Task A_Cts_Hold_Before_The_Block_End_Confirmation_Starts_T4_Not_T3()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC7u;
+        var payload = RandomPayload(21, seed: 8); // three packets, granted one at a time
+        var options = new J1939TpOptions().With(
+            t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
+            ownsService: false, actor);
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var send = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        var hold = new byte[8];
+        hold[0] = J1939TpFrames.ControlCts;
+        hold[2] = 0x02;
+        hold[3] = hold[4] = 0xFF;
+        hold[5] = (byte)(pgn & 0xFF);
+        hold[6] = (byte)((pgn >> 8) & 0xFF);
+        hold[7] = (byte)((pgn >> 16) & 0xFF);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(hold));
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, hold), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+
+        bus.DeferredEchoes.ReleaseNext(); // the block ends now
+        await clock.WaitUntilTimerArmedAsync(actor, options.T4, ShortTimeout);
+        await clock.AdvanceAsync(options.T4);
+
+        Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Message.Should().Contain("T4");
+    }
+
+    // The same hold in the middle of a block has nothing to hold yet: the block runs on, and the
+    // timer after it is T3 as usual.
+    [Fact]
+    public async Task A_Cts_Hold_In_The_Middle_Of_A_Block_Is_Ignored()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC5u;
+        var payload = RandomPayload(21, seed: 9); // three packets, granted in one block
+        var options = new J1939TpOptions().With(
+            t2: TimeSpan.FromSeconds(5), t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options,
+            ownsService: false, actor);
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var send = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        var hold = new byte[8];
+        hold[0] = J1939TpFrames.ControlCts;
+        hold[2] = 0x02;
+        hold[3] = hold[4] = 0xFF;
+        hold[5] = (byte)(pgn & 0xFF);
+        hold[6] = (byte)((pgn >> 8) & 0xFF);
+        hold[7] = (byte)((pgn >> 16) & 0xFF);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(hold));
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, hold), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+
+        bus.DeferredEchoes.ReleaseNext(); // DT 1
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext(); // DT 2
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext(); // DT 3: the last packet, so T3 for the EndOfMsgAck
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout);
+        await clock.AdvanceAsync(options.T3);
+
+        Func<Task> act = async () => await send.WithTimeout(ShortTimeout);
+        var ex = (await act.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Message.Should().Contain("EndOfMsgAck");
+    }
+
     // FR-TP-031: the receiver must cap its CTS grant at the originator's RTS-advertised
     // maximum (here 2), even though its own MaxPacketsPerCts (16) is larger — and keep the
     // cap on every subsequent block's CTS.

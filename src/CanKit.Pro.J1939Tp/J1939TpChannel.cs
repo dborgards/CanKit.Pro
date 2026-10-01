@@ -979,12 +979,23 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // for the EndOfMsgAck) or mid-block (T3 follows the block) the running timer
                 // stays: swapping it for a T4 whose expiry is ignored in those states left the
                 // send without any timer at all.
-                if (session.State != TxStage.WaitCts) return;
+                if (session.State != TxStage.WaitCts)
+                {
+                    // A fast peer can hold right after the last DT of a block, before our
+                    // confirmation of that DT has run -- the same early-response race a
+                    // non-zero CTS is stashed for. The hold is remembered and takes effect when
+                    // the block ends: T4 then, not T3.
+                    if (session.State == TxStage.SendingDt && session.BlockRemaining == 1
+                        && session.NextSn != session.TotalPackets)
+                        session.HoldPending = true;
+                    return;
+                }
                 session.Deadline?.Dispose();
                 session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(key));
                 return;
             }
 
+            session.HoldPending = false; // a CTS that grants packets ends any hold
             // What has gone out: the highest packet ever confirmed (HighestSentSn -- an int, so a
             // 255-packet message's last packet counts, where the byte NextSn wraps to 0), and,
             // while a block drains, the one outstanding (NextSn, unconfirmed). A CTS for a
@@ -1187,7 +1198,15 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
             session.State = TxStage.WaitCts;
             session.Deadline?.Dispose();
-            session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
+            if (session.HoldPending)
+            {
+                session.HoldPending = false;
+                session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(key));
+            }
+            else
+            {
+                session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
+            }
             return;
         }
 
@@ -1523,6 +1542,8 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         /// been confirmed (Virtual-loopback race). Applied in <see cref="OnCmDtConfirmed"/>.
         /// </summary>
         public bool HasPendingCts { get; set; }
+        /// <summary>A CTS(0) hold arrived before the last DT of the block was confirmed: T4 starts when it is.</summary>
+        public bool HoldPending { get; set; }
         public byte PendingCtsNumPackets { get; set; }
         /// <summary>The stashed CTS asks for a packet already sent: applied as soon as the outstanding DT is confirmed.</summary>
         public bool PendingCtsIsRetransmit { get; set; }
