@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -48,6 +49,63 @@ public class CanOpenSdoClientSendFailureTests
         await FluentActions.Awaiting(() => act().WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<CanOpenTransportException>();
         reported.Should().Contain(ex => ex is CanOpenTransportException);
+    }
+
+    public static TheoryData<string> BlockDownloadEndings => new() { "the server aborts", "the caller cancels" };
+
+    // A block download sends a whole sub-block as one ordered batch. When the transfer ends while
+    // the batch is still going -- the server aborted, or the caller cancelled -- the segments still
+    // to go must not be sent: the server has no session for them any more and reads each as a
+    // command specifier, a seqno of 0x20..0x3F being a classic download initiate.
+    [Theory]
+    [MemberData(nameof(BlockDownloadEndings))]
+    public async Task A_Block_Download_That_Ends_Mid_SubBlock_Sends_No_More_Segments(string ending)
+    {
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-end-{Guid.NewGuid():N}");
+        var toServer = new List<byte[]>();
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoRx(0x11)) lock (toServer) toServer.Add(frame.Data.ToArray());
+        };
+        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        var payload = Enumerable.Range(0, 70).Select(i => (byte)(0x30 + i)).ToArray(); // ten segments
+        using var cts = new CancellationTokenSource();
+        var download = client.SdoDownloadAsync(0x11, 0x1000, 0x00, payload, SdoTransferMode.Block, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+            SdoBlockFrames.BuildBlockDownloadInitResponse(0x1000, 0x00, serverCrcSupported: false, blockSize: 10)),
+            isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, its confirmation held
+
+        if (ending == "the server aborts")
+        {
+            bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+                SdoFrames.BuildAbort(0x1000, 0x00, (uint)SdoAbortCode.General)), isEcho: false);
+            await FluentActions.Awaiting(() => download.WithTimeoutAsync(ShortTimeout))
+                .Should().ThrowAsync<SdoAbortException>();
+        }
+        else
+        {
+            cts.Cancel();
+            await FluentActions.Awaiting(() => download.WithTimeoutAsync(ShortTimeout))
+                .Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        // The transfer is over; let the batch carry on. A batch that ignores that sends nine more.
+        bus.DeferredEchoes.ReleaseAll();
+        // No signal says "nothing more is coming", so this is a negative window: it can only pass
+        // falsely on a slow host, never fail falsely.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        bus.DeferredEchoes.ReleaseAll();
+
+        byte[][] sent;
+        lock (toServer) sent = toServer.ToArray();
+        sent.Length.Should().Be(ending == "the server aborts" ? 2 : 3,
+            "the initiate and segment 1 -- and, after a cancel, the abort -- and nothing after");
     }
 
     public static TheoryData<string> Uploads => new() { "upload", "block upload" };

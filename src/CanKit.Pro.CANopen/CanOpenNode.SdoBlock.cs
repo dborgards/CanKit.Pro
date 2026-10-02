@@ -585,7 +585,10 @@ internal sealed partial class CanOpenNode
         }
         session.ResumeSeqno = seqno;
         session.Phase = SdoBlockClientPhase.AwaitSubBlockAck;
-        _ = SendOrderedControlFrames(TrackSdoBlockClientSend(session), frames.ToArray());
+        // Every way the transfer ends completes its task (abort, peer abort, cancel, timeout,
+        // dispose), and that is readable from the sending task; the session tables are not.
+        _ = SendOrderedControlFrames(TrackSdoBlockClientSend(session),
+            () => session.Tcs.Task.IsCompleted, frames.ToArray());
     }
 
     private void SendBlockDownloadEnd(SdoBlockClientSession session)
