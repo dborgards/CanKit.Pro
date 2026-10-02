@@ -2369,6 +2369,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
         params (uint CobId, byte[] Payload)[] frames)
+        => SendOrderedControlFrames(onSendCompleted, shouldStop: null, frames);
+
+    /// <summary>
+    /// As above. <paramref name="shouldStop"/>, when given, is asked before each frame and ends the
+    /// batch without sending the rest: a block transfer sends a whole sub-block as one batch, and
+    /// when the transfer ends meanwhile (the server aborted, the caller cancelled) the segments
+    /// still to go would reach a server that has no session for them any more, and read as
+    /// command specifiers. It runs on the sending task, so it must read thread-safe state only.
+    /// </summary>
+    private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
+        Func<bool>? shouldStop, params (uint CobId, byte[] Payload)[] frames)
     {
         return Task.Run(async () =>
         {
@@ -2377,6 +2388,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             {
                 foreach (var (cobId, payload) in frames)
                 {
+                    if (shouldStop?.Invoke() == true) return;
                     try
                     {
                         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
