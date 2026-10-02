@@ -85,7 +85,7 @@ public sealed class IsoTpFunctionalListener : IDisposable
             TakeBuffered(responses, now);
             return responses.AsReadOnly();
         }
-        long deadline = now + (long)(window.TotalSeconds * _time.Frequency);
+        long deadline = TickMath.DueAt(now, window, _time.Frequency);
         using var windowEnd = new FunctionalWindow(_clock, window, cancellationToken);
         try
         {

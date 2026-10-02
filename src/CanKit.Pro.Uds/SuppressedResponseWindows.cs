@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using CanKit.Pro.Actor;
 
 namespace CanKit.Pro.Uds;
 
@@ -32,7 +33,7 @@ internal sealed class SuppressedResponseWindows
         => Extend(sid, sentTimestamp + Ticks(window, ticksPerSecond));
 
     internal static long Ticks(TimeSpan window, long ticksPerSecond)
-        => (long)(window.TotalSeconds * ticksPerSecond);
+        => TickMath.ToTicks(window, ticksPerSecond);
 
     /// <summary>Moves the window for <paramref name="sid"/> out to <paramref name="until"/>, if later.</summary>
     public void Extend(byte sid, long until)
@@ -96,6 +97,6 @@ internal sealed class SuppressedResponseWindows
     public static TimeSpan Remaining(long until, long now, long ticksPerSecond)
     {
         var ticks = until - now;
-        return ticks <= 0 ? TimeSpan.Zero : TimeSpan.FromSeconds((double)ticks / ticksPerSecond);
+        return ticks <= 0 ? TimeSpan.Zero : TickMath.RemainingFromTicks(ticks, ticksPerSecond);
     }
 }

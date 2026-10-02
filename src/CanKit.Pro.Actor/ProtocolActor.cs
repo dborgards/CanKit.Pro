@@ -151,7 +151,7 @@ namespace CanKit.Pro.Actor
                 var ticks = entry.DueTimestamp - _time.GetTimestamp();
                 return ticks <= 0
                     ? TimeSpan.Zero
-                    : TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
+                    : TickMath.RemainingFromTicks(ticks, _time.Frequency);
             }
 
             return null;
@@ -853,14 +853,11 @@ namespace CanKit.Pro.Actor
         // a floor ("not before"), never a target to be missed on the low side.
         private long DueTimestamp(TimeSpan delay)
         {
-            var now = _time.GetTimestamp();
-            var ticks = delay.TotalSeconds * _time.Frequency;
-
-            // TimeSpan reaches ~29 000 years; the tick counter does not. Saturating is the right
-            // answer for a delay nothing in this process will ever outlive anyway.
-            if (ticks >= long.MaxValue - now) return long.MaxValue;
-
-            return now + (long)Math.Ceiling(ticks);
+            // Exact, see TickMath: through a double about one millisecond value in twelve (35, 70,
+            // 85, 101 ms ...) became due a tick late. TimeSpan reaches ~29 000 years and the tick
+            // counter does not; TickMath saturates, the right answer for a delay nothing in this
+            // process will ever outlive anyway.
+            return TickMath.DueAt(_time.GetTimestamp(), delay, _time.Frequency);
         }
 
         // Rounds *up*: truncating a 0.4 ms remainder to a 0 ms wait made the loop spin on the

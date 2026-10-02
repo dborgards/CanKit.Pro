@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -22,6 +23,53 @@ namespace CanKit.Pro.Tests.TestCases;
 public class ProtocolActorTimerTests
 {
     private static readonly TimeSpan Bounded = TimeSpan.FromSeconds(5);
+
+    // #20 / the 2026-09-30 review: a delay of 35 ms became due 100 ns late and one of 43 ms was
+    // reported 100 ns short, because both conversions went through a double. Both frequencies a
+    // Stopwatch has in practice are checked, over every whole millisecond up to two seconds.
+    [Theory]
+    [InlineData(10_000_000L)]
+    [InlineData(1_000_000_000L)]
+    public async Task A_Timer_Is_Armed_Exactly_As_Far_Away_As_Asked(long frequency)
+    {
+        var clock = new ManualTimeSource(frequency);
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null);
+
+        var wrong = new List<int>();
+        for (var ms = 1; ms <= 2000; ms++)
+        {
+            var asked = TimeSpan.FromMilliseconds(ms);
+            using var handle = actor.Schedule(asked, () => { });
+            if (await actor.NextTimerDelayAsync() != asked) wrong.Add(ms);
+        }
+
+        wrong.Should().BeEmpty("the reported delay of a freshly armed timer is the delay it was armed with");
+    }
+
+    [Theory]
+    [InlineData(10_000_000L)]
+    [InlineData(1_000_000_000L)]
+    public async Task A_Timer_Fires_When_The_Clock_Has_Advanced_By_Exactly_Its_Delay(long frequency)
+    {
+        var clock = new ManualTimeSource(frequency);
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null);
+
+        var late = new List<int>();
+        for (var ms = 1; ms <= 400; ms++)
+        {
+            var asked = TimeSpan.FromMilliseconds(ms);
+            var fired = 0;
+            using var handle = actor.Schedule(asked, () => Interlocked.Increment(ref fired));
+            clock.Advance(asked);
+            // Two round trips: the first wakes the loop, the second returns after the timers that
+            // became due have run.
+            await actor.PostAsync(() => 0);
+            await actor.PostAsync(() => 0);
+            if (Volatile.Read(ref fired) != 1) late.Add(ms);
+        }
+
+        late.Should().BeEmpty("advancing the clock by exactly the delay makes the timer due");
+    }
 
     [Fact]
     public async Task Timer_Due_Times_Ignore_The_Wall_Clock_And_Follow_The_Monotonic_Source()
@@ -204,7 +252,10 @@ public class ProtocolActorTimerTests
     {
         // Guards the test above from passing for the wrong reason: the timeout must be reported
         // only when the loop genuinely could not be joined, never on every Dispose.
-        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(500));
+        // The default join timeout: Dispose returns when the loop ends, not when the timeout does,
+        // so a long one costs nothing -- and a short one is a wall-clock margin on the thread
+        // wake-up that a loaded host can exceed, reporting a timeout that did not happen.
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, null);
         Exception? observed = null;
         actor.BackgroundExceptionOccurred += (_, ex) => observed ??= ex;
 
@@ -223,7 +274,7 @@ public class ProtocolActorTimerTests
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
         var time = actor.TimeSource;
-        long Ms(int ms) => (long)(ms / 1000.0 * time.Frequency);
+        long Ms(int ms) => TickMath.ToTicks(TimeSpan.FromMilliseconds(ms), time.Frequency);
 
         var deadline = time.GetTimestamp() + Ms(50); // the caller's reading, and its deadline
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(30)); // the clock moves before the arming

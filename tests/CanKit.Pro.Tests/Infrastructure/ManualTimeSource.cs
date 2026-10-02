@@ -28,8 +28,14 @@ internal sealed class ManualTimeSource : ITimeSource
     private long _timestamp;
     private long _reads;
 
+    public ManualTimeSource() : this(TimeSpan.TicksPerSecond) { }
+
+    /// <summary>A source ticking <paramref name="frequency"/> times a second: 10 000 000 is
+    /// <c>Stopwatch</c> on Windows, 1 000 000 000 on Linux and macOS.</summary>
+    public ManualTimeSource(long frequency) => Frequency = frequency;
+
     /// <inheritdoc />
-    public long Frequency => TimeSpan.TicksPerSecond;
+    public long Frequency { get; }
 
     /// <summary>
     /// How often the actor has asked for the time since the last <see cref="ResetReadCount"/>.
@@ -50,7 +56,7 @@ internal sealed class ManualTimeSource : ITimeSource
     public void Advance(TimeSpan by)
     {
         if (by < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(by), "A monotonic clock cannot go backwards.");
-        Interlocked.Add(ref _timestamp, by.Ticks);
+        Interlocked.Add(ref _timestamp, (long)Math.Ceiling((decimal)by.Ticks * Frequency / TimeSpan.TicksPerSecond));
     }
 
     public void ResetReadCount() => Interlocked.Exchange(ref _reads, 0);

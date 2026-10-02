@@ -324,7 +324,7 @@ public sealed class IsoTpFunctionalClient : IDisposable
         // The window's end is also held as an arrival stamp: the timer's callback and this
         // method's continuations are scheduling, and a frame that arrived after the deadline
         // but before they ran is not the window's (Codex on #150).
-        long deadline = _time.GetTimestamp() + (long)(window.TotalSeconds * _time.Frequency);
+        long deadline = TickMath.DueAt(_time.GetTimestamp(), window, _time.Frequency);
         using var windowEnd = new FunctionalWindow(_clock, window, cancellationToken);
         var windowToken = windowEnd.Token;
 

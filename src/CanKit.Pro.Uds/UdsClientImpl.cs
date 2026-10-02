@@ -1529,7 +1529,7 @@ internal sealed class UdsClientImpl : IUdsClient
         var end = endTimestamp ?? Now();
         var ticks = end - startTimestamp;
         if (ticks <= 0) return TimeSpan.Zero;
-        return TimeSpan.FromSeconds((double)ticks / _time.Frequency);
+        return TickMath.ElapsedFromTicks(ticks, _time.Frequency);
     }
 
     private void ThrowIfDisposed()
