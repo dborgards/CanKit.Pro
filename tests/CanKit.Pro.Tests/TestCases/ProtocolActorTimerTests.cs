@@ -274,7 +274,7 @@ public class ProtocolActorTimerTests
         using var clock = new VirtualClock();
         var actor = clock.NewActor();
         var time = actor.TimeSource;
-        long Ms(int ms) => (long)(ms / 1000.0 * time.Frequency);
+        long Ms(int ms) => TickMath.ToTicks(TimeSpan.FromMilliseconds(ms), time.Frequency);
 
         var deadline = time.GetTimestamp() + Ms(50); // the caller's reading, and its deadline
         await clock.AdvanceAsync(TimeSpan.FromMilliseconds(30)); // the clock moves before the arming

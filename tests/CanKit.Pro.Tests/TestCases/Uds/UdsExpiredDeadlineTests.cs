@@ -841,7 +841,7 @@ public class UdsExpiredDeadlineTests
         private long FinalArrivalStamp() => _arrivalStamp + Ticks(PendingToFinalArrivalGap);
 
         private long Ticks(TimeSpan span)
-            => (long)(span.TotalSeconds * Frequency);
+            => TickMath.ToTicks(span, Frequency);
 
         public async Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default)
             => (await ReceiveWithArrivalAsync(cancellationToken).ConfigureAwait(false)).Pdu;

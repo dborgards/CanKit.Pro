@@ -710,8 +710,7 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         var call = client.SendAndCollectAsync(new byte[] { 0x22, 0xF1, 0x90 }, window);
         await clock.WaitUntilTimerArmedAsync(actor, window, ShortTimeout);
         // The clock has not moved since the collection read it, so its deadline is this.
-        long deadline = actor.TimeSource.GetTimestamp()
-            + (long)(window.TotalSeconds * actor.TimeSource.Frequency);
+        long deadline = TickMath.DueAt(actor.TimeSource.GetTimestamp(), window, actor.TimeSource.Frequency);
         service.Deliver(SingleFrameView(0x7E8, new byte[] { 0x62, 0xF1, 0x90, 0x01 }), deadline);
         service.Deliver(SingleFrameView(0x7E9, new byte[] { 0x62, 0xF1, 0x90, 0x02 }), deadline + 1);
         service.Deliver(SingleFrameView(0x7EA, new byte[] { 0x62, 0xF1, 0x90, 0x03 }));
