@@ -65,7 +65,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     /// <summary>Ticks of <see cref="_time"/> as a <see cref="TimeSpan"/>.</summary>
     private TimeSpan TimeSpanFromTicks(long ticks)
-        => TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
+        => TickMath.ElapsedFromTicks(ticks, _time.Frequency);
     private readonly J1939NodeOptions _options;
     private readonly J1939Name _name;
     private readonly ProtocolActor _actor;
@@ -1800,7 +1800,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         public PeriodicSchedule(J1939NodeImpl owner, J1939Message message, TimeSpan period)
         {
             _owner = owner;
-            _periodTicks = (long)(period.TotalSeconds * owner._time.Frequency);
+            _periodTicks = TickMath.ToTicks(period, owner._time.Frequency);
 
             // Snapshot the caller's payload into an owned array so the wire traffic is
             // frozen at Start-time regardless of whether the caller mutates the buffer that

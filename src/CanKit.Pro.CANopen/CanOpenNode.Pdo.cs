@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
@@ -426,7 +427,7 @@ internal sealed partial class CanOpenNode
         }
         var time = _actor.TimeSource;
         long elapsedTicks = time.GetTimestamp() - rt.LastTransmission;
-        var elapsed = TimeSpan.FromTicks((long)(elapsedTicks * (TimeSpan.TicksPerSecond / (double)time.Frequency)));
+        var elapsed = TickMath.ElapsedFromTicks(elapsedTicks, time.Frequency);
         if (elapsed >= rt.InhibitTime)
         {
             EmitTpdo(rt);

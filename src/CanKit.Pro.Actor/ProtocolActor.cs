@@ -151,7 +151,7 @@ namespace CanKit.Pro.Actor
                 var ticks = entry.DueTimestamp - _time.GetTimestamp();
                 return ticks <= 0
                     ? TimeSpan.Zero
-                    : TimeSpan.FromTicks(ToTimeSpanTicks(ticks));
+                    : TickMath.RemainingFromTicks(ticks, _time.Frequency);
             }
 
             return null;
@@ -853,27 +853,12 @@ namespace CanKit.Pro.Actor
         // a floor ("not before"), never a target to be missed on the low side.
         private long DueTimestamp(TimeSpan delay)
         {
-            var now = _time.GetTimestamp();
-
-            // Integer arithmetic, in decimal: a TimeSpan is a whole number of 100 ns ticks and the
-            // source's frequency a whole number per second, so the product is exact, and dividing
-            // by 10^7 is exact in decimal. Through a double (TotalSeconds * Frequency) about one
-            // millisecond value in twelve came out a tick high and was rounded up to another one
-            // (35, 70, 85, 101 ms ...), so a timer became due a tick later than asked.
-            var ticks = Math.Ceiling((decimal)delay.Ticks * _time.Frequency / TimeSpan.TicksPerSecond);
-
-            // TimeSpan reaches ~29 000 years; the tick counter does not. Saturating is the right
-            // answer for a delay nothing in this process will ever outlive anyway.
-            if (ticks >= long.MaxValue - now) return long.MaxValue;
-
-            return now + (long)ticks;
+            // Exact, see TickMath: through a double about one millisecond value in twelve (35, 70,
+            // 85, 101 ms ...) became due a tick late. TimeSpan reaches ~29 000 years and the tick
+            // counter does not; TickMath saturates, the right answer for a delay nothing in this
+            // process will ever outlive anyway.
+            return TickMath.DueAt(_time.GetTimestamp(), delay, _time.Frequency);
         }
-
-        // The inverse of DueTimestamp, rounded up for the same reason: a remaining time is a floor.
-        // TimeSpan.FromSeconds(double) truncates on current runtimes, which lost a tick for about
-        // one millisecond value in twelve (43, 51, 71, 86 ms ...).
-        private long ToTimeSpanTicks(long sourceTicks)
-            => (long)Math.Ceiling((decimal)sourceTicks * TimeSpan.TicksPerSecond / _time.Frequency);
 
         // Rounds *up*: truncating a 0.4 ms remainder to a 0 ms wait made the loop spin on the
         // semaphore -- burning a core for up to a millisecond before every single timer -- while
