@@ -214,7 +214,9 @@ public class ProtocolActorTests
         using var handle = actor.Schedule(TimeSpan.FromMilliseconds(200), () => tcs.TrySetResult(true));
 
         (await Task.WhenAny(tcs.Task, Task.Delay(TimeSpan.FromSeconds(5)))).Should().Be(tcs.Task);
-        sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(150));
+        // The stopwatch started before the schedule call and the actor's clock after it, so the
+        // wait can never be shorter than the delay: "not before it is due" is the one promise.
+        sw.Elapsed.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(200));
     }
 
     [Fact]

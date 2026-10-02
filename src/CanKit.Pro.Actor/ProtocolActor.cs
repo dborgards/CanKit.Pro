@@ -151,7 +151,7 @@ namespace CanKit.Pro.Actor
                 var ticks = entry.DueTimestamp - _time.GetTimestamp();
                 return ticks <= 0
                     ? TimeSpan.Zero
-                    : TimeSpan.FromSeconds(ticks / (double)_time.Frequency);
+                    : TimeSpan.FromTicks(ToTimeSpanTicks(ticks));
             }
 
             return null;
@@ -854,14 +854,26 @@ namespace CanKit.Pro.Actor
         private long DueTimestamp(TimeSpan delay)
         {
             var now = _time.GetTimestamp();
-            var ticks = delay.TotalSeconds * _time.Frequency;
+
+            // Integer arithmetic, in decimal: a TimeSpan is a whole number of 100 ns ticks and the
+            // source's frequency a whole number per second, so the product is exact, and dividing
+            // by 10^7 is exact in decimal. Through a double (TotalSeconds * Frequency) about one
+            // millisecond value in twelve came out a tick high and was rounded up to another one
+            // (35, 70, 85, 101 ms ...), so a timer became due a tick later than asked.
+            var ticks = Math.Ceiling((decimal)delay.Ticks * _time.Frequency / TimeSpan.TicksPerSecond);
 
             // TimeSpan reaches ~29 000 years; the tick counter does not. Saturating is the right
             // answer for a delay nothing in this process will ever outlive anyway.
             if (ticks >= long.MaxValue - now) return long.MaxValue;
 
-            return now + (long)Math.Ceiling(ticks);
+            return now + (long)ticks;
         }
+
+        // The inverse of DueTimestamp, rounded up for the same reason: a remaining time is a floor.
+        // TimeSpan.FromSeconds(double) truncates on current runtimes, which lost a tick for about
+        // one millisecond value in twelve (43, 51, 71, 86 ms ...).
+        private long ToTimeSpanTicks(long sourceTicks)
+            => (long)Math.Ceiling((decimal)sourceTicks * TimeSpan.TicksPerSecond / _time.Frequency);
 
         // Rounds *up*: truncating a 0.4 ms remainder to a 0 ms wait made the loop spin on the
         // semaphore -- burning a core for up to a millisecond before every single timer -- while
