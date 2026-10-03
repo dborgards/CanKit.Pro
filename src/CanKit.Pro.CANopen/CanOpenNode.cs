@@ -138,6 +138,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private bool _nodeGuardingProducerToggle;
 
     private int _disposed;
+    private bool _pumpStopRequested;
     private readonly TaskCompletionSource<bool> _disposeDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <inheritdoc />
@@ -651,7 +652,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
         // Dispose.
         CompleteEventQueue();
-        if (!OnEventPump)
+        if (OnEventPump)
+        {
+            // The events still queued are not delivered once this subscriber returns: nothing is
+            // delivered past Dispose.
+            Volatile.Write(ref _pumpStopRequested, true);
+        }
+        else
         {
             try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
         }
@@ -866,7 +873,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             MarkDelivering(this);
             try
             {
-                while (TryDequeueEvent() is { } raise)
+                while (!Volatile.Read(ref _pumpStopRequested) && TryDequeueEvent() is { } raise)
                 {
                     try
                     {
@@ -2691,6 +2698,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // (Codex on #133).
         foreach (var subscriber in handler.GetInvocationList())
         {
+            // One that disposed the node ends the round: the rest are not called on a node that
+            // is gone.
+            if (Volatile.Read(ref _disposed) != 0) break;
             try { ((EventHandler<NmtResetEventArgs>)subscriber)(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }

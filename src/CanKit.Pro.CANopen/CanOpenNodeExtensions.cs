@@ -19,8 +19,9 @@ public static class CanOpenNodeExtensions
     /// seconds. Either call may be made from a subscriber of the node (an event,
     /// <c>ApplicationReset</c>, <c>BackgroundExceptionOccurred</c>): the task that subscriber runs
     /// on is then not waited for. A second call while the first is running returns when the
-    /// disposal has finished. A node that is not one of this library's is disposed on the thread
-    /// pool.
+    /// disposal has finished, except from a subscriber of the node, which cannot wait for a
+    /// disposal that is waiting for it and returns at once. A node that is not one of this
+    /// library's is disposed on the thread pool.
     /// </summary>
     /// <param name="node">The node to dispose.</param>
     public static ValueTask DisposeAsync(this ICanOpenNode node)

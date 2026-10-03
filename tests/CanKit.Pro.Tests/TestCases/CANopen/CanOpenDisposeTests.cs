@@ -206,6 +206,65 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         reports.Should().BeEmpty("the reset stopped at the subscriber instead of arming timers on a disposed node");
     }
 
+    // Subscribers of ApplicationReset are called one after the other; one that disposes the node
+    // ends the round.
+    [Fact]
+    public async Task A_Reset_Does_Not_Call_The_Next_Subscriber_After_One_Disposed_The_Node()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCalled = 0;
+        node.ApplicationReset += (_, _) =>
+        {
+            node.Dispose();
+            first.TrySetResult(true);
+        };
+        node.ApplicationReset += (_, _) => Interlocked.Increment(ref secondCalled);
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new byte[] { (byte)NmtCommand.ResetNode, 0x01 }, isExtendedFrame: false));
+        await first.Task.WithTimeoutAsync(ShortTimeout);
+
+        // A negative window: it can only pass falsely on a slow host, never fail falsely.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Volatile.Read(ref secondCalled).Should().Be(0);
+    }
+
+    // Events still queued when a subscriber disposes the node are dropped, not delivered after
+    // the call has returned. The first subscriber holds the pump until the second heartbeat is
+    // certainly queued behind it.
+    [Fact]
+    public async Task Events_Queued_Behind_A_Subscriber_That_Disposes_The_Node_Are_Not_Delivered()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var delivered = 0;
+        var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.HeartbeatReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref delivered) == 1)
+            {
+                Thread.Sleep(300); // the second frame is queued behind this event by now
+                node.Dispose();
+                disposed.TrySetResult(true);
+            }
+        };
+
+        SendHeartbeat(rawBus, 0x11, 0x05);
+        SendHeartbeat(rawBus, 0x12, 0x05);
+        await disposed.Task.WithTimeoutAsync(ShortTimeout);
+
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]
