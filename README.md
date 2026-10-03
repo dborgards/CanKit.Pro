@@ -87,7 +87,8 @@ using var j1939 = service.Subscribe(e => e.Frame.IsExtendedFrame);
 
 await foreach (var frame in isoTp.Frames.WithCancellation(token))
 {
-    // A CanFrameEvent: the frame plus its timestamps and echo flag — no ownership, no disposal.
+    // A CanFrameEvent: the frame plus its timestamps and echo flag. Its payload is an owned copy,
+    // valid for as long as you hold it; nothing to dispose.
 }
 
 // "Did it actually go out?" — a real echo match where the bus provides one, driver acceptance
