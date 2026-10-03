@@ -1105,6 +1105,58 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the demux broke");
     }
 
+    // The reader's generic-catch filter does not handle these. They are still reader failures:
+    // a receive that is already waiting, and one that starts afterwards, both have to observe
+    // the same exception, and it has to be raised once. The subscription throws the instance,
+    // so a passing test is the inbox-loss signal, not a stand-in for it. StackOverflowException
+    // and AccessViolationException are left out: an explicit throw is catchable, but a real
+    // stack overflow aborts the process. ThreadAbortException cannot be constructed here.
+    [Theory]
+    [InlineData(nameof(OutOfMemoryException))]
+    [InlineData(nameof(BadImageFormatException))]
+    [InlineData(nameof(AppDomainUnloadedException))]
+    [InlineData(nameof(CannotUnloadAppDomainException))]
+    public async Task An_Excluded_Reader_Failure_Still_Wakes_Waiting_And_Later_Receives(string kind)
+    {
+        var fault = ExcludedReaderFailure(kind);
+        var service = new StarvedReaderBusService { ReaderFault = fault };
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        var first = channel.ReceiveAsync();
+        var second = channel.ReceiveAsync();
+        service.WakeReader();
+
+        Func<Task> firstAct = () => first.WaitAsync(ShortTimeout);
+        (await firstAct.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(fault);
+        Func<Task> secondAct = () => second.WaitAsync(ShortTimeout);
+        (await secondAct.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(fault);
+
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(fault);
+
+        Func<Task> later = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        (await later.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(fault);
+
+        // Publishing the loss must not swallow the failure: the reader task still faults
+        // with the same instance. WaitAsync observes that fault, or times out if it was swallowed.
+        var reader = (Task)typeof(IsoTpChannel).GetField("_readerTask",
+            BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(channel)!;
+        Func<Task> readerFaulted = () => reader.WaitAsync(ShortTimeout);
+        (await readerFaulted.Should().ThrowAsync<Exception>()).Which.Should().BeSameAs(fault);
+    }
+
+    private static Exception ExcludedReaderFailure(string kind) => kind switch
+    {
+        nameof(OutOfMemoryException) => new OutOfMemoryException("the reader failed"),
+        nameof(BadImageFormatException) => new BadImageFormatException("the reader failed"),
+        nameof(AppDomainUnloadedException) => new AppDomainUnloadedException("the reader failed"),
+        nameof(CannotUnloadAppDomainException) => new CannotUnloadAppDomainException("the reader failed"),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Not an excluded reader failure under test."),
+    };
+
     // A reassembly under way dies with the subscription: it is withdrawn, so
     // GetReceptionsInProgress does not keep reporting a transfer nobody will complete.
     [Fact]
