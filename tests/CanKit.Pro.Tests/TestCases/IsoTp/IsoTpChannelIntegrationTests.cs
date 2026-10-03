@@ -850,6 +850,396 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         thrown.Message.Should().Contain("disposed");
     }
 
+    // The 2026-09-30 review (I6): a channel opened over a shared service (leaveOpen) outlives the
+    // service when the owner disposes it first. The channel's reader ended quietly, and a receiver
+    // waiting on the inbox waited for ever; a send, by contrast, failed at once. The inbox is
+    // completed with the reason: what is buffered stays readable, then every receiver gets it.
+    [Fact]
+    public async Task A_Service_Disposed_Under_The_Channel_Faults_Every_Waiting_Receive()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+        var reported = new List<Exception>();
+        channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var first = channel.ReceiveAsync();
+        var second = channel.ReceiveAsync();
+        service.Dispose();
+
+        static async Task FaultsWithTheLossAsync(Task<byte[]> waiting)
+        {
+            Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+            var thrown = (await act.Should().ThrowAsync<ObjectDisposedException>()).Which;
+            thrown.ObjectName.Should().Be(nameof(ICanBusService));
+        }
+
+        await FaultsWithTheLossAsync(first);
+        await FaultsWithTheLossAsync(second);
+
+        // And a receive after the loss ends at once with the same reason instead of waiting.
+        Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
+        lock (reported) reported.Should().ContainSingle().Which.Should().BeOfType<ObjectDisposedException>();
+    }
+
+    // A PDU that had already arrived is not lost with the service: it stays readable, and the
+    // failure follows it.
+    [Fact]
+    public async Task A_PDU_Received_Before_The_Service_Goes_Is_Still_Delivered_First()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        // EmitPdu enqueues before it raises the event, so the event proves the PDU is in the inbox.
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        service.Dispose();
+
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+        Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // Review on #261: a discard that keeps the items from after its stamp writes them back, and a
+    // completed inbox takes no writes. The PDUs that had arrived are still delivered, then the loss.
+    [Fact]
+    public async Task A_Discard_After_The_Service_Goes_Keeps_The_Pdus_From_After_Its_Stamp()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        var arrived = 0;
+        var both = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => { if (Interlocked.Increment(ref arrived) == 2) both.TrySetResult(true); };
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0C, 0x0D, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await both.Task.WaitAsync(ShortTimeout);
+
+        // The loss is reported after the inbox is completed with it: the discard below must meet
+        // that state, not race the reader noticing the service went.
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, _) => lost.TrySetResult(true);
+        service.Dispose();
+        await lost.Task.WaitAsync(ShortTimeout);
+
+        // A stamp of 1 is before everything: nothing is discarded, everything is kept.
+        channel.DiscardPendingPdus(arrivedBefore: 1).Should().Be(0);
+
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0C, 0x0D);
+        Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // The streaming receive follows the same order: what arrived, then the loss.
+    [Fact]
+    public async Task ReceiveAll_Yields_The_Buffered_Pdu_And_Then_Throws_The_Loss()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+        service.Dispose();
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var seen = new List<byte[]>();
+        Func<Task> act = async () =>
+        {
+            await foreach (var pdu in channel.ReceiveAllAsync(cts.Token))
+                seen.Add(pdu);
+        };
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+        seen.Should().ContainSingle().Which.Should().Equal(0x0A, 0x0B);
+    }
+
+    // Review on #261: a discard after the loss has the retained items out of the inbox for a
+    // moment. A receiver arriving then must not read the empty inbox as the end and throw the
+    // loss ahead of the PDU that is about to be put back.
+    [Fact]
+    public async Task A_Receive_During_A_Discard_After_The_Loss_Still_Gets_The_Retained_Pdu_First()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+        var concrete = (IsoTpChannel)channel;
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, _) => lost.TrySetResult(true);
+        service.Dispose();
+        await lost.Task.WaitAsync(ShortTimeout);
+
+        Task<byte[]>? receive = null;
+        concrete.DiscardGapObserver = () =>
+        {
+            // On the actor, with the retained PDU out of the inbox: a receiver starts now and
+            // gets a moment to meet the empty inbox. No signal says "it looked and waited", so
+            // this is a negative window: it can only pass falsely on a slow host.
+            receive = Task.Run(() => channel.ReceiveAsync());
+            Thread.Sleep(300);
+            receive.IsCompleted.Should().BeFalse("the retained PDU is about to be put back");
+        };
+        channel.DiscardPendingPdus(arrivedBefore: 1).Should().Be(0);
+
+        (await receive!.WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
+    // The streaming receive ends gracefully when the channel is disposed under it.
+    [Fact]
+    public async Task ReceiveAll_Ends_When_The_Channel_Is_Disposed()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var seen = 0;
+        var reading = Task.Run(async () =>
+        {
+            await foreach (var _ in channel.ReceiveAllAsync(cts.Token)) seen++;
+        });
+        await Task.Delay(50); // the enumeration is waiting on the empty inbox
+        channel.Dispose();
+
+        await reading.WaitAsync(ShortTimeout);
+        seen.Should().Be(0);
+    }
+
+    // Review on #261: a canceled token must not consume a PDU that is already buffered.
+    [Fact]
+    public async Task A_Canceled_Token_Does_Not_Consume_A_Buffered_Pdu()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var channel = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        Func<Task> receive = () => channel.ReceiveAsync(canceled.Token);
+        await receive.Should().ThrowAsync<OperationCanceledException>();
+        Func<Task> all = async () =>
+        {
+            await foreach (var _ in channel.ReceiveAllAsync(canceled.Token)) { }
+        };
+        await all.Should().ThrowAsync<OperationCanceledException>();
+
+        // Still there for a receive that is not canceled.
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
+    // Review on #261: a caller that pumps the subscription (GetReceptionsInProgress, a settle, a
+    // discard) can have taken the last frame and not yet posted it when the subscription ends. The
+    // loss must not overtake that frame, or a receiver throws it before a PDU that was received.
+    [Fact]
+    public async Task The_Loss_Does_Not_Overtake_A_Frame_A_Pumping_Caller_Is_About_To_Post()
+    {
+        var service = new StarvedReaderBusService { EndSubscriptionOnWake = true };
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var gate = new ManualResetEventSlim(false);
+        service.TryReadGate = gate;
+
+        var receive = channel.ReceiveAsync();
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x321,
+            new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None));
+
+        // A caller pumps: it takes the frame and is held before it posts it.
+        var pump = Task.Run(() => channel.GetReceptionsInProgress());
+        await Task.Delay(100);
+        service.WakeReader(); // the subscription ends
+        // No signal says "the reader reached the post and waited for the lock", so this is a
+        // negative window: it can only pass falsely on a slow host.
+        await Task.Delay(200);
+
+        gate.Set(); // the pump posts its frame
+        await pump.WaitAsync(ShortTimeout);
+        (await receive.WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
+    // The reader itself failing is the same loss: the inbox ends with that failure, for every
+    // receiver, and it is reported once.
+    [Fact]
+    public async Task A_Failing_Subscription_Ends_The_Inbox_With_Its_Failure()
+    {
+        var service = new StarvedReaderBusService { ReaderFault = new InvalidOperationException("the demux broke") };
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        var reported = new List<Exception>();
+        channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var waiting = channel.ReceiveAsync();
+        service.WakeReader();
+
+        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Be("the demux broke");
+        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the demux broke");
+    }
+
+    // A reassembly under way dies with the subscription: it is withdrawn, so
+    // GetReceptionsInProgress does not keep reporting a transfer nobody will complete.
+    [Fact]
+    public async Task A_Reception_Under_Way_Is_Withdrawn_When_The_Service_Goes()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        var waiting = channel.ReceiveAsync();
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x10, 0x14, 1, 2, 3, 4, 5, 6 })); // first frame of 20 bytes
+        (await WaitForReceptionsAsync(channel, 1)).Should().HaveCount(1);
+
+        service.Dispose();
+
+        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // The actor an owner disposed first cannot write the inbox, but the loss is still reported.
+    [Fact]
+    public async Task The_Loss_Is_Still_Reported_When_The_Injected_Actor_Is_Already_Gone()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        actor.Dispose();
+        service.Dispose();
+
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeOfType<ObjectDisposedException>();
+    }
+
+    // I7: Dispose can fall between SendAsync's disposed check and the post of the send to the
+    // actor. Its cleanup is then queued ahead of the send, finds nothing in flight, and the send
+    // that runs afterwards used to begin on a disposed channel: a frame on the bus, no one to
+    // complete the call. The actor double below makes Dispose run at exactly that point.
+    [Fact]
+    public async Task A_Dispose_Between_The_Check_And_The_Post_Fails_The_Send_Before_It_Reaches_The_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var inner = new ProtocolActor();
+        using var actor = new DisposeOnFirstPostActor(inner);
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        actor.Channel = channel;
+
+        Func<Task> act = () => channel.SendAsync(new byte[] { 0x01, 0x02 }).WaitAsync(ShortTimeout);
+
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+        bus.TransmitCount.Should().Be(0, "a send that began after the dispose would have put its frame on the bus");
+    }
+
+    /// <summary>
+    /// Runs the channel's Dispose on another thread when the first send is posted and holds that
+    /// post until the dispose has posted its own cleanup, so the cleanup is queued first.
+    /// </summary>
+    private sealed class DisposeOnFirstPostActor : IProtocolActor
+    {
+        private readonly IProtocolActor _inner;
+        private readonly ManualResetEventSlim _cleanupPosted = new();
+        private int _posts;
+
+        public DisposeOnFirstPostActor(IProtocolActor inner) => _inner = inner;
+
+        public IDisposable? Channel { get; set; }
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public void Post(Action work)
+        {
+            if (Interlocked.Increment(ref _posts) == 1)
+            {
+                var channel = Channel!;
+                _ = Task.Run(channel.Dispose);
+                if (!_cleanupPosted.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("Dispose did not post its cleanup.");
+                _inner.Post(work);
+                return;
+            }
+
+            _inner.Post(work);
+            _cleanupPosted.Set();
+        }
+
+        public Task PostAsync(Action work, CancellationToken cancellationToken = default)
+            => _inner.PostAsync(work, cancellationToken);
+
+        public Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default)
+            => _inner.PostAsync(work, cancellationToken);
+
+        public IDisposable Schedule(TimeSpan delay, Action callback) => _inner.Schedule(delay, callback);
+
+        public void Dispose() => _cleanupPosted.Dispose();
+    }
+
+    // I8: a negative (or zero) protocol timer made the deadline scheduler throw after the send was
+    // on the wire or the reception begun, leaving it with no deadline; reject it where LocalStMin
+    // already is.
+    [Theory]
+    [InlineData(nameof(IsoTpChannelOptions.NAs), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NAs), -1)]
+    [InlineData(nameof(IsoTpChannelOptions.NBs), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NBs), -1)]
+    [InlineData(nameof(IsoTpChannelOptions.NCr), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NCr), -1)]
+    public void A_Protocol_Timer_That_Cannot_Arm_Is_Rejected_At_Open(string option, int milliseconds)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        var value = TimeSpan.FromMilliseconds(milliseconds);
+        var options = option switch
+        {
+            nameof(IsoTpChannelOptions.NAs) => new IsoTpChannelOptions { NAs = value },
+            nameof(IsoTpChannelOptions.NBs) => new IsoTpChannelOptions { NBs = value },
+            _ => new IsoTpChannelOptions { NCr = value },
+        };
+
+        Action act = () => IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x250, 0x251), options);
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName(option);
+    }
+
     // --------------------------------------------------------------------------------
     // FR-TP-016 — DatagramReceived event fires for a SF PDU.
     // --------------------------------------------------------------------------------
