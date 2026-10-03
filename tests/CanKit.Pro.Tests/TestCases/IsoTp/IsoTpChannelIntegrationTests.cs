@@ -868,12 +868,15 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var second = channel.ReceiveAsync();
         service.Dispose();
 
-        foreach (var waiting in new[] { first, second })
+        static async Task FaultsWithTheLossAsync(Task<byte[]> waiting)
         {
             Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
             var thrown = (await act.Should().ThrowAsync<ObjectDisposedException>()).Which;
             thrown.ObjectName.Should().Be(nameof(ICanBusService));
         }
+
+        await FaultsWithTheLossAsync(first);
+        await FaultsWithTheLossAsync(second);
 
         // And a receive after the loss ends at once with the same reason instead of waiting.
         Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
