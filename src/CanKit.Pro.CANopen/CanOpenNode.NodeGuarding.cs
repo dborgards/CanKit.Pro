@@ -206,8 +206,10 @@ internal sealed partial class CanOpenNode
         // (Bugbot, plus two adjacent findings from Codex on the same mechanism).
         bool toggle = (b & 0x80) != 0;
         byte stateByte = (byte)(b & 0x7F);
-        // A reserved state byte is a reply all the same, but it is not reported (#255).
-        bool reportable = TryDecodeHeartbeatState(stateByte, out var state);
+        // A reserved state byte is a reply all the same, but it is not reported (#255). Neither is
+        // state 0 with the toggle bit set: a node that answers guarding is never Initializing
+        // (see the boot-up branch above), so 0x80 would read as a boot-up that is not one.
+        bool reportable = TryDecodeHeartbeatState(stateByte, out var state) && stateByte != 0;
 
         // CiA 301 §7.2.8.3.3: a reply that does not alternate the toggle bit is invalid for
         // resetting the life-time window (stale/repeated frames must not keep the consumer

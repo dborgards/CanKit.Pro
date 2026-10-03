@@ -1388,53 +1388,62 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------------
-    // #255: a heartbeat or guarding reply whose state byte CiA 301 reserves is no heartbeat. It
-    // used to be reported as Initializing, the value of a boot-up. The valid frame sent after the
-    // reserved ones is what tells them apart: events arrive in order, so the first one seen is
-    // the one that decides.
+    // #255: a heartbeat or guarding state byte that CiA 301 reserves is not reported. It used to be
+    // reported as Initializing, the value of a boot-up. Events of one producer may be coalesced
+    // by the queue, so "the first event" is not a measuring point; the valid frame sent last is
+    // always delivered, and nothing delivered by then may have been Initializing.
     // -----------------------------------------------------------------------------------------
-    [Fact]
-    public async Task Heartbeat_With_A_Reserved_State_Byte_Is_Not_Reported_As_Bootup()
+    [Theory]
+    [InlineData(0x01)]
+    [InlineData(0x03)]
+    public async Task Heartbeat_With_A_Reserved_State_Byte_Is_Not_Reported_As_Bootup(byte reserved)
     {
         var session = NewSession();
         using var busA = Open(session, 1);
         using var rawBus = Open(session, 2);
         using var node = CanOpen.OpenNode(busA, nodeId: 0x01);
-        var first = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<NmtState>();
+        var last = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.HeartbeatReceived += (_, e) =>
         {
-            if (e.ProducerNodeId == 0x11) first.TrySetResult(e.State);
+            if (e.ProducerNodeId != 0x11) return;
+            seen.Enqueue(e.State);
+            if (e.State == NmtState.Operational) last.TrySetResult(true);
         };
 
-        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x01 });
-        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x03 });
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { reserved });
         Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x05 });
+        await last.Task.WithTimeoutAsync(ShortTimeout);
 
-        (await first.Task.WithTimeoutAsync(ShortTimeout)).Should().Be(NmtState.Operational);
+        seen.Should().NotContain(NmtState.Initializing);
     }
 
-    [Fact]
-    public async Task Guarding_Reply_With_A_Reserved_State_Byte_Is_Not_Reported()
+    [Theory]
+    [InlineData(0x01, 0xFF)]  // a reserved state, toggle clear; the valid reply flips the toggle
+    [InlineData(0x80, 0x7F)]  // state 0 with the toggle set: no guarding producer is Initializing
+    public async Task Guarding_Reply_With_A_Reserved_State_Byte_Is_Not_Reported(byte reserved, byte valid)
     {
         var session = NewSession();
         using var busA = Open(session, 1);
         using var rawBus = Open(session, 2);
         using var node = CanOpen.OpenNode(busA, nodeId: 0x01);
-        var first = new TaskCompletionSource<(NmtState State, bool Toggle)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var seen = new System.Collections.Concurrent.ConcurrentQueue<NmtState>();
+        var last = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         node.NodeGuardingReceived += (_, e) =>
         {
-            if (e.ProducerNodeId == 0x11) first.TrySetResult((e.State, e.Toggle));
+            if (e.ProducerNodeId != 0x11) return;
+            seen.Enqueue(e.State);
+            if (e.State == NmtState.PreOperational) last.TrySetResult(true);
         };
         node.StartNodeGuardingConsumer(producerNodeId: 0x11, guardTime: TimeSpan.FromSeconds(30), lifeTimeFactor: 3);
 
-        // The reserved reply is still a reply (toggle false), so it is not reported but it counts;
-        // the next one flips the toggle.
-        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x01 });
-        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0xFF });
+        // The reserved reply is still a reply and takes the toggle baseline, so the valid one
+        // carries the opposite toggle.
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { reserved });
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { valid });
+        await last.Task.WithTimeoutAsync(ShortTimeout);
 
-        var seen = await first.Task.WithTimeoutAsync(ShortTimeout);
-        seen.State.Should().Be(NmtState.PreOperational);
-        seen.Toggle.Should().BeTrue();
+        seen.Should().NotContain(NmtState.Initializing);
     }
 
     [Fact]
