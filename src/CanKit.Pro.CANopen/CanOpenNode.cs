@@ -918,9 +918,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // nobody will deliver for again.
                 if (Volatile.Read(ref _pumpStopRequested))
                 {
-                    while (TryDequeueEvent() is not null)
-                    {
-                    }
+                    Action? skipped;
+                    do { skipped = TryDequeueEvent(); }
+                    while (skipped is not null);
                 }
             }
             finally
