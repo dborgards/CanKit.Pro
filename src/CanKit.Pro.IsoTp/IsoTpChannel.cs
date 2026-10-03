@@ -515,6 +515,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         while (true)
         {
+            // Before any read: a canceled token must not consume a buffered PDU, as the wait on the
+            // token did before this loop existed (and as TryReceiveWithArrival documents).
+            cancellationToken.ThrowIfCancellationRequested();
             if (_pduInbox.Reader.TryRead(out var item)) return (true, item);
             if (_inboxLost is { } lost)
             {

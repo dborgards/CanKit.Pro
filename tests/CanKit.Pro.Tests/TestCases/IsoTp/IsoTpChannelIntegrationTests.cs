@@ -1027,6 +1027,34 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         seen.Should().Be(0);
     }
 
+    // Review on #261: a canceled token must not consume a PDU that is already buffered.
+    [Fact]
+    public async Task A_Canceled_Token_Does_Not_Consume_A_Buffered_Pdu()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var channel = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        Func<Task> receive = () => channel.ReceiveAsync(canceled.Token);
+        await receive.Should().ThrowAsync<OperationCanceledException>();
+        Func<Task> all = async () =>
+        {
+            await foreach (var _ in channel.ReceiveAllAsync(canceled.Token)) { }
+        };
+        await all.Should().ThrowAsync<OperationCanceledException>();
+
+        // Still there for a receive that is not canceled.
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
     // The reader itself failing is the same loss: the inbox ends with that failure, for every
     // receiver, and it is reported once.
     [Fact]
