@@ -1156,6 +1156,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         int current, int needed, long ceiling, int expected)
         => CanOpenNode.GrowCapacity(current, needed, ceiling).Should().Be(expected);
 
+#if NET5_0_OR_GREATER
+    // GC.GetTotalAllocatedBytes does not exist on net48; the growth code is the same on both.
     [Fact]
     public async Task Sdo_Client_Sizeless_Upload_Grows_Geometrically()
     {
@@ -1269,6 +1271,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         received.Should().Equal(payload);
         allocated.Should().BeLessThan(GrowthAllocationBound);
     }
+
+#endif
 
     [Fact]
     public void Sdo_Server_Sizeless_Download_Aborts_OutOfMemory_Before_Passing_The_Cap()
