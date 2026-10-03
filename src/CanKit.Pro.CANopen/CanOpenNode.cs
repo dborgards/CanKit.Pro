@@ -775,12 +775,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
     private void FinishDispose()
     {
-        _subscription.Dispose();
-        _actor.Dispose();
-        _readerCts.Dispose();
+        try
+        {
+            _subscription.Dispose();
+            _actor.Dispose();
+            _readerCts.Dispose();
 
-        if (_ownsService) _service.Dispose();
-        _disposeDone.TrySetResult(true);
+            if (_ownsService) _service.Dispose();
+        }
+        finally
+        {
+            // Whatever a Dispose above threw, a caller waiting for this disposal is released.
+            _disposeDone.TrySetResult(true);
+        }
     }
 
     // =========================================================================================

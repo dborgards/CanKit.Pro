@@ -9,6 +9,7 @@ using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -121,6 +122,74 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         await first.AsTask().WithTimeoutAsync(ShortTimeout);
     }
 
+    // The service's Dispose throws: the first call faults, and a second call that was waiting for
+    // that disposal is released instead of waiting for ever.
+    [Fact]
+    public async Task A_Disposal_That_Throws_Still_Releases_A_Concurrent_DisposeAsync()
+    {
+        var starved = new StarvedReaderBusService { DisposeFault = new InvalidOperationException("the service would not dispose") };
+        var node = new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+
+        var first = node.DisposeAsync();
+        var second = node.DisposeAsync();
+
+        await second.AsTask().WithTimeoutAsync(ShortTimeout);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => first.AsTask().WithTimeoutAsync(ShortTimeout));
+    }
+
+    // Everything a node can have open when it is disposed: a segmented and a block download as a
+    // server, a classic and a block upload as a client, and node-guarding consumers with and
+    // without a reply. Each is torn down, and the client's transfers end with ObjectDisposedException.
+    [Fact]
+    public async Task Disposing_A_Node_With_Open_Sessions_And_Consumers_Ends_Them()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var rawBus = resources.Add(Open(session, 5));
+        var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+
+        var classicServer = resources.Add(CanOpen.OpenNode(resources.Add(Open(session, 1)), nodeId: 0x01));
+        var blockServer = resources.Add(CanOpen.OpenNode(resources.Add(Open(session, 2)), nodeId: 0x02));
+        var client = resources.Add(CanOpen.OpenNode(resources.Add(Open(session, 3)), nodeId: 0x03));
+        foreach (var node in new[] { classicServer, blockServer, client })
+            node.BackgroundExceptionOccurred += (_, ex) => reports.Enqueue(ex);
+        classicServer.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);
+        blockServer.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);
+
+        var classicTap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x01));
+        var blockTap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x01)),
+            SdoFrames.BuildDownloadInit(0x2100, 0x00, new byte[20]), isExtendedFrame: false));
+        classicTap.Next(ShortTimeout);
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x02)),
+            SdoBlockFrames.BuildBlockDownloadInit(0x2100, 0x00, clientCrcSupported: false, sizeIndicated: true, totalSize: 20),
+            isExtendedFrame: false));
+        blockTap.Next(ShortTimeout);
+
+        PeerSdoLaboratory.Bind(client, 0x11);
+        PeerSdoLaboratory.Bind(client, 0x12);
+        var classicUpload = client.SdoUploadAsync(0x11, 0x2100, 0x00);
+        var blockUpload = client.SdoUploadAsync(0x12, 0x2100, 0x00, SdoTransferMode.Block);
+        var replied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == 0x22) replied.TrySetResult(true);
+        };
+        client.StartNodeGuardingConsumer(0x21, TimeSpan.FromSeconds(30), 3); // never answers
+        client.StartNodeGuardingConsumer(0x22, TimeSpan.FromSeconds(30), 3);
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)(CanOpenCobId.HeartbeatBase + 0x22)),
+            new byte[] { 0x7F }, isExtendedFrame: false));
+        await replied.Task.WithTimeoutAsync(ShortTimeout); // its life time is armed now
+
+        classicServer.Dispose();
+        blockServer.Dispose();
+        client.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => classicUpload.WithTimeoutAsync(ShortTimeout));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => blockUpload.WithTimeoutAsync(ShortTimeout));
+        reports.Should().BeEmpty();
+    }
+
     private sealed class DisposeBag : IDisposable
     {
         private readonly System.Collections.Generic.List<IDisposable> _items = new();
@@ -166,5 +235,35 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         }
 
         Assert.Throws<ObjectDisposedException>(() => _ = captured.State);
+    }
+
+    private sealed class FrameTap : IDisposable
+    {
+        private readonly ICanBus _bus;
+        private readonly uint _cobId;
+        private readonly System.Collections.Concurrent.BlockingCollection<byte[]> _frames = new();
+
+        public FrameTap(ICanBus bus, uint cobId)
+        {
+            _bus = bus;
+            _cobId = cobId;
+            _bus.FrameObserved += OnFrame;
+        }
+
+        private void OnFrame(object? sender, CanReceiveDataView e)
+        {
+            if ((uint)e.CanFrame.ID == _cobId) _frames.Add(e.CanFrame.Data.ToArray());
+        }
+
+        public byte[] Next(TimeSpan timeout)
+            => _frames.TryTake(out var frame, timeout)
+                ? frame
+                : throw new TimeoutException($"No frame on COB-ID 0x{_cobId:X3} within {timeout}.");
+
+        public void Dispose()
+        {
+            _bus.FrameObserved -= OnFrame;
+            _frames.Dispose();
+        }
     }
 }

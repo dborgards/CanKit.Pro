@@ -98,9 +98,13 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// <summary>Whether <see cref="Dispose"/> has been called.</summary>
     public bool IsDisposed { get; private set; }
 
+    /// <summary>When set, <see cref="Dispose"/> throws it after recording the call.</summary>
+    public Exception? DisposeFault { get; set; }
+
     public void Dispose()
     {
         IsDisposed = true;
+        if (DisposeFault is { } fault) throw fault;
         _frames.Writer.TryComplete();
     }
 
