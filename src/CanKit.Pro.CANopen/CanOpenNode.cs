@@ -1361,7 +1361,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // A reserved state byte still shows the producer alive and is still recorded for the NMT
         // master, but it is not reported: as Initializing it would be indistinguishable from a
         // boot-up and read as a restart that did not happen (#255).
-        if (TryDecodeHeartbeatState(stateByte, out var state))
+        // The boot-up is the byte 0x00; 0x80 is state 0 with the guarding toggle set, which no
+        // producer sends as a heartbeat.
+        if (TryDecodeHeartbeatState(stateByte, out var state) && (stateByte != 0 || data[0] == 0))
             RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
         NoteSlaveNmtState(producer, stateByte);
         _heartbeatConsumer.NoteReceived(producer);
