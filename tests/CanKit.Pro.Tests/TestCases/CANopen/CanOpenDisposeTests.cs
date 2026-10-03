@@ -481,6 +481,41 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref reportsAfterThrow).Should().Be(1);
     }
 
+    // A subscriber that outlasts Dispose's join and then throws: the disposal has finished by
+    // then, and the failure is not reported to anyone.
+    [Fact]
+    public async Task A_Failure_After_The_Disposal_Has_Finished_Is_Not_Reported()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var release = new ManualResetEventSlim();
+        var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var thrown = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reported = 0;
+        node.BackgroundExceptionOccurred += (_, _) => Interlocked.Increment(ref reported);
+        node.HeartbeatReceived += (_, _) =>
+        {
+            inHandler.TrySetResult(true);
+            release.Wait(TimeSpan.FromSeconds(30));
+            try { throw new InvalidOperationException("late"); }
+            finally { thrown.TrySetResult(true); }
+        };
+
+        SendHeartbeat(rawBus, 0x11, 0x05);
+        await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+
+        await Task.Run(node.Dispose); // gives up on the pump after its join timeout
+        release.Set();
+        await thrown.Task.WithTimeoutAsync(ShortTimeout);
+        // The report would follow the throw within moments; a negative window, as above.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+
+        Volatile.Read(ref reported).Should().Be(0);
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]

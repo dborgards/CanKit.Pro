@@ -2677,6 +2677,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         var handler = BackgroundExceptionOccurred;
         if (handler is null) return;
+        // Nothing is reported once the disposal has finished: a subscriber or a timed-out send that
+        // outlived it and fails late has nobody to tell.
+        if (_disposeDone.Task.IsCompleted) return;
         // One subscriber that disposes the node ends the round for the rest, as for the other
         // events; a node that was disposed before the report still reports it to all.
         bool disposedBefore = Volatile.Read(ref _disposed) != 0;
