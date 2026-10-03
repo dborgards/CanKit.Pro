@@ -688,7 +688,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // own, the bus refuses them. On the actor, like everything else that touches the inbox.
         try
         {
-            _actor.Post(() => EndInboxAfterSubscriptionLoss(lost));
+            // Under the pump lock: a caller that is pumping the subscription right now -- it took
+            // the last frame and has not posted it yet -- finishes first, so the frame is on the
+            // actor ahead of the loss and a receiver cannot meet the loss before it.
+            lock (_pumpGate)
+            {
+                _actor.Post(() => EndInboxAfterSubscriptionLoss(lost));
+            }
         }
         catch (ObjectDisposedException)
         {

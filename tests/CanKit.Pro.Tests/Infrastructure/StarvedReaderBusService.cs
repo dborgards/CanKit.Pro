@@ -40,6 +40,12 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// <summary>When set, the reader task's wait throws it once woken, as a subscription that failed would.</summary>
     public Exception? ReaderFault { get; set; }
 
+    /// <summary>When set, the subscription ends on the wake: the reader's wait returns false, as when its service is disposed.</summary>
+    public bool EndSubscriptionOnWake { get; set; }
+
+    /// <summary>When set, a <c>TryRead</c> that took a frame holds it until the gate opens: a caller-side pump caught between taking a frame and posting it.</summary>
+    public ManualResetEventSlim? TryReadGate { get; set; }
+
     /// <summary>Lets the reader task's wait complete once; every later wait stays pending.</summary>
     public void WakeReader() => _wake.TrySetResult(true);
 
@@ -107,6 +113,7 @@ internal sealed class StarvedReaderBusService : ICanBusService
         {
             bool ok = _owner._frames.Reader.TryRead(out frameEvent);
             if (!ok) _owner._drained.TrySetResult(true);
+            else _owner.TryReadGate?.Wait();
             return ok;
         }
 
@@ -116,6 +123,7 @@ internal sealed class StarvedReaderBusService : ICanBusService
             {
                 var woken = await _owner._wake.Task.WaitAsync(cancellationToken);
                 if (_owner.ReaderFault is { } fault) throw fault;
+                if (_owner.EndSubscriptionOnWake) return false;
                 return woken;
             }
             await Task.Delay(Timeout.Infinite, cancellationToken);

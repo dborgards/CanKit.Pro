@@ -1055,6 +1055,36 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
     }
 
+    // Review on #261: a caller that pumps the subscription (GetReceptionsInProgress, a settle, a
+    // discard) can have taken the last frame and not yet posted it when the subscription ends. The
+    // loss must not overtake that frame, or a receiver throws it before a PDU that was received.
+    [Fact]
+    public async Task The_Loss_Does_Not_Overtake_A_Frame_A_Pumping_Caller_Is_About_To_Post()
+    {
+        var service = new StarvedReaderBusService { EndSubscriptionOnWake = true };
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var gate = new ManualResetEventSlim(false);
+        service.TryReadGate = gate;
+
+        var receive = channel.ReceiveAsync();
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x321,
+            new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None));
+
+        // A caller pumps: it takes the frame and is held before it posts it.
+        var pump = Task.Run(() => channel.GetReceptionsInProgress());
+        await Task.Delay(100);
+        service.WakeReader(); // the subscription ends
+        // No signal says "the reader reached the post and waited for the lock", so this is a
+        // negative window: it can only pass falsely on a slow host.
+        await Task.Delay(200);
+
+        gate.Set(); // the pump posts its frame
+        await pump.WaitAsync(ShortTimeout);
+        (await receive.WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
     // The reader itself failing is the same loss: the inbox ends with that failure, for every
     // receiver, and it is reported once.
     [Fact]
