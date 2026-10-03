@@ -36,8 +36,17 @@ namespace CanKit.Pro.CANopen;
 /// the same way. A value that is not implementable is rejected before it is stored, so the
 /// dictionary never describes behaviour the node does not have.
 /// </para>
+/// <para>
+/// <b>Disposing.</b> <see cref="IDisposable.Dispose"/> and <see cref="IAsyncDisposable.DisposeAsync"/>
+/// both fail every open transfer with <see cref="ObjectDisposedException"/>, stop the producers
+/// and deliver nothing afterwards. <c>Dispose</c> blocks for up to two seconds on the node's
+/// reader and event pump to let them finish; <c>DisposeAsync</c> waits for the same without
+/// holding a thread, and is the one to use on a thread that must not block. Either may be called
+/// from an event handler of this node: the handler runs on the event pump, which is then not waited
+/// for, and it ends when the handler returns.
+/// </para>
 /// </remarks>
-public interface ICanOpenNode : IDisposable
+public interface ICanOpenNode : IDisposable, IAsyncDisposable
 {
     /// <summary>Node identifier (1..127) this instance answers as on the bus.</summary>
     byte NodeId { get; }

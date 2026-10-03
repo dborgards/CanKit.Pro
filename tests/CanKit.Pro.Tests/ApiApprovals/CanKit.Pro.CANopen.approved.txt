@@ -203,7 +203,7 @@ namespace CanKit.Pro.CANopen
         public byte ProducerNodeId { get; }
         public System.TimeSpan Timeout { get; }
     }
-    public interface ICanOpenNode : System.IDisposable
+    public interface ICanOpenNode : System.IAsyncDisposable, System.IDisposable
     {
         byte? ActiveFlyingMasterNodeId { get; }
         ushort? ActiveFlyingMasterPriority { get; }

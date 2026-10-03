@@ -628,7 +628,71 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// <inheritdoc />
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (!BeginDispose()) return;
+        try { _readerTask.Wait(DisposeJoinTimeout); } catch { /* observed via task; not fatal */ }
+
+        // Complete the queue so the pump exits after draining anything still queued. An event
+        // accepted before this point is delivered (unless the subscriber itself hangs); one that
+        // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
+        // Dispose.
+        CompleteEventQueue();
+        // Called from a subscriber, this is the pump's own thread: it cannot finish while it is
+        // waiting for itself, so it does not wait, and the pump ends when the subscriber returns.
+        if (!OnEventPump)
+        {
+            try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch { /* observed via task; not fatal */ }
+        }
+
+        FinishDispose();
+    }
+
+    /// <inheritdoc />
+    public async ValueTask DisposeAsync()
+    {
+        // Read before the first await: after it the continuation is on another thread, and a
+        // subscriber that blocks on this call is still holding the pump's.
+        bool onPump = OnEventPump;
+        if (!BeginDispose()) return;
+        await JoinQuietlyAsync(_readerTask).ConfigureAwait(false);
+        CompleteEventQueue();
+        if (!onPump)
+            await JoinQuietlyAsync(_eventPumpTask).ConfigureAwait(false);
+        FinishDispose();
+    }
+
+    private static readonly TimeSpan DisposeJoinTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>Waits for <paramref name="task"/> for at most <see cref="DisposeJoinTimeout"/>
+    /// without holding a thread; a fault is observed and dropped, as the blocking join does.</summary>
+    private static async Task JoinQuietlyAsync(Task task)
+    {
+        using var cts = new CancellationTokenSource();
+        var timeout = Task.Delay(DisposeJoinTimeout, cts.Token);
+        try
+        {
+            if (await Task.WhenAny(task, timeout).ConfigureAwait(false) == task)
+                await task.ConfigureAwait(false);
+        }
+        catch
+        {
+            // observed via task; not fatal
+        }
+        finally
+        {
+            cts.Cancel();
+        }
+    }
+
+    /// <summary>True on the thread that is delivering an event to a subscriber.</summary>
+    private bool OnEventPump => ReferenceEquals(t_deliveringFor, this);
+
+    [ThreadStatic]
+    private static CanOpenNode? t_deliveringFor;
+
+    /// <summary>Flips the disposed flag and posts the cleanup; false when already disposed.</summary>
+    private bool BeginDispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
         try { _readerCts.Cancel(); } catch { /* nothing else to do */ }
 
         try
@@ -675,16 +739,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         {
             // actor already gone; nothing more to do
         }
+        return true;
+    }
 
-        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
-
-        // Complete the queue so the pump exits after draining anything still queued. An event
-        // accepted before this point is delivered (unless the subscriber itself hangs); one that
-        // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
-        // Dispose.
-        CompleteEventQueue();
-        try { _eventPumpTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
-
+    private void FinishDispose()
+    {
         _subscription.Dispose();
         _actor.Dispose();
         _readerCts.Dispose();
@@ -741,16 +800,26 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // One signal covers every event queued by the time we look. A subscriber that
             // throws is reported and the loop continues: a timeout or EMCY already waiting
             // must still be delivered. Anything outside the delegate is still a bug in the pump.
-            while (TryDequeueEvent() is { } raise)
+            // Marks the thread for the whole batch: nothing in it awaits, so a subscriber that
+            // disposes the node runs on this very thread (see Dispose).
+            t_deliveringFor = this;
+            try
             {
-                try
+                while (TryDequeueEvent() is { } raise)
                 {
-                    raise();
+                    try
+                    {
+                        raise();
+                    }
+                    catch (Exception ex)
+                    {
+                        RaiseBackgroundException(ex);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    RaiseBackgroundException(ex);
-                }
+            }
+            finally
+            {
+                t_deliveringFor = null;
             }
             // The queue was just drained. Closure is the completed flag alone: an event
             // accepted before completion is still in the list and was delivered above, and
