@@ -1425,7 +1425,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(0x01)]
     [InlineData(0x03)]
     [InlineData(0x80)]  // state 0 with the toggle bit set is not the boot-up byte
-    public async Task Heartbeat_With_A_Reserved_State_Byte_Is_Not_Reported_As_Bootup(byte reserved)
+    [InlineData(0x84)]  // bit 7 is reserved in a heartbeat (#266)
+    public async Task Heartbeat_With_A_Reserved_State_Byte_Is_Not_Reported(byte reserved)
     {
         var session = NewSession();
         using var busA = Open(session, 1);
@@ -1444,7 +1445,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x05 });
         await last.Task.WithTimeoutAsync(ShortTimeout);
 
-        seen.Should().NotContain(NmtState.Initializing);
+        seen.ToArray().Should().Equal(new[] { NmtState.Operational }, "only the valid heartbeat is reported");
     }
 
     [Theory]

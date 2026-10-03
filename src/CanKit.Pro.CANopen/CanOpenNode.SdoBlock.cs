@@ -587,8 +587,22 @@ internal sealed partial class CanOpenNode
         session.Phase = SdoBlockClientPhase.AwaitSubBlockAck;
         // Every way the transfer ends completes its task (abort, peer abort, cancel, timeout,
         // dispose), and that is readable from the sending task; the session tables are not.
-        _ = SendOrderedControlFrames(TrackSdoBlockClientSend(session),
-            () => session.Tcs.Task.IsCompleted, frames.ToArray());
+        var completed = TrackSdoBlockClientSend(session);
+        var sendId = session.LatestSendId;
+        // The request timer measures how long the server has been silent, and while a sub-block
+        // is still going out the server has nothing to answer yet: it is restarted at every
+        // confirmed segment, so a long sub-block on a slow bus (127 segments at 10 kbit/s is
+        // over a second) does not use up the timer before the ACK it waits for can be sent (C12).
+        // After the last segment the timer runs for the ACK alone. A confirmation that is only the
+        // driver accepting the frame (no echo on the bus, TxConfirmation.IsApproximated) says
+        // nothing about when the frame reaches the wire, so a driver queue holding more than
+        // SdoTimeout of bus time still outlasts the timer; SdoTimeout is the remedy there.
+        _ = SendOrderedControlFrames(completed, () => session.Tcs.Task.IsCompleted,
+            () => PostSdoClientSendOutcome(() =>
+            {
+                if (IsLiveBlockSend(session, sendId))
+                    RearmBlockClient(session, session.ServerNodeId);
+            }), frames.ToArray());
     }
 
     private void SendBlockDownloadEnd(SdoBlockClientSession session)

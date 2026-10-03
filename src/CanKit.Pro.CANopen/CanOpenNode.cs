@@ -1361,9 +1361,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // A reserved state byte still shows the producer alive and is still recorded for the NMT
         // master, but it is not reported: as Initializing it would be indistinguishable from a
         // boot-up and read as a restart that did not happen (#255).
-        // The boot-up is the byte 0x00; 0x80 is state 0 with the guarding toggle set, which no
-        // producer sends as a heartbeat.
-        if (TryDecodeHeartbeatState(stateByte, out var state) && (stateByte != 0 || data[0] == 0))
+        // Bit 7 is reserved and always 0 in a heartbeat (§7.2.8.3.2.2), so a frame that sets it is
+        // not one: a bystander's guarding reply (toggle) or a malformed frame. It is not reported,
+        // which also keeps 0x80 (state 0 with the toggle set) from reading as a boot-up (#266).
+        // It still counts as a sign of life below, as before.
+        if ((data[0] & 0x80) == 0 && TryDecodeHeartbeatState(stateByte, out var state))
             RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
         NoteSlaveNmtState(producer, stateByte);
         _heartbeatConsumer.NoteReceived(producer);
@@ -2367,9 +2369,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         session.LatestSendPending = true;
         return failure => PostSdoClientSendOutcome(() =>
         {
-            if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
-                return;
-            if (sendId != session.LatestSendId) return; // answered since: it reached the server
+            if (!IsLiveBlockSend(session, sendId)) return; // ended, or answered since: it reached the server
             session.LatestSendPending = false;
             if (failure is not null)
             {
@@ -2382,6 +2382,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (session.TimedOut) CompleteSdoBlockClientTimeout(session);
         });
     }
+
+    /// <summary>
+    /// Whether <paramref name="sendId"/> is still the latest send of a block-client session that
+    /// is still open. Actor-only: it reads the session table.
+    /// </summary>
+    private bool IsLiveBlockSend(SdoBlockClientSession session, int sendId)
+        => _sdoBlockClients.TryGetValue(session.ServerNodeId, out var live)
+           && ReferenceEquals(live, session)
+           && sendId == session.LatestSendId;
 
     /// <summary>
     /// Runs a send-outcome reaction on the actor, where the session tables live. After disposal
@@ -2427,6 +2436,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
         Func<bool>? shouldStop, params (uint CobId, byte[] Payload)[] frames)
+        => SendOrderedControlFrames(onSendCompleted, shouldStop, onFrameConfirmed: null, frames);
+
+    /// <summary>
+    /// As above. <paramref name="onFrameConfirmed"/>, when given, is called on the sending task
+    /// after each frame that was confirmed, so the owner of a long batch can tell progress from
+    /// silence. It must be cheap and thread-safe.
+    /// </summary>
+    private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
+        Func<bool>? shouldStop, Action? onFrameConfirmed, params (uint CobId, byte[] Payload)[] frames)
     {
         return Task.Run(async () =>
         {
@@ -2450,6 +2468,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                                 failure = unconfirmed;
                                 return;
                             }
+                        }
+                        else
+                        {
+                            onFrameConfirmed?.Invoke();
                         }
                     }
                     catch (Exception ex)
