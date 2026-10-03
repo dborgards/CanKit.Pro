@@ -67,7 +67,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // PDU or a reassembly-abort fault (N_Cr / SN mismatch / SF·FF supersede) so a blocked
     // ReceiveAsync completes instead of hanging (FR-TP-010) —
     // the FailTx analogue on the RX side.
-    private readonly Channel<RxInboxItem> _pduInbox;
+    //
+    // Replaced only after the bus service was lost and a discard kept some items: a completed channel
+    // takes no writes, so the kept items move to a fresh one completed with the same failure.
+    private volatile Channel<RxInboxItem> _pduInbox;
+    private readonly BoundedChannelOptions _inboxOptions;
+    private Exception? _inboxLost; // actor-side
 
     // Serializes SendAsync callers: one outbound PDU on the wire at a time, per ISO 15765-2's
     // "one N-USData at a time" model. Also avoids competition for _tx state across calls.
@@ -169,13 +174,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         RequirePositive(nameof(_options.NBs), _options.NBs);
         RequirePositive(nameof(_options.NCr), _options.NCr);
 
-        var inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
+        _inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
         {
             SingleReader = false,
             SingleWriter = true, // written only from the actor loop
             FullMode = BoundedChannelFullMode.DropOldest,
         };
-        _pduInbox = Channel.CreateBounded<RxInboxItem>(inboxOptions);
+        _pduInbox = Channel.CreateBounded<RxInboxItem>(_inboxOptions);
 
         _actor = actor ?? new ProtocolActor();
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
@@ -463,8 +468,21 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             else
                 discarded++;
         }
-        foreach (var item in kept)
-            _pduInbox.Writer.TryWrite(item);
+        if (_inboxLost is { } lost && kept.Count > 0)
+        {
+            // The inbox was completed when the bus service went, and a completed channel takes no
+            // writes: the items from after the stamp move to a fresh one, completed the same way.
+            var next = Channel.CreateBounded<RxInboxItem>(_inboxOptions);
+            foreach (var item in kept)
+                next.Writer.TryWrite(item);
+            next.Writer.TryComplete(lost);
+            _pduInbox = next;
+        }
+        else
+        {
+            foreach (var item in kept)
+                _pduInbox.Writer.TryWrite(item);
+        }
         return discarded;
     }
 
@@ -475,10 +493,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private async IAsyncEnumerable<byte[]> ReadAllAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var reader = _pduInbox.Reader;
-        while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+        while (await _pduInbox.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            while (reader.TryRead(out var item))
+            while (_pduInbox.Reader.TryRead(out var item))
                 yield return UnwrapInboxItem(item);
         }
     }
@@ -636,6 +653,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             WithdrawReception(rx.Announce);
         }
 
+        _inboxLost = lost;
         _pduInbox.Writer.TryComplete(lost);
         RaiseBackgroundException(lost);
     }

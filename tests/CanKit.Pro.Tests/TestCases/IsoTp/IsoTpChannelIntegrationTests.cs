@@ -908,6 +908,34 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await next.Should().ThrowAsync<ObjectDisposedException>();
     }
 
+    // Review on #261: a discard that keeps the items from after its stamp writes them back, and a
+    // completed inbox takes no writes. The PDUs that had arrived are still delivered, then the loss.
+    [Fact]
+    public async Task A_Discard_After_The_Service_Goes_Keeps_The_Pdus_From_After_Its_Stamp()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        var arrived = 0;
+        var both = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => { if (Interlocked.Increment(ref arrived) == 2) both.TrySetResult(true); };
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0C, 0x0D, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await both.Task.WaitAsync(ShortTimeout);
+        service.Dispose();
+
+        // A stamp of 1 is before everything: nothing is discarded, everything is kept.
+        channel.DiscardPendingPdus(arrivedBefore: 1).Should().Be(0);
+
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0C, 0x0D);
+        Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
     // The reader itself failing is the same loss: the inbox ends with that failure, for every
     // receiver, and it is reported once.
     [Fact]
@@ -957,7 +985,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var bus = OpenClassic(session, 0);
         using var service = new CanBusService(bus);
-        var actor = new ProtocolActor();
+        using var actor = new ProtocolActor();
         using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
             ownsService: false, actor);
         var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
