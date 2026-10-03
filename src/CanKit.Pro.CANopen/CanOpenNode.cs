@@ -661,6 +661,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         else
         {
             try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
+            StopPumpIfStillRunning();
         }
 
         FinishDispose();
@@ -674,7 +675,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // and the continuation of an awaited join would run elsewhere, away from the context
         // Dispose recognises. The blocking path knows how to not wait for itself, and the caller
         // is on a node thread already, so nothing is lost by taking it.
-        if (OnEventPump || OnReader || _actor.IsOnCurrentActor)
+        if (OnEventPump || OnReader || OnDisposal || _actor.IsOnCurrentActor)
         {
             Dispose();
             return default;
@@ -687,39 +688,44 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         // A second caller awaits the disposal that is running: returning at once would tell it
         // that producers are stopped and the owned service released while the first caller is
-        // still waiting for the reader. The wait is bounded, by more than the first disposal can
-        // take (reader, pump and the actor's own shutdown timeout): a subscriber that the first
-        // disposal itself calls (the actor reports a shutdown timeout on the disposing thread)
-        // may land here, and the disposal cannot finish before it returns.
+        // still waiting for the reader.
         if (!BeginDispose())
         {
-            await JoinAsync(_disposeDone.Task, ConcurrentDisposeWait).ConfigureAwait(false);
+            await _disposeDone.Task.ConfigureAwait(false);
             return;
         }
         await JoinAsync(_readerTask).ConfigureAwait(false);
         CompleteEventQueue();
         await JoinAsync(_eventPumpTask).ConfigureAwait(false);
+        StopPumpIfStillRunning();
         FinishDispose();
     }
 
     private static readonly TimeSpan DisposeJoinTimeout = TimeSpan.FromSeconds(2);
 
-    // Reader join, pump join and the actor's five-second shutdown timeout, with room.
-    private static readonly TimeSpan ConcurrentDisposeWait = TimeSpan.FromSeconds(12);
+    /// <summary>A subscriber that kept the pump past the join timeout does not get the events still
+    /// queued behind it: nothing is delivered past Dispose.</summary>
+    private void StopPumpIfStillRunning()
+    {
+        if (!_eventPumpTask.IsCompleted) Volatile.Write(ref _pumpStopRequested, true);
+    }
 
-    /// <summary>Waits for <paramref name="task"/> for at most <paramref name="timeout"/> (default
-    /// <see cref="DisposeJoinTimeout"/>)
+    /// <summary>Waits for <paramref name="task"/> for at most <see cref="DisposeJoinTimeout"/>
     /// without holding a thread. Neither task joined here faults (each reports its own failures
     /// through <see cref="BackgroundExceptionOccurred"/>), so there is nothing to observe.</summary>
-    private static async Task JoinAsync(Task task, TimeSpan? timeout = null)
+    private static async Task JoinAsync(Task task)
     {
         using var cts = new CancellationTokenSource();
-        await Task.WhenAny(task, Task.Delay(timeout ?? DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
+        await Task.WhenAny(task, Task.Delay(DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
         cts.Cancel();
     }
 
     /// <summary>True on the thread that is delivering an event to a subscriber.</summary>
     private bool OnEventPump => ReferenceEquals(t_deliveringFor, this);
+
+    /// <summary>True on the thread that is finishing the disposal: a subscriber the actor calls
+    /// there (its shutdown-timeout report) is waited for by that disposal, so it cannot wait for it.</summary>
+    private bool OnDisposal => ReferenceEquals(t_finishingFor, this);
 
     /// <summary>True on the thread of the reader task while it reports a failed subscription.</summary>
     private bool OnReader => ReferenceEquals(t_reportingFor, this);
@@ -729,6 +735,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     [ThreadStatic]
     private static CanOpenNode? t_reportingFor;
+
+    [ThreadStatic]
+    private static CanOpenNode? t_finishingFor;
+
+    private static void MarkFinishing(CanOpenNode? node) => t_finishingFor = node;
 
     private static void MarkDelivering(CanOpenNode? node) => t_deliveringFor = node;
 
@@ -798,6 +809,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void FinishDispose()
     {
+        MarkFinishing(this);
         try
         {
             _subscription.Dispose();
@@ -808,6 +820,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         finally
         {
+            MarkFinishing(null);
             // Whatever a Dispose above threw, a caller waiting for this disposal is released.
             _disposeDone.TrySetResult(true);
         }
@@ -2629,6 +2642,20 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// Calls the subscribers of an event one after the other, ending the round when one of them
+    /// has disposed the node from the event pump: nothing is delivered past Dispose.
+    /// </summary>
+    private void DeliverToSubscribers<T>(EventHandler<T>? handler, T args)
+    {
+        if (handler is null) return;
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            if (Volatile.Read(ref _pumpStopRequested)) break;
+            ((EventHandler<T>)subscriber)(this, args);
+        }
+    }
+
     private void RaiseBackgroundException(Exception ex)
     {
         try { BackgroundExceptionOccurred?.Invoke(this, ex); }
@@ -2640,7 +2667,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var args = new HeartbeatReceivedEventArgs(producer, state, ts);
         EnqueueEvent(() =>
         {
-            try { HeartbeatReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(HeartbeatReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: false, key: null, emcyProducer: -1, producer);
     }
@@ -2650,7 +2677,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var args = new HeartbeatTimeoutEventArgs(producer, timeout);
         EnqueueEvent(() =>
         {
-            try { HeartbeatTimeout?.Invoke(this, args); }
+            try { DeliverToSubscribers(HeartbeatTimeout, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
     }
@@ -2660,7 +2687,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var args = new EmcyReceivedEventArgs(msg, ts);
         EnqueueEvent(() =>
         {
-            try { EmcyReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(EmcyReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.Emcy(msg), msg.ProducerNodeId, msg.ProducerNodeId);
     }
@@ -2670,7 +2697,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var args = new SyncReceivedEventArgs(ts);
         EnqueueEvent(() =>
         {
-            try { SyncReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(SyncReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }
@@ -2680,7 +2707,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var args = new RpdoReceivedEventArgs(pdoIndex, cobId, payload);
         EnqueueEvent(() =>
         {
-            try { RpdoReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(RpdoReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }
@@ -2711,7 +2738,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         var args = new NmtCommandReceivedEventArgs(cmd, target);
         EnqueueEvent(() =>
         {
-            try { NmtCommandReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(NmtCommandReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }

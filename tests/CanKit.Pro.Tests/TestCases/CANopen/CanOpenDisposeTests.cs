@@ -265,6 +265,66 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
     }
 
+    // One event, several subscribers: the one that disposes the node ends the round.
+    [Fact]
+    public async Task The_Next_Subscriber_Of_An_Event_Is_Not_Called_After_One_Disposed_The_Node()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCalled = 0;
+        node.HeartbeatReceived += (_, _) =>
+        {
+            node.Dispose();
+            first.TrySetResult(true);
+        };
+        node.HeartbeatReceived += (_, _) => Interlocked.Increment(ref secondCalled);
+
+        SendHeartbeat(rawBus, 0x11, 0x05);
+        await first.Task.WithTimeoutAsync(ShortTimeout);
+
+        // A negative window: it can only pass falsely on a slow host, never fail falsely.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Volatile.Read(ref secondCalled).Should().Be(0);
+    }
+
+    // An outside Dispose that gives up waiting for a subscriber that keeps the pump (after its two
+    // seconds) must not see the events queued behind that subscriber delivered when it returns.
+    [Fact]
+    public async Task Events_Queued_Behind_A_Subscriber_That_Outlasts_Dispose_Are_Not_Delivered()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        using var release = new ManualResetEventSlim();
+        var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delivered = 0;
+        node.HeartbeatReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref delivered) == 1)
+            {
+                inHandler.TrySetResult(true);
+                release.Wait(TimeSpan.FromSeconds(30));
+            }
+        };
+
+        SendHeartbeat(rawBus, 0x11, 0x05);
+        await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+        SendHeartbeat(rawBus, 0x12, 0x05); // queued behind the blocked subscriber
+        await Task.Delay(TimeSpan.FromMilliseconds(300)); // a negative window again: the frame is queued by now
+
+        await Task.Run(node.Dispose); // gives up on the pump after its join timeout
+        release.Set();
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+
+        Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]
