@@ -513,6 +513,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// </summary>
     private async Task<(bool Taken, RxInboxItem Item)> TakeNextAsync(CancellationToken cancellationToken)
     {
+        var lossConfirmed = false;
         while (true)
         {
             // Before any read: a canceled token must not consume a buffered PDU, as the wait on the
@@ -524,12 +525,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // A discard has the retained items out of the inbox for a moment: wait it out.
                 if (Volatile.Read(ref _discarding) != 0)
                 {
+                    lossConfirmed = false;
                     await Task.Yield();
                     continue;
                 }
 
-                // Looked again after the flag: a discard that finished in between has put them back.
-                if (_pduInbox.Reader.TryRead(out item)) return (true, item);
+                // The empty inbox was read before the flag: a discard that finished in between has
+                // put its items back. Read once more, after the flag, before it counts.
+                if (!lossConfirmed)
+                {
+                    lossConfirmed = true;
+                    continue;
+                }
+
                 throw lost;
             }
 
