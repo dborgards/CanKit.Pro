@@ -68,11 +68,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // ReceiveAsync completes instead of hanging (FR-TP-010) —
     // the FailTx analogue on the RX side.
     //
-    // Replaced only after the bus service was lost and a discard kept some items: a completed channel
-    // takes no writes, so the kept items move to a fresh one completed with the same failure.
-    private volatile Channel<RxInboxItem> _pduInbox;
-    private readonly BoundedChannelOptions _inboxOptions;
-    private Exception? _inboxLost; // actor-side
+    // The inbox is not completed when the bus service is lost (only by Dispose): that failure is
+    // kept beside it. A receiver takes what is buffered first and meets the failure only on an
+    // empty inbox, which is the order the callers rely on, and a discard keeps writing back what
+    // it retains into an inbox that is still open.
+    private readonly Channel<RxInboxItem> _pduInbox;
+    private volatile Exception? _inboxLost;
+    private readonly TaskCompletionSource<bool> _inboxLostSignal =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // Serializes SendAsync callers: one outbound PDU on the wire at a time, per ISO 15765-2's
     // "one N-USData at a time" model. Also avoids competition for _tx state across calls.
@@ -174,13 +177,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         RequirePositive(nameof(_options.NBs), _options.NBs);
         RequirePositive(nameof(_options.NCr), _options.NCr);
 
-        _inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
+        var inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
         {
             SingleReader = false,
             SingleWriter = true, // written only from the actor loop
             FullMode = BoundedChannelFullMode.DropOldest,
         };
-        _pduInbox = Channel.CreateBounded<RxInboxItem>(_inboxOptions);
+        _pduInbox = Channel.CreateBounded<RxInboxItem>(inboxOptions);
 
         _actor = actor ?? new ProtocolActor();
         _actor.BackgroundExceptionOccurred += OnActorBackgroundException;
@@ -307,12 +310,10 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     public async Task<IsoTpReceivedPdu> ReceiveWithArrivalAsync(
         CancellationToken cancellationToken = default)
     {
-        while (await _pduInbox.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
-        {
-            if (_pduInbox.Reader.TryRead(out var item))
-                return new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
-        }
-        throw new InvalidOperationException("Channel is disposed; no more PDUs will arrive.");
+        var (taken, item) = await TakeNextAsync(cancellationToken).ConfigureAwait(false);
+        if (!taken)
+            throw new InvalidOperationException("Channel is disposed; no more PDUs will arrive.");
+        return new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
     }
 
     /// <inheritdoc />
@@ -458,20 +459,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // opposite of the reset intent. Items from after it go back in their order; this runs
         // on the inbox's single writer.
         var kept = new List<RxInboxItem>();
-        var inbox = _pduInbox;
-        Channel<RxInboxItem>? replacement = null;
-        if (_inboxLost is not null)
-        {
-            // The inbox was completed when the bus service went, and a completed channel takes no
-            // writes. A writable replacement is published before the old one is drained, so a
-            // reader never meets an empty inbox that already carries the failure while the items
-            // from after the stamp are still on their way over; it is completed with the same
-            // failure once they are in.
-            replacement = Channel.CreateBounded<RxInboxItem>(_inboxOptions);
-            _pduInbox = replacement;
-        }
-
-        while (inbox.Reader.TryRead(out var item))
+        while (_pduInbox.Reader.TryRead(out var item))
         {
             // An error item carries the first-frame stamp of the reception it aborted, so an
             // abort of a reception that began after the stamp is kept as that reception's
@@ -481,17 +469,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             else
                 discarded++;
         }
-        if (replacement is not null)
-        {
-            foreach (var item in kept)
-                replacement.Writer.TryWrite(item);
-            replacement.Writer.TryComplete(_inboxLost);
-        }
-        else
-        {
-            foreach (var item in kept)
-                inbox.Writer.TryWrite(item);
-        }
+        foreach (var item in kept)
+            _pduInbox.Writer.TryWrite(item);
         return discarded;
     }
 
@@ -502,10 +481,39 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private async IAsyncEnumerable<byte[]> ReadAllAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        while (await _pduInbox.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+        while (true)
         {
-            while (_pduInbox.Reader.TryRead(out var item))
-                yield return UnwrapInboxItem(item);
+            var (taken, item) = await TakeNextAsync(cancellationToken).ConfigureAwait(false);
+            if (!taken) yield break;
+            yield return UnwrapInboxItem(item);
+        }
+    }
+
+    /// <summary>
+    /// The next item of the inbox, waiting for one. False once the inbox is completed (the channel
+    /// was disposed). If the bus service was lost, what is buffered is delivered first and the loss
+    /// is thrown only on an empty inbox, to every receiver.
+    /// </summary>
+    private async Task<(bool Taken, RxInboxItem Item)> TakeNextAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            if (_pduInbox.Reader.TryRead(out var item)) return (true, item);
+            if (_inboxLost is { } lost) throw lost;
+
+            using var release = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var wait = _pduInbox.Reader.WaitToReadAsync(release.Token).AsTask();
+            var first = await Task.WhenAny(wait, _inboxLostSignal.Task).ConfigureAwait(false);
+            if (first != wait)
+            {
+                // The loss came first: let go of the wait and look again, items before the loss.
+                release.Cancel();
+                try { await wait.ConfigureAwait(false); }
+                catch (OperationCanceledException) { /* the wait we just released */ }
+                continue;
+            }
+
+            if (!await wait.ConfigureAwait(false)) return (false, default);
         }
     }
 
@@ -635,9 +643,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         // Nothing will ever arrive again. A receiver waiting on the inbox would wait for ever, so
-        // the inbox is completed with the reason: what is buffered stays readable, and then every
-        // receiver -- not just one -- gets the failure. Sends already fail on their own, the bus
-        // refuses them. On the actor: the inbox has one writer.
+        // the reason is recorded and the receivers are woken: what is buffered is delivered first,
+        // and then every receiver -- not just one -- gets the failure. Sends already fail on their
+        // own, the bus refuses them. On the actor, like everything else that touches the inbox.
         try
         {
             _actor.Post(() => EndInboxAfterSubscriptionLoss(lost));
@@ -663,7 +671,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         _inboxLost = lost;
-        _pduInbox.Writer.TryComplete(lost);
+        _inboxLostSignal.TrySetResult(true);
         RaiseBackgroundException(lost);
     }
 

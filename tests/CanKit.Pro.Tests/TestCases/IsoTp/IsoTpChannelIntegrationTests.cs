@@ -942,6 +942,33 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await next.Should().ThrowAsync<ObjectDisposedException>();
     }
 
+    // The streaming receive follows the same order: what arrived, then the loss.
+    [Fact]
+    public async Task ReceiveAll_Yields_The_Buffered_Pdu_And_Then_Throws_The_Loss()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+        service.Dispose();
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var seen = new List<byte[]>();
+        Func<Task> act = async () =>
+        {
+            await foreach (var pdu in channel.ReceiveAllAsync(cts.Token))
+                seen.Add(pdu);
+        };
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+        seen.Should().ContainSingle().Which.Should().Equal(0x0A, 0x0B);
+    }
+
     // The reader itself failing is the same loss: the inbox ends with that failure, for every
     // receiver, and it is reported once.
     [Fact]
