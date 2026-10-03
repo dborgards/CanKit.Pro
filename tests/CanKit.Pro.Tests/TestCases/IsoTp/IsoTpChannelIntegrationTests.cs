@@ -850,6 +850,126 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         thrown.Message.Should().Contain("disposed");
     }
 
+    // The 2026-09-30 review (I6): a channel opened over a shared service (leaveOpen) outlives the
+    // service when the owner disposes it first. The channel's reader ended quietly, and a receiver
+    // waiting on the inbox waited for ever; a send, by contrast, failed at once.
+    [Fact]
+    public async Task A_Service_Disposed_Under_The_Channel_Faults_A_Waiting_Receive()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        var service = new CanBusService(bus);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+        var reported = new List<Exception>();
+        channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var waiting = channel.ReceiveAsync();
+        service.Dispose();
+
+        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+        var thrown = (await act.Should().ThrowAsync<ObjectDisposedException>()).Which;
+        thrown.ObjectName.Should().Be(nameof(ICanBusService));
+
+        // The inbox is complete behind the fault: the next receive ends at once instead of waiting.
+        Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        await next.Should().ThrowAsync<InvalidOperationException>();
+        lock (reported) reported.Should().ContainSingle().Which.Should().BeOfType<ObjectDisposedException>();
+    }
+
+    // I7: Dispose can fall between SendAsync's disposed check and the post of the send to the
+    // actor. Its cleanup is then queued ahead of the send, finds nothing in flight, and the send
+    // that runs afterwards used to begin on a disposed channel: a frame on the bus, no one to
+    // complete the call. The actor double below makes Dispose run at exactly that point.
+    [Fact]
+    public async Task A_Dispose_Between_The_Check_And_The_Post_Fails_The_Send_Before_It_Reaches_The_Bus()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var inner = new ProtocolActor();
+        using var actor = new DisposeOnFirstPostActor(inner);
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        actor.Channel = channel;
+
+        Func<Task> act = () => channel.SendAsync(new byte[] { 0x01, 0x02 }).WaitAsync(ShortTimeout);
+
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+        bus.TransmitCount.Should().Be(0, "a send that began after the dispose would have put its frame on the bus");
+    }
+
+    /// <summary>
+    /// Runs the channel's Dispose on another thread when the first send is posted and holds that
+    /// post until the dispose has posted its own cleanup, so the cleanup is queued first.
+    /// </summary>
+    private sealed class DisposeOnFirstPostActor : IProtocolActor
+    {
+        private readonly IProtocolActor _inner;
+        private readonly ManualResetEventSlim _cleanupPosted = new();
+        private int _posts;
+
+        public DisposeOnFirstPostActor(IProtocolActor inner) => _inner = inner;
+
+        public IDisposable? Channel { get; set; }
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public void Post(Action work)
+        {
+            if (Interlocked.Increment(ref _posts) == 1)
+            {
+                var channel = Channel!;
+                _ = Task.Run(channel.Dispose);
+                if (!_cleanupPosted.Wait(TimeSpan.FromSeconds(5)))
+                    throw new TimeoutException("Dispose did not post its cleanup.");
+                _inner.Post(work);
+                return;
+            }
+
+            _inner.Post(work);
+            _cleanupPosted.Set();
+        }
+
+        public Task PostAsync(Action work, CancellationToken cancellationToken = default)
+            => _inner.PostAsync(work, cancellationToken);
+
+        public Task<T> PostAsync<T>(Func<T> work, CancellationToken cancellationToken = default)
+            => _inner.PostAsync(work, cancellationToken);
+
+        public IDisposable Schedule(TimeSpan delay, Action callback) => _inner.Schedule(delay, callback);
+
+        public void Dispose() => _cleanupPosted.Dispose();
+    }
+
+    // I8: a negative (or zero) protocol timer made the deadline scheduler throw after the send was
+    // on the wire or the reception begun, leaving it with no deadline; reject it where LocalStMin
+    // already is.
+    [Theory]
+    [InlineData(nameof(IsoTpChannelOptions.NAs), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NAs), -1)]
+    [InlineData(nameof(IsoTpChannelOptions.NBs), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NBs), -1)]
+    [InlineData(nameof(IsoTpChannelOptions.NCr), 0)]
+    [InlineData(nameof(IsoTpChannelOptions.NCr), -1)]
+    public void A_Protocol_Timer_That_Cannot_Arm_Is_Rejected_At_Open(string option, int milliseconds)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        var value = TimeSpan.FromMilliseconds(milliseconds);
+        var options = option switch
+        {
+            nameof(IsoTpChannelOptions.NAs) => new IsoTpChannelOptions { NAs = value },
+            nameof(IsoTpChannelOptions.NBs) => new IsoTpChannelOptions { NBs = value },
+            _ => new IsoTpChannelOptions { NCr = value },
+        };
+
+        Action act = () => IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x250, 0x251), options);
+        act.Should().Throw<ArgumentOutOfRangeException>().WithParameterName(option);
+    }
+
     // --------------------------------------------------------------------------------
     // FR-TP-016 — DatagramReceived event fires for a SF PDU.
     // --------------------------------------------------------------------------------

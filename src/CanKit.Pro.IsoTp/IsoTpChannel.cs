@@ -162,6 +162,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // Encode once: EncodeStMin throws on negative values; surfacing at Open keeps the RX
         // path free of codec throws that ProtocolActor would only raise as BackgroundException.
         _localStMinRaw = IsoTpFrameCodec.EncodeStMin(_options.LocalStMin);
+        // The same for the protocol timers: a negative one makes the deadline scheduler throw
+        // after a send is already on the wire or a reception already started, which leaves it
+        // with no deadline at all. Zero would fire on the next loop iteration, i.e. never wait.
+        RequirePositive(nameof(_options.NAs), _options.NAs);
+        RequirePositive(nameof(_options.NBs), _options.NBs);
+        RequirePositive(nameof(_options.NCr), _options.NCr);
 
         var inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
         {
@@ -582,19 +588,51 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // -----------------------------------------------------------------------------------------
     private async Task RunReaderAsync()
     {
+        Exception lost;
         try
         {
             while (await _subscription.WaitToReadAsync(_readerCts.Token).ConfigureAwait(false))
                 PumpSubscription();
+
+            // The subscription ended on its own: the service it came from was disposed under a
+            // channel opened with leaveOpen.
+            lost = new ObjectDisposedException(nameof(ICanBusService),
+                "The bus service was disposed while the ISO-TP channel was open.");
         }
         catch (OperationCanceledException)
         {
-            // expected on Dispose
+            return; // expected on Dispose
         }
         catch (Exception ex)
         {
-            RaiseBackgroundException(ex);
+            lost = ex;
         }
+
+        // Nothing will ever arrive again. A receiver waiting on the inbox would wait for ever, so
+        // it gets the reason as a fault and the inbox is completed behind it; sends already fail
+        // on their own, the bus refuses them. On the actor: the inbox has one writer.
+        try
+        {
+            _actor.Post(() => EndInboxAfterSubscriptionLoss(lost));
+        }
+        catch (ObjectDisposedException)
+        {
+            // The channel is going down too, and its disposal completes the inbox.
+            if (!(lost is ObjectDisposedException)) RaiseBackgroundException(lost);
+        }
+    }
+
+    private void EndInboxAfterSubscriptionLoss(Exception lost)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        AbortRx(lost);
+        _pduInbox.Writer.TryComplete();
+    }
+
+    private static void RequirePositive(string name, TimeSpan value)
+    {
+        if (value <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(name, value, name + " must be greater than zero.");
     }
 
     /// <summary>
@@ -717,6 +755,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // TrySetCanceled is a no-op if the TCS is already completed.
         if (IsSendAlreadyCanceled(tcs, ct))
             return;
+
+        // Disposed between the caller's check and this callback: Dispose has already failed
+        // whatever was in flight, and found nothing, so a send that began now would put a frame
+        // on the bus after disposal and never be completed. HandleReceivedFrame has the same guard.
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            tcs.TrySetException(new ObjectDisposedException(nameof(IsoTpChannel)));
+            return;
+        }
 
         if (_tx is not null)
         {
