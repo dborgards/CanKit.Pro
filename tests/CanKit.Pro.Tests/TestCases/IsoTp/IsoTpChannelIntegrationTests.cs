@@ -908,6 +908,67 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         await next.Should().ThrowAsync<ObjectDisposedException>();
     }
 
+    // The reader itself failing is the same loss: the inbox ends with that failure, for every
+    // receiver, and it is reported once.
+    [Fact]
+    public async Task A_Failing_Subscription_Ends_The_Inbox_With_Its_Failure()
+    {
+        var service = new StarvedReaderBusService { ReaderFault = new InvalidOperationException("the demux broke") };
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        var reported = new List<Exception>();
+        channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        var waiting = channel.ReceiveAsync();
+        service.WakeReader();
+
+        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Be("the demux broke");
+        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the demux broke");
+    }
+
+    // A reassembly under way dies with the subscription: it is withdrawn, so
+    // GetReceptionsInProgress does not keep reporting a transfer nobody will complete.
+    [Fact]
+    public async Task A_Reception_Under_Way_Is_Withdrawn_When_The_Service_Goes()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        var waiting = channel.ReceiveAsync();
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x10, 0x14, 1, 2, 3, 4, 5, 6 })); // first frame of 20 bytes
+        (await WaitForReceptionsAsync(channel, 1)).Should().HaveCount(1);
+
+        service.Dispose();
+
+        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+        channel.GetReceptionsInProgress().Should().BeEmpty();
+    }
+
+    // The actor an owner disposed first cannot write the inbox, but the loss is still reported.
+    [Fact]
+    public async Task The_Loss_Is_Still_Reported_When_The_Injected_Actor_Is_Already_Gone()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        actor.Dispose();
+        service.Dispose();
+
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeOfType<ObjectDisposedException>();
+    }
+
     // I7: Dispose can fall between SendAsync's disposed check and the post of the send to the
     // actor. Its cleanup is then queued ahead of the send, finds nothing in flight, and the send
     // that runs afterwards used to begin on a disposed channel: a frame on the bus, no one to

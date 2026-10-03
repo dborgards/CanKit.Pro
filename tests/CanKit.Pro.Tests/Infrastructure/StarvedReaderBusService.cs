@@ -37,6 +37,9 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// </summary>
     public bool HoldFrames { get; set; }
 
+    /// <summary>When set, the reader task's wait throws it once woken, as a subscription that failed would.</summary>
+    public Exception? ReaderFault { get; set; }
+
     /// <summary>Lets the reader task's wait complete once; every later wait stays pending.</summary>
     public void WakeReader() => _wake.TrySetResult(true);
 
@@ -110,7 +113,11 @@ internal sealed class StarvedReaderBusService : ICanBusService
         public async ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
         {
             if (Interlocked.Exchange(ref _owner._wakesServed, 1) == 0)
-                return await _owner._wake.Task.WaitAsync(cancellationToken);
+            {
+                var woken = await _owner._wake.Task.WaitAsync(cancellationToken);
+                if (_owner.ReaderFault is { } fault) throw fault;
+                return woken;
+            }
             await Task.Delay(Timeout.Infinite, cancellationToken);
             return false;
         }

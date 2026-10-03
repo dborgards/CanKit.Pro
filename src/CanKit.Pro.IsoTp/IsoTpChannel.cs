@@ -618,15 +618,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         catch (ObjectDisposedException)
         {
-            // The channel is going down too, and its disposal completes the inbox.
-            if (!(lost is ObjectDisposedException)) RaiseBackgroundException(lost);
+            // The actor is gone (an injected one its owner disposed): there is nobody to write the
+            // inbox for. The loss is still reported; the channel's own disposal completes the inbox.
+            RaiseBackgroundException(lost);
         }
     }
 
     private void EndInboxAfterSubscriptionLoss(Exception lost)
     {
-        if (Volatile.Read(ref _disposed) != 0) return;
-
         // A reassembly under way dies with the subscription. No fault item for it: in the bounded
         // inbox it would push the oldest finished PDU out, and only one receiver would see it.
         var rx = _rx;
