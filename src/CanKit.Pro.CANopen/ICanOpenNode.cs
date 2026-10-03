@@ -37,17 +37,16 @@ namespace CanKit.Pro.CANopen;
 /// dictionary never describes behaviour the node does not have.
 /// </para>
 /// <para>
-/// <b>Disposing.</b> <see cref="IDisposable.Dispose"/> and <see cref="IAsyncDisposable.DisposeAsync"/>
-/// both fail every open transfer with <see cref="ObjectDisposedException"/>, stop the producers
-/// and deliver nothing afterwards. <c>Dispose</c> blocks for up to two seconds on the node's
-/// reader and event pump to let them finish; <c>DisposeAsync</c> waits for the same without
-/// holding a thread, and is the one to use on a thread that must not block. Either may be called
-/// from a subscriber of this node, whichever thread it runs on (an event, <c>ApplicationReset</c>,
-/// <c>BackgroundExceptionOccurred</c>): the task that thread belongs to is then not waited for,
-/// and it ends when the subscriber returns.
+/// <b>Disposing.</b> <see cref="IDisposable.Dispose"/> fails every open transfer with
+/// <see cref="ObjectDisposedException"/>, stops the producers and delivers nothing afterwards. It
+/// blocks for up to two seconds on the node's reader and event pump to let them finish;
+/// <see cref="CanOpenNodeExtensions.DisposeAsync(ICanOpenNode)"/> waits for the same without
+/// holding a thread. Either may be called from a subscriber of this node, whichever thread it runs
+/// on (an event, <c>ApplicationReset</c>, <c>BackgroundExceptionOccurred</c>): the task that thread
+/// belongs to is then not waited for, and it ends when the subscriber returns.
 /// </para>
 /// </remarks>
-public interface ICanOpenNode : IDisposable, IAsyncDisposable
+public interface ICanOpenNode : IDisposable
 {
     /// <summary>Node identifier (1..127) this instance answers as on the bus.</summary>
     byte NodeId { get; }

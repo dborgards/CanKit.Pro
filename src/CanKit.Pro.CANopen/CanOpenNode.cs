@@ -39,7 +39,7 @@ namespace CanKit.Pro.CANopen;
 /// same threading model that the J1939-TP / IsoTp / UDS clients rely on.
 /// </para>
 /// </remarks>
-internal sealed partial class CanOpenNode : ICanOpenNode
+internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 {
     private readonly ICanBusService _service;
     private readonly bool _ownsService;

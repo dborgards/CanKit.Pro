@@ -223,18 +223,49 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task A_Node_Can_Be_Used_With_Await_Using()
+    public async Task A_Node_Can_Be_Used_With_Await_Using_Through_IAsyncDisposable()
     {
         var session = NewSession();
         using var busA = Open(session, 1);
         ICanOpenNode captured;
-        await using (var node = CanOpen.OpenNode(busA, nodeId: 0x01))
+        await using (var node = (IAsyncDisposable)CanOpen.OpenNode(busA, nodeId: 0x01))
         {
-            captured = node;
-            node.State.Should().NotBe(default);
+            captured = (ICanOpenNode)node;
+            captured.State.Should().NotBe(default);
         }
 
         Assert.Throws<ObjectDisposedException>(() => _ = captured.State);
+    }
+
+#if NET5_0_OR_GREATER
+    // An ICanOpenNode that is not this library's (an interface is public, anyone may implement it)
+    // has no DisposeAsync of its own; the extension disposes it on the thread pool.
+    [Fact]
+    public async Task DisposeAsync_On_A_Node_That_Is_Not_This_Librarys_Disposes_It_On_The_Thread_Pool()
+    {
+        var foreign = System.Reflection.DispatchProxy.Create<ICanOpenNode, ForeignNode>();
+
+        await foreign.DisposeAsync();
+
+        ((ForeignNode)(object)foreign).Disposed.Should().BeTrue();
+    }
+
+    private class ForeignNode : System.Reflection.DispatchProxy
+    {
+        public bool Disposed { get; private set; }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IDisposable.Dispose)) Disposed = true;
+            return null;
+        }
+    }
+#endif
+
+    [Fact]
+    public async Task DisposeAsync_Rejects_A_Null_Node()
+    {
+        await Assert.ThrowsAsync<ArgumentNullException>(async () => await CanOpenNodeExtensions.DisposeAsync(null!));
     }
 
     private sealed class FrameTap : IDisposable

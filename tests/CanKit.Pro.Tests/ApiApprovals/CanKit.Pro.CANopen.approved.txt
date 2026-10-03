@@ -75,6 +75,10 @@ namespace CanKit.Pro.CANopen
         public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ListenAsync(CanKit.Pro.RawCan.ICanBusService service, System.TimeSpan? window = default, System.Threading.CancellationToken cancellationToken = default) { }
         public static System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.CanOpenDiscoveredNode>> ScanAsync(CanKit.Pro.CANopen.ICanOpenNode client, System.Collections.Generic.IEnumerable<byte>? skipNodeIds = null, System.Threading.CancellationToken cancellationToken = default) { }
     }
+    public static class CanOpenNodeExtensions
+    {
+        public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+    }
     public sealed class CanOpenNodeOptions
     {
         public CanOpenNodeOptions() { }
@@ -203,7 +207,7 @@ namespace CanKit.Pro.CANopen
         public byte ProducerNodeId { get; }
         public System.TimeSpan Timeout { get; }
     }
-    public interface ICanOpenNode : System.IAsyncDisposable, System.IDisposable
+    public interface ICanOpenNode : System.IDisposable
     {
         byte? ActiveFlyingMasterNodeId { get; }
         ushort? ActiveFlyingMasterPriority { get; }
