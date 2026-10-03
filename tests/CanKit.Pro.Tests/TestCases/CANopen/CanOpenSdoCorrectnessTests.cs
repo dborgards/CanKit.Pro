@@ -1317,6 +1317,30 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Sdo_Client_Upload_Aborts_When_The_Server_Announces_Zero_And_Sends_Data()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        // The size indicator is set and the size is zero: that is an announced length of nothing,
+        // not a missing one.
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadSegmentBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: true, new byte[] { 1, 2, 3 }));
+
+        var abort = tap.Next(ShortTimeout);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+    }
+
+    [Fact]
     public async Task Sdo_Client_Upload_Returns_Short_Data_And_Reports_The_Shortfall()
     {
         var session = NewSession();

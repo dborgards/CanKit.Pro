@@ -2079,6 +2079,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 session.InSegmentPhase = true;
                 session.Payload = declared > 0 ? new byte[declared] : Array.Empty<byte>();
                 session.DeclaredTotalSize = declared;
+                session.SizeIndicated = (cs & 0x01) != 0;
                 session.Offset = 0;
                 session.Toggle = false;
                 SendNextClientUploadSegmentRequest(session);
@@ -2138,9 +2139,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 return;
             }
             // More than the server announced is a protocol error, as it is for the server's own
-            // receive path and for the block-upload client (#253). Without a declared size
-            // (0) the buffer grows, which is what that case is for.
-            if (session.DeclaredTotalSize > 0 && needed > session.DeclaredTotalSize)
+            // receive path and for the block-upload client (#253). Without an
+            // indicated size the buffer grows, which is what that case is for. An indicated size
+            // of zero is a size.
+            if (session.SizeIndicated && needed > session.DeclaredTotalSize)
             {
                 AbortClient(session, SdoAbortCode.LengthTooHigh);
                 return;
@@ -2170,7 +2172,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 // Fewer bytes than announced (a device that announces the maximum length of a
                 // VISIBLE_STRING and sends what it holds) is accepted, but no longer silently:
                 // the caller gets the data, and the shortfall is reported (#253).
-                if (session.DeclaredTotalSize > 0 && session.Offset < session.DeclaredTotalSize)
+                if (session.SizeIndicated && session.Offset < session.DeclaredTotalSize)
                 {
                     RaiseBackgroundException(new CanOpenTransportException(
                         $"SDO upload of 0x{session.Index:X4}:{session.Subindex:X2} from node {serverNodeId} announced {session.DeclaredTotalSize} byte(s) and delivered {session.Offset}; the shorter data was returned."));
@@ -2607,6 +2609,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         public byte[]? Payload { get; set; }
         public int Offset { get; set; }
         public uint DeclaredTotalSize { get; set; }
+        public bool SizeIndicated { get; set; }
         public bool Toggle { get; set; }
 
         /// <summary>Numbers this transfer's sends; only the latest can still decide it (#197).</summary>
