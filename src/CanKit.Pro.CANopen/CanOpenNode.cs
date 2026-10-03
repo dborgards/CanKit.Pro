@@ -914,6 +914,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                         RaiseBackgroundException(ex);
                     }
                 }
+                // Stopped with events still queued: they are dropped, not left linked to a node
+                // nobody will deliver for again.
+                if (Volatile.Read(ref _pumpStopRequested))
+                {
+                    while (TryDequeueEvent() is not null)
+                    {
+                    }
+                }
             }
             finally
             {

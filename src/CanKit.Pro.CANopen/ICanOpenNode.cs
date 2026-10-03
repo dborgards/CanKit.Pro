@@ -38,7 +38,8 @@ namespace CanKit.Pro.CANopen;
 /// </para>
 /// <para>
 /// <b>Disposing.</b> <see cref="IDisposable.Dispose"/> fails every open transfer with
-/// <see cref="ObjectDisposedException"/>, stops the producers and delivers nothing afterwards. It
+/// <see cref="ObjectDisposedException"/>, stops the producers and starts no further delivery
+/// afterwards (a subscriber that is running when the disposal finishes is not interrupted). It
 /// blocks for up to two seconds on the node's reader and event pump to let them finish;
 /// <see cref="CanOpenNodeExtensions.DisposeAsync(ICanOpenNode)"/> waits for the same without
 /// holding a thread. Either may be called from a subscriber of this node, whichever thread it runs

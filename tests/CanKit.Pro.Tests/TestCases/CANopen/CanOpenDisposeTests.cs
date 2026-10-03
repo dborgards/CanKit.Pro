@@ -263,6 +263,7 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
 
         await Task.Delay(TimeSpan.FromMilliseconds(300));
         Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
+        ((CanOpenNode)node).QueuedEventCount.Should().Be(0, "the events skipped by the stopped pump are not left linked to the node");
     }
 
     // One event, several subscribers: the one that disposes the node ends the round.
