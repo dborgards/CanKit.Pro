@@ -138,6 +138,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private bool _nodeGuardingProducerToggle;
 
     private int _disposed;
+    private readonly TaskCompletionSource<bool> _disposeDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <inheritdoc />
     public byte NodeId => _nodeId;
@@ -670,7 +671,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode
 
     private async ValueTask DisposeCoreAsync()
     {
-        if (!BeginDispose()) return;
+        // A second caller awaits the disposal that is running: returning at once would tell it
+        // that producers are stopped and the owned service released while the first caller is
+        // still waiting for the reader.
+        if (!BeginDispose())
+        {
+            await _disposeDone.Task.ConfigureAwait(false);
+            return;
+        }
         await JoinAsync(_readerTask).ConfigureAwait(false);
         CompleteEventQueue();
         await JoinAsync(_eventPumpTask).ConfigureAwait(false);
@@ -711,51 +719,58 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
         try { _readerCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
 
+        // On the actor already (a subscriber disposing from ApplicationReset, say) the cleanup runs
+        // here: a post would wait for that subscriber to return, and the call would hand back
+        // with the transfers still open.
         try
         {
-            _actor.Post(() =>
-            {
-                _heartbeatProducer.Dispose();
-                _heartbeatConsumer.Dispose();
-                _syncProducerHandle?.Dispose();
-                _syncProducerHandle = null;
-                DisposePdoRuntime();
-                _lifeGuardingDeadline?.Dispose();
-                _lifeGuardingDeadline = null;
-                CancelFlyingMasterDeadline();
-                CancelBootUp();
-
-                _sdoServer?.Deadline?.Dispose();
-                _sdoServer = null;
-                foreach (var kv in _sdoClients)
-                {
-                    kv.Value.Deadline?.Dispose();
-                    kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
-                }
-                _sdoClients.Clear();
-
-                _sdoBlockServer?.Deadline?.Dispose();
-                _sdoBlockServer = null;
-                foreach (var kv in _sdoBlockClients)
-                {
-                    kv.Value.Deadline?.Dispose();
-                    kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
-                }
-                _sdoBlockClients.Clear();
-
-                foreach (var kv in _nodeGuardingConsumers)
-                {
-                    kv.Value.PollHandle?.Dispose();
-                    kv.Value.LifeTimeDeadline?.Dispose();
-                }
-                _nodeGuardingConsumers.Clear();
-            });
+            if (_actor.IsOnCurrentActor) CleanUpOnActor();
+            else _actor.Post(CleanUpOnActor);
         }
         catch (ObjectDisposedException)
         {
             // actor already gone; nothing more to do
         }
         return true;
+    }
+
+    /// <summary>Stops the producers and consumers and fails every open transfer. Actor-only.</summary>
+    private void CleanUpOnActor()
+    {
+        _heartbeatProducer.Dispose();
+        _heartbeatConsumer.Dispose();
+        _syncProducerHandle?.Dispose();
+        _syncProducerHandle = null;
+        DisposePdoRuntime();
+        _lifeGuardingDeadline?.Dispose();
+        _lifeGuardingDeadline = null;
+        CancelFlyingMasterDeadline();
+        CancelBootUp();
+
+        _sdoServer?.Deadline?.Dispose();
+        _sdoServer = null;
+        foreach (var kv in _sdoClients)
+        {
+            kv.Value.Deadline?.Dispose();
+            kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
+        }
+        _sdoClients.Clear();
+
+        _sdoBlockServer?.Deadline?.Dispose();
+        _sdoBlockServer = null;
+        foreach (var kv in _sdoBlockClients)
+        {
+            kv.Value.Deadline?.Dispose();
+            kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
+        }
+        _sdoBlockClients.Clear();
+
+        foreach (var kv in _nodeGuardingConsumers)
+        {
+            kv.Value.PollHandle?.Dispose();
+            kv.Value.LifeTimeDeadline?.Dispose();
+        }
+        _nodeGuardingConsumers.Clear();
     }
 
     private void FinishDispose()
@@ -765,6 +780,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         _readerCts.Dispose();
 
         if (_ownsService) _service.Dispose();
+        _disposeDone.TrySetResult(true);
     }
 
     // =========================================================================================

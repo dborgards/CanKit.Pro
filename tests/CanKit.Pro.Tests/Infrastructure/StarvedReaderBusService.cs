@@ -95,7 +95,14 @@ internal sealed class StarvedReaderBusService : ICanBusService
     public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
         => Array.Empty<FilterOverlap>();
 
-    public void Dispose() => _frames.Writer.TryComplete();
+    /// <summary>Whether <see cref="Dispose"/> has been called.</summary>
+    public bool IsDisposed { get; private set; }
+
+    public void Dispose()
+    {
+        IsDisposed = true;
+        _frames.Writer.TryComplete();
+    }
 
     private sealed class Sub : ISubscription
     {

@@ -57,53 +57,83 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
     [MemberData(nameof(Contexts))]
     public async Task A_Node_Can_Be_Disposed_From_Its_Own_Subscriber_Without_Waiting_For_Itself(string call, string context)
     {
+        using var resources = new DisposeBag();
         var elapsed = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var transferEnded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         ICanOpenNode? node = null;
+        Task? openTransfer = null;
         void DisposeNode()
         {
             var watch = Stopwatch.StartNew();
             if (call == "Dispose") node!.Dispose();
             else node!.DisposeAsync().AsTask().Wait();
+            // What a caller may rely on when the call returns: its open transfers have ended. From
+            // the actor this needs the cleanup to run in place, a post waits for this very handler.
+            transferEnded.TrySetResult(openTransfer?.IsCompleted ?? true);
             elapsed.TrySetResult(watch.Elapsed);
         }
 
-        ICanBus? busA = null, rawBus = null;
-        StarvedReaderBusService? starved = null;
-        try
+        if (context == "a reader failure report")
         {
-            if (context == "a reader failure report")
+            var starved = new StarvedReaderBusService { FramesFault = new InvalidOperationException("the demux broke") };
+            node = resources.Add(new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource()));
+            node.BackgroundExceptionOccurred += (_, _) => DisposeNode();
+            starved.WakeReader();
+        }
+        else
+        {
+            var session = NewSession();
+            var busA = resources.Add(Open(session, 1));
+            var rawBus = resources.Add(Open(session, 2));
+            node = resources.Add(CanOpen.OpenNode(busA, nodeId: 0x01));
+            if (context == "ApplicationReset")
             {
-                starved = new StarvedReaderBusService { FramesFault = new InvalidOperationException("the demux broke") };
-                node = new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
-                node.BackgroundExceptionOccurred += (_, _) => DisposeNode();
-                starved.WakeReader();
+                PeerSdoLaboratory.Bind(node, 0x02);
+                openTransfer = node.SdoUploadAsync(0x02, 0x2100, 0x00); // nobody answers
+                node.ApplicationReset += (_, _) => DisposeNode();
+                rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+                    new byte[] { (byte)NmtCommand.ResetNode, 0x01 }, isExtendedFrame: false));
             }
             else
             {
-                var session = NewSession();
-                busA = Open(session, 1);
-                rawBus = Open(session, 2);
-                node = CanOpen.OpenNode(busA, nodeId: 0x01);
-                if (context == "ApplicationReset")
-                {
-                    node.ApplicationReset += (_, _) => DisposeNode();
-                    rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
-                        new byte[] { (byte)NmtCommand.ResetNode, 0x01 }, isExtendedFrame: false));
-                }
-                else
-                {
-                    node.HeartbeatReceived += (_, _) => DisposeNode();
-                    SendHeartbeat(rawBus, 0x11, 0x05);
-                }
+                node.HeartbeatReceived += (_, _) => DisposeNode();
+                SendHeartbeat(rawBus, 0x11, 0x05);
             }
-
-            (await elapsed.Task.WithTimeoutAsync(ShortTimeout)).Should().BeLessThan(NoStall);
         }
-        finally
+
+        (await elapsed.Task.WithTimeoutAsync(ShortTimeout)).Should().BeLessThan(NoStall);
+        (await transferEnded.Task.WithTimeoutAsync(ShortTimeout)).Should().BeTrue("the open transfer ended before the call returned");
+    }
+
+    // A second DisposeAsync that arrives while the first is still waiting for the reader returns
+    // when the disposal has finished, not at once: the owned service is released by then.
+    [Fact]
+    public async Task A_Concurrent_DisposeAsync_Returns_When_The_Disposal_Has_Finished()
+    {
+        var starved = new StarvedReaderBusService();
+        var node = new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+
+        var first = node.DisposeAsync();
+        var second = node.DisposeAsync();
+        await second.AsTask().WithTimeoutAsync(ShortTimeout);
+
+        starved.IsDisposed.Should().BeTrue();
+        await first.AsTask().WithTimeoutAsync(ShortTimeout);
+    }
+
+    private sealed class DisposeBag : IDisposable
+    {
+        private readonly System.Collections.Generic.List<IDisposable> _items = new();
+
+        public T Add<T>(T item) where T : IDisposable
         {
-            node?.Dispose();
-            busA?.Dispose();
-            rawBus?.Dispose();
+            _items.Add(item);
+            return item;
+        }
+
+        public void Dispose()
+        {
+            for (var i = _items.Count - 1; i >= 0; i--) _items[i].Dispose();
         }
     }
 
