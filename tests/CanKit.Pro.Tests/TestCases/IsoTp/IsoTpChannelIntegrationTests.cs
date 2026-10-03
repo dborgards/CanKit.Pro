@@ -1095,13 +1095,21 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
             ownsService: false, actor);
         var reported = new List<Exception>();
-        channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        var firstReport = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            lock (reported) reported.Add(ex);
+            firstReport.TrySetResult(true);
+        };
 
         var waiting = channel.ReceiveAsync();
         service.WakeReader();
 
         Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
         (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Be("the demux broke");
+        // The reader posts the loss to the inbox and raises the report after it: the receive can
+        // complete first, so the report is awaited rather than read at once (#270).
+        await firstReport.Task.WaitAsync(ShortTimeout);
         lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the demux broke");
     }
 

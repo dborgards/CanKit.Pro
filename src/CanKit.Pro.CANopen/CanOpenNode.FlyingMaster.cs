@@ -614,7 +614,7 @@ internal sealed partial class CanOpenNode
         var args = new FlyingMasterChangedEventArgs(signal, _flyingMasterRole, otherNodeId, otherPriority);
         // The dispatcher reports a subscriber throw and keeps going, so a timeout or an
         // EMCY already queued is still delivered. A second catch here would only repeat that.
-        EnqueueEvent(() => FlyingMasterChanged?.Invoke(this, args));
+        EnqueueEvent(() => DeliverToSubscribers(FlyingMasterChanged, args));
     }
 
     private OdWriteDecision ValidateFlyingMasterTimingWrite(byte subindex, byte[] value)
