@@ -337,6 +337,7 @@ internal sealed partial class CanOpenNode
         var map = (ushort)(Co.RpdoMap + n - 1);
         var rp = _rpdos[n] ??= new RpdoRuntime(n);
         rp.SyncPending = null;
+        rp.ShortFrameReported = false;
 
         uint word = _od.TryReadUnsigned(comm, 0x01, out var w) ? w : CanOpenCobId.InvalidBit;
         rp.Valid = (word & CanOpenCobId.InvalidBit) == 0;
@@ -561,13 +562,19 @@ internal sealed partial class CanOpenNode
         // more than mapped → the first bytes up to the mapped length are used.
         if (payload.Length < rp.TotalBytes)
         {
-            if (_emcyValid)
+            // Once per run of short frames: a producer that keeps sending one would otherwise
+            // put an EMCY on the bus for every frame, and the EMCY traffic is what fills it.
+            // A frame that fits ends the run, as does reconfiguring the RPDO.
+            if (_emcyValid && !rp.ShortFrameReported)
             {
+                rp.ShortFrameReported = true;
                 var errorRegister = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
                 _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8210, errorRegister));
             }
             return;
         }
+
+        rp.ShortFrameReported = false;
 
         if (CanOpenTransmissionType.IsSynchronous(rp.TransmissionType))
         {
@@ -826,5 +833,6 @@ internal sealed partial class CanOpenNode
         public PdoMappingEntry[] Mapping { get; set; } = Array.Empty<PdoMappingEntry>();
         public int TotalBytes { get; set; }
         public byte[]? SyncPending { get; set; }
+        public bool ShortFrameReported { get; set; }
     }
 }
