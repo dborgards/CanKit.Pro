@@ -599,8 +599,7 @@ internal sealed partial class CanOpenNode
             {
                 if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live)
                     || !ReferenceEquals(live, session)
-                    || sendId != session.LatestSendId
-                    || session.TimedOut)
+                    || sendId != session.LatestSendId)
                     return;
                 RearmBlockClient(session, session.ServerNodeId);
             }), frames.ToArray());

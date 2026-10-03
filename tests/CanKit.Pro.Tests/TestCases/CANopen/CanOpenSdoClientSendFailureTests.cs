@@ -386,6 +386,43 @@ public class CanOpenSdoClientSendFailureTests
         last[0].Should().Be(SdoBlockFrames.CcsBlockDownloadEndBase, "three full segments leave no unused byte");
     }
 
+    // The other side of C12: a segment whose confirmation takes longer than the timeout alone is
+    // a send that is stuck, and the timeout stands. The confirmation arriving late does not
+    // restart a timer that has already decided; the transfer ends in the timeout abort once the
+    // batch is over.
+    [Fact]
+    public async Task A_Segment_Confirmed_After_The_Timeout_Does_Not_Revive_The_Block_Download()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-late-{Guid.NewGuid():N}");
+        var clock = new ManualTimeSource();
+        using var client = new CanOpenNode(new CanBusService(bus), 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        var payload = Enumerable.Range(0, 14).Select(i => (byte)(0x30 + i)).ToArray(); // two segments
+        var download = client.SdoDownloadAsync(0x11, 0x1000, 0x00, payload, SdoTransferMode.Block);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+            SdoBlockFrames.BuildBlockDownloadInitResponse(0x1000, 0x00, serverCrcSupported: false, blockSize: 2)),
+            isEcho: false);
+
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // segment 1, unconfirmed
+        _ = client.State;
+        _ = client.State;
+        clock.Advance(TimeSpan.FromMilliseconds(1500));
+        _ = client.State;
+        _ = client.State;
+        bus.DeferredEchoes.ReleaseNext();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout); // segment 2
+        bus.DeferredEchoes.ReleaseNext();
+
+        var abort = (await FluentActions.Awaiting(() => download.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<SdoAbortException>()).Which;
+        abort.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
+    }
+
     [Fact]
     public async Task A_Block_Timeout_With_Its_Send_Confirmed_Ends_In_The_Timeout_Abort()
     {
