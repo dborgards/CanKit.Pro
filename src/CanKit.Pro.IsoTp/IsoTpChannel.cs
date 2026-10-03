@@ -74,6 +74,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // it retains into an inbox that is still open.
     private readonly Channel<RxInboxItem> _pduInbox;
     private volatile Exception? _inboxLost;
+    // Set while a discard has taken the items it retains out of the inbox and not yet put them
+    // back: a receiver meeting an empty inbox then must not read that as "nothing more to come".
+    private int _discarding;
+
+    /// <summary>For tests: runs between a discard taking the retained items out of the inbox and
+    /// putting them back, on the actor.</summary>
+    internal Action? DiscardGapObserver { get; set; }
     private readonly TaskCompletionSource<bool> _inboxLostSignal =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -459,18 +466,28 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // opposite of the reset intent. Items from after it go back in their order; this runs
         // on the inbox's single writer.
         var kept = new List<RxInboxItem>();
-        while (_pduInbox.Reader.TryRead(out var item))
+        Volatile.Write(ref _discarding, 1);
+        try
         {
-            // An error item carries the first-frame stamp of the reception it aborted, so an
-            // abort of a reception that began after the stamp is kept as that reception's
-            // outcome (Codex on #143).
-            if (item.FirstFrameArrivalTimestamp >= stamp)
-                kept.Add(item);
-            else
-                discarded++;
+            while (_pduInbox.Reader.TryRead(out var item))
+            {
+                // An error item carries the first-frame stamp of the reception it aborted, so an
+                // abort of a reception that began after the stamp is kept as that reception's
+                // outcome (Codex on #143).
+                if (item.FirstFrameArrivalTimestamp >= stamp)
+                    kept.Add(item);
+                else
+                    discarded++;
+            }
+
+            DiscardGapObserver?.Invoke();
+            foreach (var item in kept)
+                _pduInbox.Writer.TryWrite(item);
         }
-        foreach (var item in kept)
-            _pduInbox.Writer.TryWrite(item);
+        finally
+        {
+            Volatile.Write(ref _discarding, 0);
+        }
         return discarded;
     }
 
@@ -499,7 +516,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         while (true)
         {
             if (_pduInbox.Reader.TryRead(out var item)) return (true, item);
-            if (_inboxLost is { } lost) throw lost;
+            if (_inboxLost is { } lost)
+            {
+                // A discard has the retained items out of the inbox for a moment: wait it out.
+                if (Volatile.Read(ref _discarding) != 0)
+                {
+                    await Task.Yield();
+                    continue;
+                }
+
+                // Looked again after the flag: a discard that finished in between has put them back.
+                if (_pduInbox.Reader.TryRead(out item)) return (true, item);
+                throw lost;
+            }
 
             using var release = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var wait = _pduInbox.Reader.WaitToReadAsync(release.Token).AsTask();

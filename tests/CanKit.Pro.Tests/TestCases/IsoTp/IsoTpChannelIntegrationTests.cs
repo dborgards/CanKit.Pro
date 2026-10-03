@@ -969,6 +969,64 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         seen.Should().ContainSingle().Which.Should().Equal(0x0A, 0x0B);
     }
 
+    // Review on #261: a discard after the loss has the retained items out of the inbox for a
+    // moment. A receiver arriving then must not read the empty inbox as the end and throw the
+    // loss ahead of the PDU that is about to be put back.
+    [Fact]
+    public async Task A_Receive_During_A_Discard_After_The_Loss_Still_Gets_The_Retained_Pdu_First()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+        var concrete = (IsoTpChannel)channel;
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, _) => lost.TrySetResult(true);
+        service.Dispose();
+        await lost.Task.WaitAsync(ShortTimeout);
+
+        Task<byte[]>? receive = null;
+        concrete.DiscardGapObserver = () =>
+        {
+            // On the actor, with the retained PDU out of the inbox: a receiver starts now and
+            // gets a moment to meet the empty inbox. No signal says "it looked and waited", so
+            // this is a negative window: it can only pass falsely on a slow host.
+            receive = Task.Run(() => channel.ReceiveAsync());
+            Thread.Sleep(300);
+            receive.IsCompleted.Should().BeFalse("the retained PDU is about to be put back");
+        };
+        channel.DiscardPendingPdus(arrivedBefore: 1).Should().Be(0);
+
+        (await receive!.WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
+    // The streaming receive ends gracefully when the channel is disposed under it.
+    [Fact]
+    public async Task ReceiveAll_Ends_When_The_Channel_Is_Disposed()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var seen = 0;
+        var reading = Task.Run(async () =>
+        {
+            await foreach (var _ in channel.ReceiveAllAsync(cts.Token)) seen++;
+        });
+        await Task.Delay(50); // the enumeration is waiting on the empty inbox
+        channel.Dispose();
+
+        await reading.WaitAsync(ShortTimeout);
+        seen.Should().Be(0);
+    }
+
     // The reader itself failing is the same loss: the inbox ends with that failure, for every
     // receiver, and it is reported once.
     [Fact]
