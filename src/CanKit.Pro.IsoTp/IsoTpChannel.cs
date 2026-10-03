@@ -458,7 +458,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // opposite of the reset intent. Items from after it go back in their order; this runs
         // on the inbox's single writer.
         var kept = new List<RxInboxItem>();
-        while (_pduInbox.Reader.TryRead(out var item))
+        var inbox = _pduInbox;
+        Channel<RxInboxItem>? replacement = null;
+        if (_inboxLost is not null)
+        {
+            // The inbox was completed when the bus service went, and a completed channel takes no
+            // writes. A writable replacement is published before the old one is drained, so a
+            // reader never meets an empty inbox that already carries the failure while the items
+            // from after the stamp are still on their way over; it is completed with the same
+            // failure once they are in.
+            replacement = Channel.CreateBounded<RxInboxItem>(_inboxOptions);
+            _pduInbox = replacement;
+        }
+
+        while (inbox.Reader.TryRead(out var item))
         {
             // An error item carries the first-frame stamp of the reception it aborted, so an
             // abort of a reception that began after the stamp is kept as that reception's
@@ -468,20 +481,16 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             else
                 discarded++;
         }
-        if (_inboxLost is { } lost && kept.Count > 0)
+        if (replacement is not null)
         {
-            // The inbox was completed when the bus service went, and a completed channel takes no
-            // writes: the items from after the stamp move to a fresh one, completed the same way.
-            var next = Channel.CreateBounded<RxInboxItem>(_inboxOptions);
             foreach (var item in kept)
-                next.Writer.TryWrite(item);
-            next.Writer.TryComplete(lost);
-            _pduInbox = next;
+                replacement.Writer.TryWrite(item);
+            replacement.Writer.TryComplete(_inboxLost);
         }
         else
         {
             foreach (var item in kept)
-                _pduInbox.Writer.TryWrite(item);
+                inbox.Writer.TryWrite(item);
         }
         return discarded;
     }

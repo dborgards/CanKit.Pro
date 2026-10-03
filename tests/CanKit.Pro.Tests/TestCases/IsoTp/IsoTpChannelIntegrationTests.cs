@@ -925,7 +925,13 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
         busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0C, 0x0D, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
         await both.Task.WaitAsync(ShortTimeout);
+
+        // The loss is reported after the inbox is completed with it: the discard below must meet
+        // that state, not race the reader noticing the service went.
+        var lost = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, _) => lost.TrySetResult(true);
         service.Dispose();
+        await lost.Task.WaitAsync(ShortTimeout);
 
         // A stamp of 1 is before everything: nothing is discarded, everything is kept.
         channel.DiscardPendingPdus(arrivedBefore: 1).Should().Be(0);
