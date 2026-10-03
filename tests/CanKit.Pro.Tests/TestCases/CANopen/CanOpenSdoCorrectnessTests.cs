@@ -1317,6 +1317,34 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Sdo_Client_Upload_Over_An_Announced_Cap_Sized_Length_Is_Length_Too_High_Not_Out_Of_Memory()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 10));
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 10));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadSegmentBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: false, new byte[] { 1, 2, 3, 4, 5, 6, 7 }));
+        tap.Next(ShortTimeout);
+        // Fourteen bytes against ten announced, and ten is also the cap: the announcement is what
+        // was broken, so that is what the abort says.
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: true, lastSegment: true, new byte[] { 8, 9, 10, 11, 12, 13, 14 }));
+
+        SdoFrames.ReadAbortCode(tap.Next(ShortTimeout)).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.LengthTooHigh);
+    }
+
+    [Fact]
     public async Task Sdo_Client_Upload_Aborts_When_The_Server_Announces_Zero_And_Sends_Data()
     {
         var session = NewSession();

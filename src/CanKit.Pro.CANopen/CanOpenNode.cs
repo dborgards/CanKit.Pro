@@ -2133,18 +2133,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // enforce MaxSdoTransferBytes so a zero-size init cannot bypass the cap by
             // streaming unbounded segments.
             int needed = session.Offset + payload.Length;
-            if (needed > _options.MaxSdoTransferBytes)
-            {
-                AbortClient(session, SdoAbortCode.OutOfMemory);
-                return;
-            }
             // More than the server announced is a protocol error, as it is for the server's own
-            // receive path and for the block-upload client (#253). Without an
-            // indicated size the buffer grows, which is what that case is for. An indicated size
-            // of zero is a size.
+            // receive path and for the block-upload client (#253). It is judged before the cap,
+            // so that a server announcing exactly the cap and sending more is told what it did
+            // wrong. Without an indicated size the buffer grows, which is what that case is for;
+            // an indicated size of zero is a size.
             if (session.SizeIndicated && needed > session.DeclaredTotalSize)
             {
                 AbortClient(session, SdoAbortCode.LengthTooHigh);
+                return;
+            }
+            if (needed > _options.MaxSdoTransferBytes)
+            {
+                AbortClient(session, SdoAbortCode.OutOfMemory);
                 return;
             }
             if (session.Payload!.Length < needed)
