@@ -83,11 +83,12 @@ using var service = new CanBusService(bus);
 // One bus, two protocol instances, two disjoint ID ranges — neither starves the other,
 // and a slow consumer cannot block the fast one.
 using var isoTp = service.Subscribe(CanIdFilter.Range(0x700, 0x7FF));
-using var j1939 = service.Subscribe(view => view.IsExtendedFrame);
+using var j1939 = service.Subscribe(e => e.Frame.IsExtendedFrame);
 
 await foreach (var frame in isoTp.Frames.WithCancellation(token))
 {
-    // A read-only CanFrameView: no ownership, no disposal, no aliasing surprises.
+    // A CanFrameEvent: the frame plus its timestamps and echo flag. Its payload is an owned copy,
+    // valid for as long as you hold it; nothing to dispose.
 }
 
 // "Did it actually go out?" — a real echo match where the bus provides one, driver acceptance

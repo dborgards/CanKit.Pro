@@ -76,8 +76,8 @@ feat(addressing)!: rename ComposePgn parameters          -> major release
 docs: explain the deadline rearm semantics               -> no release
 ```
 
-Scopes match the packages: `rawcan`, `actor`, `addressing`, `reliability`, plus `docs`, `ci`,
-`build`, `deps`.
+Scopes match the packages: `rawcan`, `actor`, `addressing`, `reliability`, `isotp`, `j1939`,
+`j1939tp`, `uds`, `canopen`, plus `docs`, `ci`, `build`, `deps`.
 
 A breaking change needs both the `!` marker and a footer that says what to do about it:
 
@@ -137,8 +137,7 @@ dotnet build tests/CanKit.Pro.Tests -f net48 -p:CanKitProTestNetFrameworkLeg=tru
 
 These are published libraries, so the public surface is a promise:
 
-- XML documentation on every public type and member. The existing code documents in English with
-  a Chinese translation, inherited from CanKit's own style — English alone is fine for new code.
+- XML documentation on every public type and member. Write them in English.
   Those comments are published verbatim: `eng/build-api-docs.sh` turns them into the
   [API reference](https://dborgards.github.io/CanKit.Pro/api/) on every website build, so what you
   write there is what readers see, and the `FR-…`/`ADR-…` ids you cite become links into the SRS

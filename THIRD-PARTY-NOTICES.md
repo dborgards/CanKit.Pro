@@ -37,7 +37,8 @@ an ordinary NuGet package. It has no runtime dependencies of its own.
 ### .NET platform packages — MIT
 
 `Microsoft.Bcl.AsyncInterfaces`, `System.Memory` and `System.Threading.Channels` are referenced by
-`CanKit.Pro.RawCan` on `netstandard2.0` only; on `net10.0` those APIs are in the framework and no
+the six packages that use them (`RawCan`, `IsoTp`, `J1939`, `J1939Tp`, `Uds`, `CanOpen`) on
+`netstandard2.0` only; on `net10.0` those APIs are in the framework and no
 package is pulled in.
 
     Copyright (c) .NET Foundation and Contributors
@@ -49,7 +50,7 @@ These never reach a consumer's application: they are `PrivateAssets`/test-projec
 
 | Package | License |
 | --- | --- |
-| [GitVersion.MsBuild](https://github.com/GitTools/GitVersion) | MIT |
+| [GitVersion](https://github.com/GitTools/GitVersion) (`gitversion.tool`, a local dotnet tool) | MIT |
 | [xunit](https://github.com/xunit/xunit), xunit.runner.visualstudio | Apache-2.0 |
 | [Microsoft.NET.Test.Sdk](https://github.com/microsoft/vstest) | MIT |
 | [AwesomeAssertions](https://github.com/AwesomeAssertions/AwesomeAssertions) | Apache-2.0 |

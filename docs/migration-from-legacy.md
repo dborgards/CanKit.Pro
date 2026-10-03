@@ -91,7 +91,7 @@ matrix driven by `CANKIT_TEST_ADAPTERS`. CanKit.Pro has no such matrix, so
 
 **The release pipeline.** The legacy repository has nine CI workflows and a PowerShell pipeline
 that detects per-package version bumps from `eng/package-versions.props` — a sensible design for a
-fork tracking upstream's many independently-versioned packages. CanKit.Pro versions all four
+fork tracking upstream's many independently-versioned packages. CanKit.Pro versions all nine
 packages together from the commit history instead, so the whole thing collapses into
 [one CI workflow and one release workflow](release-process.md).
 

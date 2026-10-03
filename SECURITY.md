@@ -22,7 +22,7 @@ credited in the advisory unless you prefer otherwise.
 
 ## Scope
 
-This repository covers the four `CanKit.Pro.*` packages only.
+This repository covers the nine `CanKit.Pro.*` packages only.
 
 Vulnerabilities in **CanKit** itself — adapters, `ICanBus`, frame handling, vendor SDK interop —
 belong to [pkuyo/CanKit](https://github.com/pkuyo/CanKit). CanKit.Pro consumes it as a NuGet
