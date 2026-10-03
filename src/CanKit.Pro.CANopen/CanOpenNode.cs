@@ -1361,9 +1361,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // A reserved state byte still shows the producer alive and is still recorded for the NMT
         // master, but it is not reported: as Initializing it would be indistinguishable from a
         // boot-up and read as a restart that did not happen (#255).
-        // The boot-up is the byte 0x00; 0x80 is state 0 with the guarding toggle set, which no
-        // producer sends as a heartbeat.
-        if (TryDecodeHeartbeatState(stateByte, out var state) && (stateByte != 0 || data[0] == 0))
+        // Bit 7 is reserved and always 0 in a heartbeat (§7.2.8.3.2.2), so a frame that sets it is
+        // not one: a bystander's guarding reply (toggle) or a malformed frame. It is not reported,
+        // which also keeps 0x80 (state 0 with the toggle set) from reading as a boot-up (#266).
+        // It still counts as a sign of life below, as before.
+        if ((data[0] & 0x80) == 0 && TryDecodeHeartbeatState(stateByte, out var state))
             RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
         NoteSlaveNmtState(producer, stateByte);
         _heartbeatConsumer.NoteReceived(producer);
@@ -2427,6 +2429,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// </summary>
     private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
         Func<bool>? shouldStop, params (uint CobId, byte[] Payload)[] frames)
+        => SendOrderedControlFrames(onSendCompleted, shouldStop, onFrameConfirmed: null, frames);
+
+    /// <summary>
+    /// As above. <paramref name="onFrameConfirmed"/>, when given, is called on the sending task
+    /// after each frame that was confirmed, so the owner of a long batch can tell progress from
+    /// silence. It must be cheap and thread-safe.
+    /// </summary>
+    private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
+        Func<bool>? shouldStop, Action? onFrameConfirmed, params (uint CobId, byte[] Payload)[] frames)
     {
         return Task.Run(async () =>
         {
@@ -2450,6 +2461,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                                 failure = unconfirmed;
                                 return;
                             }
+                        }
+                        else
+                        {
+                            onFrameConfirmed?.Invoke();
                         }
                     }
                     catch (Exception ex)

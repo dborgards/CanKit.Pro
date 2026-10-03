@@ -334,6 +334,58 @@ public class CanOpenSdoClientSendFailureTests
         data.Should().Equal(1, 2, 3, 4);
     }
 
+    // C12: the request timer measures how long the server has been silent, and during a sub-block
+    // the server has nothing to answer yet. A sub-block that takes longer to send than SdoTimeout
+    // (127 segments at 10 kbit/s) used to use the timer up before the ACK could even be asked
+    // for, and the timeout that fired during the batch discarded the healthy server's ACK. On a
+    // clock the test drives: three segments, each confirmed 600 ms after the one before, against
+    // a 1 s timeout. No single gap reaches the timeout; the sum of them does.
+    [Fact]
+    public async Task A_SubBlock_Longer_Than_The_Sdo_Timeout_Does_Not_Time_Out_Before_Its_Ack()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-block-long-{Guid.NewGuid():N}");
+        var toServer = new List<byte[]>();
+        bus.OnTransmitting = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoRx(0x11)) lock (toServer) toServer.Add(frame.Data.ToArray());
+        };
+        var clock = new ManualTimeSource();
+        using var client = new CanOpenNode(new CanBusService(bus), 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
+        bus.DeferredEchoes.ReleaseAll();
+
+        var payload = Enumerable.Range(0, 21).Select(i => (byte)(0x30 + i)).ToArray(); // three segments
+        var download = client.SdoDownloadAsync(0x11, 0x1000, 0x00, payload, SdoTransferMode.Block);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the initiate
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+            SdoBlockFrames.BuildBlockDownloadInitResponse(0x1000, 0x00, serverCrcSupported: false, blockSize: 3)),
+            isEcho: false);
+
+        for (var segment = 1; segment <= 3; segment++)
+        {
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(2 + segment, ShortTimeout);
+            _ = client.State; // two actor round-trips: every timer the last step armed is armed
+            _ = client.State;
+            clock.Advance(TimeSpan.FromMilliseconds(600));
+            _ = client.State;
+            _ = client.State;
+            bus.DeferredEchoes.ReleaseNext();
+        }
+
+        // 1.8 s of the virtual clock have passed since the initiate response, 1 s being the timeout.
+        bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
+            SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.ScsBlockDownloadSubBlockAck, lastAckedSeq: 3, nextBlockSize: 3)),
+            isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(6, ShortTimeout); // the end request
+
+        download.IsCompleted.Should().BeFalse("the transfer is waiting for the end response, not timed out");
+        byte[] last;
+        lock (toServer) last = toServer[^1];
+        last[0].Should().Be(SdoBlockFrames.CcsBlockDownloadEndBase, "three full segments leave no unused byte");
+    }
+
     [Fact]
     public async Task A_Block_Timeout_With_Its_Send_Confirmed_Ends_In_The_Timeout_Abort()
     {

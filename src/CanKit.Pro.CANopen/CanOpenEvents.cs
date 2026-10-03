@@ -15,7 +15,7 @@ public sealed class HeartbeatReceivedEventArgs : EventArgs
 
     /// <summary>Reported NMT state of the producer. <see cref="NmtState.Initializing"/> is used
     /// for the CiA 301 §7.2.8.3.2 bootup frame (<c>data[0] == 0x00</c>). A frame whose state
-    /// byte is one CiA 301 reserves is not reported.</summary>
+    /// byte is one CiA 301 reserves, or that sets the reserved bit 7, is not reported.</summary>
     public NmtState State { get; }
 
     /// <summary>UTC timestamp captured when the frame was processed on the actor loop.</summary>
