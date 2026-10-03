@@ -19,7 +19,11 @@ body:
         - CanKit.Pro.Actor (threading, scheduling)
         - CanKit.Pro.Addressing (CAN IDs, J1939 fields)
         - CanKit.Pro.Reliability (deadlines, bus state)
-        - A new package (ISO-TP, J1939, CANopen, UDS, ...)
+        - CanKit.Pro.IsoTp (ISO 15765-2 transport)
+        - CanKit.Pro.J1939 / CanKit.Pro.J1939Tp (J1939 and its transport protocols)
+        - CanKit.Pro.Uds (diagnostics)
+        - CanKit.Pro.CANopen
+        - A new package
         - Not sure
     validations:
       required: true

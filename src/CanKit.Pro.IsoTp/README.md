@@ -102,13 +102,17 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
 ## Timing accuracy — STmin pacing (NFR-003)
 
 The sender paces Consecutive Frames by the peer's advertised STmin using the L2
-`DeadlineScheduler` (actor-driven, event-based — no busy wait). On general-purpose
-operating systems the effective CF spacing is **STmin + OS scheduling latency**: typically
-within ±1 ms of the configured value on idle Windows/Linux/macOS hosts, with no hard
-real-time guarantee under load. Sub-millisecond STmin values (`0xF1..0xF9`, 100–900 µs)
-are honored as-is but bottom out at the platform timer resolution. Verified end-to-end by
-`tests/CanKit.Pro.Tests/TestCases/IsoTp/IsoTpStminTimingTests.cs` (Virtual-loopback CF-spacing
-measurement with CI-tolerant soft bounds).
+`DeadlineScheduler` (actor-driven, event-based — no busy wait). On general-purpose operating
+systems the effective CF spacing is **STmin + OS scheduling latency**, with no real-time
+guarantee, and nothing in this repository measures how large that latency is on any host.
+Sub-millisecond STmin values (`0xF1..0xF9`, 100–900 µs) are honored as-is but bottom out at the
+platform timer resolution.
+
+What the suite does verify is the logic, not the wall clock:
+`tests/CanKit.Pro.Tests/TestCases/IsoTp/IsoTpStminTimingTests.cs` advances a clock the test drives
+and checks that the sender releases exactly one Consecutive Frame per STmin interval. The
+requirement NFR-003 asks for a documented accuracy (for example ±1 ms); that figure is a target,
+not a measured result.
 
 ## Functional (1:N) addressing — `IsoTpFunctionalClient` (FR-TP-019)
 
