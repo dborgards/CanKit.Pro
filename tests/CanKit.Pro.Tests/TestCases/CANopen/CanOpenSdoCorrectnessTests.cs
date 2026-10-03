@@ -1151,8 +1151,9 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(16, 17, 24, 24)]
     [InlineData(16, 30, 24, 30)]
     [InlineData(int.MaxValue / 2 + 1, 5, int.MaxValue, int.MaxValue)]
+    [InlineData(int.MaxValue - 100, int.MaxValue - 90, (long)int.MaxValue + 7, int.MaxValue)]
     public void GrowCapacity_Doubles_Clamps_To_The_Ceiling_And_Never_Undershoots(
-        int current, int needed, int ceiling, int expected)
+        int current, int needed, long ceiling, int expected)
         => CanOpenNode.GrowCapacity(current, needed, ceiling).Should().Be(expected);
 
     [Fact]

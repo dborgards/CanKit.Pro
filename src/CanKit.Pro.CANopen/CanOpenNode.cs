@@ -2160,10 +2160,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// <paramref name="ceiling"/> (the transfer cap, plus the slack the caller's final segment
     /// may overshoot it by) and never below <paramref name="needed"/>.
     /// </summary>
-    internal static int GrowCapacity(int current, int needed, int ceiling)
+    internal static int GrowCapacity(int current, int needed, long ceiling)
     {
         long doubled = Math.Max(8L, (long)current * 2);
-        var capacity = (int)Math.Min(doubled, ceiling);
+        var capacity = (int)Math.Min(doubled, Math.Min(ceiling, int.MaxValue));
         return Math.Max(capacity, needed);
     }
 
