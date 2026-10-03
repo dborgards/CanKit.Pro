@@ -251,6 +251,10 @@ public interface ICanOpenNode : IDisposable
 
     /// <summary>Transmits a single SYNC frame (payload-less) on the SYNC COB-ID configured in
     /// <c>1005h</c>.</summary>
+    /// <remarks>This is a raw send, not the producer: it is not gated by the NMT state and not by
+    /// bit 30 of <c>1005h</c> ("device generates SYNC"), so a node in Stopped, or one that is not
+    /// configured to produce SYNC, transmits when asked. The periodic producer
+    /// (<see cref="StartSyncProducer(TimeSpan)"/>) is the one that follows CiA 301 Table 37.</remarks>
     Task SendSyncAsync(CancellationToken cancellationToken = default);
 
     // -----------------------------------------------------------------------------------------

@@ -1335,6 +1335,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     // =========================================================================================
     // Heartbeat (FR-CO-008)
     // =========================================================================================
+
+    /// <summary>The NMT state a heartbeat or guarding state byte (bit 7 already masked) reports;
+    /// false for the values CiA 301 §7.2.8.3.2 reserves.</summary>
+    internal static bool TryDecodeHeartbeatState(byte stateByte, out NmtState state)
+    {
+        switch (stateByte)
+        {
+            case 0x00: state = NmtState.Initializing; return true; // Bootup frame.
+            case 0x04: state = NmtState.Stopped; return true;
+            case 0x05: state = NmtState.Operational; return true;
+            case 0x7F: state = NmtState.PreOperational; return true;
+            default: state = default; return false;
+        }
+    }
+
     private void HandleHeartbeat(uint cobId, byte[] data)
     {
         if (data.Length < 1) return;
@@ -1343,15 +1358,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // reserved (always 0)"), and a guarding reply is routed to HandleNodeGuardingResponse
         // before it gets here, so the bit is masked rather than interpreted.
         byte stateByte = (byte)(data[0] & 0x7F);
-        NmtState state = stateByte switch
-        {
-            0x00 => NmtState.Initializing,      // Bootup frame.
-            0x04 => NmtState.Stopped,
-            0x05 => NmtState.Operational,
-            0x7F => NmtState.PreOperational,
-            _ => NmtState.Initializing,
-        };
-        RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
+        // A reserved state byte still shows the producer alive and is still recorded for the NMT
+        // master, but it is not reported: as Initializing it would be indistinguishable from a
+        // boot-up and read as a restart that did not happen (#255).
+        // The boot-up is the byte 0x00; 0x80 is state 0 with the guarding toggle set, which no
+        // producer sends as a heartbeat.
+        if (TryDecodeHeartbeatState(stateByte, out var state) && (stateByte != 0 || data[0] == 0))
+            RaiseHeartbeatReceived(producer, state, DateTime.UtcNow);
         NoteSlaveNmtState(producer, stateByte);
         _heartbeatConsumer.NoteReceived(producer);
     }
@@ -2067,6 +2080,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 RearmSdoClientDeadline(session);
                 session.InSegmentPhase = true;
                 session.Payload = declared > 0 ? new byte[declared] : Array.Empty<byte>();
+                session.DeclaredTotalSize = declared;
+                session.SizeIndicated = (cs & 0x01) != 0;
                 session.Offset = 0;
                 session.Toggle = false;
                 SendNextClientUploadSegmentRequest(session);
@@ -2120,6 +2135,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // enforce MaxSdoTransferBytes so a zero-size init cannot bypass the cap by
             // streaming unbounded segments.
             int needed = session.Offset + payload.Length;
+            // More than the server announced is a protocol error, as it is for the server's own
+            // receive path and for the block-upload client (#253). It is judged before the cap,
+            // so that a server announcing exactly the cap and sending more is told what it did
+            // wrong. Without an indicated size the buffer grows, which is what that case is for;
+            // an indicated size of zero is a size.
+            if (session.SizeIndicated && needed > session.DeclaredTotalSize)
+            {
+                AbortClient(session, SdoAbortCode.LengthTooHigh);
+                return;
+            }
             if (needed > _options.MaxSdoTransferBytes)
             {
                 AbortClient(session, SdoAbortCode.OutOfMemory);
@@ -2139,13 +2164,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode
                 var final = session.Payload;
                 if (session.Offset != final.Length)
                 {
-                    // Server declared a size but sent less. Trim.
+                    // The buffer is larger than the data: slack from geometric growth when no
+                    // size was announced, or a server that announced more than it sent.
                     var trimmed = new byte[session.Offset];
                     Buffer.BlockCopy(final, 0, trimmed, 0, session.Offset);
                     final = trimmed;
                 }
                 session.Deadline?.Dispose();
                 _sdoClients.Remove(serverNodeId);
+                // Fewer bytes than announced (a device that announces the maximum length of a
+                // VISIBLE_STRING and sends what it holds) is accepted, but no longer silently:
+                // the caller gets the data, and the shortfall is reported (#253).
+                if (session.SizeIndicated && session.Offset < session.DeclaredTotalSize)
+                {
+                    RaiseBackgroundException(new CanOpenTransportException(
+                        $"SDO upload of 0x{session.Index:X4}:{session.Subindex:X2} from node {serverNodeId} announced {session.DeclaredTotalSize} byte(s) and delivered {session.Offset}; the shorter data was returned."));
+                }
                 session.Tcs.TrySetResult(final);
                 return;
             }
@@ -2577,6 +2611,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         /// transfer.</summary>
         public byte[]? Payload { get; set; }
         public int Offset { get; set; }
+        public uint DeclaredTotalSize { get; set; }
+        public bool SizeIndicated { get; set; }
         public bool Toggle { get; set; }
 
         /// <summary>Numbers this transfer's sends; only the latest can still decide it (#197).</summary>
