@@ -2127,8 +2127,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             if (session.Payload!.Length < needed)
             {
-                var grown = new byte[needed];
-                Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
+                var grown = new byte[GrowCapacity(session.Payload.Length, needed, _options.MaxSdoTransferBytes)];
+                Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Offset);
                 session.Payload = grown;
             }
             Buffer.BlockCopy(payload, 0, session.Payload, session.Offset, payload.Length);
@@ -2152,6 +2152,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             RearmSdoClientDeadline(session);
             SendNextClientUploadSegmentRequest(session);
         }
+    }
+
+    /// <summary>
+    /// Next capacity for a receive buffer that has to grow to <paramref name="needed"/> bytes:
+    /// doubled, so a transfer of N bytes copies O(N) in total instead of O(N²), but never past
+    /// <paramref name="ceiling"/> (the transfer cap, plus the slack the caller's final segment
+    /// may overshoot it by) and never below <paramref name="needed"/>.
+    /// </summary>
+    internal static int GrowCapacity(int current, int needed, int ceiling)
+    {
+        long doubled = Math.Max(8L, (long)current * 2);
+        var capacity = (int)Math.Min(doubled, ceiling);
+        return Math.Max(capacity, needed);
     }
 
     /// <summary>

@@ -1136,6 +1136,139 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             "the value is the 24 segment bytes; capacity left above Offset is not written");
     }
 
+    // -----------------------------------------------------------------------------------------
+    // C11: a receive buffer that grows by exactly the next segment copies everything received so
+    // far on every segment, O(N^2) for an N-byte transfer. 64 KiB is 9,363 segments; growing by
+    // one segment each time allocates about 307 MB over the transfer, doubling about 0.3 MB. The
+    // bound below sits far from both, so it measures the growth policy and not the allocator.
+    // -----------------------------------------------------------------------------------------
+    private const int GrowthPayloadBytes = 64 * 1024;
+    private const long GrowthAllocationBound = 40L * 1024 * 1024;
+
+    [Theory]
+    [InlineData(0, 1, 100, 8)]
+    [InlineData(8, 9, 100, 16)]
+    [InlineData(16, 17, 24, 24)]
+    [InlineData(16, 30, 24, 30)]
+    [InlineData(int.MaxValue / 2 + 1, 5, int.MaxValue, int.MaxValue)]
+    public void GrowCapacity_Doubles_Clamps_To_The_Ceiling_And_Never_Undershoots(
+        int current, int needed, int ceiling, int expected)
+        => CanOpenNode.GrowCapacity(current, needed, ceiling).Should().Be(expected);
+
+    [Fact]
+    public async Task Sdo_Client_Sizeless_Upload_Grows_Geometrically()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 1 << 20));
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+        var payload = Enumerable.Range(0, GrowthPayloadBytes).Select(i => (byte)(i * 13)).ToArray();
+
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        // Initiate response without the size indicator: the client cannot size its buffer.
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), new byte[] { SdoFrames.ScsUploadInitSegmented & 0xFE, 0x00, 0x21, 0x00, 0, 0, 0, 0 });
+        var toggle = false;
+        for (var offset = 0; offset < payload.Length; offset += 7)
+        {
+            tap.Next(ShortTimeout);
+            var chunk = payload.AsSpan(offset, Math.Min(7, payload.Length - offset));
+            Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+                SdoFrames.ScsUploadSegmentBase, toggle, offset + 7 >= payload.Length, chunk));
+            toggle = !toggle;
+        }
+        var received = await upload.WithTimeoutAsync(TimeSpan.FromSeconds(30));
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+
+        received.Should().Equal(payload);
+        allocated.Should().BeLessThan(GrowthAllocationBound);
+    }
+
+    [Fact]
+    public void Sdo_BlockDownload_Server_Sizeless_Grows_Geometrically()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var server = CanOpen.OpenNode(busB, nodeId: 0x02,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 1 << 20));
+        server.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+        var payload = Enumerable.Range(0, GrowthPayloadBytes).Select(i => (byte)(i * 13)).ToArray();
+
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        Send(rawBus, CanOpenCobId.SdoRx(0x02),
+            SdoBlockFrames.BuildBlockDownloadInit(0x2100, 0x00, clientCrcSupported: false, sizeIndicated: false, totalSize: 0));
+        var blockSize = tap.Next(ShortTimeout)[4];
+        var offset = 0;
+        while (offset < payload.Length)
+        {
+            byte seq = 0;
+            while (seq < blockSize && offset < payload.Length)
+            {
+                seq++;
+                var chunk = payload.AsSpan(offset, Math.Min(7, payload.Length - offset));
+                offset += chunk.Length;
+                Send(rawBus, CanOpenCobId.SdoRx(0x02),
+                    SdoBlockFrames.BuildSegment(seq, offset >= payload.Length, chunk));
+            }
+            tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.ScsBlockDownloadSubBlockAck);
+        }
+        var unused = (byte)((7 - payload.Length % 7) % 7);
+        Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildEnd(SdoBlockFrames.CcsBlockDownloadEndBase, unused, 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.ScsBlockDownloadEndResponse);
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+
+        server.ObjectDictionary.ReadRaw(0x2100, 0x00).Should().Equal(payload);
+        allocated.Should().BeLessThan(GrowthAllocationBound);
+    }
+
+    [Fact]
+    public async Task Sdo_BlockUpload_Client_Sizeless_Grows_Geometrically()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01,
+            new CanOpenNodeOptions().With(maxSdoTransferBytes: 1 << 20));
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+        var payload = Enumerable.Range(0, GrowthPayloadBytes).Select(i => (byte)(i * 13)).ToArray();
+
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00, SdoTransferMode.Block);
+        var blockSize = tap.Next(ShortTimeout)[4];
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildBlockUploadInitResponse(
+            0x2100, 0x00, serverCrcSupported: false, sizeIndicated: false, totalSize: 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadStart);
+        var offset = 0;
+        while (offset < payload.Length)
+        {
+            byte seq = 0;
+            while (seq < blockSize && offset < payload.Length)
+            {
+                seq++;
+                var chunk = payload.AsSpan(offset, Math.Min(7, payload.Length - offset));
+                offset += chunk.Length;
+                Send(rawBus, CanOpenCobId.SdoTx(0x02),
+                    SdoBlockFrames.BuildSegment(seq, offset >= payload.Length, chunk));
+            }
+            tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadSubBlockAck);
+        }
+        var unused = (byte)((7 - payload.Length % 7) % 7);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoBlockFrames.BuildEnd(SdoBlockFrames.ScsBlockUploadEndBase, unused, 0));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoBlockFrames.CcsBlockUploadEndResponse);
+        var received = await upload.WithTimeoutAsync(ShortTimeout);
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+
+        received.Should().Equal(payload);
+        allocated.Should().BeLessThan(GrowthAllocationBound);
+    }
+
     [Fact]
     public void Sdo_Server_Sizeless_Download_Aborts_OutOfMemory_Before_Passing_The_Cap()
     {

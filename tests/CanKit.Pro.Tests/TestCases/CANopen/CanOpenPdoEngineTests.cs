@@ -1197,6 +1197,51 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x2101, 0x00).Should().Be(0x5678u, "the first data bytes up to the mapped length are used");
     }
 
+    // FR-CO-024 (C13) — a producer that keeps sending short frames raises EMCY 8210h once, not once
+    // per frame: the EMCY traffic would otherwise be a multiple of the fault it reports. A frame
+    // that fits ends the run, so the next short one is reported again. The count is read when the
+    // third EMCY arrives, after which every EMCY the second short frame could have raised is
+    // already in the list: the bus delivers them in order.
+    [Fact]
+    public async Task Rpdo_Shorter_Than_Its_Mapping_Raises_Emcy_Once_Per_Run_Of_Short_Frames()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var busC = Open(session, 2);
+        using var wire = new Wire(session, 3);
+        using var device = CanOpen.OpenNode(busB, Device);
+        using var observer = CanOpen.OpenNode(busC, Observer);
+        device.ObjectDictionary.AddU16(0x2100, 0x00, 0);
+        device.ObjectDictionary.AddU16(0x2101, 0x00, 0);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, 16).Add(0x2101, 0x00, 16));
+
+        var emcys = new System.Collections.Concurrent.ConcurrentQueue<EmcyMessage>();
+        var arrived = new System.Collections.Concurrent.BlockingCollection<int>();
+        observer.EmcyReceived += (_, e) =>
+        {
+            if (e.Message.ProducerNodeId != Device) return;
+            emcys.Enqueue(e.Message);
+            arrived.Add(emcys.Count);
+        };
+        var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId == Rpdo1) received.TrySetResult(e.Payload);
+        };
+        await StartAsync(wire, device);
+
+        wire.Transmit(Rpdo1, new byte[] { 0x01 });
+        arrived.Take(new CancellationTokenSource(ShortTimeout).Token);
+        wire.Transmit(Rpdo1, new byte[] { 0x02 });
+        wire.Transmit(Rpdo1, new byte[] { 0x03, 0x04, 0x05, 0x06 });
+        await received.Task.WithTimeoutAsync(ShortTimeout);
+        wire.Transmit(Rpdo1, new byte[] { 0x07 });
+        arrived.Take(new CancellationTokenSource(ShortTimeout).Token);
+
+        emcys.Should().HaveCount(2, "the second short frame continues the run the first one reported");
+        emcys.Should().OnlyContain(m => m.ErrorCode == 0x8210);
+    }
+
     // =========================================================================================
     // Findings of the #133 review.
     // =========================================================================================

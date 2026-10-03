@@ -502,8 +502,8 @@ internal sealed partial class CanOpenNode
             if (session.Payload!.Length - session.Offset < 7)
             {
                 // Grow when the declared size was 0 (unbounded) or when the payload was under-declared.
-                var grown = new byte[session.Offset + 7];
-                Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Payload.Length);
+                var grown = new byte[GrowCapacity(session.Payload.Length, session.Offset + 7, _options.MaxSdoTransferBytes + 7)];
+                Buffer.BlockCopy(session.Payload, 0, grown, 0, session.Offset);
                 session.Payload = grown;
             }
             // Copy the full 7 data bytes; unused bytes in the *last* segment are trimmed off later
@@ -813,7 +813,7 @@ internal sealed partial class CanOpenNode
             // Ensure room for 7 bytes; grow if declared size was under-specified or unbounded.
             if (session.Offset + 7 > session.Buffer.Length)
             {
-                var grown = new byte[session.Offset + 7];
+                var grown = new byte[GrowCapacity(session.Buffer.Length, session.Offset + 7, _options.MaxSdoTransferBytes + 7)];
                 Buffer.BlockCopy(session.Buffer, 0, grown, 0, session.Offset);
                 session.Buffer = grown;
             }
