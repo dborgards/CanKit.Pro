@@ -2369,9 +2369,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         session.LatestSendPending = true;
         return failure => PostSdoClientSendOutcome(() =>
         {
-            if (!_sdoBlockClients.TryGetValue(session.ServerNodeId, out var live) || !ReferenceEquals(live, session))
-                return;
-            if (sendId != session.LatestSendId) return; // answered since: it reached the server
+            if (!IsLiveBlockSend(session, sendId)) return; // ended, or answered since: it reached the server
             session.LatestSendPending = false;
             if (failure is not null)
             {
@@ -2384,6 +2382,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             if (session.TimedOut) CompleteSdoBlockClientTimeout(session);
         });
     }
+
+    /// <summary>
+    /// Whether <paramref name="sendId"/> is still the latest send of a block-client session that
+    /// is still open. Actor-only: it reads the session table.
+    /// </summary>
+    private bool IsLiveBlockSend(SdoBlockClientSession session, int sendId)
+        => _sdoBlockClients.TryGetValue(session.ServerNodeId, out var live)
+           && ReferenceEquals(live, session)
+           && sendId == session.LatestSendId;
 
     /// <summary>
     /// Runs a send-outcome reaction on the actor, where the session tables live. After disposal

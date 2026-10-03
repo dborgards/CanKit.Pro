@@ -17,6 +17,9 @@ public sealed class CanOpenNodeOptions
     /// <summary>Client-side SDO transfer timeout, applied to every request (initiate as well as
     /// each segment ack). In a block download it also restarts at every confirmed segment of a
     /// sub-block, so it measures the server's silence and not the time a sub-block takes to send.
+    /// On a bus without echo that confirmation is the driver accepting the frame, not the frame
+    /// reaching the wire: a driver queue holding more than this much bus time still outlasts
+    /// the timer, and raising it is the remedy.
     /// CiA 301 does not specify a fixed value; one second matches common
     /// production tooling and is aggressive enough for tests on a virtual bus.</summary>
     public TimeSpan SdoTimeout { get; init; } = TimeSpan.FromSeconds(1);
