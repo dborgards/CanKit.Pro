@@ -42,8 +42,9 @@ namespace CanKit.Pro.CANopen;
 /// and deliver nothing afterwards. <c>Dispose</c> blocks for up to two seconds on the node's
 /// reader and event pump to let them finish; <c>DisposeAsync</c> waits for the same without
 /// holding a thread, and is the one to use on a thread that must not block. Either may be called
-/// from an event handler of this node: the handler runs on the event pump, which is then not waited
-/// for, and it ends when the handler returns.
+/// from a subscriber of this node, whichever thread it runs on (an event, <c>ApplicationReset</c>,
+/// <c>BackgroundExceptionOccurred</c>): the task that thread belongs to is then not waited for,
+/// and it ends when the subscriber returns.
 /// </para>
 /// </remarks>
 public interface ICanOpenNode : IDisposable, IAsyncDisposable

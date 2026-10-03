@@ -629,71 +629,87 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     public void Dispose()
     {
         if (!BeginDispose()) return;
-        try { _readerTask.Wait(DisposeJoinTimeout); } catch { /* observed via task; not fatal */ }
+        // A subscriber that disposes the node runs on the thread of the task being joined: the
+        // reader when it reports a failed subscription, the event pump when it delivers an event.
+        // Neither can finish while it waits for itself, so it does not wait; the task ends when
+        // the subscriber returns. (The actor's own reentrant Dispose is ProtocolActor's.)
+        if (!OnReader)
+        {
+            try { _readerTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
+        }
 
         // Complete the queue so the pump exits after draining anything still queued. An event
         // accepted before this point is delivered (unless the subscriber itself hangs); one that
         // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
         // Dispose.
         CompleteEventQueue();
-        // Called from a subscriber, this is the pump's own thread: it cannot finish while it is
-        // waiting for itself, so it does not wait, and the pump ends when the subscriber returns.
         if (!OnEventPump)
         {
-            try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch { /* observed via task; not fatal */ }
+            try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
         }
 
         FinishDispose();
     }
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        // Read before the first await: after it the continuation is on another thread, and a
-        // subscriber that blocks on this call is still holding the pump's.
-        bool onPump = OnEventPump;
+        // From inside one of the node's own callbacks (a subscriber on the pump, on the reader's
+        // failure report or on the actor) the caller holds the thread the waits below would need,
+        // and the continuation of an awaited join would run elsewhere, away from the context
+        // Dispose recognises. The blocking path knows how to not wait for itself, and the caller
+        // is on a node thread already, so nothing is lost by taking it.
+        if (OnEventPump || OnReader || _actor.IsOnCurrentActor)
+        {
+            Dispose();
+            return default;
+        }
+
+        return DisposeCoreAsync();
+    }
+
+    private async ValueTask DisposeCoreAsync()
+    {
         if (!BeginDispose()) return;
-        await JoinQuietlyAsync(_readerTask).ConfigureAwait(false);
+        await JoinAsync(_readerTask).ConfigureAwait(false);
         CompleteEventQueue();
-        if (!onPump)
-            await JoinQuietlyAsync(_eventPumpTask).ConfigureAwait(false);
+        await JoinAsync(_eventPumpTask).ConfigureAwait(false);
         FinishDispose();
     }
 
     private static readonly TimeSpan DisposeJoinTimeout = TimeSpan.FromSeconds(2);
 
     /// <summary>Waits for <paramref name="task"/> for at most <see cref="DisposeJoinTimeout"/>
-    /// without holding a thread; a fault is observed and dropped, as the blocking join does.</summary>
-    private static async Task JoinQuietlyAsync(Task task)
+    /// without holding a thread. Neither task joined here faults (each reports its own failures
+    /// through <see cref="BackgroundExceptionOccurred"/>), so there is nothing to observe.</summary>
+    private static async Task JoinAsync(Task task)
     {
         using var cts = new CancellationTokenSource();
-        var timeout = Task.Delay(DisposeJoinTimeout, cts.Token);
-        try
-        {
-            if (await Task.WhenAny(task, timeout).ConfigureAwait(false) == task)
-                await task.ConfigureAwait(false);
-        }
-        catch
-        {
-            // observed via task; not fatal
-        }
-        finally
-        {
-            cts.Cancel();
-        }
+        await Task.WhenAny(task, Task.Delay(DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
+        cts.Cancel();
     }
 
     /// <summary>True on the thread that is delivering an event to a subscriber.</summary>
     private bool OnEventPump => ReferenceEquals(t_deliveringFor, this);
 
+    /// <summary>True on the thread of the reader task while it reports a failed subscription.</summary>
+    private bool OnReader => ReferenceEquals(t_reportingFor, this);
+
     [ThreadStatic]
     private static CanOpenNode? t_deliveringFor;
+
+    [ThreadStatic]
+    private static CanOpenNode? t_reportingFor;
+
+    private static void MarkDelivering(CanOpenNode? node) => t_deliveringFor = node;
+
+    private static void MarkReporting(CanOpenNode? node) => t_reportingFor = node;
 
     /// <summary>Flips the disposed flag and posts the cleanup; false when already disposed.</summary>
     private bool BeginDispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
-        try { _readerCts.Cancel(); } catch { /* nothing else to do */ }
+        try { _readerCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
 
         try
         {
@@ -784,7 +800,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
         }
         catch (OperationCanceledException) { /* Dispose */ }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+        catch (Exception ex)
+        {
+            // A subscriber of the report may dispose the node; see Dispose.
+            MarkReporting(this);
+            try { RaiseBackgroundException(ex); }
+            finally { MarkReporting(null); }
+        }
     }
 
     // =========================================================================================
@@ -802,7 +824,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // must still be delivered. Anything outside the delegate is still a bug in the pump.
             // Marks the thread for the whole batch: nothing in it awaits, so a subscriber that
             // disposes the node runs on this very thread (see Dispose).
-            t_deliveringFor = this;
+            MarkDelivering(this);
             try
             {
                 while (TryDequeueEvent() is { } raise)
@@ -819,7 +841,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
             finally
             {
-                t_deliveringFor = null;
+                MarkDelivering(null);
             }
             // The queue was just drained. Closure is the completed flag alone: an event
             // accepted before completion is still in the list and was delivered above, and

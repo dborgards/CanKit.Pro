@@ -40,6 +40,9 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// <summary>When set, the reader task's wait throws it once woken, as a subscription that failed would.</summary>
     public Exception? ReaderFault { get; set; }
 
+    /// <summary>When set, the <c>Frames</c> enumeration throws it once woken, as a subscription whose demux failed would.</summary>
+    public Exception? FramesFault { get; set; }
+
     /// <summary>When set, the subscription ends on the wake: the reader's wait returns false, as when its service is disposed.</summary>
     public bool EndSubscriptionOnWake { get; set; }
 
@@ -100,7 +103,18 @@ internal sealed class StarvedReaderBusService : ICanBusService
         public Sub(StarvedReaderBusService owner) => _owner = owner;
 
         public IAsyncEnumerable<CanFrameEvent> Frames
-            => _owner.HoldFrames ? Held() : _owner._frames.Reader.ReadAllAsync();
+            => _owner.FramesFault is not null ? Faulting(_owner)
+             : _owner.HoldFrames ? Held() : _owner._frames.Reader.ReadAllAsync();
+
+        private static async IAsyncEnumerable<CanFrameEvent> Faulting(StarvedReaderBusService owner,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await owner._wake.Task.WaitAsync(cancellationToken);
+            throw owner.FramesFault!;
+#pragma warning disable CS0162 // an iterator needs a yield to be one
+            yield break;
+#pragma warning restore CS0162
+        }
 
         private static async IAsyncEnumerable<CanFrameEvent> Held(
             [EnumeratorCancellation] CancellationToken cancellationToken = default)

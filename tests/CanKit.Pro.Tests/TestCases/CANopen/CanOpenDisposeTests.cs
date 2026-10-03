@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -37,50 +38,72 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         => bus.Transmit(CanFrame.Classic(unchecked((int)(CanOpenCobId.HeartbeatBase + producer)),
             new[] { state }, isExtendedFrame: false));
 
-    [Fact]
-    public async Task Dispose_From_An_Event_Handler_Does_Not_Wait_For_The_Pump_It_Runs_On()
+    public static TheoryData<string, string> Contexts => new()
     {
-        var session = NewSession();
-        using var busA = Open(session, 1);
-        using var rawBus = Open(session, 2);
-        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        { "Dispose", "an event handler" },
+        { "DisposeAsync", "an event handler" },
+        { "Dispose", "ApplicationReset" },
+        { "DisposeAsync", "ApplicationReset" },
+        { "Dispose", "a reader failure report" },
+        { "DisposeAsync", "a reader failure report" },
+    };
+
+    // A subscriber disposes the node from each of the three threads that call subscribers: the
+    // event pump (an ordinary event), the actor (ApplicationReset is raised on it) and the reader
+    // task (it reports a failed subscription). The subscriber blocks on the call, as a handler that
+    // is not async has to, so a call that waits for the thread it is on takes its whole join
+    // timeout (two seconds; the actor's is five). This bound sits between that and milliseconds.
+    [Theory]
+    [MemberData(nameof(Contexts))]
+    public async Task A_Node_Can_Be_Disposed_From_Its_Own_Subscriber_Without_Waiting_For_Itself(string call, string context)
+    {
         var elapsed = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
-        node.HeartbeatReceived += (_, _) =>
+        ICanOpenNode? node = null;
+        void DisposeNode()
         {
             var watch = Stopwatch.StartNew();
-            node.Dispose();
+            if (call == "Dispose") node!.Dispose();
+            else node!.DisposeAsync().AsTask().Wait();
             elapsed.TrySetResult(watch.Elapsed);
-        };
+        }
 
-        SendHeartbeat(rawBus, 0x11, 0x05);
-
-        (await elapsed.Task.WithTimeoutAsync(ShortTimeout)).Should().BeLessThan(NoStall);
-    }
-
-    // Whether the continuation after DisposeAsync's first await changes thread depends on whether
-    // the reader task had finished by then, so one run does not always reach the case that matters:
-    // the pump's own thread has to be recognised before that await. Repeated, a mistake in that
-    // shows up; a correct implementation passes every time.
-    [Fact]
-    public async Task DisposeAsync_From_An_Event_Handler_Does_Not_Wait_For_The_Pump_It_Runs_On()
-    {
-        for (var attempt = 0; attempt < 10; attempt++)
+        ICanBus? busA = null, rawBus = null;
+        StarvedReaderBusService? starved = null;
+        try
         {
-            var session = NewSession();
-            using var busA = Open(session, 1);
-            using var rawBus = Open(session, 2);
-            var node = CanOpen.OpenNode(busA, nodeId: 0x01);
-            var elapsed = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
-            node.HeartbeatReceived += (_, _) =>
+            if (context == "a reader failure report")
             {
-                var watch = Stopwatch.StartNew();
-                node.DisposeAsync().AsTask().Wait();
-                elapsed.TrySetResult(watch.Elapsed);
-            };
-
-            SendHeartbeat(rawBus, 0x11, 0x05);
+                starved = new StarvedReaderBusService { FramesFault = new InvalidOperationException("the demux broke") };
+                node = new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
+                node.BackgroundExceptionOccurred += (_, _) => DisposeNode();
+                starved.WakeReader();
+            }
+            else
+            {
+                var session = NewSession();
+                busA = Open(session, 1);
+                rawBus = Open(session, 2);
+                node = CanOpen.OpenNode(busA, nodeId: 0x01);
+                if (context == "ApplicationReset")
+                {
+                    node.ApplicationReset += (_, _) => DisposeNode();
+                    rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+                        new byte[] { (byte)NmtCommand.ResetNode, 0x01 }, isExtendedFrame: false));
+                }
+                else
+                {
+                    node.HeartbeatReceived += (_, _) => DisposeNode();
+                    SendHeartbeat(rawBus, 0x11, 0x05);
+                }
+            }
 
             (await elapsed.Task.WithTimeoutAsync(ShortTimeout)).Should().BeLessThan(NoStall);
+        }
+        finally
+        {
+            node?.Dispose();
+            busA?.Dispose();
+            rawBus?.Dispose();
         }
     }
 
