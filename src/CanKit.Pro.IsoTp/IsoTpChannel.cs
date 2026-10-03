@@ -609,8 +609,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
 
         // Nothing will ever arrive again. A receiver waiting on the inbox would wait for ever, so
-        // it gets the reason as a fault and the inbox is completed behind it; sends already fail
-        // on their own, the bus refuses them. On the actor: the inbox has one writer.
+        // the inbox is completed with the reason: what is buffered stays readable, and then every
+        // receiver -- not just one -- gets the failure. Sends already fail on their own, the bus
+        // refuses them. On the actor: the inbox has one writer.
         try
         {
             _actor.Post(() => EndInboxAfterSubscriptionLoss(lost));
@@ -625,8 +626,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private void EndInboxAfterSubscriptionLoss(Exception lost)
     {
         if (Volatile.Read(ref _disposed) != 0) return;
-        AbortRx(lost);
-        _pduInbox.Writer.TryComplete();
+
+        // A reassembly under way dies with the subscription. No fault item for it: in the bounded
+        // inbox it would push the oldest finished PDU out, and only one receiver would see it.
+        var rx = _rx;
+        if (rx is not null)
+        {
+            rx.CancelDeadline();
+            _rx = null;
+            WithdrawReception(rx.Announce);
+        }
+
+        _pduInbox.Writer.TryComplete(lost);
+        RaiseBackgroundException(lost);
     }
 
     private static void RequirePositive(string name, TimeSpan value)

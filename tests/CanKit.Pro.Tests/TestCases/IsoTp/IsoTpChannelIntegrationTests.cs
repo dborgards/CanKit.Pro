@@ -852,28 +852,57 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
     // The 2026-09-30 review (I6): a channel opened over a shared service (leaveOpen) outlives the
     // service when the owner disposes it first. The channel's reader ended quietly, and a receiver
-    // waiting on the inbox waited for ever; a send, by contrast, failed at once.
+    // waiting on the inbox waited for ever; a send, by contrast, failed at once. The inbox is
+    // completed with the reason: what is buffered stays readable, then every receiver gets it.
     [Fact]
-    public async Task A_Service_Disposed_Under_The_Channel_Faults_A_Waiting_Receive()
+    public async Task A_Service_Disposed_Under_The_Channel_Faults_Every_Waiting_Receive()
     {
         var session = NewSession();
         using var bus = OpenClassic(session, 0);
-        var service = new CanBusService(bus);
+        using var service = new CanBusService(bus);
         using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
         var reported = new List<Exception>();
         channel.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
 
-        var waiting = channel.ReceiveAsync();
+        var first = channel.ReceiveAsync();
+        var second = channel.ReceiveAsync();
         service.Dispose();
 
-        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
-        var thrown = (await act.Should().ThrowAsync<ObjectDisposedException>()).Which;
-        thrown.ObjectName.Should().Be(nameof(ICanBusService));
+        foreach (var waiting in new[] { first, second })
+        {
+            Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+            var thrown = (await act.Should().ThrowAsync<ObjectDisposedException>()).Which;
+            thrown.ObjectName.Should().Be(nameof(ICanBusService));
+        }
 
-        // The inbox is complete behind the fault: the next receive ends at once instead of waiting.
+        // And a receive after the loss ends at once with the same reason instead of waiting.
         Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
-        await next.Should().ThrowAsync<InvalidOperationException>();
+        await next.Should().ThrowAsync<ObjectDisposedException>();
         lock (reported) reported.Should().ContainSingle().Which.Should().BeOfType<ObjectDisposedException>();
+    }
+
+    // A PDU that had already arrived is not lost with the service: it stays readable, and the
+    // failure follows it.
+    [Fact]
+    public async Task A_PDU_Received_Before_The_Service_Goes_Is_Still_Delivered_First()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+
+        // EmitPdu enqueues before it raises the event, so the event proves the PDU is in the inbox.
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        service.Dispose();
+
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+        Func<Task> next = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        await next.Should().ThrowAsync<ObjectDisposedException>();
     }
 
     // I7: Dispose can fall between SendAsync's disposed check and the post of the send to the
