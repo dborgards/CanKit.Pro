@@ -325,6 +325,92 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref delivered).Should().Be(1, "the second heartbeat was queued but the node was disposed");
     }
 
+    // The disposal itself calls out to the subscription (here: a hook, as the actor's shutdown-timeout
+    // report would be) on the thread that is finishing it. A DisposeAsync made from there cannot
+    // wait for the end of the disposal, which waits for it.
+    [Fact]
+    public async Task A_DisposeAsync_From_Inside_The_Disposal_Does_Not_Wait_For_Its_End()
+    {
+        var starved = new StarvedReaderBusService();
+        var node = new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+        var inner = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        starved.OnSubscriptionDisposed = () =>
+        {
+            node.DisposeAsync().AsTask().Wait(); // would wait for the disposal that is running this
+            inner.TrySetResult(true);
+        };
+
+        await node.DisposeAsync().AsTask().WithTimeoutAsync(ShortTimeout);
+
+        (await inner.Task.WithTimeoutAsync(ShortTimeout)).Should().BeTrue();
+    }
+
+    // A reader failure with two subscribers of BackgroundExceptionOccurred: the first disposes
+    // the node and the second is not called.
+    [Fact]
+    public async Task The_Next_Subscriber_Of_A_Background_Exception_Is_Not_Called_After_One_Disposed_The_Node()
+    {
+        var starved = new StarvedReaderBusService { FramesFault = new InvalidOperationException("the demux broke") };
+        var node = new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
+        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondCalled = 0;
+        node.BackgroundExceptionOccurred += (_, _) =>
+        {
+            node.Dispose();
+            first.TrySetResult(true);
+        };
+        node.BackgroundExceptionOccurred += (_, _) => Interlocked.Increment(ref secondCalled);
+
+        starved.WakeReader();
+        await first.Task.WithTimeoutAsync(ShortTimeout);
+
+        // A negative window: it can only pass falsely on a slow host, never fail falsely.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Volatile.Read(ref secondCalled).Should().Be(0);
+    }
+
+    // An outside Dispose has won while the first subscriber is running on the pump; that
+    // subscriber's own Dispose loses, and the second subscriber is still not called.
+    [Fact]
+    public async Task The_Next_Subscriber_Is_Not_Called_When_The_Disposing_One_Lost_The_Race()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var outsideHasWon = new ManualResetEventSlim();
+        var secondCalled = 0;
+        node.HeartbeatReceived += (_, _) =>
+        {
+            inHandler.TrySetResult(true);
+            outsideHasWon.Wait(ShortTimeout);
+            node.Dispose(); // loses
+            done.TrySetResult(true);
+        };
+        node.HeartbeatReceived += (_, _) => Interlocked.Increment(ref secondCalled);
+
+        SendHeartbeat(rawBus, 0x11, 0x05);
+        await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+        var outside = Task.Run(node.Dispose); // wins, and waits for the pump
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (true)
+        {
+            try { _ = node.SendNmtCommandAsync(NmtCommand.Start, 0x7F); }
+            catch (ObjectDisposedException) { break; }
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The outside Dispose never began.");
+            await Task.Delay(5);
+        }
+
+        outsideHasWon.Set();
+        await done.Task.WithTimeoutAsync(ShortTimeout);
+        await outside.WithTimeoutAsync(ShortTimeout);
+
+        Volatile.Read(ref secondCalled).Should().Be(0);
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]

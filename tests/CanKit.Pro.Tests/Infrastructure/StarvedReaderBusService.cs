@@ -98,6 +98,9 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// <summary>Whether <see cref="Dispose"/> has been called.</summary>
     public bool IsDisposed { get; private set; }
 
+    /// <summary>Runs when the subscription is disposed: a node's disposal calls it on its own thread.</summary>
+    public Action? OnSubscriptionDisposed { get; set; }
+
     /// <summary>When set, <see cref="Dispose"/> throws it after recording the call.</summary>
     public Exception? DisposeFault { get; set; }
 
@@ -159,6 +162,6 @@ internal sealed class StarvedReaderBusService : ICanBusService
 
         public void Reconfigure(Func<CanFrameEvent, bool>? predicate) { }
 
-        public void Dispose() { }
+        public void Dispose() => _owner.OnSubscriptionDisposed?.Invoke();
     }
 }

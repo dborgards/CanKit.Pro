@@ -630,6 +630,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        // From the pump, this call ends the delivery whether it wins the disposal or not: the
+        // other caller cannot stop the pump before its own join has run out.
+        if (OnEventPump) Volatile.Write(ref _pumpStopRequested, true);
         if (!BeginDispose())
         {
             // Another caller won. From the actor this call still has to leave the transfers ended:
@@ -652,13 +655,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
         // Dispose.
         CompleteEventQueue();
-        if (OnEventPump)
-        {
-            // The events still queued are not delivered once this subscriber returns: nothing is
-            // delivered past Dispose.
-            Volatile.Write(ref _pumpStopRequested, true);
-        }
-        else
+        // From the pump the events still queued are not delivered once this subscriber returns
+        // (the flag is set above), and the pump is not waited for.
+        if (!OnEventPump)
         {
             try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
             StopPumpIfStillRunning();
@@ -2658,8 +2657,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void RaiseBackgroundException(Exception ex)
     {
-        try { BackgroundExceptionOccurred?.Invoke(this, ex); }
-        catch { /* subscriber must not tear down the node */ }
+        var handler = BackgroundExceptionOccurred;
+        if (handler is null) return;
+        // One subscriber that disposes the node ends the round for the rest, as for the other
+        // events; a node that was disposed before the report still reports it to all.
+        bool disposedBefore = Volatile.Read(ref _disposed) != 0;
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            if (!disposedBefore && Volatile.Read(ref _disposed) != 0) break;
+            try { ((EventHandler<Exception>)subscriber)(this, ex); }
+            catch { /* subscriber must not tear down the node */ }
+        }
     }
 
     private void RaiseHeartbeatReceived(byte producer, NmtState state, DateTime ts)
