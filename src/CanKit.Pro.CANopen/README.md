@@ -445,7 +445,7 @@ Table 37 of CiA 301, as the node applies it:
 | --- | --- | --- | --- |
 | PDO | — | transmitted and received | — |
 | SDO | served | served | requests ignored; an open server session is aborted with `0800 0022h` |
-| SYNC | consumed and produced | consumed and produced | neither; the producer keeps its cycle and resumes afterwards |
+| SYNC | consumed and produced | consumed and produced | neither; the producer keeps its cycle and resumes afterwards (`SendSyncAsync` is a raw send and transmits regardless of the state and of bit 30 of `1005h`) |
 | EMCY | transmitted | transmitted | held; the most recent one is transmitted when the node leaves Stopped |
 | Heartbeat, guarding | active | active | active |
 

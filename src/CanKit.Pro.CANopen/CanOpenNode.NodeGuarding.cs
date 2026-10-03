@@ -206,14 +206,8 @@ internal sealed partial class CanOpenNode
         // (Bugbot, plus two adjacent findings from Codex on the same mechanism).
         bool toggle = (b & 0x80) != 0;
         byte stateByte = (byte)(b & 0x7F);
-        NmtState state = stateByte switch
-        {
-            0x00 => NmtState.Initializing,      // Bootup / freshly reset.
-            0x04 => NmtState.Stopped,
-            0x05 => NmtState.Operational,
-            0x7F => NmtState.PreOperational,
-            _ => NmtState.Initializing,
-        };
+        // A reserved state byte is a reply all the same, but it is not reported (#255).
+        bool reportable = TryDecodeHeartbeatState(stateByte, out var state);
 
         // CiA 301 §7.2.8.3.3: a reply that does not alternate the toggle bit is invalid for
         // resetting the life-time window (stale/repeated frames must not keep the consumer
@@ -235,7 +229,7 @@ internal sealed partial class CanOpenNode
                 () => OnNodeGuardingTimeout(producerNodeId));
         }
 
-        RaiseNodeGuardingReceived(producerNodeId, state, toggle, DateTime.UtcNow);
+        if (reportable) RaiseNodeGuardingReceived(producerNodeId, state, toggle, DateTime.UtcNow);
     }
 
     // =========================================================================================

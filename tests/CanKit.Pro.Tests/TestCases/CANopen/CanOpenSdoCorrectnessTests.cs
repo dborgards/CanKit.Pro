@@ -13,6 +13,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
@@ -1273,6 +1274,144 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     }
 
 #endif
+
+    // -----------------------------------------------------------------------------------------
+    // #253: the classic upload client against the length the server announced. More than that is
+    // refused as the server's receive path and the block-upload client already do; fewer is
+    // accepted (a device that announces the OD maximum of a VISIBLE_STRING and sends what it
+    // holds) but reported through BackgroundExceptionOccurred instead of passing silently.
+    // -----------------------------------------------------------------------------------------
+    private static byte[] AnnouncedUploadInit(ushort index, byte subindex, uint length) => new byte[]
+    {
+        SdoFrames.ScsUploadInitSegmented,
+        (byte)(index & 0xFF), (byte)((index >> 8) & 0xFF), subindex,
+        (byte)length, (byte)(length >> 8), (byte)(length >> 16), (byte)(length >> 24),
+    };
+
+    [Fact]
+    public async Task Sdo_Client_Upload_Aborts_When_The_Server_Sends_More_Than_It_Announced()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 10));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadSegmentBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: false, new byte[] { 1, 2, 3, 4, 5, 6, 7 }));
+        tap.Next(ShortTimeout)[0].Should().Be((byte)(SdoFrames.CcsUploadSegmentBase | SdoFrames.ToggleBit));
+        // Seven bytes were delivered and ten announced; seven more make fourteen.
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: true, lastSegment: true, new byte[] { 8, 9, 10, 11, 12, 13, 14 }));
+
+        var abort = tap.Next(ShortTimeout);
+        abort[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(abort).Should().Be((uint)SdoAbortCode.LengthTooHigh);
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => upload.WithTimeoutAsync(ShortTimeout));
+        ex.AbortCode.Should().Be((uint)SdoAbortCode.LengthTooHigh);
+    }
+
+    [Fact]
+    public async Task Sdo_Client_Upload_Returns_Short_Data_And_Reports_The_Shortfall()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+        var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        client.BackgroundExceptionOccurred += (_, e) => reports.Enqueue(e);
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadInit);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 20));
+        tap.Next(ShortTimeout)[0].Should().Be(SdoFrames.CcsUploadSegmentBase);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: true, new byte[] { 1, 2, 3 }));
+
+        (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(1, 2, 3);
+        reports.Should().ContainSingle().Which.Should().BeOfType<CanOpenTransportException>()
+            .Which.Message.Should().Contain("announced 20").And.Contain("delivered 3");
+    }
+
+    [Fact]
+    public async Task Sdo_Client_Upload_With_The_Announced_Length_Reports_Nothing()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var client = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(client, 0x02);
+        using var tap = new FrameTap(rawBus, CanOpenCobId.SdoRx(0x02));
+        var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        client.BackgroundExceptionOccurred += (_, e) => reports.Enqueue(e);
+
+        var upload = client.SdoUploadAsync(0x02, 0x2100, 0x00);
+        tap.Next(ShortTimeout);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), AnnouncedUploadInit(0x2100, 0x00, 3));
+        tap.Next(ShortTimeout);
+        Send(rawBus, CanOpenCobId.SdoTx(0x02), SdoFrames.BuildSegment(
+            SdoFrames.ScsUploadSegmentBase, toggle: false, lastSegment: true, new byte[] { 1, 2, 3 }));
+
+        (await upload.WithTimeoutAsync(ShortTimeout)).Should().Equal(1, 2, 3);
+        reports.Should().BeEmpty();
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // #255: a heartbeat or guarding reply whose state byte CiA 301 reserves is no heartbeat. It
+    // used to be reported as Initializing, the value of a boot-up. The valid frame sent after the
+    // reserved ones is what tells them apart: events arrive in order, so the first one seen is
+    // the one that decides.
+    // -----------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Heartbeat_With_A_Reserved_State_Byte_Is_Not_Reported_As_Bootup()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var first = new TaskCompletionSource<NmtState>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.HeartbeatReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == 0x11) first.TrySetResult(e.State);
+        };
+
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x01 });
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x03 });
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x05 });
+
+        (await first.Task.WithTimeoutAsync(ShortTimeout)).Should().Be(NmtState.Operational);
+    }
+
+    [Fact]
+    public async Task Guarding_Reply_With_A_Reserved_State_Byte_Is_Not_Reported()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var rawBus = Open(session, 2);
+        using var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var first = new TaskCompletionSource<(NmtState State, bool Toggle)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.NodeGuardingReceived += (_, e) =>
+        {
+            if (e.ProducerNodeId == 0x11) first.TrySetResult((e.State, e.Toggle));
+        };
+        node.StartNodeGuardingConsumer(producerNodeId: 0x11, guardTime: TimeSpan.FromSeconds(30), lifeTimeFactor: 3);
+
+        // The reserved reply is still a reply (toggle false), so it is not reported but it counts;
+        // the next one flips the toggle.
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0x01 });
+        Send(rawBus, CanOpenCobId.HeartbeatBase + 0x11, new byte[] { 0xFF });
+
+        var seen = await first.Task.WithTimeoutAsync(ShortTimeout);
+        seen.State.Should().Be(NmtState.PreOperational);
+        seen.Toggle.Should().BeTrue();
+    }
 
     [Fact]
     public void Sdo_Server_Sizeless_Download_Aborts_OutOfMemory_Before_Passing_The_Cap()
