@@ -677,15 +677,45 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         {
             return; // expected on Dispose
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OutOfMemoryException
+            and not StackOverflowException
+            and not AccessViolationException
+            and not AppDomainUnloadedException
+            and not BadImageFormatException
+            and not CannotUnloadAppDomainException
+            and not ThreadAbortException)
         {
             lost = ex;
         }
+        catch (Exception ex) when (ex is OutOfMemoryException
+            or StackOverflowException
+            or AccessViolationException
+            or AppDomainUnloadedException
+            or BadImageFormatException
+            or CannotUnloadAppDomainException
+            or ThreadAbortException)
+        {
+            // The filter above is what keeps the generic catch closed, so these used to leave
+            // this method entirely. This method is the reader task. Nothing else observes that
+            // task except Dispose, and Dispose swallows the wait, so the inbox loss was never
+            // published and a ReceiveAsync already waiting never woke. Publish first, then
+            // rethrow: the post is queued before the task faults, and the task still faults.
+            // A stack overflow the runtime detects itself is not delivered here (the process
+            // ends), and ThreadAbortException is not thrown on this runtime. An
+            // OutOfMemoryException from the pump is delivered, and has to take this path.
+            PublishSubscriptionLoss(ex);
+            throw;
+        }
 
-        // Nothing will ever arrive again. A receiver waiting on the inbox would wait for ever, so
-        // the reason is recorded and the receivers are woken: what is buffered is delivered first,
-        // and then every receiver -- not just one -- gets the failure. Sends already fail on their
-        // own, the bus refuses them. On the actor, like everything else that touches the inbox.
+        PublishSubscriptionLoss(lost);
+    }
+
+    // Nothing will ever arrive again. A receiver waiting on the inbox would wait for ever, so
+    // the reason is recorded and the receivers are woken: what is buffered is delivered first,
+    // and then every receiver -- not just one -- gets the failure. Sends already fail on their
+    // own, the bus refuses them. On the actor, like everything else that touches the inbox.
+    private void PublishSubscriptionLoss(Exception lost)
+    {
         try
         {
             // Under the pump lock: a caller that is pumping the subscription right now -- it took
