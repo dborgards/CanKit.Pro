@@ -165,6 +165,47 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         await outside.WithTimeoutAsync(ShortTimeout);
     }
 
+    // The reset goes on after its subscribers: it announces the node with a boot-up. A subscriber
+    // that disposed the node ends it there, as a node that is gone announces nothing. The service
+    // is the caller's, so a boot-up that was wrongly sent would reach the bus. (With the guard
+    // removed this test still passes: nothing observable happens past the subscriber today, so it
+    // pins the behaviour and covers the line, and proves no mutation.)
+    [Fact]
+    public async Task A_Reset_Does_Not_Announce_A_Node_That_Its_Subscriber_Disposed()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var bootups = 0;
+        rawBus.FrameObserved += (_, e) =>
+        {
+            if ((uint)e.CanFrame.ID == CanOpenCobId.HeartbeatBase + 0x01) Interlocked.Increment(ref bootups);
+        };
+        var service = resources.Add(new CanBusService(busA));
+        var node = CanOpen.OpenNode(service, nodeId: 0x01, leaveOpen: true);
+        var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => reports.Enqueue(ex);
+        node.ApplicationReset += (_, _) =>
+        {
+            node.Dispose();
+            disposed.TrySetResult(true);
+        };
+        var atOpen = SpinWait.SpinUntil(() => Volatile.Read(ref bootups) >= 1, ShortTimeout);
+        atOpen.Should().BeTrue("the node announces itself when it opens");
+
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new byte[] { (byte)NmtCommand.ResetNode, 0x01 }, isExtendedFrame: false));
+        await disposed.Task.WithTimeoutAsync(ShortTimeout);
+
+        // No signal says "nothing more is coming", so this is a negative window: it can only pass
+        // falsely on a slow host, never fail falsely.
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Volatile.Read(ref bootups).Should().Be(1, "only the boot-up from opening; the reset's was not sent");
+        reports.Should().BeEmpty("the reset stopped at the subscriber instead of arming timers on a disposed node");
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]
@@ -192,11 +233,11 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
 
         var busOfClassicServer = resources.Add(Open(session, 1));
-        var classicServer = resources.Add(CanOpen.OpenNode(busOfClassicServer, nodeId: 0x01));
+        using var classicServer = CanOpen.OpenNode(busOfClassicServer, nodeId: 0x01);
         var busOfBlockServer = resources.Add(Open(session, 2));
-        var blockServer = resources.Add(CanOpen.OpenNode(busOfBlockServer, nodeId: 0x02));
+        using var blockServer = CanOpen.OpenNode(busOfBlockServer, nodeId: 0x02);
         var busOfClient = resources.Add(Open(session, 3));
-        var client = resources.Add(CanOpen.OpenNode(busOfClient, nodeId: 0x03));
+        using var client = CanOpen.OpenNode(busOfClient, nodeId: 0x03);
         foreach (var node in new[] { classicServer, blockServer, client })
             node.BackgroundExceptionOccurred += (_, ex) => reports.Enqueue(ex);
         classicServer.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);

@@ -680,12 +680,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         // A second caller awaits the disposal that is running: returning at once would tell it
         // that producers are stopped and the owned service released while the first caller is
-        // still waiting for the reader. The wait is bounded: a subscriber that the first
+        // still waiting for the reader. The wait is bounded, by more than the first disposal can
+        // take (reader, pump and the actor's own shutdown timeout): a subscriber that the first
         // disposal itself calls (the actor reports a shutdown timeout on the disposing thread)
         // may land here, and the disposal cannot finish before it returns.
         if (!BeginDispose())
         {
-            await JoinAsync(_disposeDone.Task).ConfigureAwait(false);
+            await JoinAsync(_disposeDone.Task, ConcurrentDisposeWait).ConfigureAwait(false);
             return;
         }
         await JoinAsync(_readerTask).ConfigureAwait(false);
@@ -696,13 +697,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private static readonly TimeSpan DisposeJoinTimeout = TimeSpan.FromSeconds(2);
 
-    /// <summary>Waits for <paramref name="task"/> for at most <see cref="DisposeJoinTimeout"/>
+    // Reader join, pump join and the actor's five-second shutdown timeout, with room.
+    private static readonly TimeSpan ConcurrentDisposeWait = TimeSpan.FromSeconds(12);
+
+    /// <summary>Waits for <paramref name="task"/> for at most <paramref name="timeout"/> (default
+    /// <see cref="DisposeJoinTimeout"/>)
     /// without holding a thread. Neither task joined here faults (each reports its own failures
     /// through <see cref="BackgroundExceptionOccurred"/>), so there is nothing to observe.</summary>
-    private static async Task JoinAsync(Task task)
+    private static async Task JoinAsync(Task task, TimeSpan? timeout = null)
     {
         using var cts = new CancellationTokenSource();
-        await Task.WhenAny(task, Task.Delay(DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
+        await Task.WhenAny(task, Task.Delay(timeout ?? DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
         cts.Cancel();
     }
 
