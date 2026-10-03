@@ -738,11 +738,29 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     [ThreadStatic]
     private static CanOpenNode? t_finishingFor;
 
-    private static void MarkFinishing(CanOpenNode? node) => t_finishingFor = node;
+    private static CanOpenNode? MarkFinishing(CanOpenNode? node)
+    {
+        var previous = t_finishingFor;
+        t_finishingFor = node;
+        return previous;
+    }
 
-    private static void MarkDelivering(CanOpenNode? node) => t_deliveringFor = node;
+    // Each marker returns what it replaced, and the caller puts that back: the thread may be
+    // inside another node's callback (a subscriber of A disposing B), and B's markers must not
+    // erase A's.
+    private static CanOpenNode? MarkDelivering(CanOpenNode? node)
+    {
+        var previous = t_deliveringFor;
+        t_deliveringFor = node;
+        return previous;
+    }
 
-    private static void MarkReporting(CanOpenNode? node) => t_reportingFor = node;
+    private static CanOpenNode? MarkReporting(CanOpenNode? node)
+    {
+        var previous = t_reportingFor;
+        t_reportingFor = node;
+        return previous;
+    }
 
     /// <summary>Flips the disposed flag and posts the cleanup; false when already disposed.</summary>
     private bool BeginDispose()
@@ -808,7 +826,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void FinishDispose()
     {
-        MarkFinishing(this);
+        var outerFinishing = MarkFinishing(this);
         try
         {
             _subscription.Dispose();
@@ -819,7 +837,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         finally
         {
-            MarkFinishing(null);
+            MarkFinishing(outerFinishing);
             // Whatever a Dispose above threw, a caller waiting for this disposal is released.
             _disposeDone.TrySetResult(true);
         }
@@ -861,9 +879,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         catch (Exception ex)
         {
             // A subscriber of the report may dispose the node; see Dispose.
-            MarkReporting(this);
+            var outer = MarkReporting(this);
             try { RaiseBackgroundException(ex); }
-            finally { MarkReporting(null); }
+            finally { MarkReporting(outer); }
         }
     }
 
@@ -882,7 +900,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // must still be delivered. Anything outside the delegate is still a bug in the pump.
             // Marks the thread for the whole batch: nothing in it awaits, so a subscriber that
             // disposes the node runs on this very thread (see Dispose).
-            MarkDelivering(this);
+            var outerDelivering = MarkDelivering(this);
             try
             {
                 while (!Volatile.Read(ref _pumpStopRequested) && TryDequeueEvent() is { } raise)
@@ -899,7 +917,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             }
             finally
             {
-                MarkDelivering(null);
+                MarkDelivering(outerDelivering);
             }
             // The queue was just drained. Closure is the completed flag alone: an event
             // accepted before completion is still in the list and was delivered above, and

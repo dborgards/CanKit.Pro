@@ -411,6 +411,76 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref secondCalled).Should().Be(0);
     }
 
+    // The disposal of node A calls out on its own thread (the hook), and the subscriber disposes
+    // node B before it asks A to dispose again. B's disposal must not take A's marker with it.
+    [Fact]
+    public async Task Disposing_Another_Node_From_Inside_A_Disposal_Keeps_The_Marker_Of_The_Outer_One()
+    {
+        var starvedA = new StarvedReaderBusService();
+        var nodeA = new CanOpenNode(starvedA, 0x01, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+        var starvedB = new StarvedReaderBusService();
+        var nodeB = new CanOpenNode(starvedB, 0x02, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+        var inner = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        starvedA.OnSubscriptionDisposed = () =>
+        {
+            nodeB.Dispose();
+            nodeA.DisposeAsync().AsTask().Wait(); // would wait for the disposal that is running this
+            inner.TrySetResult(true);
+        };
+
+        await nodeA.DisposeAsync().AsTask().WithTimeoutAsync(ShortTimeout);
+
+        (await inner.Task.WithTimeoutAsync(ShortTimeout)).Should().BeTrue();
+        starvedB.IsDisposed.Should().BeTrue();
+    }
+
+    // A subscriber that throws is isolated: the report goes on to the others. A report made while
+    // the node is being disposed (the pump is still delivering) goes to all of them, since none
+    // of them caused the disposal.
+    [Fact]
+    public async Task A_Background_Exception_Reaches_Every_Subscriber_Even_One_That_Throws_And_During_Disposal()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var outsideHasWon = new ManualResetEventSlim();
+        var reportsAfterThrow = 0;
+        var thrown = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, _) => throw new InvalidOperationException("a subscriber that throws");
+        node.BackgroundExceptionOccurred += (_, _) =>
+        {
+            Interlocked.Increment(ref reportsAfterThrow);
+            thrown.TrySetResult(true);
+        };
+        node.HeartbeatReceived += (_, _) =>
+        {
+            inHandler.TrySetResult(true);
+            outsideHasWon.Wait(ShortTimeout);
+            throw new InvalidOperationException("reported while the node is being disposed");
+        };
+
+        SendHeartbeat(rawBus, 0x11, 0x05);
+        await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+        var outside = Task.Run(node.Dispose);
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (true)
+        {
+            try { _ = node.SendNmtCommandAsync(NmtCommand.Start, 0x7F); }
+            catch (ObjectDisposedException) { break; }
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The outside Dispose never began.");
+            await Task.Delay(5);
+        }
+
+        outsideHasWon.Set();
+        await thrown.Task.WithTimeoutAsync(ShortTimeout);
+        await outside.WithTimeoutAsync(ShortTimeout);
+
+        Volatile.Read(ref reportsAfterThrow).Should().Be(1);
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]
