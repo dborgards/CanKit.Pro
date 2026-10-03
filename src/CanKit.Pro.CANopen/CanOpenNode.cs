@@ -629,7 +629,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (!BeginDispose()) return;
+        if (!BeginDispose())
+        {
+            // Another caller won. From the actor this call still has to leave the transfers ended:
+            // the winner's cleanup is queued behind the callback this one is made from, and the
+            // callback may be waiting for it. (Idempotent; the winner runs it again.)
+            if (_actor.IsOnCurrentActor) CleanUpOnActor();
+            return;
+        }
         // A subscriber that disposes the node runs on the thread of the task being joined: the
         // reader when it reports a failed subscription, the event pump when it delivers an event.
         // Neither can finish while it waits for itself, so it does not wait; the task ends when
@@ -673,10 +680,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         // A second caller awaits the disposal that is running: returning at once would tell it
         // that producers are stopped and the owned service released while the first caller is
-        // still waiting for the reader.
+        // still waiting for the reader. The wait is bounded: a subscriber that the first
+        // disposal itself calls (the actor reports a shutdown timeout on the disposing thread)
+        // may land here, and the disposal cannot finish before it returns.
         if (!BeginDispose())
         {
-            await _disposeDone.Task.ConfigureAwait(false);
+            await JoinAsync(_disposeDone.Task).ConfigureAwait(false);
             return;
         }
         await JoinAsync(_readerTask).ConfigureAwait(false);
@@ -747,31 +756,33 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CancelFlyingMasterDeadline();
         CancelBootUp();
 
-        _sdoServer?.Deadline?.Dispose();
+        Release(_sdoServer?.Deadline);
         _sdoServer = null;
         foreach (var kv in _sdoClients)
         {
-            kv.Value.Deadline?.Dispose();
+            Release(kv.Value.Deadline);
             kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
         }
         _sdoClients.Clear();
 
-        _sdoBlockServer?.Deadline?.Dispose();
+        Release(_sdoBlockServer?.Deadline);
         _sdoBlockServer = null;
         foreach (var kv in _sdoBlockClients)
         {
-            kv.Value.Deadline?.Dispose();
+            Release(kv.Value.Deadline);
             kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
         }
         _sdoBlockClients.Clear();
 
         foreach (var kv in _nodeGuardingConsumers)
         {
-            kv.Value.PollHandle?.Dispose();
-            kv.Value.LifeTimeDeadline?.Dispose();
+            Release(kv.Value.PollHandle);
+            Release(kv.Value.LifeTimeDeadline);
         }
         _nodeGuardingConsumers.Clear();
     }
+
+    private static void Release(IDisposable? handle) => handle?.Dispose();
 
     private void FinishDispose()
     {

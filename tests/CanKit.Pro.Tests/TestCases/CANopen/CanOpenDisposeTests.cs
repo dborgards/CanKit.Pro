@@ -122,6 +122,49 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         await first.AsTask().WithTimeoutAsync(ShortTimeout);
     }
 
+    // An outside caller wins the disposal while an ApplicationReset subscriber is running on the
+    // actor; the winner's cleanup is queued behind that subscriber. The subscriber then disposes
+    // too, loses, and must still leave the open transfer ended when its call returns.
+    [Fact]
+    public async Task A_Subscriber_On_The_Actor_That_Loses_The_Disposal_Race_Still_Ends_The_Open_Transfers()
+    {
+        using var resources = new DisposeBag();
+        var session = NewSession();
+        var busA = resources.Add(Open(session, 1));
+        var rawBus = resources.Add(Open(session, 2));
+        var node = CanOpen.OpenNode(busA, nodeId: 0x01);
+        PeerSdoLaboratory.Bind(node, 0x02);
+        var openTransfer = node.SdoUploadAsync(0x02, 0x2100, 0x00); // nobody answers
+        var inHandler = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ended = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var outsideHasWon = new ManualResetEventSlim();
+        node.ApplicationReset += (_, _) =>
+        {
+            inHandler.TrySetResult(true);
+            outsideHasWon.Wait(ShortTimeout);
+            node.DisposeAsync().AsTask().Wait();
+            ended.TrySetResult(openTransfer.IsCompleted);
+        };
+        rawBus.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new byte[] { (byte)NmtCommand.ResetNode, 0x01 }, isExtendedFrame: false));
+        await inHandler.Task.WithTimeoutAsync(ShortTimeout);
+
+        var outside = Task.Run(node.Dispose); // wins; the actor is busy, so its cleanup waits
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (true)
+        {
+            try { _ = node.SendNmtCommandAsync(NmtCommand.Start, 0x7F); }
+            catch (ObjectDisposedException) { break; } // the outside call has begun
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The outside Dispose never began.");
+            await Task.Delay(5);
+        }
+
+        outsideHasWon.Set();
+
+        (await ended.Task.WithTimeoutAsync(ShortTimeout)).Should().BeTrue("the subscriber's call ended the transfer");
+        await outside.WithTimeoutAsync(ShortTimeout);
+    }
+
     // The service's Dispose throws: the first call faults, and a second call that was waiting for
     // that disposal is released instead of waiting for ever.
     [Fact]
@@ -148,9 +191,12 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         var rawBus = resources.Add(Open(session, 5));
         var reports = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
 
-        var classicServer = resources.Add(CanOpen.OpenNode(resources.Add(Open(session, 1)), nodeId: 0x01));
-        var blockServer = resources.Add(CanOpen.OpenNode(resources.Add(Open(session, 2)), nodeId: 0x02));
-        var client = resources.Add(CanOpen.OpenNode(resources.Add(Open(session, 3)), nodeId: 0x03));
+        var busOfClassicServer = resources.Add(Open(session, 1));
+        var classicServer = resources.Add(CanOpen.OpenNode(busOfClassicServer, nodeId: 0x01));
+        var busOfBlockServer = resources.Add(Open(session, 2));
+        var blockServer = resources.Add(CanOpen.OpenNode(busOfBlockServer, nodeId: 0x02));
+        var busOfClient = resources.Add(Open(session, 3));
+        var client = resources.Add(CanOpen.OpenNode(busOfClient, nodeId: 0x03));
         foreach (var node in new[] { classicServer, blockServer, client })
             node.BackgroundExceptionOccurred += (_, ex) => reports.Enqueue(ex);
         classicServer.ObjectDictionary.AddDomain(0x2100, 0x00, new byte[4]);
@@ -247,7 +293,7 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
 
         await foreign.DisposeAsync();
 
-        ((ForeignNode)(object)foreign).Disposed.Should().BeTrue();
+        ((ForeignNode)foreign).Disposed.Should().BeTrue();
     }
 
     private class ForeignNode : System.Reflection.DispatchProxy
