@@ -435,6 +435,28 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
         starvedB.IsDisposed.Should().BeTrue();
     }
 
+    // Both disposals are active on one thread at once: A's hook disposes B, and B's own hook asks A
+    // to dispose again while B is still finishing. A's marker must still be there.
+    [Fact]
+    public async Task A_Callback_Of_An_Inner_Disposal_Still_Sees_The_Outer_Disposal_As_Running()
+    {
+        var starvedA = new StarvedReaderBusService();
+        var nodeA = new CanOpenNode(starvedA, 0x01, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+        var starvedB = new StarvedReaderBusService();
+        var nodeB = new CanOpenNode(starvedB, 0x02, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+        var inner = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        starvedB.OnSubscriptionDisposed = () =>
+        {
+            nodeA.DisposeAsync().AsTask().Wait(); // would wait for the disposal that is running this
+            inner.TrySetResult(true);
+        };
+        starvedA.OnSubscriptionDisposed = () => nodeB.Dispose();
+
+        await nodeA.DisposeAsync().AsTask().WithTimeoutAsync(ShortTimeout);
+
+        (await inner.Task.WithTimeoutAsync(ShortTimeout)).Should().BeTrue();
+    }
+
     // A subscriber that throws is isolated: the report goes on to the others. A report made while
     // the node is being disposed (the pump is still delivering) goes to all of them, since none
     // of them caused the disposal.
