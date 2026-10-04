@@ -75,11 +75,16 @@ internal static class Program
         // Nothing may be left over: a typo in an option name would otherwise run with its default.
         var valueOptions = new[] { "--a", "--b", "--label", "--bitrate", "--dbit", "--frames", "--wait-ms", "--modes", "--out" };
         var flagOptions = new[] { "--fd", "--skip-claim", "--help", "-h" };
+        // And nothing may be given twice: only one of two values for an option could be the one meant.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < args.Length; i++)
         {
-            if (valueOptions.Contains(args[i], StringComparer.OrdinalIgnoreCase)) i++; // its value is Text's to check
-            else if (!flagOptions.Contains(args[i], StringComparer.OrdinalIgnoreCase))
+            var isValueOption = valueOptions.Contains(args[i], StringComparer.OrdinalIgnoreCase);
+            if (!isValueOption && !flagOptions.Contains(args[i], StringComparer.OrdinalIgnoreCase))
                 optionErrors.Add($"Unknown option or stray argument '{args[i]}'.");
+            else if (!seen.Add(args[i]))
+                optionErrors.Add($"{args[i]} is given more than once.");
+            if (isValueOption) i++; // its value is Text's to check
         }
 
         var uriA = Text("--a");
