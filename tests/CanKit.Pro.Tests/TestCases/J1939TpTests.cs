@@ -30,6 +30,20 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
 
+    // Options for a test that round-trips a paced BAM on the real clock and asserts what came
+    // out, not when. Th is 5 ms so a transfer costs milliseconds, not the default 50 ms per
+    // packet. T1 is lifted far past ShortTimeout: the receiver re-arms it on every TP.DT, and
+    // each DT on its way there crosses a confirmation hop on the thread pool, an actor post and
+    // the spacing timer -- so with the 750 ms default any host stall longer than that, between
+    // any two of the packets, turns a reassembly test into a T1 abort (#277, macOS). A receiver
+    // whose T1 cannot fire leaves ShortTimeout as the test's only clock, and the mandatory
+    // pacing of a 15-packet transfer is 70 ms against it. The T1 behaviour itself has its own
+    // tests (Bam_Receiver_T1Timeout_FaultsReceiveAsyncWhenDtStops and the virtual-clock ones),
+    // which is where a timer that is the subject belongs.
+    private static J1939TpOptions PacedRoundtripOptions() => new J1939TpOptions().With(
+        bamPacketSpacing: TimeSpan.FromMilliseconds(5),
+        t1: TimeSpan.FromSeconds(30));
+
     private static string NewSession() => $"j1939tp-{Guid.NewGuid():N}";
 
     // Both nodes share the same virtual bus (session-scoped) but appear as different channels of
@@ -62,7 +76,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
 
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
         using var sender = J1939TpFactory.Open(service, sourceAddress: 0x10, options: opts);
         using var receiver = J1939TpFactory.Open(service, sourceAddress: 0x20, options: opts);
 
@@ -102,7 +116,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     {
         using var echo = EchoWorldFixture.Create(world, NewSession());
 
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
         using var sender = J1939TpFactory.Open(echo.Bus, sourceAddress: 0x11, options: opts);
 
         var ownPayload = RandomPayload(100, seed: 23);
@@ -151,8 +165,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        // Shorten Th so the test runs in <1s while still exercising the timer.
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
 
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x11, options: opts);
         using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x22, options: opts);
@@ -236,7 +249,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // pacing the test cannot avoid -- inside a 5 s ShortTimeout. That leaves roughly 107 ms
         // of slack per scheduled hop, and the gaps are actor Schedule callbacks, so a loaded
         // runner eats it. At 5 ms the same 28 gaps cost 140 ms and the margin is ~35x.
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions().With(
+            t2: TimeSpan.FromSeconds(30),  // the two CM sessions run on the same clock, so
+            t3: TimeSpan.FromSeconds(30)); // their CTS and DT timers get the same treatment
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x10, options: opts);
         using var receiverB = J1939TpFactory.Open(busB, sourceAddress: 0xB0, options: opts);
         using var receiverC = J1939TpFactory.Open(busC, sourceAddress: 0xC0, options: opts);
@@ -314,7 +329,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
 
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
         using var sender = J1939TpFactory.Open(busA, sourceAddress: 0x40, options: opts);
         using var receiver = J1939TpFactory.Open(busB, sourceAddress: 0x41, options: opts);
 
@@ -1856,7 +1871,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var firstPayload = RandomPayload(21, seed: 321);  // 3 TP.DT
         var secondPayload = RandomPayload(35, seed: 322); // 5 TP.DT
 
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x20, options: opts);
 
@@ -1903,7 +1918,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         using var receiverBus = Open(session, 1);
 
         const byte senderSa = 0x10;
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa, options: opts);
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x20, options: opts);
 
@@ -2631,7 +2646,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var receiverBus = Open(session, 1);
-        var opts = new J1939TpOptions().With(bamPacketSpacing: TimeSpan.FromMilliseconds(5));
+        var opts = PacedRoundtripOptions();
         using var sender = J1939TpFactory.Open(senderBus, sourceAddress: 0x30, options: opts);
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: 0x31, options: opts);
         var payload = RandomPayload(14, seed: 9);
