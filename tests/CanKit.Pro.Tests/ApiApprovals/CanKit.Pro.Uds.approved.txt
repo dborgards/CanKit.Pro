@@ -27,6 +27,10 @@ namespace CanKit.Pro.Uds
     {
         public static CanKit.Pro.Uds.IUdsClient Create(CanKit.Pro.IsoTp.IIsoTpChannel channel, CanKit.Pro.Uds.UdsClientOptions? options = null, bool leaveOpen = true) { }
     }
+    public static class UdsClientExtensions
+    {
+        public static System.Threading.Tasks.ValueTask DisposeAsync(this CanKit.Pro.Uds.IUdsClient client) { }
+    }
     public sealed class UdsClientOptions
     {
         public static readonly System.TimeSpan DefaultP2;

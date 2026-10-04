@@ -2177,6 +2177,98 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         await wait.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    // DisposeAsync does what Dispose does without holding a thread: the in-flight request is
+    // cancelled, the request lock is released before it is disposed, and the owned channel goes.
+    [Fact]
+    public async Task DisposeAsync_During_InFlight_Request_Cancels_It_And_Waits_For_The_Lock()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, _ => throw new EcuSilent()),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromSeconds(5),
+                P2StarClientMax = TimeSpan.FromSeconds(5),
+            });
+        using var teardown = dispose;
+        var impl = (UdsClientImpl)client;
+        var lockHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        impl.RequestLockAcquired += () => lockHeld.TrySetResult(true);
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190,
+            new CancellationTokenSource(ShortTimeout).Token);
+        await lockHeld.Task;
+
+        await Within(client.DisposeAsync().AsTask());
+
+        Func<Task> wait = () => inFlight;
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        Func<Task> again = () => client.ReadDataByIdentifierAsync(0xF190);
+        await again.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // Two calls at once: the second returns when the disposal has finished, not at once.
+    [Fact]
+    public async Task A_Concurrent_DisposeAsync_Returns_When_The_Disposal_Has_Finished()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        using var keepAlive = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+
+        var first = client.DisposeAsync();
+        var second = client.DisposeAsync();
+
+        await Within(second.AsTask());
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue("the second call returned only once the first had finished");
+        await Within(first.AsTask());
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190);
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // The keep-alive loop is joined without a thread too, and without waiting for ever.
+    [Fact]
+    public async Task DisposeAsync_Stops_A_Running_KeepAlive()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        using var keepAlive = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+
+        await Within(client.DisposeAsync().AsTask());
+
+        // The loop ended and cleared its slot: a new keep-alive on a disposed client is refused
+        // for the disposal, not for a live one.
+        Action start = () => client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+        start.Should().Throw<ObjectDisposedException>();
+    }
+
+#if NET5_0_OR_GREATER
+    // A client that is not this library's has no DisposeAsync of its own.
+    [Fact]
+    public async Task DisposeAsync_On_A_Client_That_Is_Not_This_Librarys_Disposes_It_On_The_Thread_Pool()
+    {
+        var foreign = System.Reflection.DispatchProxy.Create<IUdsClient, ForeignClient>();
+
+        await foreign.DisposeAsync();
+
+        ((ForeignClient)foreign).Disposed.Should().BeTrue();
+    }
+
+    private class ForeignClient : System.Reflection.DispatchProxy
+    {
+        public bool Disposed { get; private set; }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IDisposable.Dispose)) Disposed = true;
+            return null;
+        }
+    }
+#endif
+
+    [Fact]
+    public async Task DisposeAsync_Rejects_A_Null_Client()
+    {
+        await Assert.ThrowsAsync<ArgumentNullException>(async () => await UdsClientExtensions.DisposeAsync(null!));
+    }
+
     // -----------------------------------------------------------------------------------
     // Bugbot 3596586770 — suppress-positive TesterPresentAsync must honor _lifetimeCts so
     // Dispose cancels a call blocked on _requestLock (or about to Send) instead of letting
