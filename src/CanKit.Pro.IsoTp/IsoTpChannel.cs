@@ -84,6 +84,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     private readonly TaskCompletionSource<bool> _inboxLostSignal =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    // The channel was disposed: kept beside the inbox like the loss, not as the completion of its
+    // writer, so that a discard can keep writing back what it retains whatever thread disposes the
+    // channel and whenever (#262). A receiver takes what is buffered and meets the end on an empty
+    // inbox.
+    private volatile bool _inboxClosed;
+
+    // Taken by the producers around "not closed? then write" and by the disposal around setting the
+    // flag: nothing is written after the disposal has set it, and what was written before it is in
+    // the inbox when a receiver meets the closed flag. Nothing is called while it is held.
+    private readonly object _inboxGate = new();
+    private readonly TaskCompletionSource<bool> _inboxClosedSignal =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     // Serializes SendAsync callers: one outbound PDU on the wire at a time, per ISO 15765-2's
     // "one N-USData at a time" model. Also avoids competition for _tx state across calls.
     private readonly SemaphoreSlim _sendGate = new(1, 1);
@@ -520,7 +533,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // token did before this loop existed (and as TryReceiveWithArrival documents).
             cancellationToken.ThrowIfCancellationRequested();
             if (_pduInbox.Reader.TryRead(out var item)) return (true, item);
-            if (_inboxLost is { } lost)
+            var lost = _inboxLost;
+            if (lost is not null || _inboxClosed)
             {
                 // A discard has the retained items out of the inbox for a moment: wait it out.
                 if (Volatile.Read(ref _discarding) != 0)
@@ -538,22 +552,25 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                     continue;
                 }
 
-                throw lost;
+                // The loss is the more specific end; a channel that was only disposed ends quietly.
+                if (lost is not null) throw lost;
+                return (false, default);
             }
 
             using var release = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var wait = _pduInbox.Reader.WaitToReadAsync(release.Token).AsTask();
-            var first = await Task.WhenAny(wait, _inboxLostSignal.Task).ConfigureAwait(false);
+            var first = await Task.WhenAny(wait, _inboxLostSignal.Task, _inboxClosedSignal.Task).ConfigureAwait(false);
             if (first != wait)
             {
-                // The loss came first: let go of the wait and look again, items before the loss.
+                // The loss or the disposal came first: let go of the wait and look again, items
+                // before the end.
                 release.Cancel();
                 try { await wait.ConfigureAwait(false); }
                 catch (OperationCanceledException) { /* the wait we just released */ }
                 continue;
             }
 
-            if (!await wait.ConfigureAwait(false)) return (false, default);
+            await wait.ConfigureAwait(false);
         }
     }
 
@@ -576,10 +593,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // release the demux subscription and, if owned, the service.
         try { _readerCts.Cancel(); } catch { /* nothing else to do */ }
 
-        // Complete the inbox first so consumers awaiting ReceiveAsync/ReadAllAsync unblock,
-        // *before* we tear down the reader task -- otherwise a consumer could observe a canceled
-        // reader without any completion signal.
-        _pduInbox.Writer.TryComplete();
+        // Consumers awaiting ReceiveAsync/ReadAllAsync are let go before the reader task is torn
+        // down -- otherwise a consumer could observe a canceled reader without any end signal. The
+        // end is a flag and a signal beside the inbox, not the completion of its writer: a
+        // DiscardPendingPdus has the items it retains out of the inbox for a moment while it runs
+        // on the actor, and completing the writer from this thread in that moment made the
+        // write-back fail and the retained PDUs vanish (#262). It wakes the receivers at once, from
+        // whichever thread this is, and needs no actor to run.
+        lock (_inboxGate) _inboxClosed = true;
+        _inboxClosedSignal.TrySetResult(true);
 
         // Fail any in-flight SendAsync so its caller doesn't hang forever waiting for a TCS the
         // now-disposed actor will never complete. Also release any bus-TX idle waiter that would
@@ -1662,8 +1684,14 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             _rx = null;
         }
 
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex,
-            rx?.Announce.FirstFrameArrivalTimestamp ?? Stopwatch.GetTimestamp()));
+        // A producer callback that outlived the disposal queues nothing: the inbox's writer is not
+        // completed any more, so this is what keeps the end of the channel the end.
+        lock (_inboxGate)
+        {
+            if (!_inboxClosed)
+                _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex,
+                    rx?.Announce.FirstFrameArrivalTimestamp ?? Stopwatch.GetTimestamp()));
+        }
         // After the error item, for the same reason the completion path withdraws it after the
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
         if (rx is not null)
@@ -1720,7 +1748,12 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // DatagramReceived handler blocks. Raise the event off the actor loop so a sync wait
         // on ReceiveAsync / SendAsync / DiscardPendingPdus cannot deadlock the mailbox
         //.
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
+        // As in AbortRx: no PDU is queued once the channel is disposed.
+        lock (_inboxGate)
+        {
+            if (!_inboxClosed)
+                _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
+        }
 
         var handler = DatagramReceived;
         if (handler is null || Volatile.Read(ref _disposed) != 0)
