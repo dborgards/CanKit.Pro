@@ -36,7 +36,9 @@ public sealed class IsoTpChannelOptions
     public bool UsePadding { get; init; } = true;
 
     /// <summary>
-    /// Byte used to pad SF/CF/FC frames when <see cref="UsePadding"/> is <c>true</c>. Defaults to
+    /// Byte used to pad SF/CF/FC frames when <see cref="UsePadding"/> is <c>true</c>, and to round
+    /// a CAN-FD frame longer than 8 bytes up to its next valid data length when it is <c>false</c>
+    /// (see <see cref="UsePadding"/>). Defaults to
     /// <see cref="IsoTpFrameCodec.DefaultPaddingByte"/> (<c>0xCC</c>).
     /// </summary>
     public byte PaddingByte { get; init; } = IsoTpFrameCodec.DefaultPaddingByte;

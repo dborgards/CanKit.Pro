@@ -43,7 +43,9 @@ public static class IsoTpFrameCodec
 
     /// <summary>
     /// Default padding byte per ISO 15765-2 recommendation (`0xCC` is a common choice; `0xAA` and
-    /// `0x00` are also seen). Only used when the caller requests padding.
+    /// `0x00` are also seen). Used when the caller requests padding, and for the bytes that round a
+    /// CAN-FD frame longer than 8 bytes up to its next valid data length, which are added whether
+    /// padding was requested or not.
     /// </summary>
     public const byte DefaultPaddingByte = 0xCC;
 
