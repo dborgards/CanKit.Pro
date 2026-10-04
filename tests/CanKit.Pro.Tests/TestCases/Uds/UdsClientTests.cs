@@ -2177,6 +2177,243 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         await wait.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    // DisposeAsync does what Dispose does without holding a thread: the in-flight request is
+    // cancelled, the request lock is released before it is disposed, and the owned channel goes.
+    [Fact]
+    public async Task DisposeAsync_During_InFlight_Request_Cancels_It_And_Waits_For_The_Lock()
+    {
+        var (client, _, dispose) = BuildPair(
+            e => e.On(0x22, _ => throw new EcuSilent()),
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromSeconds(5),
+                P2StarClientMax = TimeSpan.FromSeconds(5),
+            });
+        using var teardown = dispose;
+        var impl = (UdsClientImpl)client;
+        var lockHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        impl.RequestLockAcquired += () => lockHeld.TrySetResult(true);
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await lockHeld.Task;
+
+        await Within(client.DisposeAsync().AsTask());
+
+        Func<Task> wait = () => inFlight;
+        await wait.Should().ThrowAsync<OperationCanceledException>();
+        Func<Task> again = () => client.ReadDataByIdentifierAsync(0xF190);
+        await again.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // Two calls at once: the second returns when the disposal has finished, not at once.
+    [Fact]
+    public async Task A_Concurrent_DisposeAsync_Returns_When_The_Disposal_Has_Finished()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        using var keepAlive = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+
+        var first = client.DisposeAsync();
+        var second = client.DisposeAsync();
+
+        await Within(second.AsTask());
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue("the second call returned only once the first had finished");
+        await Within(first.AsTask());
+        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190);
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // Dispose with a keep-alive running joins its loop; the handle the caller got back may be
+    // disposed before or after, synchronously or not, and none of those calls is an error.
+    [Fact]
+    public async Task Dispose_Joins_A_Running_KeepAlive_And_Its_Handle_Can_Be_Disposed_Again()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        var handle = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+
+        client.Dispose();
+
+        handle.Dispose();
+        await ((IAsyncDisposable)handle).DisposeAsync();
+        await ((IAsyncDisposable)handle).DisposeAsync();
+    }
+
+    // The client that owns its channel releases it with DisposeAsync as well.
+    [Fact]
+    public async Task DisposeAsync_Releases_An_Owned_Channel()
+    {
+        var (spare, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        var channel = spare.Channel;
+        var owner = UdsClient.Create(channel, leaveOpen: false);
+
+        await Within(owner.DisposeAsync().AsTask());
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(async () => await channel.ReceiveAsync());
+        ex.Message.Should().Contain("dispos", "the channel was released by the client that owned it");
+    }
+
+    // A second keep-alive is refused, and the candidate that was never started is disposed: there
+    // is no loop to join for it.
+    [Fact]
+    public void A_Second_KeepAlive_Is_Refused_And_The_Unstarted_Candidate_Is_Disposed()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        using var first = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(50));
+
+        Action second = () => client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(50));
+
+        second.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
+    public void A_KeepAlive_Period_Longer_Than_Task_Delay_Allows_Is_Refused_Up_Front()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+
+        Action act = () => client.StartTesterPresentKeepAlive(TimeSpan.MaxValue);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+        client.Dispose(); // a client with no keep-alive of the refused one disposes as usual
+    }
+
+#if NET5_0_OR_GREATER
+    // An operation's cancellation callback throws when the client is disposed: Cancel surfaces an
+    // AggregateException, and the disposal still ends -- the owned channel is released and the
+    // client does not throw.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Cancellation_Callback_That_Throws_Does_Not_Stop_The_Disposal(bool asynchronous)
+    {
+        var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, ThrowingOnCancelChannel>();
+        var stub = (ThrowingOnCancelChannel)channel;
+        using var client = UdsClient.Create(channel, leaveOpen: false);
+        // The request below never ends (the stub ignores the cancellation), so the disposal waits
+        // out the request lock; a short wait keeps the test short.
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(200);
+        var request = client.ReadDataByIdentifierAsync(0xF190);
+        if (await Task.WhenAny(stub.SendStarted.Task, request, Task.Delay(ShortTimeout)) != stub.SendStarted.Task)
+            throw new InvalidOperationException("The request did not reach SendAsync: " + (request.IsFaulted ? request.Exception!.GetBaseException().ToString() : request.Status.ToString()));
+
+        if (asynchronous) await Within(client.DisposeAsync().AsTask());
+        else client.Dispose();
+
+        stub.Disposed.Should().BeTrue("the owned channel was released although a callback threw");
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
+        request.IsCompleted.Should().BeFalse("the stub's send never ends; the disposal went on without it");
+    }
+
+    // The throwing callback sits on the keep-alive's own request: disposing the keep-alive handle
+    // must neither throw nor skip the bounded join, and the client's disposal still cancels what
+    // is queued.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Cancellation_Callback_That_Throws_In_A_KeepAlive_Request_Does_Not_Stop_Its_Disposal(bool asynchronous)
+    {
+        var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, ThrowingOnCancelChannel>();
+        var stub = (ThrowingOnCancelChannel)channel;
+        using var client = UdsClient.Create(channel, leaveOpen: false);
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(200);
+        var handle = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(10));
+        await Within(stub.SendStarted.Task); // the keep-alive's request is in flight, callback registered
+
+        if (asynchronous) await ((IAsyncDisposable)handle).DisposeAsync();
+        else handle.Dispose();
+
+        // The request never ends, so the join gave up after the disposal timeout and left the
+        // loop alone; the client can still be disposed afterwards.
+        if (asynchronous) await Within(client.DisposeAsync().AsTask());
+        else client.Dispose();
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
+    }
+
+    private class ThrowingOnCancelChannel : System.Reflection.DispatchProxy
+    {
+        public TaskCompletionSource<bool> SendStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Disposed { get; private set; }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod?.Name)
+            {
+                case nameof(IDisposable.Dispose):
+                    Disposed = true;
+                    return null;
+                case nameof(IIsoTpChannel.SendWithTransmitStampAsync):
+                    // Never completes; its token's cancellation throws out of Cancel.
+                    var token = (CancellationToken)args![1]!;
+                    token.Register(() => throw new InvalidOperationException("a cancellation callback that throws"));
+                    SendStarted.TrySetResult(true);
+                    return new TaskCompletionSource<IsoTpTransmitStamps>().Task;
+                default:
+                    // Whatever else the client asks of the channel before it sends: nothing to do.
+                    var parameters = targetMethod!.GetParameters();
+                    for (var i = 0; i < parameters.Length; i++)
+                    {
+                        if (parameters[i].ParameterType.IsByRef)
+                            args![i] = Activator.CreateInstance(parameters[i].ParameterType.GetElementType()!);
+                    }
+                    var returns = targetMethod.ReturnType;
+                    if (returns == typeof(Task)) return Task.CompletedTask;
+                    if (returns == typeof(ValueTask)) return default(ValueTask);
+                    return returns.IsValueType ? Activator.CreateInstance(returns) : null;
+            }
+        }
+    }
+#endif
+
+    // The keep-alive loop is joined without a thread too, and without waiting for ever.
+    [Fact]
+    public async Task DisposeAsync_Stops_A_Running_KeepAlive()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        using var keepAlive = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+
+        await Within(client.DisposeAsync().AsTask());
+
+        // The loop ended and cleared its slot: a new keep-alive on a disposed client is refused
+        // for the disposal, not for a live one.
+        Action start = () => client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+        start.Should().Throw<ObjectDisposedException>();
+    }
+
+#if NET5_0_OR_GREATER
+    // A client that is not this library's has no DisposeAsync of its own.
+    [Fact]
+    public async Task DisposeAsync_On_A_Client_That_Is_Not_This_Librarys_Disposes_It_On_The_Thread_Pool()
+    {
+        var foreign = System.Reflection.DispatchProxy.Create<IUdsClient, ForeignClient>();
+
+        await foreign.DisposeAsync();
+
+        ((ForeignClient)foreign).Disposed.Should().BeTrue();
+    }
+
+    private class ForeignClient : System.Reflection.DispatchProxy
+    {
+        public bool Disposed { get; private set; }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod?.Name == nameof(IDisposable.Dispose)) Disposed = true;
+            return null;
+        }
+    }
+#endif
+
+    [Fact]
+    public async Task DisposeAsync_Rejects_A_Null_Client()
+    {
+        await Assert.ThrowsAsync<ArgumentNullException>(async () => await UdsClientExtensions.DisposeAsync(null!));
+    }
+
     // -----------------------------------------------------------------------------------
     // Bugbot 3596586770 — suppress-positive TesterPresentAsync must honor _lifetimeCts so
     // Dispose cancels a call blocked on _requestLock (or about to Send) instead of letting

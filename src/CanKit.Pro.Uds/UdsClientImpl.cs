@@ -32,7 +32,7 @@ namespace CanKit.Pro.Uds;
 /// request is still outstanding.
 /// </para>
 /// </remarks>
-internal sealed class UdsClientImpl : IUdsClient
+internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 {
     private const byte NegativeResponseSid = 0x7F;
     private const byte PositiveResponseOffset = 0x40;
@@ -447,6 +447,10 @@ internal sealed class UdsClientImpl : IUdsClient
         var interval = period ?? _options.TesterPresentPeriod;
         if (interval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(period), "TesterPresent period must be positive.");
+        // The loop waits with Task.Delay, which accepts at most int.MaxValue milliseconds; a longer
+        // period would fault the loop on its first tick instead of failing here.
+        if (interval.TotalMilliseconds > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(period), "TesterPresent period must not exceed int.MaxValue milliseconds.");
 
         var candidate = new TesterPresentKeepAlive(this, interval,
             _options.KeepAliveSuppressPositiveResponse);
@@ -1540,37 +1544,96 @@ internal sealed class UdsClientImpl : IUdsClient
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (!BeginDispose()) return;
 
-        Interlocked.Exchange(ref _keepAlive, null)?.Dispose();
-
-        // Cancel in-flight ExecuteAsync / SecurityAccessAsync / suppress-TesterPresent first,
-        // then wait for the request lock so their finally blocks can Release before we dispose
-        // the semaphore. Disposing while a waiter still holds
-        // the lock races WaitAsync/Release.
-        try { _lifetimeCts.Cancel(); } catch { /* already disposed */ }
-
-        // If the holder does not let go in time -- an operation ignoring the cancellation --
-        // the semaphore stays undisposed: its Release on the holder's thread would otherwise
-        // throw ObjectDisposedException into an operation that was merely slow (#57). A
-        // SemaphoreSlim without a wait handle holds nothing that needs disposing.
+        // Whatever below throws, the disposal still ends: the owned channel is released and a
+        // second DisposeAsync waiting for this one is let go.
         bool lockAcquired = false;
         try
         {
+            TakeKeepAlive()?.Dispose();
+            CancelInFlight();
+
+            // If the holder does not let go in time -- an operation ignoring the cancellation --
+            // the semaphore stays undisposed: its Release on the holder's thread would otherwise
+            // throw ObjectDisposedException into an operation that was merely slow (#57). A
+            // SemaphoreSlim without a wait handle holds nothing that needs disposing.
             lockAcquired = _requestLock.Wait(DisposeLockTimeout);
             if (lockAcquired) _requestLock.Release();
         }
-        catch (ObjectDisposedException)
+        finally
         {
-            // Already torn down on another path.
+            FinishDispose(lockAcquired);
+        }
+    }
+
+    /// <summary>
+    /// As <see cref="Dispose"/>, without holding a thread while it waits for the keep-alive loop
+    /// and for the request lock. A second call while the first is running returns when the
+    /// disposal has finished.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (!BeginDispose())
+        {
+            await _disposeDone.Task.ConfigureAwait(false);
+            return;
         }
 
-        _lifetimeCts.Dispose();
-        if (lockAcquired) _requestLock.Dispose();
-
-        if (_ownsChannel)
+        bool lockAcquired = false;
+        try
         {
-            try { _channel.Dispose(); } catch { /* Dispose should not throw */ }
+            if (TakeKeepAlive() is { } keepAlive) await keepAlive.DisposeAsync().ConfigureAwait(false);
+            CancelInFlight();
+            // Nothing else disposes the lock before this (the flag above is taken once), so
+            // there is no torn-down case to catch here.
+            lockAcquired = await _requestLock.WaitAsync(DisposeLockTimeout).ConfigureAwait(false);
+            if (lockAcquired) _requestLock.Release();
+        }
+        finally
+        {
+            FinishDispose(lockAcquired);
+        }
+    }
+
+    private readonly TaskCompletionSource<bool> _disposeDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Test seam: whether the disposal has run to its end (the owned channel is released).</summary>
+    internal bool DisposalFinished => _disposeDone.Task.IsCompleted;
+
+    /// <summary>Flips the disposed flag; false when already disposed.</summary>
+    private bool BeginDispose() => Interlocked.Exchange(ref _disposed, 1) == 0;
+
+    private TesterPresentKeepAlive? TakeKeepAlive() => Interlocked.Exchange(ref _keepAlive, null);
+
+    /// <summary>
+    /// Cancels what is in flight -- ExecuteAsync / SecurityAccessAsync / suppress-TesterPresent --
+    /// so that their finally blocks can Release the request lock before it is disposed (disposing
+    /// while a waiter still holds the lock races WaitAsync/Release). The source is disposed only
+    /// by <see cref="FinishDispose"/>. A cancellation callback of an operation (the channel's)
+    /// that throws surfaces here as an <see cref="AggregateException"/>; the disposal goes on.
+    /// </summary>
+    private void CancelInFlight()
+    {
+        try { _lifetimeCts.Cancel(); }
+        catch (AggregateException) { /* a cancellation callback threw; nothing else to do */ }
+    }
+
+    private void FinishDispose(bool lockAcquired)
+    {
+        try
+        {
+            _lifetimeCts.Dispose();
+            if (lockAcquired) _requestLock.Dispose();
+
+            if (_ownsChannel)
+            {
+                try { _channel.Dispose(); } catch { /* Dispose should not throw */ }
+            }
+        }
+        finally
+        {
+            _disposeDone.TrySetResult(true);
         }
     }
 
@@ -1584,7 +1647,7 @@ internal sealed class UdsClientImpl : IUdsClient
     /// than a <see cref="System.Threading.Timer"/> to keep the state machine linear and share
     /// the client's request lock naturally.
     /// </summary>
-    private sealed class TesterPresentKeepAlive : IDisposable
+    private sealed class TesterPresentKeepAlive : IDisposable, IAsyncDisposable
     {
         private readonly UdsClientImpl _owner;
         private readonly TimeSpan _period;
@@ -1602,7 +1665,10 @@ internal sealed class UdsClientImpl : IUdsClient
 
         public void Start()
         {
-            _loop = Task.Run(() => LoopAsync(_cts.Token));
+            // The token is taken here, not inside the delegate: a pool that is slow to start the
+            // loop must not find its source disposed by a Dispose that gave up waiting.
+            var token = _cts.Token;
+            _loop = Task.Run(() => LoopAsync(token));
         }
 
         private async Task LoopAsync(CancellationToken ct)
@@ -1640,12 +1706,46 @@ internal sealed class UdsClientImpl : IUdsClient
             }
         }
 
+        // The loop awaits TesterPresent, which needs the channel's actor; when that actor is busy
+        // (a caller disposing from one of the channel's callbacks) an unbounded join would never
+        // return. Bounded, then, by the client's disposal timeout: the loop ends on its own once
+        // the cancellation reaches it. Its token source is released only once it has ended (or
+        // was never started): a source that is left to the collector holds no timer or handle,
+        // and one disposed under a loop that has not noticed the cancellation yet would throw
+        // inside it.
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-            try { _cts.Cancel(); } catch { /* ignored */ }
-            try { _loop?.GetAwaiter().GetResult(); } catch { /* ignored */ }
-            _cts.Dispose();
+            if (!CancelOnce()) return;
+            ReleaseSource(_loop is null || _loop.Wait(_owner.DisposeLockTimeout));
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            if (!CancelOnce()) return;
+            ReleaseSource(_loop is null || await JoinAsync(_loop, _owner.DisposeLockTimeout).ConfigureAwait(false));
+        }
+
+        private static async Task<bool> JoinAsync(Task loop, TimeSpan timeout)
+        {
+            using var gave = new CancellationTokenSource();
+            var finished = await Task.WhenAny(loop, Task.Delay(timeout, gave.Token)).ConfigureAwait(false) == loop;
+            gave.Cancel();
+            return finished;
+        }
+
+        private void ReleaseSource(bool loopEnded)
+        {
+            if (loopEnded) _cts.Dispose();
+        }
+
+        private bool CancelOnce()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+            // A cancellation callback of the request in flight (the channel's) may throw out of
+            // Cancel; the join and the release of the source go on.
+            try { _cts.Cancel(); }
+            catch (AggregateException) { /* a cancellation callback threw; nothing else to do */ }
+            return true;
         }
     }
 }
