@@ -52,6 +52,62 @@ public class IsoTpFrameCodecTests
         frame.Length.Should().Be(32); // next valid CAN-FD DLC >= 2 (PCI) + 30 (data) = 32
     }
 
+    // #250: CAN-FD only knows the data lengths 0-8, 12, 16, 20, 24, 32, 48 and 64. A frame built
+    // without padding used to carry its exact payload, so a 9-byte payload became an 11-byte frame
+    // that a driver rounds up on its own and whose echo then never matched what was sent.
+    private static readonly int[] ValidCanFdLengths = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64 };
+
+    [Theory]
+    [InlineData(6)]   // 8 bytes with the PCI: fits as it is
+    [InlineData(7)]   // 9 bytes: lands between 8 and 12
+    [InlineData(9)]
+    [InlineData(10)]
+    [InlineData(13)]
+    [InlineData(18)]
+    [InlineData(30)]
+    [InlineData(62)]  // the longest SF of a CAN-FD frame
+    public void BuildSingleFrame_CanFd_Without_Padding_Lands_On_A_Valid_Length(int userBytes)
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x123, rxCanId: 0x124);
+        var payload = Enumerable.Range(0, userBytes).Select(i => (byte)(0x40 + i)).ToArray();
+
+        var frame = IsoTpFrameCodec.BuildSingleFrame(ep, payload, isCanFd: true, padding: false);
+
+        ValidCanFdLengths.Should().Contain(frame.Length);
+        frame.Length.Should().BeGreaterThanOrEqualTo(userBytes + 1, "the PCI and the data are all in it");
+        // Rounded up by at most the gap to the next step, and never beyond what padding would give.
+        frame.Length.Should().BeLessThanOrEqualTo(
+            IsoTpFrameCodec.BuildSingleFrame(ep, payload, isCanFd: true, padding: true).Length);
+    }
+
+    [Theory]
+    [InlineData(7)]
+    [InlineData(11)]
+    [InlineData(25)]
+    [InlineData(62)]
+    [InlineData(63)]
+    public void BuildConsecutiveFrame_CanFd_Without_Padding_Lands_On_A_Valid_Length(int chunkBytes)
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x123, rxCanId: 0x124);
+        var chunk = Enumerable.Range(0, chunkBytes).Select(i => (byte)i).ToArray();
+
+        var frame = IsoTpFrameCodec.BuildConsecutiveFrame(ep, sequenceNumber: 1, chunk, isCanFd: true, padding: false);
+
+        ValidCanFdLengths.Should().Contain(frame.Length);
+        frame.Length.Should().BeGreaterThanOrEqualTo(chunkBytes + 1);
+    }
+
+    [Fact]
+    public void CanFd_Frames_Of_Eight_Bytes_Or_Fewer_Stay_Exact_Without_Padding()
+    {
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x123, rxCanId: 0x124);
+
+        IsoTpFrameCodec.BuildSingleFrame(ep, new byte[] { 1, 2, 3 }, isCanFd: true, padding: false)
+            .Length.Should().Be(4, "any length up to 8 is a valid CAN-FD length");
+        IsoTpFrameCodec.BuildFlowControl(ep, FlowStatus.ClearToSend, 0, 0, isCanFd: true, padding: false)
+            .Length.Should().Be(3);
+    }
+
     // ---------------------------------------------------------------------------------------------
     // Defect #2 / FR-TP-004: FC PCI nibble is 0x3 (FlowControl), not 0x1 (FirstFrame).
     // ---------------------------------------------------------------------------------------------
