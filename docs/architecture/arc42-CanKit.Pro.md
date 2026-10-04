@@ -154,8 +154,8 @@ Zero-Copy) erhöhen den Aufwand für Q4 und für einen sicheren **Frame-Ownershi
   Releases 1.0.0 – 1.2.3 sind zurückgezogen; 1.3.0 ist der erste Release mit stabiler API
   (README § Status, `docs/decisions/0001-versioning-and-api-stability.md`).
 - **Eine CI über die gesamte Solution** (`.github/workflows/ci.yml`; Trigger: Push auf `main`,
-  Pull Requests, `merge_group`). Die adapterweisen Pfadfilter und Solution-Filter der Erstfassung
-  gehören zu CanKit upstream, nicht zu diesem Repository.
+  Pull Requests, `workflow_dispatch`). Die adapterweisen Pfadfilter und Solution-Filter der
+  Erstfassung gehören zu CanKit upstream, nicht zu diesem Repository.
 - **Default-Branch `main`** — alle Workflows triggern auf `main`; der tote `master`-Trigger aus
   Review §3 betraf den Vorgänger (Abschnitt 11).
 - Änderungen landen ausschließlich per Pull Request auf `main` (`CONTRIBUTING.md`); alle Projekte
