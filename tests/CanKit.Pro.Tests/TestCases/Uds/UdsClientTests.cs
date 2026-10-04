@@ -2254,6 +2254,20 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("dispos", "the channel was released by the client that owned it");
     }
 
+    // A second keep-alive is refused, and the candidate that was never started is disposed: there
+    // is no loop to join for it.
+    [Fact]
+    public void A_Second_KeepAlive_Is_Refused_And_The_Unstarted_Candidate_Is_Disposed()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        using var first = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(50));
+
+        Action second = () => client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(50));
+
+        second.Should().Throw<InvalidOperationException>();
+    }
+
     [Fact]
     public void A_KeepAlive_Period_Longer_Than_Task_Delay_Allows_Is_Refused_Up_Front()
     {
