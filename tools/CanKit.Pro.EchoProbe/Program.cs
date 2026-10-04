@@ -123,10 +123,16 @@ internal static class Program
     {
         var result = new ModeResult { WorkMode = workMode.ToString() };
         using var busB = TryOpen(config.UriB, config, ChannelWorkMode.Normal, out var errorB);
-        using var busA = busB is null ? null : TryOpen(config.UriA, config, workMode, out errorB);
-        if (busA is null || busB is null)
+        if (busB is null)
         {
             result.OpenError = errorB;
+            return result;
+        }
+
+        using var busA = TryOpen(config.UriA, config, workMode, out var errorA);
+        if (busA is null)
+        {
+            result.OpenError = errorA;
             return result;
         }
 
@@ -177,13 +183,19 @@ internal static class Program
         busA.FrameObserved += RecordA;
         busB.FrameObserved += RecordB;
         var sendErrors = new List<string>();
+        var sent = 0;
         try
         {
             for (var i = 0; i < config.Frames; i++)
             {
                 try
                 {
-                    busA.Transmit(MakeFrame(config, i));
+                    // A driver may reject a frame by returning zero instead of throwing; such a frame
+                    // never entered the bus, and counting it as sent would pass off its missing
+                    // echo as adapter behaviour.
+                    var accepted = busA.Transmit(MakeFrame(config, i));
+                    if (accepted > 0) sent++;
+                    else sendErrors.Add($"frame {i}: the driver rejected it (Transmit returned {accepted})");
                 }
                 catch (Exception ex)
                 {
@@ -207,7 +219,8 @@ internal static class Program
         lock (onB) b = onB.Where(s => s.Id == StdId).ToArray();
         return new RawResult
         {
-            Sent = config.Frames,
+            Sent = sent,
+            Attempted = config.Frames,
             SendErrors = sendErrors,
             SeenOnAUnderTest = a.Length,
             SeenOnAFlaggedAsEcho = a.Count(s => s.IsEcho),
@@ -366,13 +379,39 @@ internal static class Program
 
             var raw = r.Raw!;
             var confirmed = string.Join("; ", r.Confirmed!.Attempts.Select(a =>
-                $"{(a.Confirmed ? "confirmed" : "NOT confirmed")}{(a.IsApproximated ? " (approx)" : "")} {a.ElapsedMs} ms"));
+                (a.Confirmed ? "confirmed" : $"NOT confirmed ({(a.Error ?? a.FailureReason).Replace("|", "/")})") +
+                (a.IsApproximated ? " (approx)" : "") + $" {a.ElapsedMs} ms"));
             var claim = r.Claim is null
                 ? "skipped"
-                : $"{r.Claim.State} {r.Claim.Address ?? ""} ({r.Claim.ElapsedMs} ms, peer saw {r.Claim.ClaimFramesSeenByPeer})";
+                : $"{r.Claim.State} {r.Claim.Address ?? ""} ({r.Claim.ElapsedMs} ms, peer saw {r.Claim.ClaimFramesSeenByPeer})" +
+                  (r.Claim.Error is null ? "" : $" error: {r.Claim.Error.Replace("|", "/")}");
             sb.AppendLine($"| {r.WorkMode} | {r.DeclaresEchoFeature} | {raw.SeenOnAUnderTest}/{raw.Sent} | " +
                 $"{raw.SeenOnAFlaggedAsEcho} | {raw.SeenOnAUnflagged} | {raw.SeenOnPeer}/{raw.Sent} | {confirmed} | {claim} |");
         }
+
+        // What went wrong, in full: a missing driver or a rejected transmit must not read as a
+        // measurement of the adapter.
+        var problems = new List<string>();
+        foreach (var r in report.Results)
+        {
+            if (r.OpenError is not null) problems.Add($"{r.WorkMode}: could not open: {r.OpenError}");
+            if (r.Raw is { } raw2)
+            {
+                if (raw2.Sent < raw2.Attempted)
+                    problems.Add($"{r.WorkMode}: only {raw2.Sent} of {raw2.Attempted} frames were accepted by the driver");
+                problems.AddRange(raw2.SendErrors.Select(e => $"{r.WorkMode}: send: {e}"));
+            }
+
+            if (r.Confirmed is { } c2)
+                problems.AddRange(c2.Attempts.Where(a => !a.Confirmed).Select(a =>
+                    $"{r.WorkMode}: SendConfirmedAsync not confirmed: reason {a.FailureReason}{(a.Error is null ? "" : ", " + a.Error)}"));
+            if (r.Claim?.Error is { } claimError) problems.Add($"{r.WorkMode}: J1939 claim: {claimError}");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("Problems reported while measuring (a missing driver or a rejected transmit is not adapter behaviour):");
+        if (problems.Count == 0) sb.AppendLine("- none");
+        foreach (var problem in problems) sb.AppendLine($"- {problem}");
 
         sb.AppendLine();
         sb.AppendLine("Frames A reported for its own id (first run of each mode):");
@@ -466,6 +505,7 @@ internal static class Program
     private sealed class RawResult
     {
         public int Sent { get; set; }
+        public int Attempted { get; set; }
         public List<string> SendErrors { get; set; } = new();
         public int SeenOnAUnderTest { get; set; }
         public int SeenOnAFlaggedAsEcho { get; set; }
