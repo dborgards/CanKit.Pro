@@ -90,6 +90,13 @@ def main(argv: list[str]) -> int:
         return 2
     version = args[0]
     previous = set_baseline(version)
+    if previous == version:
+        # A release run repeated after Option B of docs/release-process.md: the packages went out
+        # and this commit landed, then the GitHub Release failed; the rerun passes the push via
+        # --skip-duplicate and arrives here with nothing to change. An empty commit would fail
+        # and take publishCmd down with it (Codex on #281); the baseline is where it should be.
+        print(f"PackageValidationBaselineVersion already {version}; nothing to commit")
+        return 0
     print(f"PackageValidationBaselineVersion: {previous} -> {version}")
     if len(args) == 3:
         commit_and_push(version, args[2])

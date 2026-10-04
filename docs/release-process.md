@@ -282,7 +282,8 @@ happened.
 semantic-release will then compute the same version again from the same commits — the changelog
 entry it regenerates supersedes the reverted one. Packages already pushed at that version stay
 published; `--skip-duplicate` lets the rerun past them, but they will not be rebuilt, so use
-Option A instead if their content matters.
+Option A instead if their content matters. The baseline commit, if the failed run got that far,
+can stay: the rerun finds the baseline already at that version and commits nothing.
 
 Note what Option B is *not* for: a failure in the build or the test step. Those run before
 semantic-release is invoked, so nothing has been tagged, committed or published. Fix the failure
