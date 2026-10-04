@@ -134,7 +134,8 @@ analyze        →  nothing to release? stop here
 verifyRelease  →  re-check the release configuration for the version about to go out  (exec)
 prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
                →  verify the nine packages `verify` packed     (@semantic-release/exec, prepareCmd)
-               →  changelog committed and PUSHED to main       (@semantic-release/git)
+               →  package-validation baseline set to X.Y.Z     (@semantic-release/exec, prepareCmd)
+               →  changelog + baseline committed, PUSHED       (@semantic-release/git)
    ↓
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
    ↓
@@ -152,7 +153,10 @@ against the downloaded `.nupkg` files with the version about to be tagged, and f
 nine are there, each carries a README, a license expression and a `.snupkg`, and every one of
 them is stamped at exactly that version. It is the same script the CI pack job runs, so a package
 that would be rejected on a pull request is rejected here too — this time with a version to check
-against.
+against. Then `eng/set-package-validation-baseline.py` writes the version into
+`PackageValidationBaselineVersion` in `src/Directory.Build.props`, and `@semantic-release/git`
+commits that file alongside the changelog: from the next pull request on, every pack is compared
+with the release that just went out (see § *Package validation* below).
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
@@ -174,6 +178,26 @@ The `[skip ci]` marker on the changelog commit suppresses every push-triggered w
 website (`.github/workflows/docs.yml`) additionally listens for the Release workflow's completion
 and rebuilds right after a successful release. Without that, the changelog page would lag until
 the next unrelated documentation change.
+
+## Package validation
+
+Every `dotnet pack` compares the public surface of each of the nine packages, per target
+framework, with the last release on nuget.org — `PackageValidationBaselineVersion` in
+`src/Directory.Build.props`, set by the release that published it (above). The API approval tests
+show *that* the surface changed; this says whether the change is additive or breaking, and fails
+the pack on the pull request that introduces a break rather than after the release that shipped
+it (#257).
+
+A pack without a version — a plain `dotnet pack` on a developer machine — builds at 0.0.0, so the
+assembly-version comparison (CP0003) is switched off for exactly that case; the API comparison is
+not. CI and the release always pack with `-p:Version=`, where both run.
+
+A breaking change is a major release (`!` and a `BREAKING CHANGE:` footer in the commit, see
+`CONTRIBUTING.md`), and until that release is out the comparison with the previous one will keep
+failing on it. The way through is ApiCompat's own: rebuild once with
+`-p:ApiCompatGenerateSuppressionFile=true`, which writes a `CompatibilitySuppressions.xml` next to
+the project naming each break, and commit it with the change so the review sees the list. Once
+the major is published the baseline moves past the break and the suppression file is deleted.
 
 ## Recovering a half-finished release
 

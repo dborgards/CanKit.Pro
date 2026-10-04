@@ -9,6 +9,25 @@
     <PackageTags>CAN;can-bus;CANFD;CanKit;CanKit.Pro;automotive;embedded</PackageTags>
   </PropertyGroup>
 
+  <PropertyGroup Label="Package validation">
+    <!--
+      Every pack compares the public surface of each package with the last release on nuget.org
+      (#257). Since 1.3.0 a breaking change costs a major version, and the API approval tests
+      cannot tell additive from breaking; ApiCompat can, per target framework, and fails the pack
+      on the pull request that introduces the break. The baseline is the last published version:
+      semantic-release moves it on every release (eng/set-package-validation-baseline.py, run as
+      the exec plugin's prepareCmd, committed with the changelog), so nothing has to be kept in
+      step by hand.
+
+      CP0003 compares assembly versions and is silenced only for a pack that was given no version,
+      i.e. a local `dotnet pack`, which builds at 0.0.0 by design (see Versioning in the root
+      Directory.Build.props). CI and the release always pass -p:Version=, so there the check runs.
+    -->
+    <EnablePackageValidation>true</EnablePackageValidation>
+    <PackageValidationBaselineVersion>1.3.0</PackageValidationBaselineVersion>
+    <NoWarn Condition="'$(Version)' == ''">$(NoWarn);CP0003</NoWarn>
+  </PropertyGroup>
+
   <ItemGroup Label="Per-package README shipped inside the .nupkg">
     <None Include="README.md" Pack="true" PackagePath="" Condition="Exists('README.md')" />
   </ItemGroup>

@@ -46,12 +46,12 @@
 
     ["@semantic-release/exec", {
       "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
-      "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version}",
+      "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version} && python3 eng/set-package-validation-baseline.py ${nextRelease.version}",
       "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate"
     }],
 
     ["@semantic-release/git", {
-      "assets": ["CHANGELOG.md"],
+      "assets": ["CHANGELOG.md", "src/Directory.Build.props"],
       "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
     }],
 
