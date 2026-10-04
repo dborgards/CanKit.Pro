@@ -2254,6 +2254,81 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         ex.Message.Should().Contain("dispos", "the channel was released by the client that owned it");
     }
 
+    [Fact]
+    public void A_KeepAlive_Period_Longer_Than_Task_Delay_Allows_Is_Refused_Up_Front()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+
+        Action act = () => client.StartTesterPresentKeepAlive(TimeSpan.MaxValue);
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+        client.Dispose(); // a client with no keep-alive of the refused one disposes as usual
+    }
+
+#if NET5_0_OR_GREATER
+    // An operation's cancellation callback throws when the client is disposed: Cancel surfaces an
+    // AggregateException, and the disposal still ends -- the owned channel is released and the
+    // client does not throw.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Cancellation_Callback_That_Throws_Does_Not_Stop_The_Disposal(bool asynchronous)
+    {
+        var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, ThrowingOnCancelChannel>();
+        var stub = (ThrowingOnCancelChannel)(object)channel;
+        var client = UdsClient.Create(channel, leaveOpen: false);
+        // The request below never ends (the stub ignores the cancellation), so the disposal waits
+        // out the request lock; a short wait keeps the test short.
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(200);
+        var request = client.ReadDataByIdentifierAsync(0xF190);
+        if (await Task.WhenAny(stub.SendStarted.Task, request, Task.Delay(ShortTimeout)) != stub.SendStarted.Task)
+            throw new InvalidOperationException("The request did not reach SendAsync: " + (request.IsFaulted ? request.Exception!.GetBaseException().ToString() : request.Status.ToString()));
+
+        if (asynchronous) await Within(client.DisposeAsync().AsTask());
+        else client.Dispose();
+
+        stub.Disposed.Should().BeTrue("the owned channel was released although a callback threw");
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
+        request.IsCompleted.Should().BeFalse("the stub's send never ends; the disposal went on without it");
+    }
+
+    private class ThrowingOnCancelChannel : System.Reflection.DispatchProxy
+    {
+        public TaskCompletionSource<bool> SendStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Disposed { get; private set; }
+
+        protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+        {
+            switch (targetMethod?.Name)
+            {
+                case nameof(IDisposable.Dispose):
+                    Disposed = true;
+                    return null;
+                case nameof(IIsoTpChannel.SendWithTransmitStampAsync):
+                    // Never completes; its token's cancellation throws out of Cancel.
+                    var token = (CancellationToken)args![1]!;
+                    token.Register(() => throw new InvalidOperationException("a cancellation callback that throws"));
+                    SendStarted.TrySetResult(true);
+                    return new TaskCompletionSource<IsoTpTransmitStamps>().Task;
+                default:
+                    // Whatever else the client asks of the channel before it sends: nothing to do.
+                    var parameters = targetMethod!.GetParameters();
+                    for (var i = 0; i < parameters.Length; i++)
+                    {
+                        if (parameters[i].ParameterType.IsByRef)
+                            args![i] = Activator.CreateInstance(parameters[i].ParameterType.GetElementType()!);
+                    }
+                    var returns = targetMethod.ReturnType;
+                    if (returns == typeof(Task)) return Task.CompletedTask;
+                    if (returns == typeof(ValueTask)) return default(ValueTask);
+                    return returns.IsValueType ? Activator.CreateInstance(returns) : null;
+            }
+        }
+    }
+#endif
+
     // The keep-alive loop is joined without a thread too, and without waiting for ever.
     [Fact]
     public async Task DisposeAsync_Stops_A_Running_KeepAlive()

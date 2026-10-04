@@ -447,6 +447,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var interval = period ?? _options.TesterPresentPeriod;
         if (interval <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(period), "TesterPresent period must be positive.");
+        // The loop waits with Task.Delay, which accepts at most int.MaxValue milliseconds; a longer
+        // period would fault the loop on its first tick instead of failing here.
+        if (interval.TotalMilliseconds > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(period), "TesterPresent period must not exceed int.MaxValue milliseconds.");
 
         var candidate = new TesterPresentKeepAlive(this, interval,
             _options.KeepAliveSuppressPositiveResponse);
@@ -1540,25 +1544,27 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
     public void Dispose()
     {
-        if (!BeginDispose(out var keepAlive)) return;
-        keepAlive?.Dispose();
+        if (!BeginDispose()) return;
 
-        // If the holder does not let go in time -- an operation ignoring the cancellation --
-        // the semaphore stays undisposed: its Release on the holder's thread would otherwise
-        // throw ObjectDisposedException into an operation that was merely slow (#57). A
-        // SemaphoreSlim without a wait handle holds nothing that needs disposing.
+        // Whatever below throws, the disposal still ends: the owned channel is released and a
+        // second DisposeAsync waiting for this one is let go.
         bool lockAcquired = false;
         try
         {
+            TakeKeepAlive()?.Dispose();
+            CancelInFlight();
+
+            // If the holder does not let go in time -- an operation ignoring the cancellation --
+            // the semaphore stays undisposed: its Release on the holder's thread would otherwise
+            // throw ObjectDisposedException into an operation that was merely slow (#57). A
+            // SemaphoreSlim without a wait handle holds nothing that needs disposing.
             lockAcquired = _requestLock.Wait(DisposeLockTimeout);
             if (lockAcquired) _requestLock.Release();
         }
-        catch (ObjectDisposedException)
+        finally
         {
-            // Already torn down on another path.
+            FinishDispose(lockAcquired);
         }
-
-        FinishDispose(lockAcquired);
     }
 
     /// <summary>
@@ -1568,7 +1574,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     /// </summary>
     public async ValueTask DisposeAsync()
     {
-        if (!BeginDispose(out var keepAlive))
+        if (!BeginDispose())
         {
             await _disposeDone.Task.ConfigureAwait(false);
             return;
@@ -1577,7 +1583,8 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         bool lockAcquired = false;
         try
         {
-            if (keepAlive is not null) await keepAlive.DisposeAsync().ConfigureAwait(false);
+            if (TakeKeepAlive() is { } keepAlive) await keepAlive.DisposeAsync().ConfigureAwait(false);
+            CancelInFlight();
             // Nothing else disposes the lock before this (the flag above is taken once), so
             // there is no torn-down case to catch here.
             lockAcquired = await _requestLock.WaitAsync(DisposeLockTimeout).ConfigureAwait(false);
@@ -1594,19 +1601,22 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     /// <summary>Test seam: whether the disposal has run to its end (the owned channel is released).</summary>
     internal bool DisposalFinished => _disposeDone.Task.IsCompleted;
 
+    /// <summary>Flips the disposed flag; false when already disposed.</summary>
+    private bool BeginDispose() => Interlocked.Exchange(ref _disposed, 1) == 0;
+
+    private TesterPresentKeepAlive? TakeKeepAlive() => Interlocked.Exchange(ref _keepAlive, null);
+
     /// <summary>
-    /// Flips the disposed flag and cancels what is in flight: ExecuteAsync / SecurityAccessAsync /
-    /// suppress-TesterPresent first, so that their finally blocks can Release the request lock
-    /// before it is disposed -- disposing while a waiter still holds the lock races
-    /// WaitAsync/Release. False when already disposed.
+    /// Cancels what is in flight -- ExecuteAsync / SecurityAccessAsync / suppress-TesterPresent --
+    /// so that their finally blocks can Release the request lock before it is disposed (disposing
+    /// while a waiter still holds the lock races WaitAsync/Release). The source is disposed only
+    /// by <see cref="FinishDispose"/>. A cancellation callback of an operation (the channel's)
+    /// that throws surfaces here as an <see cref="AggregateException"/>; the disposal goes on.
     /// </summary>
-    private bool BeginDispose(out TesterPresentKeepAlive? keepAlive)
+    private void CancelInFlight()
     {
-        keepAlive = null;
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
-        keepAlive = Interlocked.Exchange(ref _keepAlive, null);
-        _lifetimeCts.Cancel(); // the source is disposed only by FinishDispose, after the flag above
-        return true;
+        try { _lifetimeCts.Cancel(); }
+        catch (AggregateException) { /* a cancellation callback threw; nothing else to do */ }
     }
 
     private void FinishDispose(bool lockAcquired)
