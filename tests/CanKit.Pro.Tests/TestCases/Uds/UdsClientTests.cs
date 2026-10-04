@@ -2067,6 +2067,72 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #252 — an ECU that supports only some of the requested DIDs answers with those; the client
+    // used to throw and drop the records it had parsed.
+    [Fact]
+    public async Task ReadDataByIdentifier_Multi_Did_Returns_The_Answered_Dids_When_Others_Are_Left_Out()
+    {
+        var (client, _, dispose) = BuildPair(e => e.On(0x22, _ => new byte[]
+        {
+            // 0xF187 is not answered; 0xF190 and 0xF189 are, in an order other than the request's.
+            0xF1, 0x89, 0x99,
+            0xF1, 0x90, 0x41, 0x42, 0x43,
+        }));
+        using (dispose)
+        {
+            var lengths = new Dictionary<ushort, int>
+            {
+                [(ushort)0xF190] = 3,
+                [(ushort)0xF187] = 2,
+                [(ushort)0xF189] = 1,
+            };
+            using var cts = new CancellationTokenSource(ShortTimeout);
+
+            var results = await client.ReadDataByIdentifierAsync(
+                new ushort[] { 0xF190, 0xF187, 0xF189 }, lengths, cts.Token);
+
+            results.Keys.Should().BeEquivalentTo(new ushort[] { 0xF190, 0xF189 });
+            results[0xF190].Should().Equal(0x41, 0x42, 0x43);
+            results[0xF189].Should().Equal(0x99);
+            results.ContainsKey(0xF187).Should().BeFalse("the ECU did not answer it");
+        }
+    }
+
+    // A positive response without any record is neither "some answered" nor the NRC for "none".
+    [Fact]
+    public async Task ReadDataByIdentifier_Multi_Did_Rejects_A_Positive_Response_Without_Records()
+    {
+        var (client, _, dispose) = BuildPair(e => e.On(0x22, _ => Array.Empty<byte>()));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+
+            Func<Task> act = () => client.ReadDataByIdentifierAsync(
+                new ushort[] { 0xF190, 0xF187 },
+                new Dictionary<ushort, int> { [0xF190] = 3, [0xF187] = 2 }, cts.Token);
+
+            await act.Should().ThrowAsync<UdsProtocolException>().WithMessage("*no data record*");
+        }
+    }
+
+    // None supported is the ECU's requestOutOfRange, surfaced as the negative response it is.
+    [Fact]
+    public async Task ReadDataByIdentifier_Multi_Did_Surfaces_RequestOutOfRange_When_None_Is_Supported()
+    {
+        var (client, _, dispose) = BuildPair(e => e.On(0x22, _ => throw new EcuNegativeResponse(0x31)));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+
+            Func<Task> act = () => client.ReadDataByIdentifierAsync(
+                new ushort[] { 0xF190, 0xF187 },
+                new Dictionary<ushort, int> { [0xF190] = 3, [0xF187] = 2 }, cts.Token);
+
+            var ex = (await act.Should().ThrowAsync<UdsNegativeResponseException>()).Which;
+            ex.Code.Should().Be(0x31);
+        }
+    }
+
     // Bugbot 3596522007 — ISO 14229-1 allows empty dataRecord; adjacent DIDs must not throw.
     [Fact]
     public async Task ReadDataByIdentifier_Multi_Did_Accepts_Empty_Records()

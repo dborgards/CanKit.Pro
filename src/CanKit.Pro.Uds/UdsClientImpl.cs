@@ -298,14 +298,14 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             cursor = dataStart + recLen;
         }
 
-        if (result.Count != dataIdentifiers.Count)
-        {
-            var missing = new List<string>();
-            foreach (var did in dataIdentifiers.Where(did => !result.ContainsKey(did)))
-                missing.Add($"0x{did:X4}");
+        // ISO 14229-1 §10.2: a server that supports some of the requested DIDs answers positively
+        // with the records of those, and leaves the others out; "none supported" is the
+        // requestOutOfRange NRC, which ExecuteAsync raises. So a DID that is absent from the
+        // result was not answered, and the caller finds that by its key. A positive response
+        // that carries no record at all is neither of the two and is malformed.
+        if (result.Count == 0)
             throw new UdsProtocolException(
-                $"Multi-DID ReadDataByIdentifier response missing DIDs: {string.Join(", ", missing)}.");
-        }
+                "Multi-DID ReadDataByIdentifier positive response carries no data record.");
 
         return result;
     }
