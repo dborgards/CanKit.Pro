@@ -1676,10 +1676,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        Dispose();
-        await Task.CompletedTask.ConfigureAwait(false);
+        // On the actor (a callback of this node) the disposal runs in place: the actor is what
+        // the blocking waits would be waiting on from another thread. Anywhere else it runs on
+        // the thread pool, so the caller's thread is not held for the joins Dispose makes.
+        if (_actor.IsOnCurrentActor)
+        {
+            Dispose();
+            return default;
+        }
+
+        return new ValueTask(Task.Run(Dispose));
     }
 
     // =========================================================================================
@@ -1791,6 +1799,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // them off one clock -- which for a test means the one it drives (#92).
         private readonly long _periodTicks;
 
+        // Cancelled by Dispose, so an emission that waits on the bus for its confirmation ends
+        // with it instead of being waited out.
+        private readonly CancellationTokenSource _cts = new();
         private IDeadline? _tick;
         private long _nextAnchorTicks;
         private Task? _sendTask;
@@ -1836,9 +1847,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 {
                     try
                     {
-                        await _owner.SendAsync(_message, CancellationToken.None).ConfigureAwait(false);
+                        await _owner.SendAsync(_message, _cts.Token).ConfigureAwait(false);
                     }
                     catch (ObjectDisposedException) { /* node disposed mid-send */ }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested) { /* schedule disposed mid-send */ }
                     catch (Exception ex)
                     {
                         _owner.RaiseBackgroundException(ex);
@@ -1881,7 +1893,19 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             try { _tick?.Dispose(); } catch { }
-            try { _sendTask?.Wait(TimeSpan.FromSeconds(2)); } catch { /* send observed elsewhere */ }
+            try { _cts.Cancel(); } catch (AggregateException) { /* a cancellation callback threw */ }
+
+            // From the actor (a callback of the node disposing its schedule) the emission in
+            // flight may be waiting for that very actor: waiting for it here would hold the
+            // actor for the whole timeout. It ends on its own, the token being cancelled.
+            var send = _sendTask;
+            if (send is null) { _cts.Dispose(); return; }
+            if (_owner._actor.IsOnCurrentActor) return;
+            try
+            {
+                if (send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
+            }
+            catch (AggregateException) { /* send observed elsewhere */ }
         }
 
 
