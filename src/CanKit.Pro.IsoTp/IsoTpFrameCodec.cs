@@ -43,7 +43,9 @@ public static class IsoTpFrameCodec
 
     /// <summary>
     /// Default padding byte per ISO 15765-2 recommendation (`0xCC` is a common choice; `0xAA` and
-    /// `0x00` are also seen). Only used when the caller requests padding.
+    /// `0x00` are also seen). Used when the caller requests padding, and for the bytes that round a
+    /// CAN-FD frame longer than 8 bytes up to its next valid data length, which are added whether
+    /// padding was requested or not.
     /// </summary>
     public const byte DefaultPaddingByte = 0xCC;
 
@@ -115,6 +117,18 @@ public static class IsoTpFrameCodec
         int addrExt = usesAddressExtension ? 1 : 0;
         return frameSize - 1 - addrExt;
     }
+
+    /// <summary>
+    /// The data length a frame is sent with: with padding, the next valid length (8 for anything
+    /// that fits classic CAN); without, the exact payload -- except that a CAN-FD frame longer than
+    /// 8 bytes has to land on one of the lengths CAN-FD knows (12, 16, 20, 24, 32, 48, 64), so it is
+    /// rounded up to the next, with padding bytes (ISO 15765-2 "DLC rounding"). An odd length would
+    /// be rounded by the driver instead, and the echo of the frame would no longer match it.
+    /// </summary>
+    private static int FrameLengthOnTheWire(int payloadLen, bool isCanFd, bool padding)
+        => padding || (isCanFd && payloadLen > ClassicCanMaxData)
+            ? NextValidFrameLength(payloadLen, isCanFd)
+            : payloadLen;
 
     /// <summary>
     /// Returns the next valid CAN-FD DLC data length that is greater than or equal to
@@ -233,7 +247,7 @@ public static class IsoTpFrameCodec
         int dataStart = addrExt + pciBytes;
         userData.CopyTo(destination.Slice(dataStart, userData.Length));
 
-        int frameLen = padding ? NextValidFrameLength(payloadLen, isCanFd) : payloadLen;
+        int frameLen = FrameLengthOnTheWire(payloadLen, isCanFd, padding);
         if (frameLen > payloadLen)
             destination.Slice(payloadLen, frameLen - payloadLen).Fill(paddingByte);
 
@@ -376,7 +390,7 @@ public static class IsoTpFrameCodec
         chunk.CopyTo(destination.Slice(dataStart, chunk.Length));
 
         int payloadLen = dataStart + chunk.Length;
-        int frameLen = padding ? NextValidFrameLength(payloadLen, isCanFd) : payloadLen;
+        int frameLen = FrameLengthOnTheWire(payloadLen, isCanFd, padding);
         if (frameLen > payloadLen)
             destination.Slice(payloadLen, frameLen - payloadLen).Fill(paddingByte);
 
@@ -426,7 +440,7 @@ public static class IsoTpFrameCodec
         destination[pciIndex + 2] = stMinRaw;
 
         int payloadLen = addrExt + 3;
-        int frameLen = padding ? NextValidFrameLength(payloadLen, isCanFd) : payloadLen;
+        int frameLen = FrameLengthOnTheWire(payloadLen, isCanFd, padding);
         if (frameLen > payloadLen)
             destination.Slice(payloadLen, frameLen - payloadLen).Fill(paddingByte);
 

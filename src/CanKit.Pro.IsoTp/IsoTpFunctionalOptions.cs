@@ -32,13 +32,16 @@ public sealed class IsoTpFunctionalOptions
 
     /// <summary>
     /// <c>true</c> to pad the outbound Single Frame to the next valid CAN/CAN-FD DLC step.
+    /// On CAN-FD a Single Frame longer than 8 bytes is rounded up to its next valid data length
+    /// (12, 16, 20, 24, 32, 48, 64) whatever this says, since no other length exists.
     /// Defaults to <c>true</c>.
     /// </summary>
     public bool UsePadding { get; init; } = true;
 
     /// <summary>
     /// Byte used to pad the outbound Single Frame when <see cref="UsePadding"/> is
-    /// <c>true</c>. Defaults to <see cref="IsoTpFrameCodec.DefaultPaddingByte"/> (<c>0xCC</c>).
+    /// <c>true</c>, and for the rounding bytes of a CAN-FD frame longer than 8 bytes when it is
+    /// not (see <see cref="UsePadding"/>). Defaults to <see cref="IsoTpFrameCodec.DefaultPaddingByte"/> (<c>0xCC</c>).
     /// </summary>
     public byte PaddingByte { get; init; } = IsoTpFrameCodec.DefaultPaddingByte;
 

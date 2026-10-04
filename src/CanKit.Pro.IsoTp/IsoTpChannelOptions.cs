@@ -28,12 +28,17 @@ public sealed class IsoTpChannelOptions
     /// <summary>
     /// <c>true</c> to pad each frame to the next valid CAN/CAN-FD DLC step with
     /// <see cref="PaddingByte"/>; <c>false</c> to send the exact minimum payload. Many ISO 15765-2
-    /// stacks expect padding on classic CAN; CAN-FD padding is optional per ISO 15765-2 §5.
+    /// stacks expect padding on classic CAN. On CAN-FD the data length of a frame can only be 0 to
+    /// 8, 12, 16, 20, 24, 32, 48 or 64 bytes, so a frame that falls between two steps is always
+    /// padded up to the next one (ISO 15765-2 requires that rounding), whatever this property
+    /// says; it only decides whether frames of 8 bytes or fewer are padded as well.
     /// </summary>
     public bool UsePadding { get; init; } = true;
 
     /// <summary>
-    /// Byte used to pad SF/CF/FC frames when <see cref="UsePadding"/> is <c>true</c>. Defaults to
+    /// Byte used to pad SF/CF/FC frames when <see cref="UsePadding"/> is <c>true</c>, and to round
+    /// a CAN-FD frame longer than 8 bytes up to its next valid data length when it is <c>false</c>
+    /// (see <see cref="UsePadding"/>). Defaults to
     /// <see cref="IsoTpFrameCodec.DefaultPaddingByte"/> (<c>0xCC</c>).
     /// </summary>
     public byte PaddingByte { get; init; } = IsoTpFrameCodec.DefaultPaddingByte;
