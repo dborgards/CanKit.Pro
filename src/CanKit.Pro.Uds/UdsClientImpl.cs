@@ -1605,8 +1605,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         keepAlive = null;
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
         keepAlive = Interlocked.Exchange(ref _keepAlive, null);
-        try { _lifetimeCts.Cancel(); }
-        catch (Exception ex) when (ex is ObjectDisposedException or AggregateException) { /* already disposed, or a callback threw */ }
+        _lifetimeCts.Cancel(); // the source is disposed only by FinishDispose, after the flag above
         return true;
     }
 
@@ -1656,7 +1655,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         public void Start()
         {
-            _loop = Task.Run(() => LoopAsync(_cts.Token));
+            // The token is taken here, not inside the delegate: a pool that is slow to start the
+            // loop must not find its source disposed by a Dispose that gave up waiting.
+            var token = _cts.Token;
+            _loop = Task.Run(() => LoopAsync(token));
         }
 
         private async Task LoopAsync(CancellationToken ct)
@@ -1696,33 +1698,40 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         // The loop awaits TesterPresent, which needs the channel's actor; when that actor is busy
         // (a caller disposing from one of the channel's callbacks) an unbounded join would never
-        // return. Bounded, then: the loop ends on its own once the cancellation reaches it.
-        private static readonly TimeSpan JoinTimeout = TimeSpan.FromSeconds(2);
-
+        // return. Bounded, then, by the client's disposal timeout: the loop ends on its own once
+        // the cancellation reaches it. Its token source is released only once it has ended (or
+        // was never started): a source that is left to the collector holds no timer or handle,
+        // and one disposed under a loop that has not noticed the cancellation yet would throw
+        // inside it.
         public void Dispose()
         {
             if (!CancelOnce()) return;
-            try { _loop?.Wait(JoinTimeout); } catch (AggregateException) { /* ignored */ }
-            _cts.Dispose();
+            ReleaseSource(_loop is null || _loop.Wait(_owner.DisposeLockTimeout));
         }
 
         public async ValueTask DisposeAsync()
         {
             if (!CancelOnce()) return;
-            if (_loop is { } loop)
-            {
-                using var gave = new CancellationTokenSource();
-                await Task.WhenAny(loop, Task.Delay(JoinTimeout, gave.Token)).ConfigureAwait(false);
-                gave.Cancel();
-            }
-            _cts.Dispose();
+            ReleaseSource(_loop is null || await JoinAsync(_loop, _owner.DisposeLockTimeout).ConfigureAwait(false));
+        }
+
+        private static async Task<bool> JoinAsync(Task loop, TimeSpan timeout)
+        {
+            using var gave = new CancellationTokenSource();
+            var finished = await Task.WhenAny(loop, Task.Delay(timeout, gave.Token)).ConfigureAwait(false) == loop;
+            gave.Cancel();
+            return finished;
+        }
+
+        private void ReleaseSource(bool loopEnded)
+        {
+            if (loopEnded) _cts.Dispose();
         }
 
         private bool CancelOnce()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
-            try { _cts.Cancel(); }
-            catch (Exception ex) when (ex is ObjectDisposedException or AggregateException) { /* ignored */ }
+            _cts.Cancel();
             return true;
         }
     }
