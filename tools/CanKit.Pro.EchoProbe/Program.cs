@@ -32,6 +32,11 @@ namespace CanKit.Pro.EchoProbe;
 internal static class Program
 {
     private const int StdId = 0x123;
+    private const byte ClaimedAddress = 0x11;
+
+    private static readonly J1939Name ProbeName = new(identityNumber: 0x4711, manufacturerCode: 0x7FF, ecuInstance: 0,
+        functionInstance: 0, function: 0x81, reserved: false, vehicleSystem: 0, vehicleSystemInstance: 0,
+        industryGroup: 0, arbitraryAddressCapable: false);
 
     private static async Task<int> Main(string[] args)
     {
@@ -41,10 +46,37 @@ internal static class Program
             return args.Length == 0 ? 2 : 0;
         }
 
-        var uriA = GetArg(args, "--a");
-        var uriB = GetArg(args, "--b");
+        // Every option is either absent (its default), or present with a value that can be used.
+        // A value that cannot be used ends the run before any hardware is opened: silently
+        // substituting a default would run the probe against a bus configuration nobody asked for.
+        var optionErrors = new List<string>();
+        string? Text(string name)
+        {
+            var at = Array.FindIndex(args, a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
+            if (at < 0) return null;
+            if (at + 1 >= args.Length || args[at + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                optionErrors.Add($"{name} needs a value.");
+                return null;
+            }
+
+            return args[at + 1];
+        }
+
+        int Whole(string name, int fallback)
+        {
+            var text = Text(name);
+            if (text is null) return fallback;
+            if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)) return value;
+            optionErrors.Add($"{name}: '{text}' is not a whole number.");
+            return fallback;
+        }
+
+        var uriA = Text("--a");
+        var uriB = Text("--b");
         if (uriA is null || uriB is null)
         {
+            foreach (var error in optionErrors) Console.Error.WriteLine(error);
             Console.Error.WriteLine("Both --a (adapter under test) and --b (peer on the same bus) are required.");
             Console.Error.WriteLine(Usage);
             return 2;
@@ -53,31 +85,40 @@ internal static class Program
         var config = new ProbeConfig(
             UriA: uriA,
             UriB: uriB,
-            Label: GetArg(args, "--label") ?? Sanitize(uriA),
+            Label: Text("--label") ?? Sanitize(uriA),
             UseFd: HasFlag(args, "--fd"),
-            Bitrate: ParseInt(GetArg(args, "--bitrate"), 500_000),
-            DataBitrate: ParseInt(GetArg(args, "--dbit"), 2_000_000),
-            Frames: ParseInt(GetArg(args, "--frames"), 5),
-            WaitMs: ParseInt(GetArg(args, "--wait-ms"), 1000),
+            Bitrate: Whole("--bitrate", 500_000),
+            DataBitrate: Whole("--dbit", 2_000_000),
+            Frames: Whole("--frames", 5),
+            WaitMs: Whole("--wait-ms", 1000),
             SkipClaim: HasFlag(args, "--skip-claim"));
-        var modes = (GetArg(args, "--modes") ?? "normal,echo")
+        var modeNames = (Text("--modes") ?? "normal,echo")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(m => m.ToLowerInvariant())
             .ToArray();
-        var outDir = GetArg(args, "--out") ?? Directory.GetCurrentDirectory();
+        if (modeNames.Length == 0) optionErrors.Add("--modes needs at least one of: normal, echo.");
+        optionErrors.AddRange(modeNames.Where(m => m is not ("normal" or "echo")).Select(m => $"--modes: unknown mode '{m}' (use normal and/or echo)."));
+        var outDir = Text("--out") ?? Directory.GetCurrentDirectory();
 
-        var invalid = Validate(config);
+        var invalid = optionErrors.Count > 0 ? string.Join(Environment.NewLine, optionErrors) : null;
+        invalid ??= Validate(config);
         if (invalid is not null)
         {
             Console.Error.WriteLine(invalid);
             return 2;
         }
 
+        var modes = modeNames;
+
         // Before anything is measured: a run that has measured everything must not be lost to a
         // directory that does not exist.
         try
         {
             Directory.CreateDirectory(outDir);
+            // An existing directory is not a writable one: create and remove a file in it.
+            var probeFile = Path.Combine(outDir, $".echo-probe-write-test-{Environment.ProcessId}");
+            File.WriteAllText(probeFile, string.Empty);
+            File.Delete(probeFile);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
@@ -289,10 +330,18 @@ internal static class Program
     private static async Task<ClaimResult> MeasureClaimAsync(ICanBus busA, ICanBus busB, ProbeConfig config)
     {
         var claimFramesOnPeer = 0;
+        var name = ProbeName;
+        var nameBytes = BitConverter.GetBytes(name.Value);
+        if (!BitConverter.IsLittleEndian) Array.Reverse(nameBytes);
+
+        // This probe's own claim: the Address Claimed PGN, from the address it claims, carrying its
+        // NAME. Another ECU claiming on the same bus is not evidence about A.
         void CountClaims(object? sender, CanReceiveDataView e)
         {
             var frame = e.CanFrame;
-            if (frame.IsExtendedFrame && J1939Id.Decompose((uint)frame.ID).Pgn == 0xEE00u)
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (fields.Pgn == 0xEE00u && fields.SourceAddress == ClaimedAddress && frame.Data.Span.SequenceEqual(nameBytes))
                 Interlocked.Increment(ref claimFramesOnPeer);
         }
 
@@ -303,14 +352,11 @@ internal static class Program
         byte? address = null;
         try
         {
-            var name = new J1939Name(identityNumber: 0x4711, manufacturerCode: 0x7FF, ecuInstance: 0,
-                functionInstance: 0, function: 0x81, reserved: false, vehicleSystem: 0, vehicleSystemInstance: 0,
-                industryGroup: 0, arbitraryAddressCapable: false);
-            using var node = J1939Node.Open(busA, new J1939NodeOptions(name));
+            using var node = J1939Node.Open(busA, new J1939NodeOptions(ProbeName));
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             try
             {
-                await node.ClaimAddressAsync(0x11, timeout.Token).ConfigureAwait(false);
+                await node.ClaimAddressAsync(ClaimedAddress, timeout.Token).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -517,21 +563,8 @@ internal static class Program
           EchoProbe --a virtual://probe/0 --b virtual://probe/1     (dry run, no hardware)
         """;
 
-    private static string? GetArg(string[] args, string name)
-    {
-        for (var i = 0; i < args.Length - 1; i++)
-        {
-            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
-        }
-
-        return null;
-    }
-
     private static bool HasFlag(string[] args, string name)
         => args.Any(a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase));
-
-    private static int ParseInt(string? text, int fallback)
-        => int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : fallback;
 
     private static string Sanitize(string uri)
     {
