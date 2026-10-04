@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -70,15 +71,11 @@ internal static class Program
             ? $"  CAN FD: arbitration {config.Bitrate} bit/s, data {config.DataBitrate} bit/s"
             : $"  Classic CAN: {config.Bitrate} bit/s");
 
+        LoadAdapterAssemblies();
+
         var results = new List<ModeResult>();
-        foreach (var mode in modes)
+        foreach (var workMode in modes.Select(ParseWorkMode))
         {
-            var workMode = mode switch
-            {
-                "normal" => ChannelWorkMode.Normal,
-                "echo" => ChannelWorkMode.Echo,
-                _ => throw new ArgumentException($"Unknown mode '{mode}' (use normal and/or echo)."),
-            };
             Console.WriteLine();
             Console.WriteLine($"=== Work mode: {workMode} ===");
             var result = await RunModeAsync(config, workMode).ConfigureAwait(false);
@@ -96,39 +93,68 @@ internal static class Program
         return 0;
     }
 
-    private static async Task<ModeResult> RunModeAsync(ProbeConfig config, ChannelWorkMode workMode)
+    private static ChannelWorkMode ParseWorkMode(string mode) => mode switch
     {
-        var result = new ModeResult { WorkMode = workMode.ToString() };
-        ICanBus? busA = null;
-        ICanBus? busB = null;
-        try
+        "normal" => ChannelWorkMode.Normal,
+        "echo" => ChannelWorkMode.Echo,
+        _ => throw new ArgumentException($"Unknown mode '{mode}' (use normal and/or echo)."),
+    };
+
+    // CanKit finds an adapter by the assemblies that are loaded when the first bus is opened. The
+    // build generates a hint list for the packages the project references, and that is normally
+    // enough; loading them here as well costs nothing and does not depend on it. An adapter whose
+    // vendor driver is missing still loads (the driver is only needed when a bus is opened).
+    private static void LoadAdapterAssemblies()
+    {
+        foreach (var name in new[] { "CanKit.Adapter.Virtual", "CanKit.Adapter.PCAN", "CanKit.Adapter.Kvaser", "CanKit.Adapter.Vector" })
         {
             try
             {
-                busB = CanBus.Open(config.UriB, cfg => Configure(cfg, config, ChannelWorkMode.Normal));
-                busA = CanBus.Open(config.UriA, cfg => Configure(cfg, config, workMode));
+                Assembly.Load(new AssemblyName(name));
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is FileNotFoundException or FileLoadException or BadImageFormatException)
             {
-                result.OpenError = $"{ex.GetType().Name}: {ex.Message}";
-                return result;
+                Console.WriteLine($"  note: adapter assembly {name} could not be loaded ({ex.GetType().Name}).");
             }
-
-            result.DeclaresEchoFeature = busA.Options.Features.HasFlag(CanFeature.Echo);
-            result.ActualWorkMode = busA.Options.WorkMode.ToString();
-
-            result.Raw = await MeasureRawAsync(busA, busB, config).ConfigureAwait(false);
-            result.Confirmed = await MeasureConfirmedAsync(busA, config).ConfigureAwait(false);
-            if (!config.UseFd && !config.SkipClaim)
-                result.Claim = await MeasureClaimAsync(busA, busB, config).ConfigureAwait(false);
         }
-        finally
+    }
+
+    private static async Task<ModeResult> RunModeAsync(ProbeConfig config, ChannelWorkMode workMode)
+    {
+        var result = new ModeResult { WorkMode = workMode.ToString() };
+        using var busB = TryOpen(config.UriB, config, ChannelWorkMode.Normal, out var errorB);
+        using var busA = busB is null ? null : TryOpen(config.UriA, config, workMode, out errorB);
+        if (busA is null || busB is null)
         {
-            busA?.Dispose();
-            busB?.Dispose();
+            result.OpenError = errorB;
+            return result;
         }
 
+        result.DeclaresEchoFeature = busA.Options.Features.HasFlag(CanFeature.Echo);
+        result.ActualWorkMode = busA.Options.WorkMode.ToString();
+
+        result.Raw = await MeasureRawAsync(busA, busB, config).ConfigureAwait(false);
+        result.Confirmed = await MeasureConfirmedAsync(busA, config).ConfigureAwait(false);
+        if (!config.UseFd && !config.SkipClaim)
+            result.Claim = await MeasureClaimAsync(busA, busB, config).ConfigureAwait(false);
         return result;
+    }
+
+    // Every failure of the adapter under test is the tool's subject, not a fault of the tool:
+    // it is recorded in the report instead of ending the run.
+    private static ICanBus? TryOpen(string uri, ProbeConfig config, ChannelWorkMode workMode, out string? error)
+    {
+        try
+        {
+            var bus = CanBus.Open(uri, cfg => Configure(cfg, config, workMode));
+            error = null;
+            return bus;
+        }
+        catch (Exception ex)
+        {
+            error = $"{uri}: {ex.GetType().Name}: {ex.Message}";
+            return null;
+        }
     }
 
     private static void Configure(IBusInitOptionsConfigurator cfg, ProbeConfig config, ChannelWorkMode workMode)
