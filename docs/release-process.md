@@ -134,13 +134,14 @@ analyze        →  nothing to release? stop here
 verifyRelease  →  re-check the release configuration for the version about to go out  (exec)
 prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
                →  verify the nine packages `verify` packed     (@semantic-release/exec, prepareCmd)
-               →  package-validation baseline set to X.Y.Z     (@semantic-release/exec, prepareCmd)
-               →  changelog + baseline committed, PUSHED       (@semantic-release/git)
+               →  changelog committed and PUSHED to main       (@semantic-release/git)
    ↓
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
    ↓
 publish        →  dotnet nuget push … --skip-duplicate         (@semantic-release/exec, publishCmd)
                →  GitHub Release with the .nupkg attached      (@semantic-release/github)
+success        →  package-validation baseline set to X.Y.Z,
+                  committed and pushed [skip ci]               (@semantic-release/exec, successCmd)
 ```
 
 Two boundaries matter here.
@@ -153,10 +154,18 @@ against the downloaded `.nupkg` files with the version about to be tagged, and f
 nine are there, each carries a README, a license expression and a `.snupkg`, and every one of
 them is stamped at exactly that version. It is the same script the CI pack job runs, so a package
 that would be rejected on a pull request is rejected here too — this time with a version to check
-against. Then `eng/set-package-validation-baseline.py` writes the version into
-`PackageValidationBaselineVersion` in `src/Directory.Build.props`, and `@semantic-release/git`
-commits that file alongside the changelog: from the next pull request on, every pack is compared
-with the release that just went out (see § *Package validation* below).
+against.
+
+**The package-validation baseline moves last, in `success`.** Once the packages are on nuget.org,
+`eng/set-package-validation-baseline.py` writes the version into `PackageValidationBaselineVersion`
+in `src/Directory.Build.props`, commits it as `chore(release): point package validation at X.Y.Z
+[skip ci]` and pushes, with the same token the changelog commit used. From the next pull request
+on, every pack is compared with the release that just went out (see § *Package validation*
+below). It runs after `publish` and not with the changelog commit on purpose: a publish that fails
+then leaves the baseline where it was, on packages that exist, instead of pointing every later
+pack at a version nuget.org never got. A red `success` step after a green `publish` means the
+release is out and only this commit is missing; run the script by hand with the version and push
+the commit.
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
@@ -183,7 +192,8 @@ the next unrelated documentation change.
 
 Every `dotnet pack` compares the public surface of each of the nine packages, per target
 framework, with the last release on nuget.org — `PackageValidationBaselineVersion` in
-`src/Directory.Build.props`, set by the release that published it (above). The API approval tests
+`src/Directory.Build.props`, set by the release that published it, after the publish (above). The
+API approval tests
 show *that* the surface changed; this says whether the change is additive or breaking, and fails
 the pack on the pull request that introduces a break rather than after the release that shipped
 it (#257).

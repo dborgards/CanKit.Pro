@@ -15,9 +15,9 @@
       (#257). Since 1.3.0 a breaking change costs a major version, and the API approval tests
       cannot tell additive from breaking; ApiCompat can, per target framework, and fails the pack
       on the pull request that introduces the break. The baseline is the last published version:
-      semantic-release moves it on every release (eng/set-package-validation-baseline.py, run as
-      the exec plugin's prepareCmd, committed with the changelog), so nothing has to be kept in
-      step by hand.
+      semantic-release moves it after every publish (eng/set-package-validation-baseline.py, run
+      as the exec plugin's successCmd, so it only ever names packages nuget.org has), and nothing
+      has to be kept in step by hand.
 
       CP0003 compares assembly versions and is silenced only for a pack that was given no version,
       i.e. a local `dotnet pack`, which builds at 0.0.0 by design (see Versioning in the root
