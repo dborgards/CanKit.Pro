@@ -720,50 +720,48 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     }
 
     /// <summary>True on the thread that is delivering an event to a subscriber.</summary>
-    private bool OnEventPump => t_delivering?.Contains(this) == true;
+    private bool OnEventPump => Callbacks.Contains(CallbackKind.Delivering, this);
 
     /// <summary>True on the thread that is finishing the disposal: a subscriber the actor calls
     /// there (its shutdown-timeout report) is waited for by that disposal, so it cannot wait for it.</summary>
-    private bool OnDisposal => t_finishing?.Contains(this) == true;
+    private bool OnDisposal => Callbacks.Contains(CallbackKind.Finishing, this);
 
     /// <summary>True on the thread of the reader task while it reports a failed subscription.</summary>
-    private bool OnReader => t_reporting?.Contains(this) == true;
+    private bool OnReader => Callbacks.Contains(CallbackKind.Reporting, this);
 
     // The nodes whose callbacks the current thread is inside, per kind. A set, not one slot: a
     // subscriber of A may dispose B, and B's own callback may then ask A to dispose again, with
     // both of them active on the same thread at once.
-    private sealed class NodeMarks
+    private enum CallbackKind { Delivering, Reporting, Finishing }
+
+    private static class Callbacks
     {
-        private readonly System.Collections.Generic.List<CanOpenNode> _nodes = new(2);
+        [ThreadStatic]
+        private static System.Collections.Generic.List<CanOpenNode>?[]? s_nodes;
 
-        public void Enter(CanOpenNode node) => _nodes.Add(node);
+        public static void Enter(CallbackKind kind, CanOpenNode node) => Of(kind).Add(node);
 
-        public void Leave(CanOpenNode node)
+        // Entering and leaving are paired, and the nodes of one thread are all the same object
+        // when they repeat, so removing the first match is removing the right one.
+        public static void Leave(CallbackKind kind, CanOpenNode node) => Of(kind).Remove(node);
+
+        public static bool Contains(CallbackKind kind, CanOpenNode node)
         {
-            var at = _nodes.LastIndexOf(node);
-            if (at >= 0) _nodes.RemoveAt(at);
-        }
-
-        public bool Contains(CanOpenNode node)
-        {
-            foreach (var marked in _nodes)
+            var list = s_nodes?[(int)kind];
+            if (list is null) return false;
+            foreach (var marked in list)
             {
                 if (ReferenceEquals(marked, node)) return true;
             }
             return false;
         }
+
+        private static System.Collections.Generic.List<CanOpenNode> Of(CallbackKind kind)
+        {
+            var all = s_nodes ??= new System.Collections.Generic.List<CanOpenNode>?[3];
+            return all[(int)kind] ??= new System.Collections.Generic.List<CanOpenNode>(2);
+        }
     }
-
-    [ThreadStatic]
-    private static NodeMarks? t_delivering;
-
-    [ThreadStatic]
-    private static NodeMarks? t_reporting;
-
-    [ThreadStatic]
-    private static NodeMarks? t_finishing;
-
-    private static NodeMarks Marks(ref NodeMarks? slot) => slot ??= new NodeMarks();
 
     /// <summary>Flips the disposed flag and posts the cleanup; false when already disposed.</summary>
     private bool BeginDispose()
@@ -829,7 +827,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private void FinishDispose()
     {
-        Marks(ref t_finishing).Enter(this);
+        Callbacks.Enter(CallbackKind.Finishing, this);
         try
         {
             _subscription.Dispose();
@@ -840,7 +838,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         finally
         {
-            Marks(ref t_finishing).Leave(this);
+            Callbacks.Leave(CallbackKind.Finishing, this);
             // Whatever a Dispose above threw, a caller waiting for this disposal is released.
             _disposeDone.TrySetResult(true);
         }
@@ -882,9 +880,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         catch (Exception ex)
         {
             // A subscriber of the report may dispose the node; see Dispose.
-            Marks(ref t_reporting).Enter(this);
+            Callbacks.Enter(CallbackKind.Reporting, this);
             try { RaiseBackgroundException(ex); }
-            finally { Marks(ref t_reporting).Leave(this); }
+            finally { Callbacks.Leave(CallbackKind.Reporting, this); }
         }
     }
 
@@ -903,7 +901,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // must still be delivered. Anything outside the delegate is still a bug in the pump.
             // Marks the thread for the whole batch: nothing in it awaits, so a subscriber that
             // disposes the node runs on this very thread (see Dispose).
-            Marks(ref t_delivering).Enter(this);
+            Callbacks.Enter(CallbackKind.Delivering, this);
             try
             {
                 while (!Volatile.Read(ref _pumpStopRequested) && TryDequeueEvent() is { } raise)
@@ -928,7 +926,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             }
             finally
             {
-                Marks(ref t_delivering).Leave(this);
+                Callbacks.Leave(CallbackKind.Delivering, this);
             }
             // The queue was just drained. Closure is the completed flag alone: an event
             // accepted before completion is still in the list and was delivered above, and
