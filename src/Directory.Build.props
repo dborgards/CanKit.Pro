@@ -19,13 +19,16 @@
       chained behind the push in the exec plugin's publishCmd, so it only ever names packages
       nuget.org has), and nothing has to be kept in step by hand.
 
-      CP0003 compares assembly versions and is silenced only for a pack that was given no version,
-      i.e. a local `dotnet pack`, which builds at 0.0.0 by design (see Versioning in the root
-      Directory.Build.props). CI and the release always pass -p:Version=, so there the check runs.
+      CP0003 compares assembly versions and is silenced only for a pack whose version is 0.0.0:
+      a local `dotnet pack` given none (VersionPrefix in the root Directory.Build.props), and the
+      CI version job's `0.0.0-unversioned.<run>` fallback for a ref GitVersion could not name,
+      which exists to keep the build running and must not be failed by the baseline comparison
+      instead (Bugbot on #281). Every real version, CI's `1.x.y-pr.<n>` and the release's own,
+      is at or above the baseline and keeps the check.
     -->
     <EnablePackageValidation>true</EnablePackageValidation>
     <PackageValidationBaselineVersion>1.3.0</PackageValidationBaselineVersion>
-    <NoWarn Condition="'$(Version)' == ''">$(NoWarn);CP0003</NoWarn>
+    <NoWarn Condition="'$(Version)' == '' Or $(Version.StartsWith('0.0.0'))">$(NoWarn);CP0003</NoWarn>
   </PropertyGroup>
 
   <ItemGroup Label="Per-package README shipped inside the .nupkg">

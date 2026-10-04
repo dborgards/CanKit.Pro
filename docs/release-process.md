@@ -200,9 +200,10 @@ show *that* the surface changed; this says whether the change is additive or bre
 the pack on the pull request that introduces a break rather than after the release that shipped
 it (#257).
 
-A pack without a version — a plain `dotnet pack` on a developer machine — builds at 0.0.0, so the
-assembly-version comparison (CP0003) is switched off for exactly that case; the API comparison is
-not. CI and the release always pack with `-p:Version=`, where both run.
+A pack at version 0.0.0 — a plain `dotnet pack` on a developer machine, or CI's
+`0.0.0-unversioned.<run>` fallback for a ref GitVersion could not name — has the assembly-version
+comparison (CP0003) switched off, since it would fail on the number rather than on the API; the
+API comparison is not. Every real version is at or above the baseline, so there both run.
 
 A breaking change is a major release (`!` and a `BREAKING CHANGE:` footer in the commit, see
 `CONTRIBUTING.md`), and until that release is out the comparison with the previous one will keep
