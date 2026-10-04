@@ -4,18 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
-  # A merge queue builds `main` plus the queued pull requests together and merges only if that
-  # combination is green. Without this trigger the queue would find no checks on its temporary
-  # `gh-readonly-queue/...` branch and stall every entry until the timeout.
-  #
-  # The reason it exists: #81 and #83 were each green and merged four minutes apart, and their
-  # combination broke the net48 leg on `main` (#85). Neither pull request was ever built against
-  # the other. Nothing below is event-specific, so the same jobs cover this trigger unchanged.
-  # On this event `github.ref` is `refs/heads/gh-readonly-queue/<base>/pr-<n>-<sha>`, a different
-  # ref for each queue entry, which is what keeps the concurrency group above from cancelling a
-  # neighbouring entry. GitVersion names that ref (`merge-queue` in GitVersion.yml); a ref it
-  # still cannot name falls back inside the version job rather than failing the build.
-  merge_group:
+  # No `merge_group` trigger. One was carried from #85 until #256 and never fired: the ruleset of
+  # this user-owned repository does not offer *Require merge queue* (#165). What stands in for the
+  # queue is the ruleset's up-to-date requirement together with CLAUDE.md's
+  # one-pull-request-at-a-time rule.
   workflow_dispatch:
 
 concurrency:
@@ -51,8 +43,7 @@ jobs:
 
       # Deliberately allowed to fail. GitVersion cannot version every git shape — a branch with no
       # merge base against a release branch, for one — and "we could not name this build" is not a
-      # reason to refuse to compile it. A merge-queue ref is not one of those shapes; the step
-      # below checks that it is named rather than falling through to `unknown`.
+      # reason to refuse to compile it.
       - name: Run GitVersion
         id: gitversion
         continue-on-error: true
@@ -61,9 +52,6 @@ jobs:
           dotnet tool restore
           semver=$(dotnet gitversion /showvariable FullSemVer)
           echo "semver=$semver" >> "$GITHUB_OUTPUT"
-
-      - name: Verify merge-queue version
-        run: bash eng/verify-merge-queue-version.sh
 
       - name: Pick the version for this run
         id: pick
@@ -263,15 +251,14 @@ jobs:
       # issue tracker. The check is a ratchet, not a gate: it passes on the recorded gaps and
       # fails on a new one, or on a recorded one that has since been closed and not removed.
       #
-      # Running is not blocking. Only the three OS build-test legs are required by the `main`
-      # ruleset, so as things stand a pull request can introduce a new untraced `Must`, leave
-      # this job red, and still satisfy every required check (Codex on #126). Like `format`
-      # below, this job is meant to gate and therefore belongs in that ruleset -- a repository
-      # setting, not something this file can declare.
+      # It gates through the `main` ruleset, where it is a required check since #256 -- a
+      # repository setting, not something this file can declare. Until then only the OS legs and
+      # `format` were required, so a pull request could introduce a new untraced `Must`, leave
+      # this job red, and still satisfy every required check (Codex on #126).
       #
-      # Deliberately not wired as a `needs:` of an already-required job, which would enforce it
-      # today: that is the coupling the `format` comment below rejects for the same reason -- a
-      # requirement with no test has no business stopping the build legs from running.
+      # Deliberately not wired as a `needs:` of a build leg, which would have enforced it without
+      # the ruleset: that is the coupling the `format` comment below rejects for the same reason
+      # -- a requirement with no test has no business stopping the build legs from running.
       - name: Verify requirements traceability
         run: python3 eng/verify-requirements-traceability.py
 
@@ -291,13 +278,12 @@ jobs:
       # until three separate agents tripped over the same three files. The formatter's own rules
       # are the arbiter here; nothing in .editorconfig was changed to accommodate the fixes.
       #
-      # Deliberately its own job rather than a step in build-test: the three OS legs are the
-      # required status checks on `main`, and a misplaced blank line has no business failing the
-      # build legs.
+      # Deliberately its own job rather than a step in build-test: a misplaced blank line has no
+      # business failing the build legs.
       #
-      # It is meant to gate, though. Code style is enforced here and only here --
+      # It gates all the same. Code style is enforced here and only here --
       # EnforceCodeStyleInBuild was considered and rejected, because two mechanisms for one rule
-      # eventually disagree. That makes this job the single arbiter, so it belongs in the required
+      # eventually disagree. That makes this job the single arbiter, so it is one of the required
       # checks of the `main` ruleset (a repository setting, not something this file can declare).
       - name: Verify formatting
         run: dotnet format CanKit.Pro.sln --verify-no-changes --verbosity diagnostic

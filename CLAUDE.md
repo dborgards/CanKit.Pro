@@ -33,14 +33,14 @@
   no waiver and no "too large to fold in" for your own regression — the scope rule below has no
   exception at all, and this is not one.
 
-  *Aside, because it dates the second cost above:* `ci.yml` already carries a `merge_group`
-  trigger, added after #81 and #83 merged four minutes apart and their untested combination broke
-  the `net48` leg (#85) — a merge queue builds `main` plus the queued pull requests together, so
-  a queued branch is tested against current `main` without a base merge and without a new head.
-  It has never run, because the queue is configured in the workflow but not enabled on the
-  branch — #106 carries the evidence and will carry the change. Enabling it would remove the
-  base-merge cost and leave the supervision cost, which is the reason this rule exists,
-  untouched.
+  *Aside on the second cost above:* a merge queue would remove it — a queued branch is tested
+  against current `main` without a base merge and without a new head — and `ci.yml` carried a
+  `merge_group` trigger for one from #85 on, after #81 and #83 (`9cd969b`, `8c94d51`) merged
+  2 min 31 s apart and their untested combination broke the `net48` leg. It never fired: the
+  ruleset of this user-owned repository does not offer *Require merge queue* (#165), so #256
+  removed the trigger, the `merge-queue` branch in `GitVersion.yml` and the script that
+  simulated the queue ref on every run. Both costs stand. What covers the #85 case instead is
+  the ruleset's up-to-date requirement together with this rule.
 - **A pull request is finished when every thread is closed, not when the code is right.** Bot
   findings and the coverage report count; so does a thread whose finding was fixed but which
   still shows no answer in it. And none of that survives a base merge unchanged — merging `main`
