@@ -1741,7 +1741,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         private bool CancelOnce()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
-            _cts.Cancel();
+            // A cancellation callback of the request in flight (the channel's) may throw out of
+            // Cancel; the join and the release of the source go on.
+            try { _cts.Cancel(); }
+            catch (AggregateException) { /* a cancellation callback threw; nothing else to do */ }
             return true;
         }
     }

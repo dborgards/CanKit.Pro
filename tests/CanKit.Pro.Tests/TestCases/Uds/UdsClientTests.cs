@@ -2276,8 +2276,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     public async Task A_Cancellation_Callback_That_Throws_Does_Not_Stop_The_Disposal(bool asynchronous)
     {
         var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, ThrowingOnCancelChannel>();
-        var stub = (ThrowingOnCancelChannel)(object)channel;
-        var client = UdsClient.Create(channel, leaveOpen: false);
+        var stub = (ThrowingOnCancelChannel)channel;
+        using var client = UdsClient.Create(channel, leaveOpen: false);
         // The request below never ends (the stub ignores the cancellation), so the disposal waits
         // out the request lock; a short wait keeps the test short.
         ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(200);
@@ -2291,6 +2291,31 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         stub.Disposed.Should().BeTrue("the owned channel was released although a callback threw");
         ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
         request.IsCompleted.Should().BeFalse("the stub's send never ends; the disposal went on without it");
+    }
+
+    // The throwing callback sits on the keep-alive's own request: disposing the keep-alive handle
+    // must neither throw nor skip the bounded join, and the client's disposal still cancels what
+    // is queued.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Cancellation_Callback_That_Throws_In_A_KeepAlive_Request_Does_Not_Stop_Its_Disposal(bool asynchronous)
+    {
+        var channel = System.Reflection.DispatchProxy.Create<IIsoTpChannel, ThrowingOnCancelChannel>();
+        var stub = (ThrowingOnCancelChannel)channel;
+        using var client = UdsClient.Create(channel, leaveOpen: false);
+        ((UdsClientImpl)client).DisposeLockTimeout = TimeSpan.FromMilliseconds(200);
+        var handle = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(10));
+        await Within(stub.SendStarted.Task); // the keep-alive's request is in flight, callback registered
+
+        if (asynchronous) await ((IAsyncDisposable)handle).DisposeAsync();
+        else handle.Dispose();
+
+        // The request never ends, so the join gave up after the disposal timeout and left the
+        // loop alone; the client can still be disposed afterwards.
+        if (asynchronous) await Within(client.DisposeAsync().AsTask());
+        else client.Dispose();
+        ((UdsClientImpl)client).DisposalFinished.Should().BeTrue();
     }
 
     private class ThrowingOnCancelChannel : System.Reflection.DispatchProxy
