@@ -1578,15 +1578,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         try
         {
             if (keepAlive is not null) await keepAlive.DisposeAsync().ConfigureAwait(false);
-            try
-            {
-                lockAcquired = await _requestLock.WaitAsync(DisposeLockTimeout).ConfigureAwait(false);
-                if (lockAcquired) _requestLock.Release();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already torn down on another path.
-            }
+            // Nothing else disposes the lock before this (the flag above is taken once), so
+            // there is no torn-down case to catch here.
+            lockAcquired = await _requestLock.WaitAsync(DisposeLockTimeout).ConfigureAwait(false);
+            if (lockAcquired) _requestLock.Release();
         }
         finally
         {
@@ -1610,7 +1605,8 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         keepAlive = null;
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
         keepAlive = Interlocked.Exchange(ref _keepAlive, null);
-        try { _lifetimeCts.Cancel(); } catch { /* already disposed */ }
+        try { _lifetimeCts.Cancel(); }
+        catch (Exception ex) when (ex is ObjectDisposedException or AggregateException) { /* already disposed, or a callback threw */ }
         return true;
     }
 
@@ -1725,7 +1721,8 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         private bool CancelOnce()
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
-            try { _cts.Cancel(); } catch { /* ignored */ }
+            try { _cts.Cancel(); }
+            catch (Exception ex) when (ex is ObjectDisposedException or AggregateException) { /* ignored */ }
             return true;
         }
     }

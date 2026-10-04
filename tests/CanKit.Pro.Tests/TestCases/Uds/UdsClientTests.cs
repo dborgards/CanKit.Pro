@@ -2193,8 +2193,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         var impl = (UdsClientImpl)client;
         var lockHeld = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         impl.RequestLockAcquired += () => lockHeld.TrySetResult(true);
-        var inFlight = client.ReadDataByIdentifierAsync(0xF190,
-            new CancellationTokenSource(ShortTimeout).Token);
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var inFlight = client.ReadDataByIdentifierAsync(0xF190, cts.Token);
         await lockHeld.Task;
 
         await Within(client.DisposeAsync().AsTask());
@@ -2221,6 +2221,37 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         await Within(first.AsTask());
         Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190);
         await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    // Dispose with a keep-alive running joins its loop; the handle the caller got back may be
+    // disposed before or after, synchronously or not, and none of those calls is an error.
+    [Fact]
+    public async Task Dispose_Joins_A_Running_KeepAlive_And_Its_Handle_Can_Be_Disposed_Again()
+    {
+        var (client, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        var handle = client.StartTesterPresentKeepAlive(TimeSpan.FromMilliseconds(30));
+
+        client.Dispose();
+
+        handle.Dispose();
+        await ((IAsyncDisposable)handle).DisposeAsync();
+        await ((IAsyncDisposable)handle).DisposeAsync();
+    }
+
+    // The client that owns its channel releases it with DisposeAsync as well.
+    [Fact]
+    public async Task DisposeAsync_Releases_An_Owned_Channel()
+    {
+        var (spare, _, dispose) = BuildPair(e => { });
+        using var teardown = dispose;
+        var channel = spare.Channel;
+        var owner = UdsClient.Create(channel, leaveOpen: false);
+
+        await Within(owner.DisposeAsync().AsTask());
+
+        var ex = await Assert.ThrowsAnyAsync<Exception>(async () => await channel.ReceiveAsync());
+        ex.Message.Should().Contain("dispos", "the channel was released by the client that owned it");
     }
 
     // The keep-alive loop is joined without a thread too, and without waiting for ever.
