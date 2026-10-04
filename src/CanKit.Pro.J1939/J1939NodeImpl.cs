@@ -1629,13 +1629,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // =========================================================================================
 
     /// <inheritdoc />
-    public void Dispose()
+    public void Dispose() => TryDispose();
+
+    /// <summary>Disposes; true when this call was the one that did the work, false when another
+    /// had taken it. The answer is the atomic exchange's, not an earlier read of the flag.</summary>
+    private bool TryDispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
         try
         {
             DisposeCore();
             _disposalDone.TrySetResult(true);
+            return true;
         }
         catch (Exception ex)
         {
@@ -1698,8 +1703,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // the thread pool, so the caller's thread is not held for the joins Dispose makes.
         if (_actor.IsOnCurrentActor)
         {
-            var won = Volatile.Read(ref _disposed) == 0;
-            Dispose();
+            var won = TryDispose();
             // A call that lost cannot wait for the winner's teardown, which may be waiting for
             // this very actor; it reports the outcome when there is one already, failure included.
             return won || !_disposalDone.Task.IsCompleted ? default : new ValueTask(_disposalDone.Task);
