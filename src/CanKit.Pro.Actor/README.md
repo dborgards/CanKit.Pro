@@ -47,6 +47,10 @@ using var timeout = actor.Schedule(TimeSpan.FromMilliseconds(150), () => channel
   than draining it to empty, so an RX reader posting one work item per frame on a saturated bus
   cannot starve the timer list — every batch is followed by a due-timer check. Anything that
   arrives mid-batch is picked up on the next pass, which is entered without waiting.
+- **A due timer never overtakes earlier work**: a timer is an event at its due instant, and work
+  that reached the mailbox before that instant runs first, even when a long work item held the
+  loop past the deadline in between. A protocol deadline that measures a peer's silence therefore
+  cannot fire on a frame that had already arrived (#240).
 - **Deadlines are measured on a monotonic clock**, never on the wall clock: `Stopwatch`
   timestamps, so an NTP step, a DST change, or an operator setting the system clock cannot make
   an armed timeout fire early, late, or all at once. A `TimeSpan` delay is elapsed time and is
