@@ -139,9 +139,9 @@ prepare        →  CHANGELOG.md regenerated                     (@semantic-rele
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
    ↓
 publish        →  dotnet nuget push … --skip-duplicate         (@semantic-release/exec, publishCmd)
+               →  package-validation baseline set to X.Y.Z,
+                  committed and pushed [skip ci]               (same publishCmd, chained behind the push)
                →  GitHub Release with the .nupkg attached      (@semantic-release/github)
-success        →  package-validation baseline set to X.Y.Z,
-                  committed and pushed [skip ci]               (@semantic-release/exec, successCmd)
 ```
 
 Two boundaries matter here.
@@ -156,16 +156,18 @@ them is stamped at exactly that version. It is the same script the CI pack job r
 that would be rejected on a pull request is rejected here too — this time with a version to check
 against.
 
-**The package-validation baseline moves last, in `success`.** Once the packages are on nuget.org,
-`eng/set-package-validation-baseline.py` writes the version into `PackageValidationBaselineVersion`
-in `src/Directory.Build.props`, commits it as `chore(release): point package validation at X.Y.Z
-[skip ci]` and pushes, with the same token the changelog commit used. From the next pull request
-on, every pack is compared with the release that just went out (see § *Package validation*
-below). It runs after `publish` and not with the changelog commit on purpose: a publish that fails
-then leaves the baseline where it was, on packages that exist, instead of pointing every later
-pack at a version nuget.org never got. A red `success` step after a green `publish` means the
-release is out and only this commit is missing; run the script by hand with the version and push
-the commit.
+**The package-validation baseline moves the moment the packages are on nuget.org.** Chained
+behind `dotnet nuget push` in the same `publishCmd`, `eng/set-package-validation-baseline.py`
+writes the version into `PackageValidationBaselineVersion` in `src/Directory.Build.props`,
+commits it as `chore(release): point package validation at X.Y.Z [skip ci]` and pushes, with the
+same token the changelog commit used. From the next pull request on, every pack is compared with
+the release that just went out (see § *Package validation* below). The place is deliberate: not
+with the changelog commit, because a publish that fails would then point every later pack at a
+version nuget.org never got; and not in semantic-release's `success` step, because that runs only
+once every publish plugin is through, so a GitHub Release failing after the push would have left
+the baseline behind. Directly behind the push, it moves exactly when the packages exist. If the
+commit or its push fails, `publishCmd` fails with the packages already out: that is the case
+Option A below finishes by hand, and the baseline is part of what it finishes.
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
@@ -233,7 +235,16 @@ dotnet nuget push "artifacts/nuget/*.nupkg" \
 
 `--skip-duplicate` makes this safe to repeat when some packages made it and others did not. The
 API key comes from a fresh `NuGet/login` run or a temporary key from nuget.org. Afterwards, create
-the GitHub Release for the tag by hand and attach the `.nupkg` files.
+the GitHub Release for the tag by hand and attach the `.nupkg` files, and move the package-validation
+baseline to the version that is now published, which the failed run did not get to:
+
+```bash
+python3 eng/set-package-validation-baseline.py X.Y.Z   # edits src/Directory.Build.props
+# commit as "chore(release): point package validation at X.Y.Z [skip ci]" and get it onto main
+```
+
+Until that commit is on `main`, every pack compares against the release before this one, which
+is a weaker check, not a broken one.
 
 **Repacking from the tag is the fallback, and it is not equivalent.** Use it only if the artifact
 has expired or is otherwise gone:

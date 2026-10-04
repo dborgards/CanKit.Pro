@@ -2,13 +2,15 @@
 """Point package validation at the release that has just been published.
 
 src/Directory.Build.props compares every packed package with PackageValidationBaselineVersion,
-the last release on nuget.org. semantic-release runs this as the exec plugin's successCmd, i.e.
-after `dotnet nuget push` succeeded, with the version it just published: the baseline only ever
-names packages that exist. Had it moved in `prepare` (with the changelog commit), a publish that
-failed would have left main comparing against a version nuget.org never got, and every later
+the last release on nuget.org. semantic-release runs this inside the exec plugin's publishCmd,
+chained directly behind `dotnet nuget push`, with the version it just published: the baseline only
+ever names packages that exist. Had it moved in `prepare` (with the changelog commit), a publish
+that failed would have left main comparing against a version nuget.org never got, and every later
 pack, the tag repack in docs/release-process.md included, would fail to resolve it (Bugbot on
-#281). The one commit this makes lands after the tag and carries [skip ci], like the changelog
-commit it follows.
+#281). It is not the `success` step either: that runs only once every publish plugin is through,
+so a GitHub Release that failed after the packages were out would have left the baseline behind
+(Codex on #281). The one commit this makes lands after the tag and carries [skip ci], like the
+changelog commit it follows.
 
 Exactly one element has to change. Zero means the props file no longer carries the element this
 script was written for; that fails loudly rather than leaving a baseline that silently stopped

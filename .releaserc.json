@@ -47,8 +47,7 @@
     ["@semantic-release/exec", {
       "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
       "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version}",
-      "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate",
-      "successCmd": "python3 eng/set-package-validation-baseline.py ${nextRelease.version} --commit-and-push ${branch.name}"
+      "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate && python3 eng/set-package-validation-baseline.py ${nextRelease.version} --commit-and-push ${branch.name}"
     }],
 
     ["@semantic-release/git", {
