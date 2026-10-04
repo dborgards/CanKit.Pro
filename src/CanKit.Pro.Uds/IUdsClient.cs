@@ -91,8 +91,11 @@ public interface IUdsClient : IDisposable
 
     /// <summary>
     /// Sends ReadDataByIdentifier (0x22) with more than one DID in a single request
-    /// (SRS FR-UDS-011, ISO 14229-1 §9.3.4). Returns a dictionary keyed by DID with each
-    /// requested identifier's raw data-record bytes.
+    /// (SRS FR-UDS-011, ISO 14229-1 §9.3.4). Returns a dictionary keyed by DID with the raw
+    /// data-record bytes of each identifier the ECU answered. An ECU that supports only some of
+    /// the requested DIDs answers with those (ISO 14229-1 §10.2), so a requested DID that has no
+    /// key in the result was not answered; if none is supported the ECU's negative response
+    /// (requestOutOfRange) is raised instead.
     /// </summary>
     /// <param name="dataIdentifiers">DIDs to request, in the order they are placed on the wire.</param>
     /// <param name="dataRecordLengths">
@@ -103,8 +106,9 @@ public interface IUdsClient : IDisposable
     /// <param name="cancellationToken">Cancels the wait for the ECU response.</param>
     /// <exception cref="ArgumentException">A requested DID has no length entry, or a length is
     /// negative.</exception>
-    /// <exception cref="UdsProtocolException">The ECU response is malformed, truncated, missing a
-    /// DID, or contains DIDs that were not requested.</exception>
+    /// <exception cref="UdsProtocolException">The ECU response is malformed, truncated, carries no
+    /// data record at all, repeats a DID, or contains DIDs that were not requested. A DID that is
+    /// merely not answered is not an error: it is absent from the result.</exception>
     Task<IReadOnlyDictionary<ushort, byte[]>> ReadDataByIdentifierAsync(
         IReadOnlyList<ushort> dataIdentifiers,
         IReadOnlyDictionary<ushort, int> dataRecordLengths,
