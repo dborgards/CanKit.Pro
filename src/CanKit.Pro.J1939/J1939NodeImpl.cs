@@ -1632,8 +1632,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        try { DisposeCore(); }
-        finally { _disposalDone.TrySetResult(true); }
+        try
+        {
+            DisposeCore();
+            _disposalDone.TrySetResult(true);
+        }
+        catch (Exception ex)
+        {
+            // A teardown step that throws is the disposal's failure: a caller awaiting
+            // DisposeAsync is told, not told that it succeeded.
+            _disposalDone.TrySetException(ex);
+            throw;
+        }
     }
 
     private void DisposeCore()
@@ -1698,7 +1708,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // finally), so a caller awaiting it waits for the real teardown, also when a blocking
         // Dispose won. Only the first asynchronous caller starts a Dispose of its own.
         if (Interlocked.Exchange(ref _asyncDisposalStarted, 1) == 0)
-            _ = Task.Run(Dispose);
+        {
+            // The failure reaches the callers through the completion; the task itself is observed.
+            _ = Task.Run(Dispose).ContinueWith(static failed => _ = failed.Exception,
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
 
         return new ValueTask(_disposalDone.Task);
     }

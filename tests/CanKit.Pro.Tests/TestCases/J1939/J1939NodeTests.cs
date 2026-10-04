@@ -3538,7 +3538,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
         await claim.WithTimeout(ShortTimeout);
 
-        var handle = node.StartPeriodicSend(
+        using var handle = node.StartPeriodicSend(
             new J1939Message(0xFEE5u, new byte[] { 1, 2, 3 }, priority: 6, destinationAddress: J1939Pgn.GlobalAddress),
             TimeSpan.FromMilliseconds(50));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the emission waits for its echo
@@ -3549,6 +3549,19 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         // The emission would otherwise wait out the bus's confirm timeout (one second) before the
         // join returned; cancelled, it ends in milliseconds.
         watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(0.5), "the cancelled emission did not have to be waited out");
+    }
+
+    // A teardown step that throws (the owned service's Dispose here) is the disposal's failure,
+    // and DisposeAsync tells its caller.
+    [Fact]
+    public async Task DisposeAsync_Reports_A_Teardown_That_Threw()
+    {
+        var starved = new StarvedReaderBusService { DisposeFault = new InvalidOperationException("the service would not dispose") };
+        var node = new J1939NodeImpl(starved, new J1939NodeOptions(Name(1)), ownsService: true);
+
+        var disposal = node.DisposeAsync().AsTask();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => disposal);
     }
 
     // Two DisposeAsync calls at once are one disposal: both return the same task, so neither
