@@ -3464,6 +3464,165 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // makes, rather than a weaker mean-gap heuristic sized against a 10.56 s wall-clock budget
     // a 3x-loaded runner could still exhaust (the property the audit flagged).
     // ---------------------------------------------------------------------------------------
+    // #251: a schedule disposed from the actor (a callback of the node) must not wait for an
+    // emission that is stuck: the join is for a thread that can wait, and the actor is the one
+    // thing an emission awaiting the bus would be waiting for. The transmit below blocks its pool
+    // thread until the test lets go, so the emission cannot end by itself.
+    [Fact]
+    public async Task A_Periodic_Schedule_Disposed_From_The_Actor_Does_Not_Wait_For_Its_Emission()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var senderActor = clock.NewActor();
+        using var sender = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, senderActor);
+        await clock.RunUntilAsync(sender.ClaimAddressAsync(0xC1),
+            step: TimeSpan.FromMilliseconds(50), giveUpAfter: ShortTimeout);
+
+        const uint targetPgn = 0xFEE5u;
+        using var release = new ManualResetEventSlim();
+        var stuck = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            if (J1939Id.Decompose((uint)frame.ID).Pgn != targetPgn) return;
+            stuck.TrySetResult(true);
+            release.Wait(TimeSpan.FromSeconds(30));
+        };
+        var handle = sender.StartPeriodicSend(
+            new J1939Message(targetPgn, new byte[] { 1, 2, 3, 4 }, priority: 6, destinationAddress: 0xFF),
+            TimeSpan.FromMilliseconds(100));
+
+        try
+        {
+            await clock.RunUntilAsync(stuck.Task, step: TimeSpan.FromMilliseconds(20), giveUpAfter: ShortTimeout);
+
+            var elapsed = await senderActor.PostAsync(() =>
+            {
+                var watch = Stopwatch.StartNew();
+                handle.Dispose();
+                return watch.Elapsed;
+            });
+
+            // The join is two seconds; a call that did not wait takes milliseconds.
+            elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1.5));
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        // Let go, the emission ends (the token it carries was cancelled by the disposal), counts
+        // itself and releases the token source the disposal left to it.
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (sender.PeriodicEmissionsCompleted < 1)
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The stuck emission never ended.");
+            await Task.Delay(5);
+        }
+    }
+
+    // The emission waits for its confirmation, which the bus holds back: disposing the schedule
+    // off the actor cancels the token the emission carries, the emission ends with it, and the
+    // join returns without using up its timeout.
+    [Fact]
+    public async Task Disposing_A_Periodic_Schedule_Cancels_An_Emission_Waiting_For_Its_Confirmation()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        var claim = node.ClaimAddressAsync(0x11);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await claim.WithTimeout(ShortTimeout);
+
+        using var handle = node.StartPeriodicSend(
+            new J1939Message(0xFEE5u, new byte[] { 1, 2, 3 }, priority: 6, destinationAddress: J1939Pgn.GlobalAddress),
+            TimeSpan.FromMilliseconds(50));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the emission waits for its echo
+
+        var watch = Stopwatch.StartNew();
+        handle.Dispose();
+
+        // The emission would otherwise wait out the bus's confirm timeout (one second) before the
+        // join returned; cancelled, it ends in milliseconds.
+        watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(0.5), "the cancelled emission did not have to be waited out");
+    }
+
+    // A teardown step that throws (the owned service's Dispose here) is the disposal's failure,
+    // and DisposeAsync tells its caller.
+    [Fact]
+    public async Task DisposeAsync_Reports_A_Teardown_That_Threw()
+    {
+        var starved = new StarvedReaderBusService { DisposeFault = new InvalidOperationException("the service would not dispose") };
+        var node = new J1939NodeImpl(starved, new J1939NodeOptions(Name(1)), ownsService: true);
+
+        var disposal = node.DisposeAsync().AsTask();
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => disposal);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_On_The_Actor_After_A_Failed_Disposal_Reports_The_Failure()
+    {
+        using var actor = new ProtocolActor();
+        var starved = new StarvedReaderBusService { DisposeFault = new InvalidOperationException("the service would not dispose") };
+        var node = new J1939NodeImpl(starved, new J1939NodeOptions(Name(1)), ownsService: true, actor);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask());
+
+        var onActor = await actor.PostAsync(() => node.DisposeAsync().AsTask());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => onActor);
+    }
+
+    // Two DisposeAsync calls at once are one disposal: both return the same task, so neither
+    // completes before the disposal has.
+    [Fact]
+    public async Task Concurrent_DisposeAsync_Calls_Return_One_Disposal()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false);
+
+        var first = node.DisposeAsync().AsTask();
+        var second = node.DisposeAsync().AsTask();
+
+        // The same completion, and one that has not been handed out before the disposal ended.
+        second.Should().BeSameAs(first);
+        if (await Task.WhenAny(first, Task.Delay(ShortTimeout)) != first)
+            throw new TimeoutException("The disposal did not finish.");
+        await first;
+    }
+
+    // DisposeAsync does not hold the caller's thread while the node waits for its readers, and from
+    // the actor it runs in place.
+    [Fact]
+    public async Task DisposeAsync_Completes_From_Outside_And_From_The_Actor()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        using var outside = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false);
+        var outsideDisposal = outside.DisposeAsync().AsTask();
+        if (await Task.WhenAny(outsideDisposal, Task.Delay(ShortTimeout)) != outsideDisposal)
+            throw new TimeoutException("DisposeAsync did not finish.");
+        await outsideDisposal;
+
+        using var actor = new ProtocolActor();
+        var inside = new J1939NodeImpl(service, new J1939NodeOptions(Name(2)), ownsService: false, actor);
+        var elapsed = await actor.PostAsync(() =>
+        {
+            var watch = Stopwatch.StartNew();
+            inside.DisposeAsync().AsTask().Wait();
+            return watch.Elapsed;
+        });
+
+        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(1.5));
+        Action use = () => _ = inside.ClaimState;
+        use.Should().NotThrow(); // a disposed node still reports its last state
+    }
+
     [Fact]
     public async Task StartPeriodicSend_SingleFrame_FiresAtConfiguredPeriod()
     {

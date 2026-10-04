@@ -1629,10 +1629,30 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // =========================================================================================
 
     /// <inheritdoc />
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+    public void Dispose() => TryDispose();
 
+    /// <summary>Disposes; true when this call was the one that did the work, false when another
+    /// had taken it. The answer is the atomic exchange's, not an earlier read of the flag.</summary>
+    private bool TryDispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+        try
+        {
+            DisposeCore();
+            _disposalDone.TrySetResult(true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // A teardown step that throws is the disposal's failure: a caller awaiting
+            // DisposeAsync is told, not told that it succeeded.
+            _disposalDone.TrySetException(ex);
+            throw;
+        }
+    }
+
+    private void DisposeCore()
+    {
         try { _readerCts.Cancel(); } catch { }
         _rxInbox.Writer.TryComplete();
 
@@ -1676,11 +1696,37 @@ internal sealed class J1939NodeImpl : IJ1939Node
     }
 
     /// <inheritdoc />
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        Dispose();
-        await Task.CompletedTask.ConfigureAwait(false);
+        // On the actor (a callback of this node) the disposal runs in place: the actor is what
+        // the blocking waits would be waiting on from another thread. Anywhere else it runs on
+        // the thread pool, so the caller's thread is not held for the joins Dispose makes.
+        if (_actor.IsOnCurrentActor)
+        {
+            var won = TryDispose();
+            // A call that lost cannot wait for the winner's teardown, which may be waiting for
+            // this very actor; it reports the outcome when there is one already, failure included.
+            return won || !_disposalDone.Task.IsCompleted ? default : new ValueTask(_disposalDone.Task);
+        }
+
+        // One task for every caller: a second call must not return before the first disposal has
+        // finished, which running the idempotent Dispose twice would let it do.
+        // The completion belongs to whichever Dispose actually does the work (it sets it in its
+        // finally), so a caller awaiting it waits for the real teardown, also when a blocking
+        // Dispose won. Only the first asynchronous caller starts a Dispose of its own.
+        if (Interlocked.Exchange(ref _asyncDisposalStarted, 1) == 0)
+        {
+            // The failure reaches the callers through the completion; the task itself is observed.
+            _ = Task.Run(Dispose).ContinueWith(static failed => _ = failed.Exception,
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
+
+        return new ValueTask(_disposalDone.Task);
     }
+
+    private int _asyncDisposalStarted;
+
+    private readonly TaskCompletionSource<bool> _disposalDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // =========================================================================================
     // Diagnostics helpers
@@ -1791,6 +1837,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // them off one clock -- which for a test means the one it drives (#92).
         private readonly long _periodTicks;
 
+        // Cancelled by Dispose, so an emission that waits on the bus for its confirmation ends
+        // with it instead of being waited out.
+        private readonly CancellationTokenSource _cts = new();
         private IDeadline? _tick;
         private long _nextAnchorTicks;
         private Task? _sendTask;
@@ -1836,9 +1885,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 {
                     try
                     {
-                        await _owner.SendAsync(_message, CancellationToken.None).ConfigureAwait(false);
+                        await _owner.SendAsync(_message, _cts.Token).ConfigureAwait(false);
                     }
                     catch (ObjectDisposedException) { /* node disposed mid-send */ }
+                    catch (OperationCanceledException) when (_cts.IsCancellationRequested) { /* schedule disposed mid-send */ }
                     catch (Exception ex)
                     {
                         _owner.RaiseBackgroundException(ex);
@@ -1849,6 +1899,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                         // ordering, already seen a tick become possible again.
                         Volatile.Write(ref _sendInFlight, 0);
                         Interlocked.Increment(ref _owner._periodicEmissionsCompleted);
+                        // A schedule disposed while this emission was running leaves its token
+                        // source to the emission: it is the last thing that holds the token.
+                        if (Volatile.Read(ref _disposed) != 0) _cts.Dispose();
                     }
                 });
             }
@@ -1881,7 +1934,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             try { _tick?.Dispose(); } catch { }
-            try { _sendTask?.Wait(TimeSpan.FromSeconds(2)); } catch { /* send observed elsewhere */ }
+            try { _cts.Cancel(); }
+            catch (Exception ex) when (ex is AggregateException or ObjectDisposedException) { /* a callback threw, or the emission that ended first released it */ }
+
+            // From the actor (a callback of the node disposing its schedule) the emission in
+            // flight may be waiting for that very actor: waiting for it here would hold the
+            // actor for the whole timeout. It ends on its own, the token being cancelled, and
+            // releases the token source when it does (the emission cannot fault: it reports its
+            // failures itself).
+            var send = _sendTask;
+            if (send is null) { _cts.Dispose(); return; }
+            if (_owner._actor.IsOnCurrentActor) return;
+            if (send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
         }
 
 
