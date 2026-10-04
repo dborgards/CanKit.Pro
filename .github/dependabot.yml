@@ -7,13 +7,24 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     commit-message:
+      # A shipped dependency moving is a change in the packages, so .releaserc.json lets
+      # `build(deps)` publish a patch -- except for the `test-tooling` group below, which it
+      # recognises by that name in the subject ("Bump the test-tooling group ..."). 1.3.0 carried
+      # coverlet and Polyfill bumps as release entries for want of this split (#257). Rename the
+      # group and the rule in .releaserc.json has to follow; eng/verify-release-config.mjs
+      # checks the rule against a subject of this shape.
       prefix: "build(deps)"
     groups:
+      # Every package only tests/ references (Directory.Packages.props, the Test block). A
+      # test-only package left out of this list releases a patch nobody needs.
       test-tooling:
         patterns:
           - "xunit*"
           - "Microsoft.NET.Test.Sdk"
           - "coverlet.*"
+          - "AwesomeAssertions"
+          - "Polyfill"
+          - "PublicApiGenerator"
     ignore:
       # CanKit is the upstream this product is built on; moving to a new version is a decision
       # about compatibility and testing, made by bumping CanKitVersion in eng/Dependencies.props.
