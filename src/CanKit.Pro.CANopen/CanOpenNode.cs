@@ -39,7 +39,7 @@ namespace CanKit.Pro.CANopen;
 /// same threading model that the J1939-TP / IsoTp / UDS clients rely on.
 /// </para>
 /// </remarks>
-internal sealed partial class CanOpenNode : ICanOpenNode
+internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 {
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
@@ -138,6 +138,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     private bool _nodeGuardingProducerToggle;
 
     private int _disposed;
+    private bool _pumpStopRequested;
+    private readonly TaskCompletionSource<bool> _disposeDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <inheritdoc />
     public byte NodeId => _nodeId;
@@ -628,68 +630,218 @@ internal sealed partial class CanOpenNode : ICanOpenNode
     /// <inheritdoc />
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        try { _readerCts.Cancel(); } catch { /* nothing else to do */ }
-
-        try
+        // From the pump, this call ends the delivery whether it wins the disposal or not: the
+        // other caller cannot stop the pump before its own join has run out.
+        if (OnEventPump) Volatile.Write(ref _pumpStopRequested, true);
+        if (!BeginDispose())
         {
-            _actor.Post(() =>
-            {
-                _heartbeatProducer.Dispose();
-                _heartbeatConsumer.Dispose();
-                _syncProducerHandle?.Dispose();
-                _syncProducerHandle = null;
-                DisposePdoRuntime();
-                _lifeGuardingDeadline?.Dispose();
-                _lifeGuardingDeadline = null;
-                CancelFlyingMasterDeadline();
-                CancelBootUp();
-
-                _sdoServer?.Deadline?.Dispose();
-                _sdoServer = null;
-                foreach (var kv in _sdoClients)
-                {
-                    kv.Value.Deadline?.Dispose();
-                    kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
-                }
-                _sdoClients.Clear();
-
-                _sdoBlockServer?.Deadline?.Dispose();
-                _sdoBlockServer = null;
-                foreach (var kv in _sdoBlockClients)
-                {
-                    kv.Value.Deadline?.Dispose();
-                    kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
-                }
-                _sdoBlockClients.Clear();
-
-                foreach (var kv in _nodeGuardingConsumers)
-                {
-                    kv.Value.PollHandle?.Dispose();
-                    kv.Value.LifeTimeDeadline?.Dispose();
-                }
-                _nodeGuardingConsumers.Clear();
-            });
+            // Another caller won. From the actor this call still has to leave the transfers ended:
+            // the winner's cleanup is queued behind the callback this one is made from, and the
+            // callback may be waiting for it. (Idempotent; the winner runs it again.)
+            if (_actor.IsOnCurrentActor) CleanUpOnActor();
+            return;
         }
-        catch (ObjectDisposedException)
+        // A subscriber that disposes the node runs on the thread of the task being joined: the
+        // reader when it reports a failed subscription, the event pump when it delivers an event.
+        // Neither can finish while it waits for itself, so it does not wait; the task ends when
+        // the subscriber returns. (The actor's own reentrant Dispose is ProtocolActor's.)
+        if (!OnReader)
         {
-            // actor already gone; nothing more to do
+            try { _readerTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
         }
-
-        try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
 
         // Complete the queue so the pump exits after draining anything still queued. An event
         // accepted before this point is delivered (unless the subscriber itself hangs); one that
         // arrives afterwards is dropped, timeout and EMCY included. Nothing is delivered past
         // Dispose.
         CompleteEventQueue();
-        try { _eventPumpTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }
+        // From the pump the events still queued are not delivered once this subscriber returns
+        // (the flag is set above), and the pump is not waited for.
+        if (!OnEventPump)
+        {
+            try { _eventPumpTask.Wait(DisposeJoinTimeout); } catch (AggregateException) { /* observed via task; not fatal */ }
+            StopPumpIfStillRunning();
+        }
 
-        _subscription.Dispose();
-        _actor.Dispose();
-        _readerCts.Dispose();
+        FinishDispose();
+    }
 
-        if (_ownsService) _service.Dispose();
+    /// <inheritdoc />
+    public ValueTask DisposeAsync()
+    {
+        // From inside one of the node's own callbacks (a subscriber on the pump, on the reader's
+        // failure report or on the actor) the caller holds the thread the waits below would need,
+        // and the continuation of an awaited join would run elsewhere, away from the context
+        // Dispose recognises. The blocking path knows how to not wait for itself, and the caller
+        // is on a node thread already, so nothing is lost by taking it.
+        if (OnEventPump || OnReader || OnDisposal || _actor.IsOnCurrentActor)
+        {
+            Dispose();
+            return default;
+        }
+
+        return DisposeCoreAsync();
+    }
+
+    private async ValueTask DisposeCoreAsync()
+    {
+        // A second caller awaits the disposal that is running: returning at once would tell it
+        // that producers are stopped and the owned service released while the first caller is
+        // still waiting for the reader.
+        if (!BeginDispose())
+        {
+            await _disposeDone.Task.ConfigureAwait(false);
+            return;
+        }
+        await JoinAsync(_readerTask).ConfigureAwait(false);
+        CompleteEventQueue();
+        await JoinAsync(_eventPumpTask).ConfigureAwait(false);
+        StopPumpIfStillRunning();
+        FinishDispose();
+    }
+
+    private static readonly TimeSpan DisposeJoinTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>A subscriber that kept the pump past the join timeout does not get the events still
+    /// queued behind it: nothing is delivered past Dispose.</summary>
+    private void StopPumpIfStillRunning()
+    {
+        if (!_eventPumpTask.IsCompleted) Volatile.Write(ref _pumpStopRequested, true);
+    }
+
+    /// <summary>Waits for <paramref name="task"/> for at most <see cref="DisposeJoinTimeout"/>
+    /// without holding a thread. Neither task joined here faults (each reports its own failures
+    /// through <see cref="BackgroundExceptionOccurred"/>), so there is nothing to observe.</summary>
+    private static async Task JoinAsync(Task task)
+    {
+        using var cts = new CancellationTokenSource();
+        await Task.WhenAny(task, Task.Delay(DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
+        cts.Cancel();
+    }
+
+    /// <summary>True on the thread that is delivering an event to a subscriber.</summary>
+    private bool OnEventPump => Callbacks.Contains(CallbackKind.Delivering, this);
+
+    /// <summary>True on the thread that is finishing the disposal: a subscriber the actor calls
+    /// there (its shutdown-timeout report) is waited for by that disposal, so it cannot wait for it.</summary>
+    private bool OnDisposal => Callbacks.Contains(CallbackKind.Finishing, this);
+
+    /// <summary>True on the thread of the reader task while it reports a failed subscription.</summary>
+    private bool OnReader => Callbacks.Contains(CallbackKind.Reporting, this);
+
+    // The nodes whose callbacks the current thread is inside, per kind. A set, not one slot: a
+    // subscriber of A may dispose B, and B's own callback may then ask A to dispose again, with
+    // both of them active on the same thread at once.
+    private enum CallbackKind { Delivering, Reporting, Finishing }
+
+    private static class Callbacks
+    {
+        [ThreadStatic]
+        private static System.Collections.Generic.List<CanOpenNode>?[]? s_nodes;
+
+        public static void Enter(CallbackKind kind, CanOpenNode node) => Of(kind).Add(node);
+
+        // Entering and leaving are paired, and the nodes of one thread are all the same object
+        // when they repeat, so removing the first match is removing the right one.
+        public static void Leave(CallbackKind kind, CanOpenNode node) => Of(kind).Remove(node);
+
+        public static bool Contains(CallbackKind kind, CanOpenNode node)
+        {
+            var list = s_nodes?[(int)kind];
+            if (list is null) return false;
+            foreach (var marked in list)
+            {
+                if (ReferenceEquals(marked, node)) return true;
+            }
+            return false;
+        }
+
+        private static System.Collections.Generic.List<CanOpenNode> Of(CallbackKind kind)
+        {
+            var all = s_nodes ??= new System.Collections.Generic.List<CanOpenNode>?[3];
+            return all[(int)kind] ??= new System.Collections.Generic.List<CanOpenNode>(2);
+        }
+    }
+
+    /// <summary>Flips the disposed flag and posts the cleanup; false when already disposed.</summary>
+    private bool BeginDispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+        try { _readerCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
+
+        // On the actor already (a subscriber disposing from ApplicationReset, say) the cleanup runs
+        // here: a post would wait for that subscriber to return, and the call would hand back
+        // with the transfers still open.
+        try
+        {
+            if (_actor.IsOnCurrentActor) CleanUpOnActor();
+            else _actor.Post(CleanUpOnActor);
+        }
+        catch (ObjectDisposedException)
+        {
+            // actor already gone; nothing more to do
+        }
+        return true;
+    }
+
+    /// <summary>Stops the producers and consumers and fails every open transfer. Actor-only.</summary>
+    private void CleanUpOnActor()
+    {
+        _heartbeatProducer.Dispose();
+        _heartbeatConsumer.Dispose();
+        _syncProducerHandle?.Dispose();
+        _syncProducerHandle = null;
+        DisposePdoRuntime();
+        _lifeGuardingDeadline?.Dispose();
+        _lifeGuardingDeadline = null;
+        CancelFlyingMasterDeadline();
+        CancelBootUp();
+
+        Release(_sdoServer?.Deadline);
+        _sdoServer = null;
+        foreach (var kv in _sdoClients)
+        {
+            Release(kv.Value.Deadline);
+            kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
+        }
+        _sdoClients.Clear();
+
+        Release(_sdoBlockServer?.Deadline);
+        _sdoBlockServer = null;
+        foreach (var kv in _sdoBlockClients)
+        {
+            Release(kv.Value.Deadline);
+            kv.Value.Tcs.TrySetException(new ObjectDisposedException(nameof(CanOpenNode)));
+        }
+        _sdoBlockClients.Clear();
+
+        foreach (var kv in _nodeGuardingConsumers)
+        {
+            Release(kv.Value.PollHandle);
+            Release(kv.Value.LifeTimeDeadline);
+        }
+        _nodeGuardingConsumers.Clear();
+    }
+
+    private static void Release(IDisposable? handle) => handle?.Dispose();
+
+    private void FinishDispose()
+    {
+        Callbacks.Enter(CallbackKind.Finishing, this);
+        try
+        {
+            _subscription.Dispose();
+            _actor.Dispose();
+            _readerCts.Dispose();
+
+            if (_ownsService) _service.Dispose();
+        }
+        finally
+        {
+            Callbacks.Leave(CallbackKind.Finishing, this);
+            // Whatever a Dispose above threw, a caller waiting for this disposal is released.
+            _disposeDone.TrySetResult(true);
+        }
     }
 
     // =========================================================================================
@@ -725,7 +877,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             }
         }
         catch (OperationCanceledException) { /* Dispose */ }
-        catch (Exception ex) { RaiseBackgroundException(ex); }
+        catch (Exception ex)
+        {
+            // A subscriber of the report may dispose the node; see Dispose.
+            Callbacks.Enter(CallbackKind.Reporting, this);
+            try { RaiseBackgroundException(ex); }
+            finally { Callbacks.Leave(CallbackKind.Reporting, this); }
+        }
     }
 
     // =========================================================================================
@@ -741,16 +899,34 @@ internal sealed partial class CanOpenNode : ICanOpenNode
             // One signal covers every event queued by the time we look. A subscriber that
             // throws is reported and the loop continues: a timeout or EMCY already waiting
             // must still be delivered. Anything outside the delegate is still a bug in the pump.
-            while (TryDequeueEvent() is { } raise)
+            // Marks the thread for the whole batch: nothing in it awaits, so a subscriber that
+            // disposes the node runs on this very thread (see Dispose).
+            Callbacks.Enter(CallbackKind.Delivering, this);
+            try
             {
-                try
+                while (!Volatile.Read(ref _pumpStopRequested) && TryDequeueEvent() is { } raise)
                 {
-                    raise();
+                    try
+                    {
+                        raise();
+                    }
+                    catch (Exception ex)
+                    {
+                        RaiseBackgroundException(ex);
+                    }
                 }
-                catch (Exception ex)
+                // Stopped with events still queued: they are dropped, not left linked to a node
+                // nobody will deliver for again.
+                if (Volatile.Read(ref _pumpStopRequested))
                 {
-                    RaiseBackgroundException(ex);
+                    Action? skipped;
+                    do { skipped = TryDequeueEvent(); }
+                    while (skipped is not null);
                 }
+            }
+            finally
+            {
+                Callbacks.Leave(CallbackKind.Delivering, this);
             }
             // The queue was just drained. Closure is the completed flag alone: an event
             // accepted before completion is still in the list and was delivered above, and
@@ -2492,10 +2668,36 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         });
     }
 
+    /// <summary>
+    /// Calls the subscribers of an event one after the other, ending the round when one of them
+    /// has disposed the node from the event pump: nothing is delivered past Dispose.
+    /// </summary>
+    private void DeliverToSubscribers<T>(EventHandler<T>? handler, T args)
+    {
+        if (handler is null) return;
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            if (Volatile.Read(ref _pumpStopRequested)) break;
+            ((EventHandler<T>)subscriber)(this, args);
+        }
+    }
+
     private void RaiseBackgroundException(Exception ex)
     {
-        try { BackgroundExceptionOccurred?.Invoke(this, ex); }
-        catch { /* subscriber must not tear down the node */ }
+        var handler = BackgroundExceptionOccurred;
+        if (handler is null) return;
+        // Nothing is reported once the disposal has finished: a subscriber or a timed-out send that
+        // outlived it and fails late has nobody to tell.
+        if (_disposeDone.Task.IsCompleted) return;
+        // One subscriber that disposes the node ends the round for the rest, as for the other
+        // events; a node that was disposed before the report still reports it to all.
+        bool disposedBefore = Volatile.Read(ref _disposed) != 0;
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            if (!disposedBefore && Volatile.Read(ref _disposed) != 0) break;
+            try { ((EventHandler<Exception>)subscriber)(this, ex); }
+            catch { /* subscriber must not tear down the node */ }
+        }
     }
 
     private void RaiseHeartbeatReceived(byte producer, NmtState state, DateTime ts)
@@ -2503,7 +2705,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var args = new HeartbeatReceivedEventArgs(producer, state, ts);
         EnqueueEvent(() =>
         {
-            try { HeartbeatReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(HeartbeatReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: false, key: null, emcyProducer: -1, producer);
     }
@@ -2513,7 +2715,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var args = new HeartbeatTimeoutEventArgs(producer, timeout);
         EnqueueEvent(() =>
         {
-            try { HeartbeatTimeout?.Invoke(this, args); }
+            try { DeliverToSubscribers(HeartbeatTimeout, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.HeartbeatTimeout(producer), emcyProducer: -1, producer);
     }
@@ -2523,7 +2725,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var args = new EmcyReceivedEventArgs(msg, ts);
         EnqueueEvent(() =>
         {
-            try { EmcyReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(EmcyReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.Emcy(msg), msg.ProducerNodeId, msg.ProducerNodeId);
     }
@@ -2533,7 +2735,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var args = new SyncReceivedEventArgs(ts);
         EnqueueEvent(() =>
         {
-            try { SyncReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(SyncReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }
@@ -2543,7 +2745,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var args = new RpdoReceivedEventArgs(pdoIndex, cobId, payload);
         EnqueueEvent(() =>
         {
-            try { RpdoReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(RpdoReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }
@@ -2561,6 +2763,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         // (Codex on #133).
         foreach (var subscriber in handler.GetInvocationList())
         {
+            // One that disposed the node ends the round: the rest are not called on a node that
+            // is gone.
+            if (Volatile.Read(ref _disposed) != 0) break;
             try { ((EventHandler<NmtResetEventArgs>)subscriber)(this, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }
@@ -2571,7 +2776,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode
         var args = new NmtCommandReceivedEventArgs(cmd, target);
         EnqueueEvent(() =>
         {
-            try { NmtCommandReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(NmtCommandReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }

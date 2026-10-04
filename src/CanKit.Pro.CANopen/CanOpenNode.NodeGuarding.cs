@@ -332,7 +332,7 @@ internal sealed partial class CanOpenNode
         var args = new LifeGuardingEventArgs(state, _guardTime, _lifeTimeFactor);
         EnqueueEvent(() =>
         {
-            try { LifeGuardingEvent?.Invoke(this, args); }
+            try { DeliverToSubscribers(LifeGuardingEvent, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
     }
@@ -354,7 +354,7 @@ internal sealed partial class CanOpenNode
         var args = new NodeGuardingReceivedEventArgs(producer, state, toggle, ts);
         EnqueueEvent(() =>
         {
-            try { NodeGuardingReceived?.Invoke(this, args); }
+            try { DeliverToSubscribers(NodeGuardingReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: false, key: null, emcyProducer: -1, producer);
     }
@@ -364,7 +364,7 @@ internal sealed partial class CanOpenNode
         var args = new NodeGuardingTimeoutEventArgs(producer, guardTime, lifeTimeFactor);
         EnqueueEvent(() =>
         {
-            try { NodeGuardingTimeout?.Invoke(this, args); }
+            try { DeliverToSubscribers(NodeGuardingTimeout, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         }, critical: true, EventKey.NodeGuardingTimeout(producer), emcyProducer: -1, producer);
     }

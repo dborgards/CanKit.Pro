@@ -697,6 +697,9 @@ internal sealed partial class CanOpenNode
         // the hook lets the application restore what the description does not hold.
         RaiseApplicationReset(communicationOnly ? NmtCommand.ResetCommunication : NmtCommand.ResetNode);
 
+        // A subscriber may have disposed the node; its timers are gone and nothing is announced.
+        if (Volatile.Read(ref _disposed) != 0) return;
+
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
