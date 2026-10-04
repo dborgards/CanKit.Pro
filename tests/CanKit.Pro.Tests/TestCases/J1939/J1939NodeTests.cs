@@ -3564,6 +3564,19 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAsync<InvalidOperationException>(() => disposal);
     }
 
+    [Fact]
+    public async Task DisposeAsync_On_The_Actor_After_A_Failed_Disposal_Reports_The_Failure()
+    {
+        using var actor = new ProtocolActor();
+        var starved = new StarvedReaderBusService { DisposeFault = new InvalidOperationException("the service would not dispose") };
+        var node = new J1939NodeImpl(starved, new J1939NodeOptions(Name(1)), ownsService: true, actor);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask());
+
+        var onActor = await actor.PostAsync(() => node.DisposeAsync().AsTask());
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => onActor);
+    }
+
     // Two DisposeAsync calls at once are one disposal: both return the same task, so neither
     // completes before the disposal has.
     [Fact]

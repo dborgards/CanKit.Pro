@@ -1698,8 +1698,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // the thread pool, so the caller's thread is not held for the joins Dispose makes.
         if (_actor.IsOnCurrentActor)
         {
+            var won = Volatile.Read(ref _disposed) == 0;
             Dispose();
-            return default;
+            // A call that lost cannot wait for the winner's teardown, which may be waiting for
+            // this very actor; it reports the outcome when there is one already, failure included.
+            return won || !_disposalDone.Task.IsCompleted ? default : new ValueTask(_disposalDone.Task);
         }
 
         // One task for every caller: a second call must not return before the first disposal has
