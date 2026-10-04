@@ -576,10 +576,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // release the demux subscription and, if owned, the service.
         try { _readerCts.Cancel(); } catch { /* nothing else to do */ }
 
-        // Complete the inbox first so consumers awaiting ReceiveAsync/ReadAllAsync unblock,
-        // *before* we tear down the reader task -- otherwise a consumer could observe a canceled
-        // reader without any completion signal.
-        _pduInbox.Writer.TryComplete();
+        // The inbox is completed so consumers awaiting ReceiveAsync/ReadAllAsync unblock, before
+        // the reader task is torn down -- otherwise a consumer could observe a canceled reader
+        // without any completion signal. It is completed on the actor, which is the inbox's single
+        // writer: a DiscardPendingPdus has the items it retains out of the inbox for a moment
+        // while it runs there, and completing from this thread in that moment made the write-back
+        // fail and the retained PDUs vanish (#262). Here, when this is the actor already (a
+        // handler disposing the channel): nothing can be mid-discard on this thread.
+        if (_actor is ProtocolActor { IsOnCurrentActor: true })
+            _pduInbox.Writer.TryComplete();
 
         // Fail any in-flight SendAsync so its caller doesn't hang forever waiting for a TCS the
         // now-disposed actor will never complete. Also release any bus-TX idle waiter that would
@@ -592,6 +597,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             var idle = _busTxIdleWaiter;
             _busTxIdleWaiter = null;
             idle?.TrySetResult(null);
+
+            // Behind any discard that was running: what it retained has been put back by now.
+            _pduInbox.Writer.TryComplete();
 
             // A reassembly under way dies with the channel: its deadline is cancelled and its
             // record withdrawn, so GetReceptionsInProgress does not keep reporting a transfer
@@ -619,6 +627,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             // on is thread-safe to complete, and is all that has to be released.
             Volatile.Read(ref _sendCompletion)?.TrySetException(new ObjectDisposedException(nameof(IsoTpChannel)));
             Volatile.Read(ref _idleWait)?.TrySetResult(null);
+            // No actor left to run a discard: the inbox can be completed from here.
+            _pduInbox.Writer.TryComplete();
         }
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* observed via task; not fatal */ }

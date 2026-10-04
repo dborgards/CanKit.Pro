@@ -1006,6 +1006,40 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await receive!.WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
     }
 
+    // #262: a Dispose that arrives while a discard has the retained PDU out of the inbox must not
+    // lose it. The inbox used to be completed from the disposing thread, and the write-back that
+    // followed found it completed.
+    [Fact]
+    public async Task A_Dispose_During_A_Discard_Does_Not_Drop_The_Pdu_The_Discard_Retains()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+        var concrete = (IsoTpChannel)channel;
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        Task? disposal = null;
+        concrete.DiscardGapObserver = () =>
+        {
+            // On the actor, with the retained PDU out of the inbox: another thread disposes the
+            // channel now. No signal says "it got as far as it will", so this is a negative
+            // window: it can only pass falsely on a slow host.
+            disposal = Task.Run(channel.Dispose);
+            Thread.Sleep(300);
+        };
+        channel.DiscardPendingPdus(arrivedBefore: 1).Should().Be(0);
+        await disposal!.WaitAsync(ShortTimeout);
+
+        // What is left can still be read after the disposal: the PDU the discard retained.
+        (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
+    }
+
     // The streaming receive ends gracefully when the channel is disposed under it.
     [Fact]
     public async Task ReceiveAll_Ends_When_The_Channel_Is_Disposed()
