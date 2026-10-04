@@ -3523,8 +3523,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // The emission waits for its confirmation, which the bus holds back: disposing the schedule
-    // off the actor cancels the token the emission carries, the emission ends with it, and the
-    // join returns without using up its timeout.
+    // off the actor cancels the token the emission carries, and the emission ends quietly with
+    // it. Without the cancellation it would run into the bus's confirm timeout (one second) and
+    // report that as a failure. The outcome is judged, not a stopwatch: how long a cancellation
+    // takes to be observed varies by hundreds of milliseconds between hosts (it took 620 ms on a
+    // Windows runner), more than any bound that would still tell it from the timeout.
     [Fact]
     public async Task Disposing_A_Periodic_Schedule_Cancels_An_Emission_Waiting_For_Its_Confirmation()
     {
@@ -3533,6 +3536,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
         });
+        var failures = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (failures) failures.Add(ex); };
         var claim = node.ClaimAddressAsync(0x11);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
         bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
@@ -3543,12 +3548,18 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             TimeSpan.FromMilliseconds(50));
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the emission waits for its echo
 
-        var watch = Stopwatch.StartNew();
         handle.Dispose();
 
-        // The emission would otherwise wait out the bus's confirm timeout (one second) before the
-        // join returned; cancelled, it ends in milliseconds.
-        watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(0.5), "the cancelled emission did not have to be waited out");
+        // The emission has ended by the time the confirm timeout would have: let it run past it.
+        var impl = (J1939NodeImpl)node;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (impl.PeriodicEmissionsCompleted < 1)
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The emission never ended.");
+            await Task.Delay(5);
+        }
+        await Task.Delay(TimeSpan.FromSeconds(1.5)); // past the confirm timeout, for a failure to be reported
+        lock (failures) failures.Should().BeEmpty("a cancelled emission ends quietly; an uncancelled one reports the confirm timeout");
     }
 
     // A teardown step that throws (the owned service's Dispose here) is the disposal's failure,
