@@ -72,6 +72,16 @@ internal static class Program
             return fallback;
         }
 
+        // Nothing may be left over: a typo in an option name would otherwise run with its default.
+        var valueOptions = new[] { "--a", "--b", "--label", "--bitrate", "--dbit", "--frames", "--wait-ms", "--modes", "--out" };
+        var flagOptions = new[] { "--fd", "--skip-claim", "--help", "-h" };
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (valueOptions.Contains(args[i], StringComparer.OrdinalIgnoreCase)) i++; // its value is Text's to check
+            else if (!flagOptions.Contains(args[i], StringComparer.OrdinalIgnoreCase))
+                optionErrors.Add($"Unknown option or stray argument '{args[i]}'.");
+        }
+
         var uriA = Text("--a");
         var uriB = Text("--b");
         if (uriA is null || uriB is null)
@@ -112,17 +122,22 @@ internal static class Program
 
         // Before anything is measured: a run that has measured everything must not be lost to a
         // directory that does not exist.
+        // The label stays as typed in the report; as part of a file name it may not carry path
+        // characters, and it is bounded so that the names stay within the file system's limits.
+        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        var baseName = Path.Combine(outDir, $"echo-probe-{Sanitize(config.Label)}-{stamp}");
         try
         {
             Directory.CreateDirectory(outDir);
-            // An existing directory is not a writable one: create and remove a file in it.
-            var probeFile = Path.Combine(outDir, $".echo-probe-write-test-{Environment.ProcessId}");
-            File.WriteAllText(probeFile, string.Empty);
-            File.Delete(probeFile);
+            // The two final files are created now, with a note that is replaced when the run is done:
+            // an existing directory is not a writable one, and a name that is too long is found
+            // here and not after the measurements.
+            File.WriteAllText(baseName + ".md", "The run did not finish.");
+            File.WriteAllText(baseName + ".json", "{}");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
-            Console.Error.WriteLine($"--out {outDir} cannot be used: {ex.Message}");
+            Console.Error.WriteLine($"--out {outDir} cannot be used for {Path.GetFileName(baseName)}.md/.json: {ex.Message}");
             return 2;
         }
 
@@ -143,9 +158,6 @@ internal static class Program
             PrintResult(result);
         }
 
-        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        // The label stays as typed in the report; as part of a file name it may not carry path characters.
-        var baseName = Path.Combine(outDir, $"echo-probe-{Sanitize(config.Label)}-{stamp}");
         var report = new Report(config, Environment.OSVersion.ToString(), results);
         File.WriteAllText(baseName + ".json", JsonSerializer.Serialize(report, JsonOptions));
         File.WriteAllText(baseName + ".md", RenderMarkdown(report));
@@ -570,7 +582,8 @@ internal static class Program
     {
         var sb = new StringBuilder();
         foreach (var c in uri) sb.Append(char.IsLetterOrDigit(c) ? c : '-');
-        return sb.ToString().Trim('-');
+        var text = sb.ToString().Trim('-');
+        return text.Length > 80 ? text[..80] : text;
     }
 
     private sealed record ProbeConfig(string UriA, string UriB, string Label, bool UseFd, int Bitrate,
