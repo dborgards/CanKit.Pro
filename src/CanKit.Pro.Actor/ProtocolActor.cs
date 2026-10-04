@@ -433,7 +433,7 @@ namespace CanKit.Pro.Actor
             lock (_disposeGate)
             {
                 ThrowIfDisposed();
-                _mailbox.Enqueue(new MailboxItem(work, onDispatchFailure));
+                _mailbox.Enqueue(new MailboxItem(work, onDispatchFailure, _time.GetTimestamp()));
                 _signal.Release();
             }
         }
@@ -697,7 +697,8 @@ namespace CanKit.Pro.Actor
             // snapshot keeps throughput (still one wake per batch, not per item) while giving the
             // timer check a guaranteed turn in between: anything that arrives during the batch is
             // simply next batch's problem, and NextWaitTimeoutMilliseconds refuses to sleep while
-            // it is outstanding.
+            // it is outstanding. That turn is not a licence to overtake, though -- see
+            // FireDueTimers for what it does with work that arrived before a timer fell due.
             var budget = _mailbox.Count;
             while (budget-- > 0 && _mailbox.TryDequeue(out var item))
                 RunSafely(item.Work, item.OnDispatchFailure);
@@ -717,6 +718,22 @@ namespace CanKit.Pro.Actor
             while (_timers.Count > 0 && _timers[0].DueTimestamp <= now)
             {
                 var entry = _timers[0];
+
+                // A due timer is an event at its due instant, and it does not overtake an event
+                // that happened earlier: work that reached the mailbox before the timer fell due
+                // runs first. The case this closes (#240) is a work item that holds the loop past
+                // a deadline while the frame that would have re-armed it is already queued --
+                // DrainMailbox's snapshot left that frame for the next batch, this check ran in
+                // between, and the deadline fired on a peer that had answered in time. Leaving the
+                // timer in the list costs nothing: the mailbox is non-empty, so
+                // NextWaitTimeoutMilliseconds does not sleep and the next pass drains the older
+                // work and comes back here. Under a saturated bus every queued frame is younger
+                // than a timer that has been due for a while, so the fairness the batching exists
+                // for is untouched; a frame stamped at exactly the due instant does not hold the
+                // timer back either.
+                if (_mailbox.TryPeek(out var older) && older.PostedAt < entry.DueTimestamp)
+                    break;
+
                 _timers.RemoveAt(0);
 
                 // Retire() reports whether this entry had been cancelled, and does so atomically
@@ -880,16 +897,20 @@ namespace CanKit.Pro.Actor
         // OnDispatchFailure is null for plain Post() items (BackgroundExceptionOccurred is their
         // only failure channel); PostAsync/PostAsync<T> set it to fail their own
         // TaskCompletionSource if the marshal itself fails before Work ever runs (see RunSafely).
+        // PostedAt is the actor clock's reading when the item was enqueued, the instant
+        // FireDueTimers orders it against a due timer by.
         private readonly struct MailboxItem
         {
-            public MailboxItem(Action work, Action<Exception>? onDispatchFailure)
+            public MailboxItem(Action work, Action<Exception>? onDispatchFailure, long postedAt)
             {
                 Work = work;
                 OnDispatchFailure = onDispatchFailure;
+                PostedAt = postedAt;
             }
 
             public Action Work { get; }
             public Action<Exception>? OnDispatchFailure { get; }
+            public long PostedAt { get; }
         }
 
         private sealed class TimerEntry

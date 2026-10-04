@@ -151,6 +151,42 @@ public class ProtocolActorTimerTests
             "an armed deadline must still fire while the mailbox is permanently non-empty");
     }
 
+    // #240: the batching above has a second edge. The drain's budget is a snapshot taken before
+    // the batch runs, so work that arrives *during* a batch waits for the next one -- and the
+    // due-timer check sits in between. After a work item that holds the loop for longer than a
+    // deadline's remaining time, the deadline therefore fired before a frame that had reached the
+    // mailbox while the loop was held: a block-upload server whose peer acknowledged in time
+    // aborted the transfer for idleness, and the acknowledgement's re-arm then found an expired
+    // deadline. A timer is an event at its due instant, and an event is not processed ahead of
+    // one that happened earlier. The stall is a gated work item and the clock is driven by hand,
+    // so the ordering is forced rather than hoped for.
+    [Fact]
+    public async Task A_Due_Timer_Does_Not_Overtake_Work_Posted_Before_It_Fell_Due()
+    {
+        var clock = new ManualTimeSource();
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, clock, null);
+        var order = new List<string>();
+        var fired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var holding = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+
+        using var handle = actor.Schedule(TimeSpan.FromSeconds(2), () => { order.Add("timer"); fired.TrySetResult(true); });
+        await actor.PostAsync(() => 0); // the timer sits in the loop's list before anything else happens
+
+        actor.Post(() => { holding.Set(); release.Wait(Bounded); });
+        holding.Wait(Bounded).Should().BeTrue("the loop must be inside the stalling item before the frame is posted");
+
+        actor.Post(() => order.Add("frame")); // reaches the mailbox at t = 0, while the loop is held
+        clock.Advance(TimeSpan.FromSeconds(2)); // the deadline falls due at t = 2 s, still during the hold
+        release.Set();
+
+        (await Task.WhenAny(fired.Task, Task.Delay(Bounded))).Should().Be(fired.Task, "the deadline is due and must fire");
+        await actor.PostAsync(() => 0); // the loop has gone round once more; the order is final
+
+        order.Should().Equal(new[] { "frame", "timer" },
+            "the frame reached the mailbox at t = 0 and the deadline fell due at t = 2 s; the earlier event runs first");
+    }
+
     [Fact]
     public async Task A_Sub_Millisecond_Remaining_Delay_Waits_Instead_Of_Busy_Spinning()
     {
