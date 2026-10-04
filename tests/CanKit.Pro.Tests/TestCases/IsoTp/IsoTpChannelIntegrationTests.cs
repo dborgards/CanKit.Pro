@@ -1040,6 +1040,36 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await channel.ReceiveAsync().WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
     }
 
+    // Review on #275: the receivers are let go by the disposal itself, not by the actor getting
+    // round to it. With the actor busy (a callback that does not return), a pending receive must
+    // still end when the channel is disposed.
+    [Fact]
+    public async Task A_Pending_Receive_Ends_On_Dispose_Although_The_Actor_Is_Busy()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var release = new ManualResetEventSlim();
+        var busy = actor.PostAsync(() => release.Wait(TimeSpan.FromSeconds(30)));
+        var receiving = channel.ReceiveAsync();
+
+        var disposal = Task.Run(channel.Dispose);
+        try
+        {
+            // The actor cannot run the cleanup Dispose posts to it, and the receive ends anyway.
+            await Assert.ThrowsAsync<InvalidOperationException>(() => receiving.WaitAsync(ShortTimeout));
+        }
+        finally
+        {
+            release.Set();
+            await busy;
+            await disposal;
+        }
+    }
+
     // The streaming receive ends gracefully when the channel is disposed under it.
     [Fact]
     public async Task ReceiveAll_Ends_When_The_Channel_Is_Disposed()
