@@ -66,6 +66,25 @@ internal static class Program
             .ToArray();
         var outDir = GetArg(args, "--out") ?? Directory.GetCurrentDirectory();
 
+        var invalid = Validate(config);
+        if (invalid is not null)
+        {
+            Console.Error.WriteLine(invalid);
+            return 2;
+        }
+
+        // Before anything is measured: a run that has measured everything must not be lost to a
+        // directory that does not exist.
+        try
+        {
+            Directory.CreateDirectory(outDir);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            Console.Error.WriteLine($"--out {outDir} cannot be used: {ex.Message}");
+            return 2;
+        }
+
         Console.WriteLine($"EchoProbe  A={config.UriA} (under test)  B={config.UriB} (peer)  label={config.Label}");
         Console.WriteLine(config.UseFd
             ? $"  CAN FD: arbitration {config.Bitrate} bit/s, data {config.DataBitrate} bit/s"
@@ -92,6 +111,16 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine($"Written: {baseName}.md and .json -- send the .md back (or paste it).");
         return 0;
+    }
+
+    private static string? Validate(ProbeConfig config)
+    {
+        // The counter in the payload is one byte, and a run without a frame measures nothing.
+        if (config.Frames is < 1 or > 100) return "--frames must be between 1 and 100.";
+        if (config.Bitrate <= 0) return "--bitrate must be positive.";
+        if (config.UseFd && config.DataBitrate <= 0) return "--dbit must be positive.";
+        if (config.WaitMs < 0) return "--wait-ms must not be negative.";
+        return null;
     }
 
     private static ChannelWorkMode ParseWorkMode(string mode) => mode switch
@@ -179,8 +208,8 @@ internal static class Program
         var onA = new List<Seen>();
         var onB = new List<Seen>();
         var clock = Stopwatch.StartNew();
-        void RecordA(object? sender, CanReceiveDataView e) { lock (onA) onA.Add(Describe(e, clock)); }
-        void RecordB(object? sender, CanReceiveDataView e) { lock (onB) onB.Add(Describe(e, clock)); }
+        void RecordA(object? sender, CanReceiveDataView e) { lock (onA) onA.Add(Describe(e, config, clock)); }
+        void RecordB(object? sender, CanReceiveDataView e) { lock (onB) onB.Add(Describe(e, config, clock)); }
         busA.FrameObserved += RecordA;
         busB.FrameObserved += RecordB;
         var sendErrors = new List<string>();
@@ -216,8 +245,8 @@ internal static class Program
 
         Seen[] a;
         Seen[] b;
-        lock (onA) a = onA.Where(s => s.Id == StdId).ToArray();
-        lock (onB) b = onB.Where(s => s.Id == StdId).ToArray();
+        lock (onA) a = onA.Where(s => s.IsProbeFrame).ToArray();
+        lock (onB) b = onB.Where(s => s.IsProbeFrame).ToArray();
         return new RawResult
         {
             Sent = sent,
@@ -322,9 +351,32 @@ internal static class Program
             : CanFrame.Classic(StdId, data);
     }
 
-    private static Seen Describe(CanReceiveDataView e, Stopwatch clock)
-        => new(e.CanFrame.ID, e.CanFrame.IsExtendedFrame, e.IsEcho,
-            e.CanFrame.Data.Length > 0 ? e.CanFrame.Data.Span[0] : -1, clock.ElapsedMilliseconds);
+    private static Seen Describe(CanReceiveDataView e, ProbeConfig config, Stopwatch clock)
+    {
+        var frame = e.CanFrame;
+        return new Seen(frame.ID, frame.IsExtendedFrame, e.IsEcho,
+            frame.Data.Length > 0 ? frame.Data.Span[0] : -1, clock.ElapsedMilliseconds, IsProbeFrame(frame, config));
+    }
+
+    // The tool's own frame and nothing else on the bus: the id, the standard frame format, the frame
+    // type and length it sent, and the payload pattern with a counter in range. Traffic of other
+    // nodes on the same id is not a measurement.
+    private static bool IsProbeFrame(CanFrameView frame, ProbeConfig config)
+    {
+        var length = config.UseFd ? 12 : 8;
+        if (frame.ID != StdId || frame.IsExtendedFrame || frame.IsRemoteFrame || frame.Data.Length != length)
+            return false;
+        if (config.UseFd != (frame.FrameKind == CanFrameType.CanFd))
+            return false;
+        var data = frame.Data.Span;
+        if (data[0] >= config.Frames) return false;
+        for (var i = 1; i < length; i++)
+        {
+            if (data[i] != (byte)(0xA0 + i)) return false;
+        }
+
+        return true;
+    }
 
     private static void PrintResult(ModeResult r)
     {
@@ -493,7 +545,7 @@ internal static class Program
 
     private sealed record Report(ProbeConfig Config, string Os, List<ModeResult> Results);
 
-    private sealed record Seen(int Id, bool Extended, bool IsEcho, int Counter, long AtMs);
+    private sealed record Seen(int Id, bool Extended, bool IsEcho, int Counter, long AtMs, bool IsProbeFrame);
 
     private sealed record ConfirmedAttempt(bool Confirmed, bool IsApproximated, string FailureReason, long ElapsedMs, string? Error);
 
