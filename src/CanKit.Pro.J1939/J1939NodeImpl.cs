@@ -1687,8 +1687,19 @@ internal sealed class J1939NodeImpl : IJ1939Node
             return default;
         }
 
-        return new ValueTask(Task.Run(Dispose));
+        // One task for every caller: a second call must not return before the first disposal has
+        // finished, which running the idempotent Dispose twice would let it do.
+        var disposal = Volatile.Read(ref _asyncDisposal);
+        if (disposal is null)
+        {
+            var started = Task.Run(Dispose);
+            disposal = Interlocked.CompareExchange(ref _asyncDisposal, started, null) ?? started;
+        }
+
+        return new ValueTask(disposal);
     }
+
+    private Task? _asyncDisposal;
 
     // =========================================================================================
     // Diagnostics helpers
@@ -1861,6 +1872,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                         // ordering, already seen a tick become possible again.
                         Volatile.Write(ref _sendInFlight, 0);
                         Interlocked.Increment(ref _owner._periodicEmissionsCompleted);
+                        // A schedule disposed while this emission was running leaves its token
+                        // source to the emission: it is the last thing that holds the token.
+                        if (Volatile.Read(ref _disposed) != 0) _cts.Dispose();
                     }
                 });
             }
@@ -1893,19 +1907,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             try { _tick?.Dispose(); } catch { }
-            try { _cts.Cancel(); } catch (AggregateException) { /* a cancellation callback threw */ }
+            try { _cts.Cancel(); }
+            catch (Exception ex) when (ex is AggregateException or ObjectDisposedException) { /* a callback threw, or the emission that ended first released it */ }
 
             // From the actor (a callback of the node disposing its schedule) the emission in
             // flight may be waiting for that very actor: waiting for it here would hold the
-            // actor for the whole timeout. It ends on its own, the token being cancelled.
+            // actor for the whole timeout. It ends on its own, the token being cancelled, and
+            // releases the token source when it does (the emission cannot fault: it reports its
+            // failures itself).
             var send = _sendTask;
             if (send is null) { _cts.Dispose(); return; }
             if (_owner._actor.IsOnCurrentActor) return;
-            try
-            {
-                if (send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
-            }
-            catch (AggregateException) { /* send observed elsewhere */ }
+            if (send.Wait(TimeSpan.FromSeconds(2))) _cts.Dispose();
         }
 
 

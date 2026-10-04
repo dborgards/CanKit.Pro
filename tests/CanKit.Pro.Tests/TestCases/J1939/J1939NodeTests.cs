@@ -3511,6 +3511,33 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         {
             release.Set();
         }
+
+        // Let go, the emission ends (the token it carries was cancelled by the disposal), counts
+        // itself and releases the token source the disposal left to it.
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (sender.PeriodicEmissionsCompleted < 1)
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException("The stuck emission never ended.");
+            await Task.Delay(5);
+        }
+    }
+
+    // Two DisposeAsync calls at once are one disposal: both return the same task, so neither
+    // completes before the disposal has.
+    [Fact]
+    public async Task Concurrent_DisposeAsync_Calls_Return_One_Disposal()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false);
+
+        var first = node.DisposeAsync().AsTask();
+        var second = node.DisposeAsync().AsTask();
+
+        second.Should().BeSameAs(first);
+        if (await Task.WhenAny(first, Task.Delay(ShortTimeout)) != first)
+            throw new TimeoutException("The disposal did not finish.");
+        await first;
     }
 
     // DisposeAsync does not hold the caller's thread while the node waits for its readers, and from
