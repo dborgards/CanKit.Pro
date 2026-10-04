@@ -84,7 +84,8 @@ internal static class Program
         }
 
         var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        var baseName = Path.Combine(outDir, $"echo-probe-{config.Label}-{stamp}");
+        // The label stays as typed in the report; as part of a file name it may not carry path characters.
+        var baseName = Path.Combine(outDir, $"echo-probe-{Sanitize(config.Label)}-{stamp}");
         var report = new Report(config, Environment.OSVersion.ToString(), results);
         File.WriteAllText(baseName + ".json", JsonSerializer.Serialize(report, JsonOptions));
         File.WriteAllText(baseName + ".md", RenderMarkdown(report));
@@ -385,7 +386,10 @@ internal static class Program
                 ? "skipped"
                 : $"{r.Claim.State} {r.Claim.Address ?? ""} ({r.Claim.ElapsedMs} ms, peer saw {r.Claim.ClaimFramesSeenByPeer})" +
                   (r.Claim.Error is null ? "" : $" error: {r.Claim.Error.Replace("|", "/")}");
-            sb.AppendLine($"| {r.WorkMode} | {r.DeclaresEchoFeature} | {raw.SeenOnAUnderTest}/{raw.Sent} | " +
+            var mode = r.ActualWorkMode is { } actual && actual != r.WorkMode
+                ? $"{r.WorkMode} (**adapter reports {actual}**)"
+                : r.WorkMode;
+            sb.AppendLine($"| {mode} | {r.DeclaresEchoFeature} | {raw.SeenOnAUnderTest}/{raw.Sent} | " +
                 $"{raw.SeenOnAFlaggedAsEcho} | {raw.SeenOnAUnflagged} | {raw.SeenOnPeer}/{raw.Sent} | {confirmed} | {claim} |");
         }
 
@@ -395,6 +399,8 @@ internal static class Program
         foreach (var r in report.Results)
         {
             if (r.OpenError is not null) problems.Add($"{r.WorkMode}: could not open: {r.OpenError}");
+            if (r.ActualWorkMode is { } reported && reported != r.WorkMode)
+                problems.Add($"{r.WorkMode}: requested, but the adapter reports work mode {reported}: this row is not a measurement of {r.WorkMode}");
             if (r.Raw is { } raw2)
             {
                 if (raw2.Sent < raw2.Attempted)
