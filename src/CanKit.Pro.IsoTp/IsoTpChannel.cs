@@ -1679,8 +1679,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             _rx = null;
         }
 
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex,
-            rx?.Announce.FirstFrameArrivalTimestamp ?? Stopwatch.GetTimestamp()));
+        // A producer callback that outlived the disposal queues nothing: the inbox's writer is not
+        // completed any more, so this is what keeps the end of the channel the end.
+        if (!_inboxClosed)
+            _pduInbox.Writer.TryWrite(RxInboxItem.FromError(ex,
+                rx?.Announce.FirstFrameArrivalTimestamp ?? Stopwatch.GetTimestamp()));
         // After the error item, for the same reason the completion path withdraws it after the
         // PDU: a waiter that saw the reception in progress must find its outcome in the inbox.
         if (rx is not null)
@@ -1737,7 +1740,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // DatagramReceived handler blocks. Raise the event off the actor loop so a sync wait
         // on ReceiveAsync / SendAsync / DiscardPendingPdus cannot deadlock the mailbox
         //.
-        _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
+        // As in AbortRx: no PDU is queued once the channel is disposed.
+        if (!_inboxClosed)
+            _pduInbox.Writer.TryWrite(RxInboxItem.FromPdu(pdu, frameArrival, firstFrameArrival));
 
         var handler = DatagramReceived;
         if (handler is null || Volatile.Read(ref _disposed) != 0)

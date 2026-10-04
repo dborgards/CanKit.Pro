@@ -1070,6 +1070,29 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // Review on #275: the inbox's writer stays open now, so a producer callback that passed the
+    // disposed guard before the disposal and writes after it must not put anything in it. The
+    // callback is simulated by calling the producers directly after the disposal.
+    [Fact]
+    public async Task A_Producer_That_Writes_After_The_Disposal_Does_Not_Queue_Anything()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        var channel = IsoTpFactory.Open(bus, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions());
+        var concrete = (IsoTpChannel)channel;
+        channel.Dispose();
+
+        var emit = typeof(IsoTpChannel).GetMethod("EmitPdu", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+            null, new[] { typeof(byte[]), typeof(long) }, null)!;
+        var abort = typeof(IsoTpChannel).GetMethod("AbortRx", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        emit.Invoke(concrete, new object[] { new byte[] { 0x0A, 0x0B }, 1L });
+        abort.Invoke(concrete, new object[] { new IsoTpException("a reception that a late callback aborts") });
+
+        // The end of the channel, not the PDU or the abort that came after it.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => channel.ReceiveAsync().WaitAsync(ShortTimeout));
+        ex.Message.Should().Contain("disposed");
+    }
+
     // The streaming receive ends gracefully when the channel is disposed under it.
     [Fact]
     public async Task ReceiveAll_Ends_When_The_Channel_Is_Disposed()
