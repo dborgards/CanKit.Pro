@@ -3522,6 +3522,35 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // The emission waits for its confirmation, which the bus holds back: disposing the schedule
+    // off the actor cancels the token the emission carries, the emission ends with it, and the
+    // join returns without using up its timeout.
+    [Fact]
+    public async Task Disposing_A_Periodic_Schedule_Cancels_An_Emission_Waiting_For_Its_Confirmation()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        var claim = node.ClaimAddressAsync(0x11);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        bus.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        await claim.WithTimeout(ShortTimeout);
+
+        var handle = node.StartPeriodicSend(
+            new J1939Message(0xFEE5u, new byte[] { 1, 2, 3 }, priority: 6, destinationAddress: J1939Pgn.GlobalAddress),
+            TimeSpan.FromMilliseconds(50));
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the emission waits for its echo
+
+        var watch = Stopwatch.StartNew();
+        handle.Dispose();
+
+        // The emission would otherwise wait out the bus's confirm timeout (one second) before the
+        // join returned; cancelled, it ends in milliseconds.
+        watch.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(0.5), "the cancelled emission did not have to be waited out");
+    }
+
     // Two DisposeAsync calls at once are one disposal: both return the same task, so neither
     // completes before the disposal has.
     [Fact]
@@ -3534,6 +3563,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         var first = node.DisposeAsync().AsTask();
         var second = node.DisposeAsync().AsTask();
 
+        // The same completion, and one that has not been handed out before the disposal ended.
         second.Should().BeSameAs(first);
         if (await Task.WhenAny(first, Task.Delay(ShortTimeout)) != first)
             throw new TimeoutException("The disposal did not finish.");

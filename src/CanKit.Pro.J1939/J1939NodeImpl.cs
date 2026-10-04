@@ -1632,7 +1632,12 @@ internal sealed class J1939NodeImpl : IJ1939Node
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        try { DisposeCore(); }
+        finally { _disposalDone.TrySetResult(true); }
+    }
 
+    private void DisposeCore()
+    {
         try { _readerCts.Cancel(); } catch { }
         _rxInbox.Writer.TryComplete();
 
@@ -1689,17 +1694,18 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
         // One task for every caller: a second call must not return before the first disposal has
         // finished, which running the idempotent Dispose twice would let it do.
-        var disposal = Volatile.Read(ref _asyncDisposal);
-        if (disposal is null)
-        {
-            var started = Task.Run(Dispose);
-            disposal = Interlocked.CompareExchange(ref _asyncDisposal, started, null) ?? started;
-        }
+        // The completion belongs to whichever Dispose actually does the work (it sets it in its
+        // finally), so a caller awaiting it waits for the real teardown, also when a blocking
+        // Dispose won. Only the first asynchronous caller starts a Dispose of its own.
+        if (Interlocked.Exchange(ref _asyncDisposalStarted, 1) == 0)
+            _ = Task.Run(Dispose);
 
-        return new ValueTask(disposal);
+        return new ValueTask(_disposalDone.Task);
     }
 
-    private Task? _asyncDisposal;
+    private int _asyncDisposalStarted;
+
+    private readonly TaskCompletionSource<bool> _disposalDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     // =========================================================================================
     // Diagnostics helpers
