@@ -39,9 +39,13 @@ On Windows from the published folder (no .NET needed, it is self-contained):
 
 ```powershell
 .\CanKit.Pro.EchoProbe.exe --a pcan://PCAN_USBBUS1 --b kvaser://0 --label pcan-usb-classic
-.\CanKit.Pro.EchoProbe.exe --a pcan://PCAN_USBBUS2 --b kvaser://0 --fd --label pcan-usb-fd
+.\CanKit.Pro.EchoProbe.exe --a pcan://PCAN_USBBUS2 --b <fd-capable-peer> --fd --label pcan-usb-fd
 .\CanKit.Pro.EchoProbe.exe --a kvaser://0 --b pcan://PCAN_USBBUS1 --label kvaser
 ```
+
+With `--fd` the peer must be FD-capable too (the second channel of an FD interface, for
+example); a classic-only adapter such as a Kvaser Leaf Light v2 cannot receive the frames, and the
+report then lists "peer B saw 0 of n frames" as a problem instead of a measurement of A.
 
 From source, with the .NET 10 SDK:
 
