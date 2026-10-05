@@ -229,7 +229,7 @@ jobs:
           cache: npm
 
       - name: Install release tooling
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Catches a broken .releaserc.json (typo'd plugin, missing dependency, preset/tooling
       # mismatch) on the pull request that introduces it, rather than on the merge to main that
