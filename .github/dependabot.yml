@@ -25,6 +25,19 @@ updates:
           - "AwesomeAssertions"
           - "Polyfill"
           - "PublicApiGenerator"
+      # The same packages once more for security updates, which a group covers only when it says
+      # so: without this, a security bump of a test-only package arrives ungrouped as "Bump
+      # coverlet.collector from X to Y", no group name in the subject, and releases a patch
+      # (Bugbot on #281). The name keeps the `test-tooling` prefix the release rule matches on.
+      test-tooling-security:
+        applies-to: security-updates
+        patterns:
+          - "xunit*"
+          - "Microsoft.NET.Test.Sdk"
+          - "coverlet.*"
+          - "AwesomeAssertions"
+          - "Polyfill"
+          - "PublicApiGenerator"
     ignore:
       # CanKit is the upstream this product is built on; moving to a new version is a decision
       # about compatibility and testing, made by bumping CanKitVersion in eng/Dependencies.props.

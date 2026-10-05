@@ -67,6 +67,7 @@ if (analyzerOptions) {
   };
   await expectRelease('build(deps): Bump the test-tooling group with 1 update', null);
   await expectRelease('build(deps): Bump the test-tooling group across 1 directory with 2 updates', null);
+  await expectRelease('build(deps): Bump the test-tooling-security group with 1 update', null);
   await expectRelease('build(deps): Bump EdsDcfNet from 1.14.0 to 1.15.0', 'patch');
   await expectRelease('chore(deps): Bump the semantic-release group with 3 updates', null);
 }
