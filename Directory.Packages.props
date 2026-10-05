@@ -11,6 +11,10 @@
     <PackageVersion Include="CanKit.Abstractions" Version="$(CanKitVersion)" />
     <PackageVersion Include="CanKit.Core" Version="$(CanKitVersion)" />
     <PackageVersion Include="CanKit.Adapter.Virtual" Version="$(CanKitVersion)" />
+    <!-- The hardware adapters, referenced only by tools/CanKit.Pro.EchoProbe (a diagnostic tool, not shipped). -->
+    <PackageVersion Include="CanKit.Adapter.PCAN" Version="$(CanKitVersion)" />
+    <PackageVersion Include="CanKit.Adapter.Kvaser" Version="$(CanKitVersion)" />
+    <PackageVersion Include="CanKit.Adapter.Vector" Version="$(CanKitVersion)" />
   </ItemGroup>
 
   <ItemGroup Label="CiA 306 / CiA 311 device descriptions (MIT, the maintainer's own library)">
