@@ -9,7 +9,8 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// <summary>
 /// A real bus configurator with two values overridden: <see cref="Features"/> always includes
 /// <see cref="CanFeature.Echo"/>, and <see cref="WorkMode"/> is always
-/// <see cref="ChannelWorkMode.Echo"/>.
+/// <see cref="ChannelWorkMode.Echo"/> unless a test asks for another mode: Vector Classic
+/// declares the capability and flags its own TX event in Normal mode (#249).
 ///
 /// <para>
 /// <c>CanBusService.SendConfirmedAsync</c> branches on exactly those two, so a test that wants the
@@ -20,11 +21,12 @@ namespace CanKit.Pro.Tests.Infrastructure;
 /// configurator's values rather than invented ones.
 /// </para>
 /// </summary>
-internal sealed class EchoCapableOptions(IBusRTOptionsConfigurator inner) : IBusRTOptionsConfigurator
+internal sealed class EchoCapableOptions(IBusRTOptionsConfigurator inner, ChannelWorkMode workMode = ChannelWorkMode.Echo)
+    : IBusRTOptionsConfigurator
 {
     public CanFeature Features => inner.Features | CanFeature.Echo;
 
-    public ChannelWorkMode WorkMode => ChannelWorkMode.Echo;
+    public ChannelWorkMode WorkMode => workMode;
 
     public Capability Capabilities => inner.Capabilities;
 

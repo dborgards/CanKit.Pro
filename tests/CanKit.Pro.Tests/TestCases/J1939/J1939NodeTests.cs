@@ -409,6 +409,63 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the peer's claim is on the bus, and we did not re-announce ours at them");
     }
 
+    // The same bus, one claim: its grace handle is armed because a flagged echo might follow, and
+    // it must leave the node's list when it fires. Without that every claim answered on a bus that
+    // never echoes keeps one handle until Dispose (Codex on #287).
+    [Fact]
+    public async Task A_Fired_Claim_Echo_Grace_Handle_Is_Not_Kept()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.FlaggedEchoInNormalMode(NewSession());
+        bus.EchoAcceptedFrames = false;
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(new CanBusService(bus), new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = announce,
+        }, ownsService: true, actor);
+
+        var claim = node.ClaimAddressAsync(0x11);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(1);
+
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(0);
+    }
+
+    // A bus that declares the echo capability outside Echo mode, but never delivers one (SocketCAN
+    // and Kvaser in Normal mode): the claim is recorded in case a flagged echo follows (#249),
+    // and that marker may only be spent by a flagged frame. A peer with our NAME is never
+    // flagged, so it is still a contest, even while the marker is outstanding (#168).
+    [Fact]
+    public async Task A_Peer_With_Our_Name_Is_Not_Spent_On_A_Flagged_Only_Marker()
+    {
+        using var bus = ControllableBus.FlaggedEchoInNormalMode(NewSession());
+        bus.EchoAcceptedFrames = false;
+        var name = Name(1);
+        using var node = J1939Node.Open(bus, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        });
+
+        await node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+
+        var lost = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(e);
+        };
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, name.ToBytes()), isEcho: false);
+
+        var transition = await lost.Task.AsTaskWithTimeout(ShortTimeout);
+        transition.ContendingSourceAddress.Should().Be((byte)0x11);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+    }
+
     // Two CAs, one NAME, one SA (#168). The single-node inject above cannot see the case the
     // early return was papering over: each side's claim is the other's peer, and each side's
     // echo — when the bus has one — is its own. Neither NAME wins §4.4.3.3, so both finish
