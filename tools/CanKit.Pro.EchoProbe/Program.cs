@@ -521,12 +521,16 @@ internal static class Program
                 if (raw2.Sent < raw2.Attempted)
                     problems.Add($"{r.WorkMode}: only {raw2.Sent} of {raw2.Attempted} frames were accepted by the driver");
                 problems.AddRange(raw2.SendErrors.Select(e => $"{r.WorkMode}: send: {e}"));
+                if (raw2.SeenOnPeer < raw2.Sent)
+                    problems.Add($"{r.WorkMode}: peer B saw {raw2.SeenOnPeer} of {raw2.Sent} frames: the bus did not carry them (wiring, termination, bitrate, or a peer that cannot receive this frame format), so this row is not a measurement of A");
             }
 
             if (r.Confirmed is { } c2)
                 problems.AddRange(c2.Attempts.Where(a => !a.Confirmed).Select(a =>
                     $"{r.WorkMode}: SendConfirmedAsync not confirmed: reason {a.FailureReason}{(a.Error is null ? "" : ", " + a.Error)}"));
             if (r.Claim?.Error is { } claimError) problems.Add($"{r.WorkMode}: J1939 claim: {claimError}");
+            if (r.Claim is { ClaimFramesSeenByPeer: 0 } silent)
+                problems.Add($"{r.WorkMode}: J1939 claim: peer B saw 0 claim frames (state {silent.State}): the bus did not carry the claim, so this is not a measurement of A");
         }
 
         sb.AppendLine();
