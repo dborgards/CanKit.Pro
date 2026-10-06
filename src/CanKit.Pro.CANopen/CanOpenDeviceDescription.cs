@@ -73,47 +73,62 @@ public sealed class CanOpenDeviceDescription
     /// <summary>Reads an EDS or DCF file; the extension decides which (<c>.dcf</c> is a DCF,
     /// anything else an EDS).</summary>
     /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The file is not a readable
-    /// description, including one with a value the parser cannot evaluate: a <c>$NODEID</c>
-    /// formula in an integer header entry such as <c>VendorNumber</c>.</exception>
+    /// description. A <c>$NODEID</c> formula in an integer header entry such as
+    /// <c>VendorNumber</c> is not this failure on the default read: the description is returned
+    /// and the formula is recorded in <see cref="ParseDiagnostics"/>. Strict parsing still
+    /// throws.</exception>
     public static CanOpenDeviceDescription Load(string path)
+        => Load(path, options: null);
+
+    /// <summary>Parses EDS content.</summary>
+    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The content is not a readable
+    /// description, as for <see cref="Load(string)"/>.</exception>
+    public static CanOpenDeviceDescription ParseEds(string content)
+        => ParseEds(content, options: null);
+
+    /// <summary>Parses DCF content.</summary>
+    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The content is not a readable
+    /// description, as for <see cref="Load(string)"/>.</exception>
+    public static CanOpenDeviceDescription ParseDcf(string content)
+        => ParseDcf(content, options: null);
+
+    // The options overload exists so a caller (the tests) can set CanOpenFileOptions.StrictParsing.
+    // EdsDcfNet 1.15 reports a $NODEID formula in an integer header as a diagnostic unless that
+    // flag is set (eds-dcf-net#610); the public methods above keep the lenient default.
+    internal static CanOpenDeviceDescription Load(string path, CanOpenFileOptions? options)
     {
         if (path is null) throw new ArgumentNullException(nameof(path));
         if (string.Equals(Path.GetExtension(path), ".dcf", StringComparison.OrdinalIgnoreCase))
         {
-            var dcf = Read(() => CanOpenFile.Dcf.ReadFileWithDiagnostics(path));
+            var dcf = Read(() => CanOpenFile.Dcf.ReadFileWithDiagnostics(path, options));
             return new CanOpenDeviceDescription(null, dcf.Model, dcf.Diagnostics);
         }
-        var eds = Read(() => CanOpenFile.Eds.ReadFileWithDiagnostics(path));
+        var eds = Read(() => CanOpenFile.Eds.ReadFileWithDiagnostics(path, options));
         return new CanOpenDeviceDescription(eds.Model, null, eds.Diagnostics);
     }
 
-    /// <summary>Parses EDS content.</summary>
-    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The content is not a readable
-    /// description, as for <see cref="Load"/>.</exception>
-    public static CanOpenDeviceDescription ParseEds(string content)
+    internal static CanOpenDeviceDescription ParseEds(string content, CanOpenFileOptions? options)
     {
         var text = content ?? throw new ArgumentNullException(nameof(content));
-        var eds = Read(() => CanOpenFile.Eds.ReadStringWithDiagnostics(text));
+        var eds = Read(() => CanOpenFile.Eds.ReadStringWithDiagnostics(text, options));
         return new CanOpenDeviceDescription(eds.Model, null, eds.Diagnostics);
     }
 
-    /// <summary>Parses DCF content.</summary>
-    /// <exception cref="EdsDcfNet.Exceptions.EdsParseException">The content is not a readable
-    /// description, as for <see cref="Load"/>.</exception>
-    public static CanOpenDeviceDescription ParseDcf(string content)
+    internal static CanOpenDeviceDescription ParseDcf(string content, CanOpenFileOptions? options)
     {
         var text = content ?? throw new ArgumentNullException(nameof(content));
-        var dcf = Read(() => CanOpenFile.Dcf.ReadStringWithDiagnostics(text));
+        var dcf = Read(() => CanOpenFile.Dcf.ReadStringWithDiagnostics(text, options));
         return new CanOpenDeviceDescription(null, dcf.Model, dcf.Diagnostics);
     }
 
-    // EdsDcfNet throws NotSupportedException, not EdsParseException, for a $NODEID formula it
-    // cannot evaluate without a node ID -- in an integer header entry such as VendorNumber
-    // (dborgards/eds-dcf-net#577). To a caller that is one failure, "not a readable description",
-    // so it is reported as EdsParseException (#220) with the original as the inner exception.
-    // Only that failure is wrapped: opening the file can throw NotSupportedException too (an
-    // unsupported path syntax), and that is the caller's error, not a parse failure.
-    // Drop this when the parser reports it that way itself.
+    // A $NODEID formula in an integer header such as VendorNumber has no node ID to evaluate it
+    // with, so ValueConverter throws NotSupportedException (eds-dcf-net#577). EdsDcfNet 1.15 turns
+    // that into EdsParseException itself when StrictParsing is set, and into a diagnostic
+    // otherwise (eds-dcf-net#610); the NotSupportedException does not leave the reader. This
+    // wrapper remains for a NotSupportedException that still names $NODEID, so the caller sees one
+    // failure, EdsParseException (#220), with the original as the inner exception. Only that
+    // failure is wrapped: opening the file can throw NotSupportedException too (an unsupported
+    // path syntax), and that is the caller's error, not a parse failure.
     internal static T Read<T>(Func<T> read)
     {
         try
