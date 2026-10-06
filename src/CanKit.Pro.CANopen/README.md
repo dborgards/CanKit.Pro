@@ -635,7 +635,10 @@ node.StoreParameters();
 // FR-CO-002: 1000h:00, 1001h:00 and 1018h:00–04 are readable without a peer file.
 var value = await node.SdoUploadAsync(serverNodeId: 0x12, index: 0x1000, subindex: 0x00);
 
-// FR-CO-007: bring the network up as an NMT master (PDOs flow in Operational only).
+// FR-CO-007: bring the slaves up as an NMT master (PDOs flow in Operational only). A sender does
+// not obey its own frame on a real bus, so this does not start *this* node; whether a loopback
+// adapter echoes it back is an adapter detail and not something to rely on. This node enters
+// Operational through the self-start of 1F80h (bit 2) or by being the target of another master.
 await node.SendNmtCommandAsync(NmtCommand.Start, targetNodeId: 0);
 
 // Flying master (CiA 302-2 v4.1.0): priority 0 is the highest. The heartbeat

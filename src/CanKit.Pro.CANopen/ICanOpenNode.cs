@@ -170,9 +170,12 @@ public interface ICanOpenNode : IDisposable
 
     /// <summary>
     /// Sends an NMT master command (COB-ID <c>0x000</c>). <paramref name="targetNodeId"/>
-    /// zero means broadcast to all nodes. Applying the command to the local node (either
-    /// broadcast or targeting this node's own id) is expected to be handled by the receiver
-    /// via <see cref="NmtCommandReceived"/>.
+    /// zero means broadcast to all nodes. The sender does not apply the command to itself: a CAN
+    /// node does not receive its own frame, and this method does nothing beyond transmitting it.
+    /// On an adapter that echoes the frame back (a loopback, or hardware in an echo mode) the echo
+    /// reaches the receive path and the node obeys it there, via <see cref="NmtCommandReceived"/>;
+    /// that is a property of the adapter, and on a real bus a node leaves its own NMT state to
+    /// <c>1F80h</c> (self-start) or to another master.
     /// </summary>
     Task SendNmtCommandAsync(NmtCommand command, byte targetNodeId,
         CancellationToken cancellationToken = default);
