@@ -13,6 +13,7 @@ using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
+using EdsDcfNet;
 using EdsDcfNet.Exceptions;
 using Xunit;
 
@@ -515,11 +516,13 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
             .Should().Throw<ArgumentNullException>();
     }
 
-    // EdsDcfNet raises NotSupportedException, not EdsParseException, for a $NODEID formula in an
-    // integer header entry (eds-dcf-net#577): there is no node ID to evaluate it with. The loader
-    // reports it as the documented failure with the original as the inner exception (#220), on
-    // every way in: EDS and DCF, content and file. The rows also cover the forms around it: the
-    // bare name, an offset, and a dangling "+" the standard's grammar does not allow.
+    // EdsDcfNet 1.15 no longer throws for a $NODEID formula in an integer header entry on a
+    // lenient read (eds-dcf-net#610): the model comes back and the formula is a diagnostic.
+    // Strict parsing still throws EdsParseException. The cause is the NotSupportedException from
+    // eds-dcf-net#577 (there is no node ID to evaluate the formula with); the reader keeps that
+    // as an inner exception (#220). Covered on every way in: EDS and DCF, content and file. The
+    // rows also cover the forms around it: the bare name, an offset, and a dangling "+" the
+    // standard's grammar does not allow.
     [Theory]
     [InlineData("$NODEID", false)]
     [InlineData("$NODEID+0x10", false)]
@@ -531,21 +534,35 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
             "(?m)^VendorNumber=.*$", "VendorNumber=" + vendorNumber);
         text.Should().Contain("VendorNumber=" + vendorNumber, "the replacement must have taken effect");
 
-        Action parse = () => _ = isDcf ? CanOpenDeviceDescription.ParseDcf(text) : CanOpenDeviceDescription.ParseEds(text);
+        var strict = new CanOpenFileOptions { StrictParsing = true };
+        Action parse = () => _ = isDcf
+            ? CanOpenDeviceDescription.ParseDcf(text, strict)
+            : CanOpenDeviceDescription.ParseEds(text, strict);
         var thrown = parse.Should().Throw<EdsParseException>().Which;
-        thrown.InnerException.Should().BeOfType<NotSupportedException>("the original is kept");
         thrown.Message.Should().Contain("$NODEID");
+        OriginalNodeIdFailure(thrown).Should().BeOfType<NotSupportedException>("the original is kept");
 
         var path = Path.GetTempPath() + Guid.NewGuid().ToString("N") + (isDcf ? ".dcf" : ".eds");
         File.WriteAllText(path, text);
         try
         {
-            Action load = () => _ = CanOpenDeviceDescription.Load(path);
-            load.Should().Throw<EdsParseException>().Which.InnerException.Should().BeOfType<NotSupportedException>();
+            Action load = () => _ = CanOpenDeviceDescription.Load(path, strict);
+            var loaded = load.Should().Throw<EdsParseException>().Which;
+            OriginalNodeIdFailure(loaded).Should().BeOfType<NotSupportedException>();
         }
         finally
         {
             File.Delete(path);
         }
+    }
+
+    // EdsDcfNet wraps the NotSupportedException in EdsParseException before it attaches the
+    // section and the diagnostic code, so the original is not the immediate InnerException.
+    private static Exception? OriginalNodeIdFailure(Exception thrown)
+    {
+        Exception? cause = thrown;
+        while (cause is not null && cause is not NotSupportedException)
+            cause = cause.InnerException;
+        return cause;
     }
 }
