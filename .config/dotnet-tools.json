@@ -4,12 +4,16 @@
   "tools": {
     "gitversion.tool": {
       "version": "6.8.2",
-      "commands": ["dotnet-gitversion"],
+      "commands": [
+        "dotnet-gitversion"
+      ],
       "rollForward": false
     },
     "defaultdocumentation.console": {
-      "version": "1.2.5",
-      "commands": ["defaultdocumentation"],
+      "version": "1.2.6",
+      "commands": [
+        "defaultdocumentation"
+      ],
       "rollForward": true
     }
   }
