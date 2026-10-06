@@ -7,7 +7,7 @@ using Xunit;
 namespace CanKit.Pro.Tests.Infrastructure;
 
 /// <summary>
-/// Which of the two echo worlds a test is running in (#94).
+/// Which of the echo worlds a test is running in (#94).
 /// </summary>
 /// <remarks>
 /// An adapter in <see cref="ChannelWorkMode.Echo"/> hands a sender its own frames back. Whether it
@@ -33,6 +33,14 @@ public enum EchoWorld
     /// no-op and only an identity check on the frame itself can tell self from peer.
     /// </summary>
     Unflagged,
+
+    /// <summary>
+    /// The adapter is not in <see cref="ChannelWorkMode.Echo"/>, declares the echo capability and
+    /// still delivers its own transmit flagged — Vector Classic in Normal mode, read from the
+    /// adapter source, not measured (#249). Modelled by
+    /// <see cref="ControllableBus.FlaggedEchoInNormalMode"/>.
+    /// </summary>
+    FlaggedNormal,
 }
 
 /// <summary>
@@ -63,7 +71,7 @@ public sealed class EchoWorldFixture : IDisposable
     }
 
     /// <summary>Both worlds, for a <c>[Theory]</c> that must hold in each.</summary>
-    public static TheoryData<EchoWorld> Both => new() { EchoWorld.Flagging, EchoWorld.Unflagged };
+    public static TheoryData<EchoWorld> Both => new() { EchoWorld.Flagging, EchoWorld.Unflagged, EchoWorld.FlaggedNormal };
 
     public EchoWorld World { get; }
 
@@ -77,6 +85,9 @@ public sealed class EchoWorldFixture : IDisposable
             case EchoWorld.Flagging:
                 var controllable = ControllableBus.EchoCapable(session);
                 return new EchoWorldFixture(world, controllable, controllable, peerBus: null);
+            case EchoWorld.FlaggedNormal:
+                var normal = ControllableBus.FlaggedEchoInNormalMode(session);
+                return new EchoWorldFixture(world, normal, normal, peerBus: null);
             case EchoWorld.Unflagged:
                 var own = VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo);
                 var peer = VirtualAdapterFixture.Open(session, 1, ChannelWorkMode.Echo);

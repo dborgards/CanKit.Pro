@@ -61,10 +61,11 @@ public sealed class ControllableBus : ICanBus
     private readonly IBusRTOptionsConfigurator _options;
     private int _disposed;
 
-    private ControllableBus(ICanBus configurationSource, EchoDelivery echoDelivery, bool echoCapable = true)
+    private ControllableBus(ICanBus configurationSource, EchoDelivery echoDelivery, bool echoCapable = true,
+        ChannelWorkMode reportedWorkMode = ChannelWorkMode.Echo)
     {
         _configurationSource = configurationSource;
-        _options = echoCapable ? new EchoCapableOptions(configurationSource.Options) : configurationSource.Options;
+        _options = echoCapable ? new EchoCapableOptions(configurationSource.Options, reportedWorkMode) : configurationSource.Options;
         EchoMode = echoDelivery;
         DeferredEchoes = new DeferredEchoQueue(frame => RaiseObserved(frame, isEcho: true));
         // What a healthy CAN controller reports; tests move it from here.
@@ -79,6 +80,15 @@ public sealed class ControllableBus : ICanBus
     /// </summary>
     public static ControllableBus EchoCapable(string session)
         => new(VirtualAdapterFixture.Open(session, 0, ChannelWorkMode.Echo), EchoDelivery.Synchronous);
+
+    /// <summary>
+    /// Declares <c>CanFeature.Echo</c> but reports <c>ChannelWorkMode.Normal</c>, and still raises
+    /// every accepted transmit flagged as an echo: Vector Classic delivers its own TX event that
+    /// way in Normal mode (#249). <c>SendConfirmedAsync</c> takes the approximated path here.
+    /// </summary>
+    public static ControllableBus FlaggedEchoInNormalMode(string session)
+        => new(VirtualAdapterFixture.Open(session, 0), EchoDelivery.Synchronous,
+            reportedWorkMode: ChannelWorkMode.Normal);
 
     /// <summary>
     /// Same echo-capable configuration as <see cref="EchoCapable"/>, but every accepted transmit's

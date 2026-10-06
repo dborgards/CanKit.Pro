@@ -704,7 +704,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 $"J1939 address claim TX failed for SA 0x{preferredAddress:X2}.", error));
     }
 
-    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload)
+    private void HandleIncomingAddressClaim(uint canId, byte peerSa, byte[] payload, bool isEcho)
     {
         if (payload.Length < 8) return; // malformed
         var peerName = J1939Name.FromBytes(payload); // the wire order, not the host's (#55)
@@ -721,7 +721,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
         // claim (#23). One identical frame still outstanding is the echo; the next one is the
         // peer. Do not go back to dropping every equal NAME on the assumption that the echo
         // gate covers this.
-        if (BusEchoesOwnTransmits && TryTakeClaimEcho(canId, payload)) return;
+        //
+        // A frame the adapter flags as an echo is one too in Normal mode: Vector Classic delivers
+        // its own TX event flagged there (#249). Such a marker is only spent by a flagged frame,
+        // so a peer's identical claim, which is never flagged, is still arbitrated.
+        if (TryTakeClaimEcho(canId, payload, isEcho)) return;
 
         // A peer at SA=0xFE announces Cannot-Claim. Not directly relevant to *us* unless we
         // are in the middle of claiming — in which case a Cannot-Claim cannot contest us
@@ -868,6 +872,13 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private bool BusEchoesOwnTransmits =>
         _service.Bus.Options.WorkMode == ChannelWorkMode.Echo;
 
+    // An adapter that can flag an echo may do so outside Echo mode (Vector Classic delivers its
+    // own TX event, flagged, in Normal mode; measured on no hardware, read from the adapter
+    // source, #249). Whether one comes is not known up front, so such a claim is marked too, for
+    // a flagged frame only and for a bounded time.
+    private bool BusMayFlagEcho =>
+        _service.Bus.Options.Features.HasFlag(CanFeature.Echo);
+
     // The address we are claiming, or the one we hold. A peer on any other SA is not this contest.
     private bool ContestsOurAddress(byte peerSa)
     {
@@ -982,6 +993,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 return;
             }
 
+            // Confirmed without an echo of our own to match: a flagged echo, if this adapter
+            // delivers one outside Echo mode, may still follow.
+            if (echo is { FlaggedOnly: true }) NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
             try { _actor.Post(() => OnClaimAnnounceTxConfirmed(preferred)); }
             catch (ObjectDisposedException) { /* the node was disposed: no loop to tell */ }
         }
@@ -1017,18 +1031,19 @@ internal sealed class J1939NodeImpl : IJ1939Node
     private void WriteAddress(byte? address)
         => Volatile.Write(ref _addressStore, address.HasValue ? address.Value : -1);
 
-    // One Address Claim / Cannot Claim transmit on an echo-mode bus. Null when the bus does
-    // not echo: there is nothing to filter, and a recorded marker would later swallow the
-    // other CA's identical claim (#168). Actor loop only, same as the list it is added to.
+    // One Address Claim / Cannot Claim transmit on a bus that echoes, or may flag an echo outside
+    // Echo mode (FlaggedOnly). Null when neither: there is nothing to filter, and a recorded
+    // marker would later swallow the other CA's identical claim (#168). Actor loop only, same as the list it is added to.
     private ClaimEcho? RecordClaimEcho(uint canId, byte[] payload)
     {
-        if (!BusEchoesOwnTransmits) return null;
-        var echo = new ClaimEcho(canId, payload);
+        var echoMode = BusEchoesOwnTransmits;
+        if (!echoMode && !BusMayFlagEcho) return null;
+        var echo = new ClaimEcho(canId, payload) { FlaggedOnly = !echoMode };
         _claimEchoes.Add(echo);
         return echo;
     }
 
-    private bool TryTakeClaimEcho(uint canId, byte[] payload)
+    private bool TryTakeClaimEcho(uint canId, byte[] payload, bool isEcho)
     {
         // A live send is still waiting for its echo. Prefer that marker over an older one
         // whose confirm already timed out: otherwise the retry's echo is spent on the
@@ -1040,6 +1055,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         {
             var echo = _claimEchoes[i];
             if (!ClaimEchoMatches(echo, canId, payload)) continue;
+            if (echo.FlaggedOnly && !isEcho) continue;
             if (!echo.Lingering)
             {
                 DropClaimEchoAt(i);
@@ -1353,6 +1369,10 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 RaiseBackgroundException(new J1939NodeException(
                     $"J1939 frame TX failed (id=0x{canId:X8}): {confirmation.FailureReason}."));
             }
+            else if (echo is { FlaggedOnly: true })
+            {
+                NoteUnconfirmedClaimEcho(echo, mayStillEcho: true);
+            }
         }
         catch (Exception ex)
         {
@@ -1398,7 +1418,8 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 var payload = frame.Data.ToArray();
                 var isPdu1 = fields.IsPdu1;
                 var canId = (uint)frame.ID;
-                _actor.Post(() => HandleIncomingFrame(canId, pgn, priority, sa, da, isPdu1, payload));
+                var isEcho = frameEvent.IsEcho;
+                _actor.Post(() => HandleIncomingFrame(canId, pgn, priority, sa, da, isPdu1, payload, isEcho));
             }
         }
         catch (OperationCanceledException) { /* expected on Dispose */ }
@@ -1534,14 +1555,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
         return true;
     }
 
-    private void HandleIncomingFrame(uint canId, uint pgn, byte priority, byte sa, byte da, bool isPdu1, byte[] payload)
+    private void HandleIncomingFrame(uint canId, uint pgn, byte priority, byte sa, byte da, bool isPdu1, byte[] payload,
+        bool isEcho)
     {
         try
         {
             // Address Claim (PGN 0xEE00): drive the state machine and stop; not an application PGN.
             if (J1939Pgn.IsAddressClaim(pgn))
             {
-                HandleIncomingAddressClaim(canId, sa, payload);
+                HandleIncomingAddressClaim(canId, sa, payload, isEcho);
                 return;
             }
 
@@ -1782,6 +1804,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
         public uint CanId { get; }
         public byte[] Payload { get; }
         public bool Lingering { get; set; }
+
+        // Recorded outside Echo mode: only a frame the adapter flags as an echo may spend it.
+        public bool FlaggedOnly { get; init; }
         public IDeadline? Grace { get; set; }
     }
 
