@@ -409,6 +409,32 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the peer's claim is on the bus, and we did not re-announce ours at them");
     }
 
+    // The same bus, one claim: its grace handle is armed because a flagged echo might follow, and
+    // it must leave the node's list when it fires. Without that every claim answered on a bus that
+    // never echoes keeps one handle until Dispose (Codex on #287).
+    [Fact]
+    public async Task A_Fired_Claim_Echo_Grace_Handle_Is_Not_Kept()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.FlaggedEchoInNormalMode(NewSession());
+        bus.EchoAcceptedFrames = false;
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(new CanBusService(bus), new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = announce,
+        }, ownsService: true, actor);
+
+        var claim = node.ClaimAddressAsync(0x11);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(1);
+
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(0);
+    }
+
     // A bus that declares the echo capability outside Echo mode, but never delivers one (SocketCAN
     // and Kvaser in Normal mode): the claim is recorded in case a flagged echo follows (#249),
     // and that marker may only be spent by a flagged frame. A peer with our NAME is never

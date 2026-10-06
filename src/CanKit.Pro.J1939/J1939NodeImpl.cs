@@ -1103,14 +1103,30 @@ internal sealed class J1939NodeImpl : IJ1939Node
 
     private void ArmClaimEchoGrace(ClaimEcho echo)
     {
-        echo.Grace?.Dispose();
+        ReleaseClaimEchoGrace(echo);
         var grace = _deadlines.Arm(ClaimEchoGrace, () => OnClaimEchoGraceElapsed(echo));
         echo.Grace = grace;
         _claimEchoGraces.Add(grace);
     }
 
+    // A grace handle is dropped from the list once it has fired or been replaced. On a bus that
+    // declares the echo capability and never echoes, every confirmed claim send arms one, so a
+    // list that only Dispose empties would grow with every Request-for-Address-Claimed (Codex
+    // on #287).
+    private void ReleaseClaimEchoGrace(ClaimEcho echo)
+    {
+        if (echo.Grace is not { } grace) return;
+        grace.Dispose();
+        _claimEchoGraces.Remove(grace);
+        echo.Grace = null;
+    }
+
+    // Test seam: how many grace handles are still held. Actor loop only.
+    internal int ClaimEchoGraceCount => _claimEchoGraces.Count;
+
     private void OnClaimEchoGraceElapsed(ClaimEcho echo)
     {
+        ReleaseClaimEchoGrace(echo);
         if (!_claimEchoes.Contains(echo)) return;
         // A retry of the same frame is in flight. Retiring this marker now lets the late
         // echo spend the retry's, and the retry's own echo is then an equal-NAME peer.
@@ -1119,7 +1135,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
             ArmClaimEchoGrace(echo);
             return;
         }
-        echo.Grace = null;
         _claimEchoes.Remove(echo);
     }
 
