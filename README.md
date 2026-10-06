@@ -93,6 +93,8 @@ await foreach (var frame in isoTp.Frames.WithCancellation(token))
 
 // "Did it actually go out?" — a real echo match where the bus provides one, driver acceptance
 // otherwise, and flagged so you can tell which you got.
+// Echo matching needs an adapter that flags its own frames: PCAN and Kvaser (CanKit 0.5.6) do not
+// in Echo mode, so use Normal mode there (docs/reviews/2026-10-06-echo-hardware-measurements.md).
 var tx = await service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1, 2, 3 }));
 if (!tx.Confirmed) Console.WriteLine(tx.FailureReason);  // Timeout, BusOff or Rejected — never a hang
 

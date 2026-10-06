@@ -77,6 +77,23 @@ CanKit.Pro kept the half of that file it actually owns, the demultiplex-service 
   the Linux API.
 - ZLG and ControlCAN: freeing the auto-send index when a `PeriodicTx` constructor throws.
 
+## 6. Echo behaviour that does not match the contract (measured, #249)
+
+Evidence: [`reviews/2026-10-06-echo-hardware-measurements.md`](reviews/2026-10-06-echo-hardware-measurements.md).
+
+- **Kvaser** (`KvaserBus.cs`, notify mask): the callback is registered with `canNOTIFY_RX` (and
+  `canNOTIFY_ERROR`) only, although `canIOCTL_SET_TXACK` is switched on. TX acknowledgements are
+  reported with `canNOTIFY_TX` (0x2), which `Canlib.cs` does not define. Measured on a Leaf Light
+  v2: with mask 0x3 three callbacks for three sends, with 0x1 none; in Echo mode a quiet bus
+  delivers no own frame at all. Proposal: define `canNOTIFY_TX` and add it to the mask when the
+  channel is in Echo mode.
+- **PCAN** (`PcanBus.cs`, `PcanClassicTransceiver.cs`): in Echo mode (`AllowEchoFrames`) the own
+  frames arrive but without `IsEcho` set. Measured on a PCAN USB Pro FD, classic and FD. Proposal:
+  set `IsEcho` for frames received with the self-receive message type.
+- **Vector** (not measured, from source): Classic drops its own TX event in Echo mode
+  (`if (recEcho && isEcho) return`) and delivers it flagged in Normal mode; FD never delivers it.
+  Needs a measurement on hardware before it is reported.
+
 ## How to use this list
 
 Each item is a self-contained change with its own commits in the legacy repository's `develop`
