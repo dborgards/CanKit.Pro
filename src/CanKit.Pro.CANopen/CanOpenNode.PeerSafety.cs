@@ -14,6 +14,10 @@ namespace CanKit.Pro.CANopen;
 /// transfer is a client SDO through the peer gate (FR-CO-029).</summary>
 internal sealed partial class CanOpenNode
 {
+    /// <summary>Test seam: awaited between the readback and the 13FEh = A5h write of a
+    /// configuration — the gap in which another write would stale the acknowledged checksum.</summary>
+    internal Func<Task>? AfterSafetyReadbackForTests { get; set; }
+
     public async Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration,
         CancellationToken cancellationToken = default)
     {
@@ -24,8 +28,9 @@ internal sealed partial class CanOpenNode
         // Without a bound description the peer gate refuses the first transfer anyway.
         if (_peerDescriptions.TryGetValue(peerNodeId, out var description))
             EnsureMappingsFitDescription(configuration, description); // before the first frame
-        // The peer's SDO channel, for the whole transaction: no other SDO call of this node reaches
-        // the peer between two of its transfers. Every transfer below is a ...CoreAsync one.
+        // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
+        // then held, so another SDO call of this node to the peer is refused as in flight until the
+        // transaction ends. Every transfer below is a ...CoreAsync one.
         var gate = PeerSdoChannel(peerNodeId);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -39,6 +44,7 @@ internal sealed partial class CanOpenNode
             // "read all safety-relevant parameter incl. checksums back" — "compared"
             var mismatches = await CompareAsync(peerNodeId, writes, cancellationToken).ConfigureAwait(false);
             if (mismatches.Count > 0) return new PeerSafetyResult(false, mismatches);
+            if (AfterSafetyReadbackForTests is { } pause) await pause().ConfigureAwait(false);
             // "configuration acknowledged"
             var valid = new[] { SrdoRecords.ConfigurationValidValue };
             await SdoDownloadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, valid, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
@@ -60,8 +66,9 @@ internal sealed partial class CanOpenNode
         if (expected is null) throw new ArgumentNullException(nameof(expected));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(expected); // before the first frame
-        // The peer's SDO channel, for the whole transaction: no other SDO call of this node reaches
-        // the peer between two of its transfers. Every transfer below is a ...CoreAsync one.
+        // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
+        // then held, so another SDO call of this node to the peer is refused as in flight until the
+        // transaction ends. Every transfer below is a ...CoreAsync one.
         var gate = PeerSdoChannel(peerNodeId);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try

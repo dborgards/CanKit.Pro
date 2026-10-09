@@ -10,10 +10,12 @@ internal sealed partial class CanOpenNode
 {
     private readonly ConcurrentDictionary<byte, CanOpenDeviceDescription> _peerDescriptions = new();
 
-    // One SDO channel per peer. A public SDO call holds it for the length of the call, a safety
-    // transaction (ConfigurePeerSafetyAsync, VerifyPeerSafetyConfigurationAsync) for the whole
-    // transaction: nothing else of this node reaches that peer between two of its transfers. Not
-    // re-entrant — a path holding it calls the ...CoreAsync transfers, never the public ones.
+    // One SDO channel per peer. A public SDO call takes it for the length of the call without
+    // waiting — a busy channel is the "already in flight" refusal callers have always had; a
+    // safety transaction (ConfigurePeerSafetyAsync, VerifyPeerSafetyConfigurationAsync) waits for
+    // it and holds it for the whole transaction, so a call during the transaction is refused as in
+    // flight and nothing reaches the peer between two of its transfers. Not re-entrant — a path
+    // holding it calls the ...CoreAsync transfers, never the public ones.
     private readonly ConcurrentDictionary<byte, SemaphoreSlim> _peerSdoChannels = new();
 
     private SemaphoreSlim PeerSdoChannel(byte serverNodeId)
@@ -22,24 +24,20 @@ internal sealed partial class CanOpenNode
     /// <summary>Test seam, any thread: whether nothing holds the peer's SDO channel.</summary>
     internal bool PeerSdoChannelIsFreeForTests(byte serverNodeId) => PeerSdoChannel(serverNodeId).CurrentCount == 1;
 
-    /// <summary>Runs <paramref name="transfer"/> holding the peer's SDO channel; the wait honours
-    /// <paramref name="cancellationToken"/>. The transfer gets the release, which runs when it
-    /// ends — before its task completes (see <see cref="NewSdoTransfer"/>), so a caller that sees
-    /// the call completed finds the channel free. With the channel free the transfer starts at
-    /// once and a synchronous refusal is thrown synchronously, as before.</summary>
-    private Task<T> InPeerSdoChannelAsync<T>(byte serverNodeId, CancellationToken cancellationToken, Func<Action, Task<T>> transfer)
+    /// <summary>Runs <paramref name="transfer"/> holding the peer's SDO channel, taken without
+    /// waiting. A busy channel — a transfer in flight, or a safety transaction — fails the call with
+    /// the "already in flight" refusal before anything reaches the bus. The transfer gets the
+    /// release, which runs when it ends and before its task completes (see
+    /// <see cref="NewSdoTransfer"/>): a caller that has seen a call complete finds the channel free
+    /// for its next one.</summary>
+    private static Task<T> InPeerSdoChannelAsync<T>(byte serverNodeId, SemaphoreSlim channel, Func<Action, Task<T>> transfer)
     {
-        var channel = PeerSdoChannel(serverNodeId);
-        var wait = channel.WaitAsync(cancellationToken);
-        return wait.Status == TaskStatus.RanToCompletion
-            ? StartHoldingChannel(channel, transfer)
-            : WaitThenStartAsync(channel, wait, transfer);
-    }
-
-    private static async Task<T> WaitThenStartAsync<T>(SemaphoreSlim channel, Task wait, Func<Action, Task<T>> transfer)
-    {
-        await wait.ConfigureAwait(false);
-        return await StartHoldingChannel(channel, transfer).ConfigureAwait(false);
+        if (!channel.Wait(0))
+        {
+            return Task.FromException<T>(new InvalidOperationException(
+                $"An SDO transfer with server 0x{serverNodeId:X2} is already in flight."));
+        }
+        return StartHoldingChannel(channel, transfer);
     }
 
     /// <summary>Starts <paramref name="transfer"/> with the channel held; the release it is given
@@ -98,24 +96,6 @@ internal sealed partial class CanOpenNode
         }, (outcome, onEnded), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         handedOut = outcome.Task;
         return transfer;
-    }
-
-    /// <summary>An upload for the observers (ObserveForeignPdoAsync, ObserveForeignSrdoAsync): it
-    /// does not wait for the peer's SDO channel. A busy channel — another SDO call or a safety
-    /// transaction with that peer — is reported as the "already in flight" refusal, which the
-    /// observers take as a live read that is unavailable and fall back to the file (FR-CO-030).</summary>
-    private Task<byte[]> SdoUploadForObserverAsync(byte serverNodeId, ushort index, byte subindex, CancellationToken cancellationToken)
-    {
-        ThrowIfDisposed();
-        CanOpenCobId.ValidateNodeId(serverNodeId);
-        EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        var channel = PeerSdoChannel(serverNodeId);
-        if (!channel.Wait(0))
-        {
-            return Task.FromException<byte[]>(new InvalidOperationException(
-                $"An SDO transfer with server 0x{serverNodeId:X2} is already in flight."));
-        }
-        return StartHoldingChannel(channel, release => SdoUploadCoreAsync(serverNodeId, index, subindex, Sdo.SdoTransferMode.Auto, cancellationToken, release));
     }
 
     /// <inheritdoc />

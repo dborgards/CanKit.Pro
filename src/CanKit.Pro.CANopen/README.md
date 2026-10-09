@@ -260,10 +260,10 @@ is not built.
 
 ## SDO client and a peer's device description
 
-Calls to one server are serialised: an SDO call waits for the previous call to that server, and
-for a safety transaction with it (`ConfigurePeerSafetyAsync`, `VerifyPeerSafetyConfigurationAsync`),
-to end — the wait honours the call's cancellation token — instead of failing because a transfer
-is in flight. Calls to different servers do not wait for each other.
+One transfer per server is in flight at a time: a call to a server with a transfer in flight
+fails with `InvalidOperationException` ("already in flight") before anything is sent. A safety
+transaction with that server (`ConfigurePeerSafetyAsync`, `VerifyPeerSafetyConfigurationAsync`)
+counts as a transfer in flight for its whole length. Calls to different servers are independent.
 
 `SdoUploadAsync` and `SdoDownloadAsync` do not accept an arbitrary index. Before any frame is
 sent they check a peer EDS or DCF bound for that server:
@@ -749,7 +749,7 @@ result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates
 every such write clears it; an abort before that — for example `0800 0022h` from an Operational
 peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
-One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: another SDO call of this node to that peer waits until it has ended, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges).
+One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges).
 
 ### Verifying, and the boot-up
 

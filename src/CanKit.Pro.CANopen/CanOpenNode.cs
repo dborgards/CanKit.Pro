@@ -560,7 +560,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CanOpenCobId.ValidateNodeId(serverNodeId);
         ValidateTransferMode(mode, nameof(mode));
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        return InPeerSdoChannelAsync(serverNodeId, cancellationToken,
+        return InPeerSdoChannelAsync(serverNodeId, PeerSdoChannel(serverNodeId),
             release => SdoUploadCoreAsync(serverNodeId, index, subindex, mode, cancellationToken, release));
     }
 
@@ -625,7 +625,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var payload = data.ToArray();
-        return InPeerSdoChannelAsync(serverNodeId, cancellationToken,
+        return InPeerSdoChannelAsync(serverNodeId, PeerSdoChannel(serverNodeId),
             release => SdoDownloadCoreAsync(serverNodeId, index, subindex, payload, mode, cancellationToken, release));
     }
 
