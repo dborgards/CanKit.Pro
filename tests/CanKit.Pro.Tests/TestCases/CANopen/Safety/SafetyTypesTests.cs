@@ -33,6 +33,34 @@ public class SafetyTypesTests
         Assert.Throws<ArgumentOutOfRangeException>(() => CanOpenCobId.SrdoDefaultCobId2(nodeId));
     }
 
+    /// <summary>An entry with the given fields, built past the constructor's check the way
+    /// <c>default(PdoMappingEntry)</c> is: a struct can carry any width.</summary>
+    internal static PdoMappingEntry UncheckedEntry(ushort index, byte subindex, byte bitLength)
+    {
+        object boxed = default(PdoMappingEntry);
+        foreach (var (name, value) in new (string, object)[] { ("Index", index), ("Subindex", subindex), ("BitLength", bitLength) })
+            typeof(PdoMappingEntry).GetField($"<{name}>k__BackingField", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(boxed, value);
+        return (PdoMappingEntry)boxed;
+    }
+
+    /// <summary>The entry overload applies the width rule of the other one: a struct passed in
+    /// as <c>default</c>, or built past its constructor, is refused and the mapping is unchanged.</summary>
+    [Theory]
+    [InlineData((ushort)0x0000, (byte)0, (byte)0)]   // default(PdoMappingEntry)
+    [InlineData((ushort)0x2001, (byte)0, (byte)0)]
+    [InlineData((ushort)0x2001, (byte)0, (byte)12)]
+    [InlineData((ushort)0x2001, (byte)0, (byte)72)]
+    public void Mapping_Refuses_An_Entry_Of_A_Width_The_Constructor_Would_Refuse(ushort index, byte subindex, byte bitLength)
+    {
+        var entry = index == 0 ? default : UncheckedEntry(index, subindex, bitLength);
+        entry.BitLength.Should().Be(bitLength);
+        var mapping = new SrdoMapping().Add(0x2000, 0x00, 16);
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => mapping.Add(entry));
+        ex.ParamName.Should().Be("entry");
+        mapping.Entries.Should().ContainSingle().Which.Index.Should().Be((ushort)0x2000, "nothing was added");
+        mapping.TotalBytes.Should().Be(2);
+    }
+
     [Fact]
     public void Mapping_Holds_At_Most_Eight_Byte_Aligned_Objects()
     {

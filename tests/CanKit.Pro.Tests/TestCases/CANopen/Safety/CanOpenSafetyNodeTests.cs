@@ -569,6 +569,31 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.Invoking(s => s.GetSrdoState(1)).Should().Throw<ObjectDisposedException>();
     }
 
+    /// <summary>A mapping that cannot be built does not reach the record: the configured SRDO
+    /// survives the attempt instead of being deleted first and then left without a mapping.</summary>
+    [Fact]
+    public void A_Configured_Srdo_Survives_An_Attempt_With_A_Zero_Width_Entry()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Producer, clock, srdoCount: 1);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 1).Should().Be(1u);
+
+        var ex = Record.Exception(() => safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(default(PdoMappingEntry)), TimeSpan.FromMilliseconds(30)));
+        ex.Should().BeOfType<ArgumentOutOfRangeException>();
+        od.ReadUnsigned(0x1301, 1).Should().Be(1u, "the SRDO still exists");
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u);
+        od.ReadUnsigned(0x1381, 0).Should().Be(2u);
+        od.ReadUnsigned(0x1381, 1).Should().Be(0x2001_0008u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing was written, so the configuration is still valid");
+    }
+
     private static async Task AwaitSrdoChainAsync(CanOpenNode node)
     {
         Task chain = Task.CompletedTask;

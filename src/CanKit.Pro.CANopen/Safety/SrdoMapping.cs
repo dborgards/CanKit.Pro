@@ -45,6 +45,11 @@ public sealed class SrdoMapping
     /// <inheritdoc cref="Add(ushort, byte, byte)"/>
     public SrdoMapping Add(PdoMappingEntry entry)
     {
+        // The entry is a struct: default(PdoMappingEntry) has never passed its constructor, so the
+        // width rule is applied here again — a 0-bit entry would add no bytes and pass the rest.
+        if (entry.BitLength == 0 || entry.BitLength > 64 || entry.BitLength % 8 != 0)
+            throw new ArgumentOutOfRangeException(nameof(entry), entry.BitLength,
+                "An SRDO mapping entry is a byte multiple of 8..64 bits (CiA DSP 304 §8.4.2.3).");
         if (entry.IsDummy) throw new InvalidOperationException("An SRDO mapping carries no dummy entries.");
         if (_entries.Count >= MaxEntries) throw new InvalidOperationException($"An SRDO mapping holds at most {MaxEntries} entries.");
         if (TotalBytes + entry.ByteLength > 8) throw new InvalidOperationException("An SRDO carries at most 8 bytes of plain data (§8.1.3.1).");
