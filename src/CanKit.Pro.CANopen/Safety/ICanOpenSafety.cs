@@ -1,0 +1,67 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace CanKit.Pro.CANopen.Safety;
+
+/// <summary>
+/// CANopen Safety (CiA DSP 304 V1.0) on a node: the SRDOs it produces and consumes, the global
+/// failsafe command, and — for a master or tool — the configuration and verification of a
+/// peer's safety parameters. Reached through <see cref="CanOpenSafetyExtensions.Safety"/>.
+/// A node has SRDOs only when opened with <see cref="CanOpenNodeOptions.SrdoCount"/> &gt; 0 or
+/// a device description that declares them.
+/// </summary>
+/// <remarks>
+/// This library is not developed to IEC 61508 / DIN V VDE 0801 and claims no safety integrity
+/// level. It implements the data transport of DSP 304 V1.0 — the frame pair, the timing checks,
+/// the objects, the checksum — and leaves the diverse redundancy of §9.5 ("built by two
+/// different ways", "compared … in the application") and the safe state to the device.
+/// </remarks>
+public interface ICanOpenSafety
+{
+    /// <summary>The number of SRDO records this node holds (0..64).</summary>
+    int SrdoCount { get; }
+
+    /// <summary>Writes record <paramref name="srdoNumber"/> as a producer: direction tx,
+    /// refresh time, the mapping (plain and inverted sub-indices), the COB-IDs — the
+    /// pre-defined pair of Table 4 for SRDO 1 of a node-id ≤ 64 when none is given. The SRDO
+    /// is deleted first and created last, as §8.4.2.2 requires for a mapping change. Writes
+    /// <c>13FEh</c> to 0; call <see cref="CommitSafetyConfiguration"/> afterwards.</summary>
+    /// <exception cref="InvalidOperationException">The node has no SRDOs, or is Operational (0800 0022h).</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The number is not 1..<see cref="SrdoCount"/>, or a time is out of range.</exception>
+    /// <exception cref="ArgumentException">A value the dictionary refused (the abort code is in the message), or no COB-ID for a node-id above 64.</exception>
+    void ConfigureSrdoProducer(int srdoNumber, SrdoMapping mapping, TimeSpan refreshTime, uint? cobId1 = null, uint? cobId2 = null);
+
+    /// <summary>Writes record <paramref name="srdoNumber"/> as a consumer: direction rx, SCT,
+    /// SRVT, mapping and COB-IDs. See <see cref="ConfigureSrdoProducer"/> for the rest.</summary>
+    void ConfigureSrdoConsumer(int srdoNumber, SrdoMapping mapping, TimeSpan safeguardCycleTime, TimeSpan validationTime, uint? cobId1 = null, uint? cobId2 = null);
+
+    /// <summary>Sets the direction of the record to 0: the SRDO does not exist.</summary>
+    void DeleteSrdo(int srdoNumber);
+
+    /// <summary>§9.2 for a locally configured node: writes <c>13FFh:n</c> for every record and
+    /// then <c>13FEh</c> = A5h. Until this is called the configuration is not valid and no SRDO
+    /// runs in Operational.</summary>
+    void CommitSafetyConfiguration();
+
+    /// <summary>Transmits producer <paramref name="srdoNumber"/> now (§8.1, event-driven) and
+    /// restarts its refresh cycle. Nothing happens outside Operational.</summary>
+    Task TriggerSrdoAsync(int srdoNumber, CancellationToken cancellationToken = default);
+
+    /// <summary>The current validity of an SRDO.</summary>
+    SrdoState GetSrdoState(int srdoNumber);
+
+    /// <summary>Sends the global failsafe command (§8.2: COB-ID 001h, DLC 0). Requires
+    /// <c>1300h</c> = 1 and Operational.</summary>
+    /// <exception cref="InvalidOperationException">1300h is 0 or the node is not Operational.</exception>
+    Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>A consumer SRDO received a valid pair and wrote it to the mapped objects.</summary>
+    event EventHandler<SrdoReceivedEventArgs>? SrdoReceived;
+
+    /// <summary>An SRDO became valid or invalid (transitions only; never dropped).</summary>
+    event EventHandler<SrdoStateChangedEventArgs>? SrdoStateChanged;
+
+    /// <summary>A GFC arrived while <c>1300h</c> = 1 (including the node's own, on a bus that echoes).</summary>
+    event EventHandler<GlobalFailsafeCommandReceivedEventArgs>? GlobalFailsafeCommandReceived;
+}

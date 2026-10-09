@@ -461,7 +461,9 @@ internal sealed partial class CanOpenNode
         // thread and still inside the write gate, so that the writer's next write — the first
         // value of an object it has just mapped — is already seen, before the actor has rebuilt
         // the runtime (Codex on #133).
-        if (index is (>= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount) or (>= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount))
+        // A transmit SRDO record likewise: its mapped objects are change-of-state sources too.
+        if (index is (>= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount) or (>= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount)
+            || Safety.SrdoRecords.IsCommunicationRecord(index) || Safety.SrdoRecords.IsMappingRecord(index))
             RebuildCosRelevantEntries();
         // CiA DSP 304 §8.4.2.2, 13FEh: "After a write access to the safety-relevant parameter the
         // entry of object 13FEh is automatically 0". Still inside the write gate, so the next
@@ -540,11 +542,17 @@ internal sealed partial class CanOpenNode
             RebuildRpdo(n);
             RebuildTpdo(n);
         }
+        for (int n = 1; n <= _srdoCount; n++) _srdo.Rebuild(n);
     }
 
     private void ApplyCommunicationObject(ushort index, byte subindex)
     {
         if (_disposed != 0) return;
+        if (Safety.SrdoRecords.SrdoNumberOf(index) is { } srdo)
+        {
+            _srdo.Rebuild(srdo);
+            return;
+        }
         switch (index)
         {
             case Co.SyncCobId:
@@ -658,6 +666,8 @@ internal sealed partial class CanOpenNode
 
         if (previous == NmtState.Operational && target != NmtState.Operational) OnLeaveOperational();
         if (target == NmtState.Operational && previous != NmtState.Operational) OnEnterOperational();
+        if (previous == NmtState.Operational && target != NmtState.Operational) _srdo.LeaveOperational();
+        if (target == NmtState.Operational && previous != NmtState.Operational) _srdo.EnterOperational();
 
         if (target == NmtState.Stopped)
         {
@@ -698,7 +708,11 @@ internal sealed partial class CanOpenNode
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
         SuspendFlyingMasterForReset();
-        if (_state == NmtState.Operational) OnLeaveOperational();
+        if (_state == NmtState.Operational)
+        {
+            OnLeaveOperational();
+            _srdo.LeaveOperational();
+        }
         _state = NmtState.Initializing;
 
         if (_restoreDefaultsOnReset)

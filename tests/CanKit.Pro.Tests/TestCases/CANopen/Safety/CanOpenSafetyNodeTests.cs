@@ -1,0 +1,343 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using AwesomeAssertions;
+using CanKit.Abstractions.API.Can;
+using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core;
+using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
+using CanKit.Pro.CANopen.Safety;
+using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
+using CanKit.Pro.Tests.Infrastructure;
+using Xunit;
+
+namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
+
+/// <summary>Two nodes on the virtual bus: a producer and a consumer configured through
+/// <see cref="ICanOpenSafety"/>, and the master configuring the device over SDO. Wire-level
+/// expectations are awaited as positives; a negative is shown with an ordering witness
+/// (the heartbeat the node emits on an NMT transition, or a later SRDO pair).</summary>
+public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
+{
+    private const byte Producer = 0x11;
+    private const byte Consumer = 0x12;
+    private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
+
+    private static ICanBus Open(string session, int channel) => CanBus.Open(
+        $"virtual://{session}/{channel}",
+        cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
+
+    private static string NewSession() => VirtualAdapterFixture.NewSession("co-safety-node");
+
+    private static ICanOpenNode OpenClocked(ICanBus bus, byte nodeId, ManualTimeSource clock, int srdoCount = 2)
+        => new CanOpenNode(new CanBusService(bus), nodeId,
+            new CanOpenNodeOptions { SrdoCount = srdoCount, WritableCommunicationParameters = true }, ownsService: true, clock);
+
+    private static void Settle(ICanOpenNode node) { _ = node.State; _ = node.State; }
+    private static void Advance(ManualTimeSource clock, ICanOpenNode node, TimeSpan by) { Settle(node); clock.Advance(by); Settle(node); }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException(what);
+            await Task.Delay(5);
+        }
+    }
+
+    /// <summary>A raw channel that records data frames per COB-ID and sends NMT.</summary>
+    private sealed class Wire : IDisposable
+    {
+        private readonly ICanBus _bus;
+        private readonly object _gate = new();
+        private readonly Dictionary<uint, List<byte[]>> _frames = new();
+        public Wire(string session, int channel)
+        {
+            _bus = Open(session, channel);
+            _bus.FrameObserved += (_, e) =>
+            {
+                var f = e.CanFrame;
+                if (f.IsExtendedFrame || f.IsRemoteFrame) return;
+                lock (_gate)
+                {
+                    if (!_frames.TryGetValue((uint)f.ID, out var list)) _frames[(uint)f.ID] = list = new List<byte[]>();
+                    list.Add(f.Data.ToArray());
+                }
+            };
+        }
+        public int Count(uint cobId) { lock (_gate) return _frames.TryGetValue(cobId, out var l) ? l.Count : 0; }
+        public byte[][] Payloads(uint cobId) { lock (_gate) return _frames.TryGetValue(cobId, out var l) ? l.ToArray() : Array.Empty<byte[]>(); }
+        public Task WaitForCountAsync(uint cobId, int count) => WaitUntilAsync(() => Count(cobId) >= count, $"expected {count} frame(s) on 0x{cobId:X3}, saw {Count(cobId)}");
+        public void Transmit(uint cobId, byte[] data) => _bus.Transmit(CanFrame.Classic(unchecked((int)cobId), data, isExtendedFrame: false));
+        public void SendNmt(NmtCommand command, byte nodeId) => Transmit(CanOpenCobId.NmtCommand, new[] { (byte)command, nodeId });
+        public void Dispose() => _bus.Dispose();
+    }
+
+    private static void AddApplicationObjects(ObjectDictionary od)
+    {
+        od.AddU16(0x2000, 0x00, 0x1234);
+        od.AddU8(0x2001, 0x00, 0x5A);
+    }
+
+    [Fact]
+    public void Node_Without_Srdos_Is_Unchanged()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, Producer);
+        var safety = node.Safety();
+        safety.SrdoCount.Should().Be(0);
+        Assert.Throws<InvalidOperationException>(() => safety.ConfigureSrdoProducer(1, new SrdoMapping(), TimeSpan.FromMilliseconds(25)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => safety.GetSrdoState(1));
+    }
+
+    [Fact]
+    public void Safety_Of_A_Foreign_Node_Is_Not_Supported()
+    {
+        var foreign = new ForeignNode();
+        Assert.Throws<NotSupportedException>(() => foreign.Safety());
+    }
+
+    [Fact]
+    public async Task Configure_Commit_And_Transmit()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Producer, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 1).Should().Be(1u);
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u);
+        od.ReadUnsigned(0x1301, 5).Should().Be(0x0FFu + 2 * Producer);
+        od.ReadUnsigned(0x1381, 0).Should().Be(4u);
+        od.ReadUnsigned(0x1381, 4).Should().Be(0x2001_0008u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "not committed");
+        safety.CommitSafetyConfiguration();
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        SrdoRecords.TryReadCommunication(od, 1, out var p);
+        od.ReadUnsigned(0x13FF, 1).Should().Be(SrdoCrc.Compute(p, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, 1))));
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        safety.GetSrdoState(1).IsValid.Should().BeTrue();
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await wire.WaitForCountAsync(0x0FFu + 2 * Producer, 1);
+        await wire.WaitForCountAsync(0x100u + 2 * Producer, 1);
+        wire.Payloads(0x0FFu + 2 * Producer)[0].Should().Equal(0x34, 0x12, 0x5A);
+        wire.Payloads(0x100u + 2 * Producer)[0].Should().Equal(0xCB, 0xED, 0xA5);
+    }
+
+    [Fact]
+    public async Task Commit_Writes_Checksums_Then_Valid()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 2 });
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.ConfigureSrdoConsumer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(20), 0x125, 0x126);
+        safety.CommitSafetyConfiguration();
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "A5h is written after the checksums, which each clear it");
+        node.ObjectDictionary.ReadUnsigned(0x13FF, 2).Should().NotBe(0u);
+        await Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task Tampered_Checksum_Makes_The_Configuration_Invalid_At_Start()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Producer, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        var changes = new List<SrdoStateChangedEventArgs>();
+        safety.SrdoStateChanged += (_, e) => { lock (changes) changes.Add(e); };
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        node.ObjectDictionary.WriteUnsigned(0x13FF, 1, node.ObjectDictionary.ReadUnsigned(0x13FF, 1) ^ 1);
+        node.ObjectDictionary.WriteUnsigned(0x13FE, 0, 0xA5);
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(100)); // the witness: the state-change heartbeat
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        await wire.WaitForCountAsync(0x700u + Producer, 1);
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        wire.Count(0x0FFu + 2 * Producer).Should().Be(0, "§8.3.1 D: the safety node shall not transmit SRDOs");
+        await WaitUntilAsync(() => { lock (changes) return changes.Any(c => c.Reason == SrdoInvalidReason.ConfigurationInvalid); }, "state change");
+        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+    }
+
+    [Fact]
+    public async Task Configuration_Is_Refused_In_Operational()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Assert.Throws<InvalidOperationException>(() => safety.ConfigureSrdoProducer(1, new SrdoMapping(), TimeSpan.FromMilliseconds(25)));
+        Assert.Throws<InvalidOperationException>(() => safety.CommitSafetyConfiguration());
+        Assert.Throws<InvalidOperationException>(() => safety.DeleteSrdo(1));
+        var ex = Assert.Throws<ArgumentException>(() => node.ObjectDictionary.WriteUnsigned(0x1301, 2, 30));
+        ex.Message.Should().Contain("0x08000022");
+    }
+
+    [Fact]
+    public async Task Producer_And_Consumer_Exchange_An_Srdo()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var wire = new Wire(session, 3);
+        var clockA = new ManualTimeSource();
+        var clockB = new ManualTimeSource();
+        using var producer = OpenClocked(busA, Producer, clockA);
+        using var consumer = OpenClocked(busB, Consumer, clockB);
+        AddApplicationObjects(producer.ObjectDictionary);
+        consumer.ObjectDictionary.AddU16(0x3000, 0x00, 0);
+        consumer.ObjectDictionary.AddU8(0x3001, 0x00, 0);
+        producer.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        producer.Safety().CommitSafetyConfiguration();
+        var received = new List<SrdoReceivedEventArgs>();
+        consumer.Safety().SrdoReceived += (_, e) => { lock (received) received.Add(e); };
+        consumer.Safety().ConfigureSrdoConsumer(1, new SrdoMapping().Add(0x3000, 0x00, 16).Add(0x3001, 0x00, 8),
+            TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(20), CanOpenCobId.SrdoDefaultCobId1(Producer), CanOpenCobId.SrdoDefaultCobId2(Producer));
+        consumer.Safety().CommitSafetyConfiguration();
+        wire.SendNmt(NmtCommand.Start, 0);
+        await WaitUntilAsync(() => producer.State == NmtState.Operational && consumer.State == NmtState.Operational, "start");
+        Advance(clockA, producer, TimeSpan.FromMilliseconds(Producer));
+        await WaitUntilAsync(() => { lock (received) return received.Count >= 1; }, "SRDO received");
+        consumer.Safety().GetSrdoState(1).IsValid.Should().BeTrue();
+        consumer.ObjectDictionary.ReadUnsigned(0x3000, 0).Should().Be(0x1234u);
+        consumer.ObjectDictionary.ReadUnsigned(0x3001, 0).Should().Be(0x5Au);
+        received[0].CobId.Should().Be(CanOpenCobId.SrdoDefaultCobId1(Producer));
+        // Change of state: the application writes a mapped object, the producer transmits at once.
+        producer.ObjectDictionary.WriteUnsigned(0x2001, 0, 0x07);
+        await WaitUntilAsync(() => { lock (received) return received.Count >= 2; }, "CoS SRDO");
+        consumer.ObjectDictionary.ReadUnsigned(0x3001, 0).Should().Be(0x07u);
+        // The consumer's SCT runs on its own clock: 50 ms without a pair invalidates it.
+        Advance(clockB, consumer, TimeSpan.FromMilliseconds(50));
+        consumer.Safety().GetSrdoState(1).IsValid.Should().BeFalse();
+        consumer.Safety().GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.SafeguardCycleExpired);
+    }
+
+    [Fact]
+    public async Task Gfc_Round_Trip()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var wire = new Wire(session, 3);
+        using var sender = CanOpen.OpenNode(busA, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        using var receiver = CanOpen.OpenNode(busB, Consumer, new CanOpenNodeOptions { SrdoCount = 1 });
+        int gfcs = 0;
+        receiver.Safety().GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
+        receiver.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        wire.SendNmt(NmtCommand.Start, 0);
+        await WaitUntilAsync(() => sender.State == NmtState.Operational && receiver.State == NmtState.Operational, "start");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sender.Safety().SendGlobalFailsafeCommandAsync());
+        sender.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        await sender.Safety().SendGlobalFailsafeCommandAsync();
+        await wire.WaitForCountAsync(CanOpenCobId.GlobalFailsafeCommand, 1);
+        wire.Payloads(CanOpenCobId.GlobalFailsafeCommand)[0].Should().BeEmpty();
+        await WaitUntilAsync(() => Volatile.Read(ref gfcs) >= 1, "GFC received");
+    }
+
+    [Fact]
+    public async Task Reset_Communication_Restores_The_Safety_Objects()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30));
+        node.Safety().CommitSafetyConfiguration();
+        node.StoreParameters();
+        node.ObjectDictionary.WriteUnsigned(0x1301, 1, 0);
+        node.ObjectDictionary.WriteUnsigned(0x1301, 2, 40);
+        wire.SendNmt(NmtCommand.ResetCommunication, Producer);
+        await WaitUntilAsync(() => node.ObjectDictionary.ReadUnsigned(0x1301, 2) == 30, "restored");
+        node.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(1u);
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+    }
+
+    /// <summary>An ICanOpenNode this library did not create: every member throws.</summary>
+    private sealed class ForeignNode : ICanOpenNode
+    {
+        public byte NodeId => throw new NotImplementedException();
+        public CanOpenNodeOptions Options => throw new NotImplementedException();
+        public ObjectDictionary ObjectDictionary => throw new NotImplementedException();
+        public NmtState State => throw new NotImplementedException();
+        public DeviceDescriptionReport? DeviceDescription => throw new NotImplementedException();
+        public FlyingMasterRole FlyingMasterRole => throw new NotImplementedException();
+        public byte? ActiveFlyingMasterNodeId => throw new NotImplementedException();
+        public ushort? ActiveFlyingMasterPriority => throw new NotImplementedException();
+
+        public event EventHandler<HeartbeatReceivedEventArgs>? HeartbeatReceived { add { } remove { } }
+        public event EventHandler<HeartbeatTimeoutEventArgs>? HeartbeatTimeout { add { } remove { } }
+        public event EventHandler<EmcyReceivedEventArgs>? EmcyReceived { add { } remove { } }
+        public event EventHandler<SyncReceivedEventArgs>? SyncReceived { add { } remove { } }
+        public event EventHandler<RpdoReceivedEventArgs>? RpdoReceived { add { } remove { } }
+        public event EventHandler<NmtCommandReceivedEventArgs>? NmtCommandReceived { add { } remove { } }
+        public event EventHandler<NmtResetEventArgs>? ApplicationReset { add { } remove { } }
+        public event EventHandler<NodeGuardingReceivedEventArgs>? NodeGuardingReceived { add { } remove { } }
+        public event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout { add { } remove { } }
+        public event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent { add { } remove { } }
+        public event EventHandler<Exception>? BackgroundExceptionOccurred { add { } remove { } }
+        public event EventHandler<FlyingMasterChangedEventArgs>? FlyingMasterChanged { add { } remove { } }
+
+        public Task SendNmtCommandAsync(NmtCommand command, byte targetNodeId, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public void StartFlyingMaster(ushort priorityLevel, TimeSpan activeMasterHeartbeatTimeout) => throw new NotImplementedException();
+        public void StopFlyingMaster() => throw new NotImplementedException();
+        public void StartHeartbeatProducer(TimeSpan interval) => throw new NotImplementedException();
+        public void StopHeartbeatProducer() => throw new NotImplementedException();
+        public void AddHeartbeatConsumer(byte producerNodeId, TimeSpan timeout) => throw new NotImplementedException();
+        public void RemoveHeartbeatConsumer(byte producerNodeId) => throw new NotImplementedException();
+        public void StartSyncProducer(TimeSpan interval) => throw new NotImplementedException();
+        public void StopSyncProducer() => throw new NotImplementedException();
+        public Task SendSyncAsync(CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task SendEmcyAsync(ushort errorCode, byte errorRegister, ReadOnlyMemory<byte> manufacturerSpecific = default,
+            CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public void BindPeerDeviceDescription(byte nodeId, CanOpenDeviceDescription description) => throw new NotImplementedException();
+        public CanOpenDeviceDescription? GetPeerDeviceDescription(byte nodeId) => throw new NotImplementedException();
+        public void UnbindPeerDeviceDescription(byte nodeId) => throw new NotImplementedException();
+        public Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex, SdoTransferMode mode = SdoTransferMode.Auto,
+            CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, ReadOnlyMemory<byte> data,
+            CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, ReadOnlyMemory<byte> data,
+            SdoTransferMode mode = SdoTransferMode.Auto, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public void ConfigureTpdo(int pdoIndex, PdoMapping mapping, TpdoTransmission transmission = TpdoTransmission.EventDriven,
+            uint? cobId = null, TimeSpan? eventTimerInterval = null, TimeSpan? inhibitTime = null) => throw new NotImplementedException();
+        public void ConfigureRpdo(int pdoIndex, PdoMapping mapping, uint? cobId = null,
+            RpdoTransmission transmission = RpdoTransmission.EventDriven) => throw new NotImplementedException();
+        public Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default) => throw new NotImplementedException();
+        public Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId, ReadOnlyMemory<byte> payload,
+            CanOpenDeviceDescription peerDescription, IForeignPdoSink sink, CancellationToken cancellationToken = default)
+            => throw new NotImplementedException();
+        public void StoreParameters() => throw new NotImplementedException();
+        public void RestoreDefaultParameters() => throw new NotImplementedException();
+        public void StartNodeGuardingConsumer(byte producerNodeId, TimeSpan guardTime, byte lifeTimeFactor) => throw new NotImplementedException();
+        public void StopNodeGuardingConsumer(byte producerNodeId) => throw new NotImplementedException();
+        public void Dispose() => throw new NotImplementedException();
+    }
+}

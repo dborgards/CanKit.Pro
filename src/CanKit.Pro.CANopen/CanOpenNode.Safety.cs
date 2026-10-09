@@ -1,4 +1,7 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
+using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Safety;
@@ -12,7 +15,7 @@ namespace CanKit.Pro.CANopen;
 /// the safety facade and the wiring of the SRDO engine.
 /// Opt-in: with <c>_srdoCount == 0</c> none of this exists in the dictionary.
 /// </summary>
-internal sealed partial class CanOpenNode
+internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 {
     private readonly int _srdoCount;
 
@@ -215,5 +218,184 @@ internal sealed partial class CanOpenNode
         int fixedSize = OdEntryLayout.FixedSize(target.DataType);
         if (fixedSize > 0 && bitLength / 8 != fixedSize) return SdoAbortCode.ObjectCannotBeMapped;
         return null;
+    }
+
+    private readonly SrdoEngine _srdo;   // constructed in CanOpenNode's constructor, see below
+
+    // ---- ICanOpenSafety ----------------------------------------------------------------------
+
+    public event EventHandler<SrdoReceivedEventArgs>? SrdoReceived;
+    public event EventHandler<SrdoStateChangedEventArgs>? SrdoStateChanged;
+    public event EventHandler<GlobalFailsafeCommandReceivedEventArgs>? GlobalFailsafeCommandReceived;
+
+    public int SrdoCount => _srdoCount;
+
+    public void ConfigureSrdoProducer(int srdoNumber, SrdoMapping mapping, TimeSpan refreshTime, uint? cobId1 = null, uint? cobId2 = null)
+        => ConfigureSrdo(srdoNumber, SrdoDirection.Transmit, mapping, refreshTime, null, cobId1, cobId2, nameof(refreshTime));
+
+    public void ConfigureSrdoConsumer(int srdoNumber, SrdoMapping mapping, TimeSpan safeguardCycleTime, TimeSpan validationTime, uint? cobId1 = null, uint? cobId2 = null)
+        => ConfigureSrdo(srdoNumber, SrdoDirection.Receive, mapping, safeguardCycleTime, validationTime, cobId1, cobId2, nameof(safeguardCycleTime));
+
+    private void ConfigureSrdo(int srdoNumber, SrdoDirection direction, SrdoMapping mapping, TimeSpan cycle, TimeSpan? validation,
+        uint? cobId1, uint? cobId2, string cycleParamName)
+    {
+        ThrowIfDisposed();
+        RequireSrdo(srdoNumber);
+        if (mapping is null) throw new ArgumentNullException(nameof(mapping));
+        ushort cycleMs = ToMilliseconds16(cycle, cycleParamName, allowZero: false);
+        byte srvtMs = 0;
+        if (validation is { } v)
+        {
+            long ms = (long)Math.Round(v.TotalMilliseconds);
+            if (ms is < 1 or > byte.MaxValue)
+                throw new ArgumentOutOfRangeException(nameof(validation), v, "SRVT must be 1 ms .. 255 ms: 1301h:03 is an UNSIGNED8 in ms (CiA DSP 304 §8.4.2.2).");
+            srvtMs = (byte)ms;
+        }
+        uint id1 = cobId1 ?? (srdoNumber == 1 && _nodeId <= 64
+            ? CanOpenCobId.SrdoDefaultCobId1(_nodeId)
+            : throw new ArgumentException("No pre-defined COB-ID for this SRDO (only SRDO 1 of a node-id 1..64 has one, CiA DSP 304 §8.3.3); pass cobId1.", nameof(cobId1)));
+        uint id2 = cobId2 ?? id1 + 1;
+        RequireNotOperationalForSafetyWrite();
+        var entries = mapping.ToArray();
+        RunOnActorAndWait(() =>
+        {
+            var comm = SrdoRecords.CommIndex(srdoNumber);
+            var map = SrdoRecords.MapIndex(srdoNumber);
+            try
+            {
+                _od.Transaction(() =>
+                {
+                    _od.WriteUnsigned(comm, 0x01, 0);
+                    _od.WriteUnsigned(map, 0x00, 0);
+                    for (byte s = 1; s <= SrdoRecords.MappingSubindices; s++)
+                    {
+                        int i = (s - 1) / 2;
+                        _od.WriteUnsigned(map, s, i < entries.Length ? EncodeMappingEntry(entries[i]) : 0u);
+                    }
+                    _od.WriteUnsigned(map, 0x00, (uint)(2 * entries.Length));
+                    _od.WriteUnsigned(comm, 0x02, cycleMs);
+                    if (direction == SrdoDirection.Receive) _od.WriteUnsigned(comm, 0x03, srvtMs);
+                    _od.WriteUnsigned(comm, 0x05, id1);
+                    _od.WriteUnsigned(comm, 0x06, id2);
+                    _od.WriteUnsigned(comm, 0x01, (byte)direction);
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                throw new ArgumentException($"SRDO{srdoNumber} configuration rejected: {ex.Message}", ex);
+            }
+        });
+    }
+
+    public void DeleteSrdo(int srdoNumber)
+    {
+        ThrowIfDisposed();
+        RequireSrdo(srdoNumber);
+        RequireNotOperationalForSafetyWrite();
+        RunOnActorAndWait(() => _od.WriteUnsigned(SrdoRecords.CommIndex(srdoNumber), 0x01, 0));
+    }
+
+    public void CommitSafetyConfiguration()
+    {
+        ThrowIfDisposed();
+        if (_srdoCount == 0) throw NoSrdos();
+        RequireNotOperationalForSafetyWrite();
+        RunOnActorAndWait(() => _od.Transaction(() =>
+        {
+            // Every 13FFh:n write clears 13FEh, so the checksums go first and A5h last (§9.2).
+            for (int n = 1; n <= _srdoCount; n++)
+            {
+                ushort crc = 0;
+                if (SrdoRecords.TryReadCommunication(_od, n, out var p) && p.Direction != SrdoDirection.None)
+                    crc = SrdoCrc.Compute(p, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(_od, n)));
+                _od.WriteUnsigned(Co.SrdoChecksum, (byte)n, crc);
+            }
+            _od.WriteUnsigned(Co.SrdoConfigurationValid, 0x00, SrdoRecords.ConfigurationValidValue);
+        }));
+    }
+
+    public Task TriggerSrdoAsync(int srdoNumber, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        RequireSrdo(srdoNumber);
+        return _actor.PostAsync(() => _srdo.Trigger(srdoNumber), cancellationToken);
+    }
+
+    // Range check only (the engine's): a node without SRDOs has no number in range, which is an
+    // ArgumentOutOfRangeException like any other number outside 1..SrdoCount.
+    public SrdoState GetSrdoState(int srdoNumber) => _srdo.GetState(srdoNumber);
+
+    public Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return _actor.PostAsync(() =>
+        {
+            if (!_srdo.TrySendGfc())
+                throw new InvalidOperationException("The global failsafe command needs 1300h = 1 and NMT state Operational (CiA DSP 304 §8.2).");
+        }, cancellationToken);
+    }
+
+    private void RequireSrdo(int srdoNumber)
+    {
+        if (_srdoCount == 0) throw NoSrdos();
+        if (srdoNumber < 1 || srdoNumber > _srdoCount)
+            throw new ArgumentOutOfRangeException(nameof(srdoNumber), srdoNumber, $"SRDO number must be 1..{_srdoCount}.");
+    }
+
+    private static InvalidOperationException NoSrdos()
+        => new("This node has no SRDOs: open it with CanOpenNodeOptions.SrdoCount > 0 or with a device description that declares SRDO records.");
+
+    /// <summary>§8.3.2.4 note 1, surfaced as the exception the caller can act on; the validator
+    /// refuses the write with 0800 0022h as well, should the state change in between.</summary>
+    private void RequireNotOperationalForSafetyWrite()
+    {
+        if (_state == NmtState.Operational)
+            throw new InvalidOperationException("Safety parameters cannot be written in NMT state Operational (abort 0800 0022h, CiA DSP 304 §8.3.2.4).");
+    }
+
+    // ---- ISrdoEngineHost (actor loop) ----------------------------------------------------------
+
+    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _ = SendControlFrame(cobId, payload);
+
+    void ISrdoEngineHost.EmitEmcy(ushort errorCode)
+    {
+        if (!_emcyValid) return;
+        var errorRegister = (byte)_od.ReadUnsigned(Co.ErrorRegister, 0x00);
+        _ = EmitEmcy(new EmcyMessage(_nodeId, errorCode, errorRegister));
+    }
+
+    void ISrdoEngineHost.SrdoReceived(int srdoNumber, uint cobId, byte[] payload) => RaiseSrdoReceived(srdoNumber, cobId, payload);
+    void ISrdoEngineHost.SrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason) => RaiseSrdoStateChanged(srdoNumber, isValid, reason);
+    void ISrdoEngineHost.GlobalFailsafeCommandReceived() => RaiseGlobalFailsafeCommandReceived();
+    void ISrdoEngineHost.ReportBackgroundException(Exception exception) => RaiseBackgroundException(exception);
+
+    private void RaiseSrdoReceived(int srdoNumber, uint cobId, byte[] payload)
+    {
+        var args = new SrdoReceivedEventArgs(srdoNumber, cobId, payload, DateTime.UtcNow);
+        EnqueueEvent(() =>
+        {
+            try { DeliverToSubscribers(SrdoReceived, args); }
+            catch (Exception ex) { RaiseBackgroundException(ex); }
+        });
+    }
+
+    private void RaiseSrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason)
+    {
+        var args = new SrdoStateChangedEventArgs(srdoNumber, isValid, reason, DateTime.UtcNow);
+        EnqueueEvent(() =>
+        {
+            try { DeliverToSubscribers(SrdoStateChanged, args); }
+            catch (Exception ex) { RaiseBackgroundException(ex); }
+        }, critical: true, EventKey.SrdoState(srdoNumber, isValid, reason), emcyProducer: -1);
+    }
+
+    private void RaiseGlobalFailsafeCommandReceived()
+    {
+        var args = new GlobalFailsafeCommandReceivedEventArgs(DateTime.UtcNow);
+        EnqueueEvent(() =>
+        {
+            try { DeliverToSubscribers(GlobalFailsafeCommandReceived, args); }
+            catch (Exception ex) { RaiseBackgroundException(ex); }
+        }, critical: true, EventKey.GlobalFailsafeCommand(), emcyProducer: -1);
     }
 }
