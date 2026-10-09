@@ -239,6 +239,32 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Srdo_Change_Of_State_Does_Not_Trigger_A_Tpdo_When_Tpdo_CoS_Is_Off()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, EnableChangeOfStateTpdo = false }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        // One object, mapped in an event-driven TPDO and in a transmit SRDO.
+        node.ConfigureTpdo(1, new PdoMapping().Add(0x2001, 0x00, 8), TpdoTransmission.EventDriven);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        uint tpdo1 = 0x180u + Producer;
+        uint srdo1 = 0x0FFu + 2 * Producer;
+        node.ObjectDictionary.WriteUnsigned(0x2001, 0, 0x07);
+        await wire.WaitForCountAsync(srdo1, 1); // the SRDO's change of state still runs
+        // The witness: a TPDO the application requests afterwards, through the same send path.
+        await node.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(tpdo1, 1);
+        wire.Count(tpdo1).Should().Be(1, "EnableChangeOfStateTpdo = false: the write is no TPDO event");
+    }
+
+    [Fact]
     public async Task Gfc_Round_Trip()
     {
         var session = NewSession();
