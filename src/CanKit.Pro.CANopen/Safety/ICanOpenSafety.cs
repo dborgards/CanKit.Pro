@@ -68,6 +68,17 @@ public interface ICanOpenSafety
     /// the expected record) and the records themselves, and compares. Nothing is written.</summary>
     Task<PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, PeerSafetyConfiguration expected, CancellationToken cancellationToken = default);
 
+    /// <summary>Splits an SRDO pair of another node into <paramref name="sink"/>, like
+    /// <see cref="ICanOpenNode.ObserveForeignPdoAsync"/>: the record whose live 1301h–1340h:05
+    /// equals <paramref name="cobId1"/> (the file is the fallback when the upload fails), the
+    /// pair checked for equal length and bitwise inversion, the mapping read live from
+    /// 1381h–13C0h (odd sub-indices) or from the file. Signals carry
+    /// <see cref="ForeignPdoKind.Srdo"/> and the SRDO number. SRVT and SCT are the caller's to
+    /// judge: it holds the timestamps. Nothing is written to this node's dictionary.</summary>
+    Task<ForeignSrdoObserveResult> ObserveForeignSrdoAsync(byte peerNodeId, uint cobId1, ReadOnlyMemory<byte> frame1,
+        ReadOnlyMemory<byte> frame2, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
+        CancellationToken cancellationToken = default);
+
     /// <summary>A consumer SRDO received a valid pair and wrote it to the mapped objects.</summary>
     event EventHandler<SrdoReceivedEventArgs>? SrdoReceived;
 
