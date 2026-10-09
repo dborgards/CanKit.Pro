@@ -440,9 +440,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // The Operational period a link on the chain belongs to, as a token: leaving Operational and
     // disposing cancel it (actor only). A link checks it before each of its two frames and hands
     // each frame over with it, so a link of an ended period sends nothing more — including a
-    // frame whose thread had passed the check and was still on its way to the service: the
-    // service abandons a send whose token is cancelled before it took the frame. §8.3.2.2 has no
-    // safety communication outside Operational. That covers the pairs queued behind a held one —
+    // frame whose thread had passed the check but whose send task had not started: the token is
+    // honoured until that task starts. A send task already running — waiting for the bus
+    // service's pending gate, say — still hands its frame to the driver, because the service does
+    // not check the token before the driver call (#294). §8.3.2.2 has no safety communication
+    // outside Operational. That covers the pairs queued behind a held one —
     // one per SRDO — and the inverted half of the held one: a consumer that times out on its SRVT
     // is safer than one that refreshes its SCT on a stale pair. Created with the period's first
     // pair. A frame the service has already taken goes out, as on any controller.

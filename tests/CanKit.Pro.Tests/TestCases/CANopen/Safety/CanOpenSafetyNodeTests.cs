@@ -446,8 +446,6 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         service.Handed(cob1 + 1).Should().Be(0, "nor the inverted half of the held pair");
     }
 
-    /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
-    /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
     /// <summary>The check before each frame cannot see a thread that has passed it and is still
     /// on its way to the service. Each frame of a pair is therefore handed over with the token of
     /// its Operational period, which leaving Operational cancels: a send the service has not taken
@@ -547,6 +545,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         service.TokenOf(cob1 + 1, 0).IsCancellationRequested.Should().BeFalse();
     }
 
+    /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
+    /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
     [Fact]
     public async Task Disposing_The_Node_Ends_The_Pairs_Still_On_The_Send_Chain()
     {
