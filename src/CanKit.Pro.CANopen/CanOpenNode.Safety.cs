@@ -30,9 +30,17 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
            && (index == Co.GfcParameter || index == Co.SrdoConfigurationValid || index == Co.SrdoChecksum
                || (SrdoRecords.SrdoNumberOf(index) is { } n && n <= _srdoCount));
 
-    /// <summary>The highest SRDO record a description declares; 0 without one. Completed when the
-    /// loader learns the safety objects (device-description task).</summary>
-    private static int DescribedSrdoCount(CanOpenDeviceDescription? description) => 0;
+    /// <summary>The highest SRDO record a description declares (1301h–1340h, 1381h–13C0h); 0 without one.</summary>
+    private static int DescribedSrdoCount(CanOpenDeviceDescription? description)
+    {
+        if (description is null) return 0;
+        int highest = 0;
+        foreach (var index in description.Objects.Objects.Keys)
+        {
+            if (SrdoRecords.SrdoNumberOf(index) is { } n) highest = Math.Max(highest, n);
+        }
+        return highest;
+    }
 
     /// <summary>§8.4.2.2 defaults. Bus access follows WritableCommunicationParameters, as the PDO
     /// records do (Table 6 footnote: "These may be read only"); sub0 and sub4 are const.</summary>

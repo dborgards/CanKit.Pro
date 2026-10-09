@@ -1,0 +1,381 @@
+; A safety device (CiA DSP 304): node 5, SRDO 1 produces 2000h (16 bit) and 2001h (8 bit) on the
+; pre-defined ids, SRDO 2 is declared but has direction 0, and 13FEh/13FFh. 13FFh:01 is patched
+; by the tests with the checksum the implementation computes.
+
+[FileInfo]
+LastEDS=device.eds
+FileName=safety.dcf
+FileVersion=1
+FileRevision=0
+EDSVersion=4.0
+Description=CanKit.Pro safety test device
+CreationTime=10:00AM
+CreationDate=10-09-2026
+CreatedBy=CanKit.Pro tests
+
+[DeviceComissioning]
+NodeID=5
+NodeName=Node five
+Baudrate=500
+NetNumber=1
+NetworkName=test
+CANopenManager=0
+
+[DeviceInfo]
+VendorName=CanKit.Pro
+VendorNumber=0x00000100
+ProductName=Test device
+ProductNumber=0x00001001
+RevisionNumber=0x00010000
+OrderCode=TD-1
+BaudRate_500=1
+SimpleBootUpMaster=0
+SimpleBootUpSlave=1
+Granularity=8
+DynamicChannelsSupported=0
+GroupMessaging=0
+NrOfRXPDO=0
+NrOfTXPDO=0
+LSS_Supported=0
+
+[DummyUsage]
+Dummy0005=1
+Dummy0006=1
+
+[MandatoryObjects]
+SupportedObjects=3
+1=0x1000
+2=0x1001
+3=0x1018
+
+[1000]
+ParameterName=Device type
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00030191
+PDOMapping=0
+
+[1001]
+ParameterName=Error register
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0
+PDOMapping=0
+
+[1018]
+ParameterName=Identity object
+SubNumber=5
+ObjectType=0x9
+
+[1018sub0]
+ParameterName=Highest sub-index supported
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=4
+PDOMapping=0
+
+[1018sub1]
+ParameterName=Vendor-ID
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00000100
+PDOMapping=0
+
+[1018sub2]
+ParameterName=Product code
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00001001
+PDOMapping=0
+
+[1018sub3]
+ParameterName=Revision number
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x00010000
+PDOMapping=0
+
+[1018sub4]
+ParameterName=Serial number
+ObjectType=0x7
+DataType=0x0007
+AccessType=ro
+DefaultValue=0x0000002A
+PDOMapping=0
+
+[OptionalObjects]
+SupportedObjects=7
+1=0x1300
+2=0x1301
+3=0x1302
+4=0x1381
+5=0x1382
+6=0x13FE
+7=0x13FF
+
+[1300]
+ParameterName=Global failsafe command parameter
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+ParameterValue=1
+PDOMapping=0
+
+[1301]
+ParameterName=SRDO communication parameter 1
+SubNumber=7
+ObjectType=0x9
+
+[1301sub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=6
+PDOMapping=0
+
+[1301sub1]
+ParameterName=Information direction
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+ParameterValue=1
+PDOMapping=0
+
+[1301sub2]
+ParameterName=Refresh-time/SCT
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=25
+ParameterValue=30
+PDOMapping=0
+
+[1301sub3]
+ParameterName=SRVT
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=20
+PDOMapping=0
+
+[1301sub4]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=254
+PDOMapping=0
+
+[1301sub5]
+ParameterName=COB-ID 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x0FF+$NODEID
+ParameterValue=0x109
+PDOMapping=0
+
+[1301sub6]
+ParameterName=COB-ID 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=$NODEID+0x100+$NODEID
+ParameterValue=0x10A
+PDOMapping=0
+
+[1302]
+ParameterName=SRDO communication parameter 2
+SubNumber=7
+ObjectType=0x9
+
+[1302sub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=6
+PDOMapping=0
+
+[1302sub1]
+ParameterName=Information direction
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[1302sub2]
+ParameterName=Refresh-time/SCT
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=25
+ParameterValue=30
+PDOMapping=0
+
+[1302sub3]
+ParameterName=SRVT
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=20
+PDOMapping=0
+
+[1302sub4]
+ParameterName=Transmission type
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=254
+PDOMapping=0
+
+[1302sub5]
+ParameterName=COB-ID 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[1302sub6]
+ParameterName=COB-ID 2
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+PDOMapping=0
+
+[1381]
+ParameterName=SRDO mapping parameter 1
+SubNumber=5
+ObjectType=0x8
+
+[1381sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+ParameterValue=4
+PDOMapping=0
+
+[1381sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0x20000010
+PDOMapping=0
+
+[1381sub2]
+ParameterName=Mapping entry 2 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0x20000010
+PDOMapping=0
+
+[1381sub3]
+ParameterName=Mapping entry 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0x20010008
+PDOMapping=0
+
+[1381sub4]
+ParameterName=Mapping entry 4 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0x20010008
+PDOMapping=0
+
+[1382]
+ParameterName=SRDO mapping parameter 2
+SubNumber=1
+ObjectType=0x8
+
+[1382sub0]
+ParameterName=Number of mapped objects
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[13FE]
+ParameterName=Configuration valid
+ObjectType=0x7
+DataType=0x0005
+AccessType=rw
+DefaultValue=0
+ParameterValue=0xA5
+PDOMapping=0
+
+[13FF]
+ParameterName=Safety configuration signature
+SubNumber=3
+ObjectType=0x8
+
+[13FFsub0]
+ParameterName=Number of entries
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=2
+PDOMapping=0
+
+[13FFsub1]
+ParameterName=Signature SRDO 1
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=0
+ParameterValue=0x0000
+PDOMapping=0
+
+[13FFsub2]
+ParameterName=Signature SRDO 2
+ObjectType=0x7
+DataType=0x0006
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[ManufacturerObjects]
+SupportedObjects=2
+1=0x2000
+2=0x2001
+
+[2000]
+ParameterName=Safe process value
+ObjectType=0x7
+DataType=0x0006
+AccessType=ro
+DefaultValue=0x1234
+PDOMapping=1
+
+[2001]
+ParameterName=Safe flags
+ObjectType=0x7
+DataType=0x0005
+AccessType=ro
+DefaultValue=0x5A
+PDOMapping=1
