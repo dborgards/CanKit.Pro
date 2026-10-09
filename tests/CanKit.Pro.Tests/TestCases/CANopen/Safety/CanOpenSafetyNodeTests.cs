@@ -625,6 +625,30 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    /// <summary>§8.2 has every safety node act on a GFC, the sender included: on a bus that echoes,
+    /// the node's own GFC is reported once, in both echo worlds (#94). A peer heartbeat injected
+    /// after it is the ordering witness that no second report of the own GFC follows.</summary>
+    [Theory]
+    [MemberData(nameof(EchoWorldFixture.Both), MemberType = typeof(EchoWorldFixture))]
+    public async Task A_Nodes_Own_Gfc_Is_Reported_Once_On_A_Bus_That_Echoes(EchoWorld world)
+    {
+        using var echo = EchoWorldFixture.Create(world, NewSession());
+        using var node = CanOpen.OpenNode(echo.Bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        int gfcs = 0, witnesses = 0;
+        node.Safety().GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
+        node.HeartbeatReceived += (_, e) => { if (e.ProducerNodeId == 0x12) Interlocked.Increment(ref witnesses); };
+        node.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        echo.InjectPeerFrame(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new[] { (byte)NmtCommand.Start, Producer }, isExtendedFrame: false));
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+
+        await node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => Volatile.Read(ref gfcs) >= 1, "own GFC reported");
+        echo.InjectPeerFrame(CanFrame.Classic((int)CanOpenCobId.Heartbeat(0x12), new[] { (byte)NmtState.Operational }));
+        await WaitUntilAsync(() => Volatile.Read(ref witnesses) >= 1, "witness delivered");
+        Volatile.Read(ref gfcs).Should().Be(1, "the own GFC is reported, and only once");
+    }
+
     [Fact]
     public async Task Gfc_Round_Trip()
     {

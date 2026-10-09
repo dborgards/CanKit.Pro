@@ -244,6 +244,68 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "restoring is not a write to a safety-relevant parameter");
     }
 
+    /// <summary>A valid configuration on the device, stored with "save", then changed.</summary>
+    private static void StoreAValidConfigurationThenChangeIt(ObjectDictionary od, ICanOpenNode node)
+    {
+        od.AddU8(0x2000, 0x00, 0);
+        od.WriteUnsigned(0x1381, 1, 0x2000_0008);
+        od.WriteUnsigned(0x1381, 2, 0x2000_0008);
+        od.WriteUnsigned(0x1381, 0, 2);
+        od.WriteUnsigned(0x1301, 1, 1);
+        od.WriteUnsigned(0x13FF, 1, 0x1234);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        node.StoreParameters();
+
+        od.WriteUnsigned(0x1301, 2, 40);
+        od.WriteUnsigned(0x13FF, 1, 0x4321);
+        od.WriteUnsigned(0x13FE, 0, 0);
+    }
+
+    [Fact]
+    public async Task Reset_Node_Restores_The_Stored_Safety_Objects()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var master = Open(session, 2);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        StoreAValidConfigurationThenChangeIt(od, node);
+
+        // Operational first, so that the wait below ends on the PreOperational the reset enters.
+        SendNmt(master, NmtCommand.Start, Device);
+        await WaitForStateAsync(node, NmtState.Operational);
+        SendNmt(master, NmtCommand.ResetNode, Device);
+        await WaitForStateAsync(node, NmtState.PreOperational);
+
+        od.ReadUnsigned(0x1301, 1).Should().Be(1u);
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u, "Reset Node restored the stored values");
+        od.ReadUnsigned(0x13FF, 1).Should().Be(0x1234u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+    }
+
+    [Fact]
+    public async Task Load_Then_Reset_Brings_Back_The_Safety_Defaults()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var master = Open(session, 2);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        StoreAValidConfigurationThenChangeIt(od, node);
+        node.RestoreDefaultParameters();   // 1011h:01 "load": the defaults become valid with the reset
+
+        SendNmt(master, NmtCommand.Start, Device);
+        await WaitForStateAsync(node, NmtState.Operational);
+        SendNmt(master, NmtCommand.ResetCommunication, Device);
+        await WaitForStateAsync(node, NmtState.PreOperational);
+
+        od.ReadUnsigned(0x1301, 1).Should().Be(0u, "the factory default: no SRDO");
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u);
+        od.ReadUnsigned(0x1381, 0).Should().Be(0u);
+        od.ReadUnsigned(0x13FF, 1).Should().Be(0u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+    }
+
     [Fact]
     public void A_Pdo_Cannot_Take_An_Srdo_CobId()
     {

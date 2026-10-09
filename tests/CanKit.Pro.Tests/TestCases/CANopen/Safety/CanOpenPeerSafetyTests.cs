@@ -91,11 +91,14 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var master = CanOpen.OpenNode(busA, Master);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
+        device.ObjectDictionary.WriteUnsigned(0x13FE, 0, 0xA5);
         await master.SendNmtCommandAsync(NmtCommand.Start, Device);
         var deadline = DateTime.UtcNow + ShortTimeout;
         while (device.State != NmtState.Operational && DateTime.UtcNow < deadline) await Task.Delay(5);
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         ex.AbortCode.Should().Be((uint)SdoAbortCode.DataCannotBeTransferredDeviceState);
+        device.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u,
+            "the first write was refused, so no parameter changed and nothing cleared 13FEh");
     }
 
     [Fact]
