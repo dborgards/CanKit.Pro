@@ -609,7 +609,10 @@ its count, the times, the COB-IDs, and the direction last. Without COB-IDs SRDO 
 (`ArgumentException`). A producer's sub-index `03h` keeps its value (default 20 ms).
 `DeleteSrdo(n)` sets the direction to 0. All three throw `InvalidOperationException` in
 Operational and on a node without SRDOs, and `ArgumentException` naming the abort code for a value
-the dictionary refuses.
+the dictionary refuses. A configuration is checked whole before its first write — the same writes
+through the same validator against a copy of the dictionary — so one the dictionary would refuse
+part-way (a mapped object the direction cannot use, COB-IDs another SRDO holds) changes nothing:
+the SRDO, its checksum and `13FEh` stay as they were.
 
 `CommitSafetyConfiguration()` is §9.2 for a node configured locally: it writes `13FFh:n` for
 every SRDO, computed by `SrdoCrc.Compute`, and then `13FEh` = `A5h`. `A5h` has to come last,

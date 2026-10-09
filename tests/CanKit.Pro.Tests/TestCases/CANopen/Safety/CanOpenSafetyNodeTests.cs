@@ -594,6 +594,58 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing was written, so the configuration is still valid");
     }
 
+    /// <summary>A reconfiguration the dictionary would refuse part-way — a mapped object that
+    /// does not exist, is not mappable, has another size or is not readable for a producer, or
+    /// COB-IDs another existing SRDO holds — changes nothing: the committed SRDO, its checksum and
+    /// 13FEh stay byte for byte what they were (ObjectDictionary has no rollback, so the writes
+    /// are checked before the first one).</summary>
+    [Theory]
+    [InlineData("missing object")]
+    [InlineData("not mappable")]
+    [InlineData("wrong size")]
+    [InlineData("not readable")]
+    [InlineData("cob-ids of srdo 2")]
+    public void A_Refused_Reconfiguration_Leaves_The_Committed_Srdo_As_It_Was(string what)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var node = OpenClocked(bus, Producer, new ManualTimeSource(), srdoCount: 2);
+        var od = node.ObjectDictionary;
+        AddApplicationObjects(od);
+        od.AddU32(0x2002, 0x00, 0, OdAccess.ReadWrite, pdoMappable: false);
+        od.AddU8(0x2003, 0x00, 0, OdAccess.WriteOnly);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30), 0x141, 0x142);
+        safety.CommitSafetyConfiguration();
+        var before = SafetyRecordBytes(od);
+        before[(0x13FE, 0)].Should().Equal(new byte[] { 0xA5 });
+
+        var (mapping, cobId1) = what switch
+        {
+            "missing object" => (new SrdoMapping().Add(0x2FFF, 0x00, 8), (uint?)null),
+            "not mappable" => (new SrdoMapping().Add(0x2002, 0x00, 32), null),
+            "wrong size" => (new SrdoMapping().Add(0x2000, 0x00, 8), null),
+            "not readable" => (new SrdoMapping().Add(0x2003, 0x00, 8), null),
+            _ => (new SrdoMapping().Add(0x2001, 0x00, 8), (uint?)0x141),
+        };
+        var ex = Record.Exception(() => safety.ConfigureSrdoProducer(1, mapping, TimeSpan.FromMilliseconds(40), cobId1));
+        ex.Should().BeOfType<ArgumentException>().Which.Message.Should().StartWith("SRDO1 configuration rejected");
+        SafetyRecordBytes(od).Should().BeEquivalentTo(before, options => options.WithStrictOrdering(), "nothing was written");
+    }
+
+    /// <summary>Every sub-index of 1301h–1302h, 1381h–1382h, 13FEh and 13FFh, as stored.</summary>
+    private static Dictionary<(ushort, byte), byte[]> SafetyRecordBytes(ObjectDictionary od)
+    {
+        var bytes = new Dictionary<(ushort, byte), byte[]>();
+        foreach (ushort index in new ushort[] { 0x1301, 0x1302, 0x1381, 0x1382, 0x13FE, 0x13FF })
+        {
+            for (int sub = 0; sub <= 16; sub++)
+                if (od.TryReadRaw(index, (byte)sub, out var raw)) bytes[(index, (byte)sub)] = raw;
+        }
+        return bytes;
+    }
+
     private static async Task AwaitSrdoChainAsync(CanOpenNode node)
     {
         Task chain = Task.CompletedTask;

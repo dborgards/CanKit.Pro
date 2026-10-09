@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Emcy;
@@ -279,23 +280,34 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             RequireNotOperationalForSafetyWrite();
             var comm = SrdoRecords.CommIndex(srdoNumber);
             var map = SrdoRecords.MapIndex(srdoNumber);
+            var writes = new List<(ushort Index, byte Subindex, uint Value)>
+            {
+                (comm, 0x01, 0),
+                (map, 0x00, 0),
+            };
+            for (byte s = 1; s <= SrdoRecords.MappingSubindices; s++)
+            {
+                int i = (s - 1) / 2;
+                writes.Add((map, s, i < entries.Length ? EncodeMappingEntry(entries[i]) : 0u));
+            }
+            writes.Add((map, 0x00, (uint)(2 * entries.Length)));
+            writes.Add((comm, 0x02, cycleMs));
+            if (direction == SrdoDirection.Receive) writes.Add((comm, 0x03, srvtMs));
+            writes.Add((comm, 0x05, id1));
+            writes.Add((comm, 0x06, id2));
+            writes.Add((comm, 0x01, (byte)direction));
             try
             {
                 _od.Transaction(() =>
                 {
-                    _od.WriteUnsigned(comm, 0x01, 0);
-                    _od.WriteUnsigned(map, 0x00, 0);
-                    for (byte s = 1; s <= SrdoRecords.MappingSubindices; s++)
-                    {
-                        int i = (s - 1) / 2;
-                        _od.WriteUnsigned(map, s, i < entries.Length ? EncodeMappingEntry(entries[i]) : 0u);
-                    }
-                    _od.WriteUnsigned(map, 0x00, (uint)(2 * entries.Length));
-                    _od.WriteUnsigned(comm, 0x02, cycleMs);
-                    if (direction == SrdoDirection.Receive) _od.WriteUnsigned(comm, 0x03, srvtMs);
-                    _od.WriteUnsigned(comm, 0x05, id1);
-                    _od.WriteUnsigned(comm, 0x06, id2);
-                    _od.WriteUnsigned(comm, 0x01, (byte)direction);
+                    // The dictionary has no rollback: a write refused half-way — a mapped object
+                    // the direction cannot use, COB-IDs another SRDO holds — would leave the SRDO
+                    // deleted and 13FEh cleared. The same writes therefore run first through the
+                    // same validator against a copy, and the dictionary is written only when every
+                    // one of them was accepted there. The writes below are still validated.
+                    var trial = SafetyTrialCopy();
+                    foreach (var (index, subindex, value) in writes) trial.WriteUnsigned(index, subindex, value);
+                    foreach (var (index, subindex, value) in writes) _od.WriteUnsigned(index, subindex, value);
                 });
             }
             catch (ArgumentException ex)
@@ -303,6 +315,26 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                 throw new ArgumentException($"SRDO{srdoNumber} configuration rejected: {ex.Message}", ex);
             }
         });
+    }
+
+    /// <summary>A copy of the dictionary — every entry, so that a mapped object is found with its
+    /// type, access and mappability — whose writes run through the safety validator as in
+    /// Pre-Operational, the state a configuration is written in. Called under the write gate.</summary>
+    private ObjectDictionary SafetyTrialCopy()
+    {
+        var copy = new ObjectDictionary();
+        foreach (var key in _od.SnapshotKeys())
+        {
+            ushort index = (ushort)(key >> 8);
+            byte subindex = (byte)key;
+            if (_od.TryGet(index, subindex, out var entry))
+                copy.Declare(index, subindex, entry.DataType, entry.Access, entry.GetRawValue(), entry.PdoMappable);
+        }
+        int srdoCount = _srdoCount;
+        copy.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
+            ? ValidateSafetyWrite(copy, srdoCount, operational: false, index, subindex, value)
+            : OdWriteDecision.Accept;
+        return copy;
     }
 
     public void DeleteSrdo(int srdoNumber)

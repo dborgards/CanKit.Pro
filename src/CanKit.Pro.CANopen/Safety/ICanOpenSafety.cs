@@ -26,10 +26,12 @@ public interface ICanOpenSafety
     /// refresh time, the mapping (plain and inverted sub-indices), the COB-IDs — the
     /// pre-defined pair of Table 4 for SRDO 1 of a node-id ≤ 64 when none is given. The SRDO
     /// is deleted first and created last, as §8.4.2.2 requires for a mapping change. Writes
-    /// <c>13FEh</c> to 0; call <see cref="CommitSafetyConfiguration"/> afterwards.</summary>
+    /// <c>13FEh</c> to 0; call <see cref="CommitSafetyConfiguration"/> afterwards. The writes are
+    /// checked whole before the first one: a configuration the dictionary would refuse part-way
+    /// changes nothing.</summary>
     /// <exception cref="InvalidOperationException">The node has no SRDOs, or is Operational (0800 0022h).</exception>
     /// <exception cref="ArgumentOutOfRangeException">The number is not 1..<see cref="SrdoCount"/>, or a time is out of range.</exception>
-    /// <exception cref="ArgumentException">A value the dictionary refused (the abort code is in the message), or no COB-ID for a node-id above 64.</exception>
+    /// <exception cref="ArgumentException">A value the dictionary refuses (the abort code is in the message; nothing is written), or no COB-ID for a node-id above 64.</exception>
     void ConfigureSrdoProducer(int srdoNumber, SrdoMapping mapping, TimeSpan refreshTime, uint? cobId1 = null, uint? cobId2 = null);
 
     /// <summary>Writes record <paramref name="srdoNumber"/> as a consumer: direction rx, SCT,
