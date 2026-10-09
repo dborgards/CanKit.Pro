@@ -21,8 +21,10 @@ internal sealed partial class CanOpenNode
         CanOpenCobId.ValidateNodeId(peerNodeId);
         if (!SrdoFrames.IsCobId1(cobId1))
             throw new ArgumentOutOfRangeException(nameof(cobId1), cobId1, "COB-ID 1 of an SRDO is odd, 257..383 (CiA DSP 304 Figure 7).");
-        if (frame1.Length > 8 || frame2.Length > 8)
-            throw new ArgumentOutOfRangeException(nameof(frame1), "A classic CAN frame carries at most 8 bytes.");
+        if (frame1.Length > 8)
+            throw new ArgumentOutOfRangeException(nameof(frame1), frame1.Length, "A classic CAN frame carries at most 8 bytes.");
+        if (frame2.Length > 8)
+            throw new ArgumentOutOfRangeException(nameof(frame2), frame2.Length, "A classic CAN frame carries at most 8 bytes.");
         var first = frame1.ToArray();
         var second = frame2.ToArray();
         var gate = _foreignPdoObserve.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
@@ -37,13 +39,27 @@ internal sealed partial class CanOpenNode
                     "the second frame is not the bitwise inverse of the first with the same length (§8.1)"), null);
             PdoMappingEntry[] mapping;
             ForeignPdoMappingOrigin origin;
-            var live = await TryReadLiveSrdoMappingAsync(peerNodeId, n, cancellationToken).ConfigureAwait(false);
-            if (live is { } liveEntries) { mapping = liveEntries; origin = ForeignPdoMappingOrigin.LiveMapping; }
+            var read = await TryReadLiveMappingCoreAsync(peerNodeId, SrdoRecords.MapIndex(n), 2, SrdoRecords.MappingSubindices, cancellationToken)
+                .ConfigureAwait(false);
+            // Unlike a PDO (FR-CO-030), a live mapping the gate only partly lets through is not
+            // replaced by the file: the live mapping is known to exist and to differ from what the
+            // bound description declares, and splitting safety data by a mapping the device does
+            // not use would hand the caller wrong values with a clean "decoded".
+            if (read.GateRefusedAfterCount)
+                return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, null, 0,
+                    $"the live mapping declares {read.DeclaredEntries} entries but the bound description declares fewer; the file's mapping is not used for safety data"), null);
+            if (read.Entries is { } liveEntries) { mapping = liveEntries; origin = ForeignPdoMappingOrigin.LiveMapping; }
             else if (TryDescribedSrdoMapping(peerDescription, n, peerNodeId, out mapping, out var why)) origin = ForeignPdoMappingOrigin.DeviceDescription;
             else return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, null, 0,
                 "the live mapping record could not be read, and the description's mapping could not be used: " + why), null);
             int total = 0;
-            foreach (var e in mapping) total += e.ByteLength;
+            foreach (var e in mapping)
+            {
+                if (e.IsDummy)
+                    return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, origin, 0,
+                        "the mapping contains a dummy entry, which an SRDO mapping does not carry"), null);
+                total += e.ByteLength;
+            }
             if (first.Length < total)
                 return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, origin, 0,
                     $"the frames have {first.Length} byte(s) and the mapping needs {total}"), null);
@@ -73,55 +89,30 @@ internal sealed partial class CanOpenNode
         for (int n = 1; n <= count; n++)
         {
             var comm = SrdoRecords.CommIndex(n);
-            uint? liveId = null;
+            uint? liveWord = null;
             try
             {
                 var raw = await SdoUploadAsync(peerNodeId, comm, 0x05, cancellationToken).ConfigureAwait(false);
-                if (raw.Length >= 4) liveId = ObjectDictionary.DecodeU32(raw) & CanOpenCobId.CanIdMask;
+                if (raw.Length >= 4) liveWord = ObjectDictionary.DecodeU32(raw);
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
-            if (liveId is { } id)
+            // A live word that was read decides, whether it matches or not: the file is only for a record that could not be read.
+            if (liveWord is { } live)
             {
-                if (id == cobId1) return n;
+                if (SrdoCobId1(live) == cobId1) return n;
                 continue;
             }
             if (TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x05, out var text)
-                && ParseDescribedUnsigned(text, peerNodeId) is { } word && (word & CanOpenCobId.CanIdMask) == cobId1)
+                && ParseDescribedUnsigned(text, peerNodeId) is { } word && SrdoCobId1(word) == cobId1)
                 return n;
         }
         return null;
     }
 
-    /// <summary>Sub0 and the odd entries of 1380h+n; null when unavailable or malformed (an even
-    /// count ≤ 16, each odd slot non-zero and byte-aligned, ≤ 8 bytes). A live count of 0 is a mapping.</summary>
-    private async Task<PdoMappingEntry[]?> TryReadLiveSrdoMappingAsync(byte peerNodeId, int n, CancellationToken cancellationToken)
-    {
-        var map = SrdoRecords.MapIndex(n);
-        byte[] countBytes;
-        try { countBytes = await SdoUploadAsync(peerNodeId, map, 0x00, cancellationToken).ConfigureAwait(false); }
-        catch (Exception ex) when (IsLiveReadUnavailable(ex)) { return null; }
-        if (countBytes.Length < 1) return null;
-        int count = countBytes[0];
-        if ((count & 1) != 0 || count > SrdoRecords.MappingSubindices) return null;
-        var entries = new List<PdoMappingEntry>(count / 2);
-        int total = 0;
-        for (byte s = 1; s <= count; s += 2)
-        {
-            byte[] raw;
-            try { raw = await SdoUploadAsync(peerNodeId, map, s, cancellationToken).ConfigureAwait(false); }
-            catch (Exception ex) when (IsLiveReadUnavailable(ex)) { return null; }
-            if (raw.Length < 4) return null;
-            uint word = ObjectDictionary.DecodeU32(raw);
-            if (word == 0) return null;
-            PdoMappingEntry entry;
-            try { entry = new PdoMappingEntry((ushort)(word >> 16), (byte)(word >> 8), (byte)word); }
-            catch (ArgumentOutOfRangeException) { return null; }
-            total += entry.ByteLength;
-            if (total > 8) return null;
-            entries.Add(entry);
-        }
-        return entries.ToArray();
-    }
+    /// <summary>The COB-ID 1 of a 1301h–1340h:05 word: its bits 0–10, and null when any bit above
+    /// them is set (bit 31 included) — DSP 304 defines no flags for it. Not
+    /// <see cref="UsableCanId"/>, which also rejects 101h–180h, the very range of SRDOs.</summary>
+    private static uint? SrdoCobId1(uint word) => (word & ~CanOpenCobId.CanIdMask) == 0 ? word : null;
 
     private static bool TryDescribedSrdoMapping(CanOpenDeviceDescription description, int n, byte peerNodeId,
         out PdoMappingEntry[] entries, out string reason)
