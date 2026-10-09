@@ -448,6 +448,105 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
     /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
+    /// <summary>The check before each frame cannot see a thread that has passed it and is still
+    /// on its way to the service. Each frame of a pair is therefore handed over with the token of
+    /// its Operational period, which leaving Operational cancels: a send the service has not taken
+    /// yet is abandoned, and the inverted frame of a pair in flight is not handed over.</summary>
+    [Fact]
+    public async Task Leaving_Operational_Cancels_The_Send_Of_A_Pair_In_Flight()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // the first pair, held at its plain frame
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        var token = service.TokenOf(cob1, 0);
+        token.CanBeCanceled.Should().BeTrue("the frame carries its period's token");
+        token.IsCancellationRequested.Should().BeFalse();
+
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        // State is read through the actor, behind the turn that applied the Stop.
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
+        token.IsCancellationRequested.Should().BeTrue("leaving Operational cancels the period's sends");
+        service.Release();
+        await WaitUntilAsync(() => !SrdoPairInFlight(node), "the link has ended");
+        service.Handed(cob1 + 1).Should().Be(0, "the inverted frame is not handed over");
+    }
+
+    /// <summary>Disposing the node cancels the period's sends as leaving Operational does.</summary>
+    [Fact]
+    public async Task Disposing_The_Node_Cancels_The_Send_Of_A_Pair_In_Flight()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var service = new HoldingService(new CanBusService(bus));
+        var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: false, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        using (var wire = new Wire(session, 2))
+        {
+            wire.SendNmt(NmtCommand.Start, Producer);
+            await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        }
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        var token = service.TokenOf(cob1, 0);
+        token.IsCancellationRequested.Should().BeFalse();
+        Task chain = Task.CompletedTask;
+        await node.PostToActorAsync(() => chain = node.SrdoSendChainForTests);
+
+        node.Dispose(); // returns after the actor ran its cleanup
+        token.IsCancellationRequested.Should().BeTrue("disposing cancels the period's sends");
+        service.Release();
+        await chain.WithTimeoutAsync(ShortTimeout);
+        service.Handed(cob1 + 1).Should().Be(0);
+    }
+
+    /// <summary>Each Operational period has a token of its own: a pair of the next period is
+    /// handed over with one that is not cancelled, and goes out.</summary>
+    [Fact]
+    public async Task A_Pair_Of_The_Next_Operational_Period_Is_Not_Cancelled()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
+        service.Release();
+        await WaitUntilAsync(() => !SrdoPairInFlight(node), "the first period's link has ended");
+
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "started again");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // the new period's first pair
+        await WaitUntilAsync(() => service.Handed(cob1 + 1) >= 1, "the new pair went out");
+        service.TokenOf(cob1, 0).IsCancellationRequested.Should().BeTrue();
+        service.TokenOf(cob1, 1).IsCancellationRequested.Should().BeFalse("a fresh period, not the old one");
+        service.TokenOf(cob1 + 1, 0).IsCancellationRequested.Should().BeFalse();
+    }
+
     [Fact]
     public async Task Disposing_The_Node_Ends_The_Pairs_Still_On_The_Send_Chain()
     {
@@ -692,6 +791,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
             lock (_gate)
             {
                 _handed.Add((id, frame.Data.ToArray()));
+                _tokens.Add((id, cancellationToken));
                 if (_holding && id is >= CanOpenCobId.SrdoFirstCobId and <= CanOpenCobId.SrdoLastCobId)
                 {
                     var confirmation = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -703,6 +803,11 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         }
 
         public int Handed(uint cobId) { lock (_gate) return _handed.Count(x => x.CobId == cobId); }
+
+        private readonly List<(uint CobId, CancellationToken Token)> _tokens = new();
+
+        /// <summary>The token the <paramref name="nth"/> frame on <paramref name="cobId"/> was handed over with.</summary>
+        public CancellationToken TokenOf(uint cobId, int nth) { lock (_gate) return _tokens.Where(x => x.CobId == cobId).ElementAt(nth).Token; }
 
         public byte[][] Payloads(uint cobId) { lock (_gate) return _handed.Where(x => x.CobId == cobId).Select(x => x.Data).ToArray(); }
 

@@ -437,13 +437,16 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     private sealed record SrdoPair(uint CobId1, byte[] Plain, uint CobId2, byte[] Inverted);
 
-    // Which Operational period a link on the chain belongs to. Leaving Operational and disposing
-    // advance it (actor only); a link compares it with the value captured when it was queued,
-    // before each of its two frames, and a link of an earlier period sends nothing more: its pair
-    // came due in Operational, but §8.3.2.2 has no safety communication outside it. That covers
-    // the pairs queued behind a held one — one per SRDO — and the inverted half of the held one:
-    // a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair.
-    private int _srdoSendEpoch;
+    // The Operational period a link on the chain belongs to, as a token: leaving Operational and
+    // disposing cancel it (actor only). A link checks it before each of its two frames and hands
+    // each frame over with it, so a link of an ended period sends nothing more — including a
+    // frame whose thread had passed the check and was still on its way to the service: the
+    // service abandons a send whose token is cancelled before it took the frame. §8.3.2.2 has no
+    // safety communication outside Operational. That covers the pairs queued behind a held one —
+    // one per SRDO — and the inverted half of the held one: a consumer that times out on its SRVT
+    // is safer than one that refreshes its SCT on a stale pair. Created with the period's first
+    // pair. A frame the service has already taken goes out, as on any controller.
+    private CancellationTokenSource? _srdoSendPeriod;
 
     // The GFC is not an SRDO and does not wait behind them (§8.2: it is the highest-priority
     // safety message); it goes out at once, as every other control frame of the node.
@@ -463,9 +466,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private void QueueSrdoPair(int srdoNumber, SrdoPair pair)
     {
         _srdoInFlight[srdoNumber] = true;
-        int epoch = _srdoSendEpoch;
+        var period = (_srdoSendPeriod ??= new CancellationTokenSource()).Token;
         var link = _srdoSendChain.ContinueWith(
-            _ => SendSrdoPairAsync(pair, epoch),
+            _ => SendSrdoPairAsync(pair, period),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _srdoSendChain = link;
         _ = link.ContinueWith(
@@ -491,11 +494,19 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         _srdo.LeaveOperational();
         Array.Clear(_srdoPending, 0, _srdoPending.Length);
-        EndSrdoSendEpoch();
+        EndSrdoSendPeriod();
     }
 
-    /// <summary>The links queued so far belong to a period that has ended. Actor only.</summary>
-    private void EndSrdoSendEpoch() => Volatile.Write(ref _srdoSendEpoch, _srdoSendEpoch + 1);
+    /// <summary>The links queued so far belong to a period that has ended: their sends are
+    /// cancelled, and the next pair starts a period of its own. Actor only.</summary>
+    private void EndSrdoSendPeriod()
+    {
+        var period = _srdoSendPeriod;
+        _srdoSendPeriod = null;
+        if (period is null) return;
+        period.Cancel();
+        period.Dispose();
+    }
 
     /// <summary>Test seam, actor only: the tail of the SRDO send chain.</summary>
     internal Task SrdoSendChainForTests => _srdoSendChain;
@@ -505,13 +516,20 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     // A failed or unconfirmed frame is reported by SendControlFrame itself and the inverted frame
     // still follows, as it would on the controller; only a cancelled send (the service is being
-    // disposed) or the end of the Operational period the pair belongs to ends the pair early.
-    private async Task SendSrdoPairAsync(SrdoPair pair, int epoch)
+    // disposed) or the end of the Operational period the pair belongs to ends the pair early. A
+    // send cancelled by the period's own token is no failure: the pair ends quietly.
+    private async Task SendSrdoPairAsync(SrdoPair pair, CancellationToken period)
     {
-        if (Volatile.Read(ref _srdoSendEpoch) != epoch) return;
-        await SendControlFrame(pair.CobId1, pair.Plain).ConfigureAwait(false);
-        if (Volatile.Read(ref _srdoSendEpoch) != epoch) return;
-        await SendControlFrame(pair.CobId2, pair.Inverted).ConfigureAwait(false);
+        try
+        {
+            if (period.IsCancellationRequested) return;
+            await SendControlFrame(pair.CobId1, pair.Plain, period).ConfigureAwait(false);
+            if (period.IsCancellationRequested) return;
+            await SendControlFrame(pair.CobId2, pair.Inverted, period).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (period.IsCancellationRequested)
+        {
+        }
     }
 
     void ISrdoEngineHost.EmitEmcy(ushort errorCode)

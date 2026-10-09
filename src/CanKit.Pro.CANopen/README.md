@@ -648,7 +648,10 @@ confirmed becomes that SRDO's pending pair, replacing an older pending one — t
 and is sent as soon as the previous pair completes. Leaving Operational, or disposing the node,
 drops the pending pair, and a pair already on the send chain sends nothing more — neither another
 SRDO's pair queued behind the one in flight nor the inverted half of the one in flight (§8.3.2.2):
-a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair. A
+a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair.
+Each frame is handed to the bus service with a cancellation token of its Operational period,
+which leaving Operational or disposing cancels; the token is honoured up to the hand-over, and a
+frame the driver already holds goes out, as on any controller. A
 send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
 SRDO stays valid. `GetSrdoState(n)` of a producer is valid while the node is Operational with a
 valid configuration. The state is a snapshot of the actor's view: right after `OpenNode` the
