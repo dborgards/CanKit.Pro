@@ -108,6 +108,9 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue();
         node.DeviceDescription!.Findings.Where(f => f.Index is >= 0x1300 and <= 0x13FF).Should().BeEmpty(
             string.Join("\n", node.DeviceDescription.Findings));
+        // The engine takes the loaded records on the actor, in the turn the constructor posted; a
+        // State read is a round trip queued behind it, so the snapshot below is the loaded one.
+        _ = node.State;
         node.Safety().GetSrdoState(1).Direction.Should().Be(SrdoDirection.Transmit);
     }
 
@@ -193,6 +196,9 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         od.ReadUnsigned(0x1381, 0).Should().Be(0u, "the mapping stays disabled");
         od.ReadUnsigned(0x1301, 1).Should().Be(0u, "an SRDO is not created over a mapping that failed");
         node.DeviceDescription.Findings.Should().Contain(f => f.Index == 0x1301 && f.Subindex == 1 && f.Outcome == DeviceDescriptionOutcome.Corrected);
+        // The engine takes the loaded records on the actor, in the turn the constructor posted; a
+        // State read is a round trip queued behind it, so the snapshot below is the loaded one.
+        _ = node.State;
         node.Safety().GetSrdoState(1).Direction.Should().Be(SrdoDirection.None);
     }
 
