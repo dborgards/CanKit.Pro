@@ -24,6 +24,7 @@ public sealed class SrdoState
     public bool IsValid { get; }
     /// <summary>Why not, when <see cref="IsValid"/> is false and the SRDO exists; null for an SRDO with direction <see cref="SrdoDirection.None"/>.</summary>
     public SrdoInvalidReason? Reason { get; }
-    /// <summary>Consumer: when the last valid pair was accepted (UTC).</summary>
+    /// <summary>When the SRDO last became or was confirmed valid (UTC): for a consumer the last
+    /// valid pair, for a producer the start of its valid Operational period; null before that.</summary>
     public DateTime? LastValidAt { get; }
 }
