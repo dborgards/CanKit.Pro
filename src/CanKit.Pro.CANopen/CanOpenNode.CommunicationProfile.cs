@@ -666,7 +666,7 @@ internal sealed partial class CanOpenNode
 
         if (previous == NmtState.Operational && target != NmtState.Operational) OnLeaveOperational();
         if (target == NmtState.Operational && previous != NmtState.Operational) OnEnterOperational();
-        if (previous == NmtState.Operational && target != NmtState.Operational) _srdo.LeaveOperational();
+        if (previous == NmtState.Operational && target != NmtState.Operational) LeaveSrdoOperational();
         if (target == NmtState.Operational && previous != NmtState.Operational) _srdo.EnterOperational();
 
         if (target == NmtState.Stopped)
@@ -711,7 +711,7 @@ internal sealed partial class CanOpenNode
         if (_state == NmtState.Operational)
         {
             OnLeaveOperational();
-            _srdo.LeaveOperational();
+            LeaveSrdoOperational();
         }
         _state = NmtState.Initializing;
 

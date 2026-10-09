@@ -366,14 +366,21 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // each other. Actor loop only.
     private Task _srdoSendChain = Task.CompletedTask;
 
-    // At most one pair per SRDO on that chain. A link ends when both frames are confirmed or
-    // have failed or timed out, and on a bus where confirmations stall the cycles would otherwise
-    // queue pairs faster than they drain, and the backlog would later reach the consumer as
-    // current data. A pair due while the previous one of the same SRDO is still in flight is
-    // skipped; the consumer's SCT reports the gap. Actor-only, like every other piece of runtime
-    // state: the flag is set and read on the actor, and the continuation that ends a link posts
-    // its clear there, so no cycle can see a half-updated state and no lock is needed.
+    // At most one pair per SRDO on that chain, plus one waiting. A link ends when both frames
+    // are confirmed or have failed or timed out, and on a bus where confirmations stall the cycles
+    // would otherwise queue pairs faster than they drain, and the backlog would later reach the
+    // consumer as current data. A pair due while the previous one of the same SRDO is still in
+    // flight becomes that SRDO's pending pair, replacing any pending one (the latest data wins),
+    // and goes on the chain the moment the in-flight pair completes: an event-driven
+    // transmission is §8.1's "fast reaction after a safety critical change" and must not wait a
+    // whole refresh cycle. Under a stall the drained backlog is therefore at most two pairs per
+    // SRDO. Actor-only, like every other piece of runtime state: both are set and read on the
+    // actor, and the continuation that ends a link posts its completion there, so no cycle can
+    // see a half-updated state and no lock is needed.
     private readonly bool[] _srdoInFlight;
+    private readonly SrdoPair?[] _srdoPending;
+
+    private sealed record SrdoPair(uint CobId1, byte[] Plain, uint CobId2, byte[] Inverted);
 
     // The GFC is not an SRDO and does not wait behind them (§8.2: it is the highest-priority
     // safety message); it goes out at once, as every other control frame of the node.
@@ -381,15 +388,45 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     void ISrdoEngineHost.SendPair(int srdoNumber, uint cobId1, byte[] plain, uint cobId2, byte[] inverted)
     {
-        if (_srdoInFlight[srdoNumber]) return;
+        var pair = new SrdoPair(cobId1, plain, cobId2, inverted);
+        if (_srdoInFlight[srdoNumber])
+        {
+            _srdoPending[srdoNumber] = pair;
+            return;
+        }
+        QueueSrdoPair(srdoNumber, pair);
+    }
+
+    private void QueueSrdoPair(int srdoNumber, SrdoPair pair)
+    {
         _srdoInFlight[srdoNumber] = true;
         var link = _srdoSendChain.ContinueWith(
-            _ => SendSrdoPairAsync(cobId1, plain, cobId2, inverted),
+            _ => SendSrdoPairAsync(pair),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _srdoSendChain = link;
         _ = link.ContinueWith(
-            _ => RunOnActor(() => _srdoInFlight[srdoNumber] = false),
+            _ => RunOnActor(() => OnSrdoPairCompleted(srdoNumber)),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+    }
+
+    // The pending pair goes only while the SRDOs still run: leaving Operational (or disposing)
+    // between its coming due and this completion means it must not reach the bus (§8.3.2.2).
+    private void OnSrdoPairCompleted(int srdoNumber)
+    {
+        var pending = _srdoPending[srdoNumber];
+        _srdoPending[srdoNumber] = null;
+        if (pending is not null && _srdo.IsOperational && Volatile.Read(ref _disposed) == 0)
+            QueueSrdoPair(srdoNumber, pending);
+        else
+            _srdoInFlight[srdoNumber] = false;
+    }
+
+    /// <summary>Leaving Operational: the engine stops, and a pair still pending for the bus is
+    /// dropped with it. Actor only.</summary>
+    private void LeaveSrdoOperational()
+    {
+        _srdo.LeaveOperational();
+        Array.Clear(_srdoPending, 0, _srdoPending.Length);
     }
 
     /// <summary>Test seam, actor only: the tail of the SRDO send chain.</summary>
@@ -401,10 +438,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // A failed or unconfirmed frame is reported by SendControlFrame itself and the inverted frame
     // still follows, as it would on the controller; only a cancelled send (the service is being
     // disposed) ends the pair early.
-    private async Task SendSrdoPairAsync(uint cobId1, byte[] plain, uint cobId2, byte[] inverted)
+    private async Task SendSrdoPairAsync(SrdoPair pair)
     {
-        await SendControlFrame(cobId1, plain).ConfigureAwait(false);
-        await SendControlFrame(cobId2, inverted).ConfigureAwait(false);
+        await SendControlFrame(pair.CobId1, pair.Plain).ConfigureAwait(false);
+        await SendControlFrame(pair.CobId2, pair.Inverted).ConfigureAwait(false);
     }
 
     void ISrdoEngineHost.EmitEmcy(ushort errorCode)

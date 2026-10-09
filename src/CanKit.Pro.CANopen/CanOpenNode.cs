@@ -212,6 +212,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // populated: a record write there already reaches the engine through the CoS filter.
         _srdoCount = Math.Max(_options.SrdoCount, DescribedSrdoCount(description));
         _srdoInFlight = new bool[_srdoCount + 1];
+        _srdoPending = new SrdoPair?[_srdoCount + 1];
         _srdo = new Safety.SrdoEngine(_actor, _actor.TimeSource, _deadlines, _od, _nodeId, _srdoCount, this);
         _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0,
             () => { _ = EmitHeartbeat((byte)_state); });
