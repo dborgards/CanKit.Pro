@@ -41,6 +41,11 @@ internal sealed partial class CanOpenNode
     private readonly bool[] _slaveVerified = new bool[CanOpenCobId.MaxNodeId + 1];
     private CancellationTokenSource? _slaveVerificationCts;
 
+    // Counts the boots: CancelBootUp moves it on. A verification carries the value it began
+    // under, so a result that was already posted when its boot was cancelled is not taken for
+    // the verification a newer boot started for the same slave.
+    private int _bootGeneration;
+
     // NMT the master sends, in the order it was asked for. Each frame waits for the previous
     // send to finish, so a simultaneous Start cannot pass the Reset Communication that was
     // queued ahead of it. Only the tail is kept, so the chain does not retain every frame.
@@ -96,6 +101,7 @@ internal sealed partial class CanOpenNode
         _slaveVerificationCts?.Cancel();
         _slaveVerificationCts?.Dispose();
         _slaveVerificationCts = null;
+        _bootGeneration++;
     }
 
     private void NoteSlaveNmtState(byte nodeId, byte state)
@@ -147,10 +153,18 @@ internal sealed partial class CanOpenNode
         if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
 
         // Step D before step E: a safety slave is started only once its configuration verified.
-        if (!_slaveVerified[nodeId] && SafetyExpectationOf(nodeId) is { } expected)
+        // Step D is "before NMT Start", so it covers only a slave this master starts itself: one
+        // already Operational (keep-alive, or a running network taken over) is returned above and
+        // is not verified, and under a simultaneous start (1F80h bit 1) a slave that announces
+        // after the broadcast went out was started by that broadcast and is not verified either.
+        if (!_slaveVerified[nodeId])
         {
-            if (!_slaveVerifying[nodeId]) BeginSlaveVerification(nodeId, expected);
-            return;
+            if (_slaveVerifying[nodeId]) return;
+            if (SafetyExpectationOf(nodeId) is { } expected)
+            {
+                BeginSlaveVerification(nodeId, expected);
+                return;
+            }
         }
 
         // Bit 1 waits for one broadcast, and only when this node may enter Operational too.
@@ -188,6 +202,9 @@ internal sealed partial class CanOpenNode
 
     private void OnBootTimeout()
     {
+        // A halt already applied its reaction (a failed safety verification, say). The network is
+        // not started past it, so a second stop-all or reset-all would only repeat it.
+        if (_bootHalted) return;
         if (_coldResetPending)
         {
             // This tick landed in the wait. Arm the same timeout again instead of commanding
@@ -215,6 +232,10 @@ internal sealed partial class CanOpenNode
     private void ApplyBootErrorReaction(IEnumerable<byte> failedSlaves, FlyingMasterSignal signal)
     {
         _bootHalted = true;
+        // One reaction per boot: a halt from a failed verification must not be followed by the
+        // boot timeout's own for a mandatory slave that is still unseen.
+        _bootDeadline?.Dispose();
+        _bootDeadline = null;
         uint startup = ReadStartup();
         bool stopAll = (startup & NmtStopAllOnErrorBit) != 0;
         bool resetAll = !stopAll && (startup & NmtResetAllOnErrorBit) != 0;
@@ -254,6 +275,7 @@ internal sealed partial class CanOpenNode
         _slaveVerifying[nodeId] = true;
         var cts = _slaveVerificationCts ??= new CancellationTokenSource();
         var token = cts.Token;
+        int generation = _bootGeneration;
         _ = Task.Run(async () =>
         {
             bool verified = false;
@@ -262,18 +284,28 @@ internal sealed partial class CanOpenNode
             {
                 verified = (await VerifyPeerSafetyConfigurationAsync(nodeId, expected, token).ConfigureAwait(false)).Succeeded;
             }
-            catch (OperationCanceledException) { return; }
-            catch (Exception ex) { failure = ex; }
-            try { _actor.Post(() => OnSlaveVerified(nodeId, verified, failure)); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+            catch (Exception ex) { failure = ex; } // a cancellation of anything else is a failure
+            try { _actor.Post(() => OnSlaveVerified(nodeId, generation, verified, failure)); }
             catch (ObjectDisposedException) { }
         });
     }
 
-    private void OnSlaveVerified(byte nodeId, bool verified, Exception? failure)
+    private void OnSlaveVerified(byte nodeId, int generation, bool verified, Exception? failure)
     {
-        if (!_slaveVerifying[nodeId]) return; // cancelled by a reset, a role change or dispose
+        // Cancelled by a reset, a role change or dispose; or begun by a boot that has been
+        // cancelled since, while a newer boot is verifying the same slave.
+        if (generation != _bootGeneration || !_slaveVerifying[nodeId]) return;
         _slaveVerifying[nodeId] = false;
         if (_disposed != 0 || _flyingMasterRole != FlyingMasterRole.Active || _bootHalted) return;
+        if (_coldResetPending)
+        {
+            // A forced Reset Communication is held: nothing is started, reset or signalled in the
+            // window, as for an announcement. A confirmed reset cancels this boot; an abandoned
+            // one resumes it, which starts a verified slave and verifies a failed one again.
+            if (verified) _slaveVerified[nodeId] = true;
+            return;
+        }
         if (failure is not null) RaiseBackgroundException(failure);
         if (verified)
         {
