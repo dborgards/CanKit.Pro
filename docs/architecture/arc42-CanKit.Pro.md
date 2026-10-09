@@ -35,7 +35,7 @@
 > | L3 ISO-TP (ISO 15765-2), Kodierer und aktorgetriebener `IIsoTpChannel` (§5.4, §6.4, §6.7, ADR-4) | `CanKit.Pro.IsoTp` |
 > | L3 J1939-TP (BAM/CM) (§6.6) | `CanKit.Pro.J1939Tp` |
 > | L4 UDS-Client über ISO-TP (§6.5) | `CanKit.Pro.Uds` |
-> | L4 CANopen (CiA 301) | `CanKit.Pro.CANopen` |
+> | L4 CANopen (CiA 301, CiA 304) | `CanKit.Pro.CANopen` |
 > | L4 J1939-Applikation | `CanKit.Pro.J1939` |
 >
 > Der Frame-Ownership-/Lifetime-Vertrag (§8.1, ADR-9) ist die eine Ausnahme: er wurde im Fork
@@ -335,7 +335,7 @@ flowchart TB
 | L1 Raw-CAN-Kern | vorhanden | Herstellerneutraler Frame-Zugriff, Discovery, Utilities, Diagnostics. | `ICanBus`, `CanBus.Open`, `CanRegistry` | `FR-RAW-*` |
 | L2 Raw-CAN-Dienste | vorhanden (`CanKit.Pro.RawCan`, `.Actor`, `.Addressing`, `.Reliability`) | Ein RX-Strom → N unabhängige gefilterte Consumer; Ownership-Vertrag (upstream); TX-Confirm; Aktor-Modell. | `ICanBusService` / `ISubscription` | `FR-RAW-DEMUX-*`, `FR-RAW-OWN-*`, `FR-RAW-TXC-*` |
 | L3 Transport | vorhanden (`CanKit.Pro.IsoTp`, `CanKit.Pro.J1939Tp`) | Segmentierung/Reassemblierung (ISO-TP), Sessions (J1939-TP). | `IIsoTpChannel`, `IJ1939TpChannel` | `FR-TP-*` |
-| L4 Anwendungsprotokolle | vorhanden (`CanKit.Pro.Uds`, `.CANopen`, `.J1939`) | Diagnose-/Applikationssemantik auf L3/L2. | `UdsClient`, `ICanOpenNode`, `J1939Node` | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*` |
+| L4 Anwendungsprotokolle | vorhanden (`CanKit.Pro.Uds`, `.CANopen`, `.J1939`) | Diagnose-/Applikationssemantik auf L3/L2; CANopen Safety (CiA 304) im CANopen-Paket, `SrdoEngine` (ADR-12). | `UdsClient`, `ICanOpenNode`, `J1939Node` | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*` |
 
 ## 5.2 Ebene 2 – Zoom L1 (Raw-CAN-Kern, vorhanden)
 
@@ -1225,6 +1225,26 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   sondern als protokoll-codec-spezifische Aufgabe in `IsoTpFrameCodec.DecodeStMin` (FR-TP-007,
   Review §1.1 Punkt 6) — eine generische „Reserved-Value"-Abstraktion wäre spekulativ gewesen.
 
+### ADR-12 (umgesetzt): CANopen Safety (CiA 304) im CANopen-Paket, als eigene Engine-Klasse
+- **Kontext:** CiA DSP 304 ergänzt CiA 301 um SRDO, GFC und die Objekte 1300h–13FFh. Alles, was
+  eine Umsetzung braucht — Aktor, Deadline-Scheduler, Bus-Subscription, Validator-Kette,
+  NMT-Übergänge, EDS-Pfad — ist intern in `CanOpenNode`; `ICanOpenNode` darf seit 1.3.0 nicht
+  erweitert werden (`c636a17`).
+- **Entscheidung:** im Paket `CanKit.Pro.CANopen` (kein eigenes Paket: eine öffentliche
+  Erweiterungs-SPI wäre ein zweites Designprojekt und friert eine Plugin-API ein, die sonst
+  niemand nutzt; Präzedenz CiA 302-2 und CiA 306). Laufzeit als `Safety/SrdoEngine` mit
+  injiziertem `IProtocolActor`, `IDeadlineScheduler`, `ObjectDictionary` und Host-Callbacks
+  (`ISrdoEngineHost`), nach dem Muster von `HeartbeatProducer`/`HeartbeatConsumer`; die Objekte
+  sind verwaltete Kommunikationsobjekte nach dem PDO-Muster. Öffentliche API als `ICanOpenSafety`
+  über `CanOpenSafetyExtensions.Safety(this ICanOpenNode)`. Opt-in über `SrdoCount` bzw. eine
+  Gerätebeschreibung mit SRDO-Records.
+- **Konsequenzen:** + kein Major-Release (die 1.3.0-Signatur von `CanOpenNodeOptions.With` bleibt
+  als Überladung neben der um die SRDO-Optionen erweiterten), ein Paket, eine Zeitquelle für alle
+  Fristen, Engine ohne Bus testbar; − das CANopen-Paket wächst; − Normbasis ist DSP 304 V1.0, der
+  Abgleich gegen EN 50325-5 steht aus (#289). Entscheidungsakte:
+  `docs/reviews/2026-10-09-canopen-safety-scope.md`.
+- **Status:** Umgesetzt als FR-CO-035..046.
+
 ---
 
 # 10. Qualitätsanforderungen
@@ -1340,6 +1360,7 @@ des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
 | **CANopen** | Höheres Protokoll (CiA 301) auf CAN. |
 | **SDO / PDO** | Service / Process Data Object (CANopen). |
 | **NMT / EMCY** | Network Management / Emergency Object (CANopen). |
+| **SRDO / GFC** | Safety-Relevant Data Object / Global Failsafe Command (CANopen Safety, CiA 304). |
 | **SPI (hier)** | Service Provider Interface; interne Erweiterungspunkte (`CanKit.Abstractions.SPI.*`), nicht der Hardware-SPI-Bus. |
 | **Fake-Native** | `*.Fake.cs`-Spiegel der P/Invoke-Schicht für hardwarelose Builds (`-c Fake`). |
 | **Virtual-Hub** | In-Memory-Loopback-Adapter (`VirtualBusHub`) für Tests. |

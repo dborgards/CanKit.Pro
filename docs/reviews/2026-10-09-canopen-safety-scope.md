@@ -12,6 +12,8 @@ Entscheidungen, nicht als Vorschläge. Das Design danach ist die Form, in der di
 gebaut werden; die Posten-Tabelle ist die Quelle der `FR-CO`-Zeilen, die erst geschrieben werden,
 wenn das Verhalten gebaut ist, das sie prüfen.
 
+Nachgetragen (09.10.2026): umgesetzt als FR-CO-035..046 (SRS §4.3.2), ADR-12; PR folgt.
+
 ## Woher die Belege kommen
 
 | Stufe | Was so belegt ist |

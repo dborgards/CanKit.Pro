@@ -7,7 +7,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — and CANopen Safety as it reads CiA DSP 304 V1.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
@@ -18,6 +18,8 @@ Table 72, an NMT slave state machine, heartbeat producer/consumer, node guarding
 guarding, a SYNC producer/consumer and structured EMCY — all composed on the CanKit.Pro L2
 pipeline (`ICanBusService` / `IProtocolActor` / `DeadlineScheduler`), exactly like
 `CanKit.Pro.IsoTp`, `CanKit.Pro.J1939Tp` and `CanKit.Pro.Uds`.
+CANopen Safety (CiA DSP 304 V1.0) is available opt-in through `node.Safety()` — see
+[CANopen Safety](#canopen-safety-cia-304).
 
 One `ICanOpenNode` serves both roles a CANopen application takes: the **device** (its own object
 dictionary, the PDOs it produces and consumes, configurable by a master over SDO) and the **tool
@@ -32,7 +34,9 @@ every requirement of SRS §4.3.2 — the requirements this repository set itself
 FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 (`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
 scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
-(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`). The SRS's "Quelle" column says for each
+(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-035 to FR-CO-046 are CANopen
+Safety after CiA DSP 304 V1.0, decided on 9 October 2026
+(`docs/reviews/2026-10-09-canopen-safety-scope.md`). The SRS's "Quelle" column says for each
 of them whether a standard requires it, the architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
@@ -71,6 +75,18 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-032 | Boot-up of the slaves in `1F81h` by the active master, `1F80h`, `1F82h`, `1F89h` ([Boot-up](#boot-up)) |
 | FR-CO-033 | Listen-only discovery: heartbeat or boot-up within a caller-chosen window, nothing transmitted ([Discovery](#discovery)) |
 | FR-CO-034 | Scan on request: one SDO upload of `1000h:00` per node-id not already found ([Discovery](#discovery)) |
+| FR-CO-035 | Safety objects `1300h`, `1301h`–`1340h`, `1381h`–`13C0h`, `13FEh`, `13FFh` as managed objects at the DSP 304 §8.4.2.2 defaults, only with `SrdoCount` > 0 or SRDO records in a description; reset, store and load like the communication objects ([The objects](#the-objects)) |
+| FR-CO-036 | Every write to them validated: value ranges, `0800 0022h` in Operational, delete before change, plain/inverted pairs, at most 8 bytes, COB-ID collisions; `13FEh` back to 0 on every parameter write ([The objects](#the-objects)) |
+| FR-CO-037 | The `13FFh` checksum of §8.4.2.2 as CRC-16/XMODEM over the fields MSB-first; `SrdoCrc` is public ([Configuring and committing](#configuring-and-committing)) |
+| FR-CO-038 | At the transition to Operational, per SRDO: `13FEh` = `A5h` and a matching checksum, else `ConfigurationInvalid` and nothing sent ([Configuring and committing](#configuring-and-committing)) |
+| FR-CO-039 | Producer: cycle = refresh time, first cycle after 0.5 ms × node-id, plain and inverted frame as one unit, `TriggerSrdoAsync` and change of state send at once and restart the cycle ([Producer](#producer)) |
+| FR-CO-040 | Consumer: order, inversion, SRVT, SCT, length (EMCY `8210h` once per run), writing the mapped objects, `SrdoReceived` / `SrdoStateChanged`, re-validation by the next valid pair ([Consumer](#consumer)) |
+| FR-CO-041 | Global failsafe command: sent and reported only with `1300h` = 1 in Operational, DLC 0 ([GFC](#gfc)) |
+| FR-CO-042 | `ICanOpenSafety` through `node.Safety()`, without widening `ICanOpenNode`; configuration, delete, commit, state, options ([Opening a safety node](#opening-a-safety-node)) |
+| FR-CO-043 | EDS/DCF: the safety objects loaded like the PDO records, with findings; the file's highest SRDO record raises `SrdoCount` ([Opening a safety node](#opening-a-safety-node)) |
+| FR-CO-044 | `ConfigurePeerSafetyAsync` after §9.2 (write, read back, compare, `A5h` only without a difference) and `VerifyPeerSafetyConfigurationAsync` after §8.3.1 step D, both through the peer-SDO gate ([Configuring a peer](#configuring-a-peer)) |
+| FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
+| FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
 
 ## Not built, and why
 
@@ -100,6 +116,18 @@ Deliberate omissions, each checked against the norm text:
   as CiA 301 says (see below).
 * **The pst > 0 fallback from block to segmented transfer** — `pst = 0` is forced, which CiA 301
   §7.2.4.3.13 defines as "change of transfer protocol not allowed".
+* **Diverse redundancy and the safe state (CiA DSP 304 §9.5, §8.3.2)** — this library is not
+  developed to IEC 61508 / DIN V VDE 0801 and claims no safety integrity level. It builds the
+  inverted frame from the plain one and compares bit by bit on reception; building the pair
+  "by two different ways" and entering the safe state are the device's.
+* **SRDO details V1.0 leaves open** — the checksum's initial value and byte order (CRC-16/XMODEM,
+  MSB-first here) and the `ro`/`rw` conflict of `13FFh` (`rw` here, as the records are: always
+  locally, on the bus with `WritableCommunicationParameters` or a file that declares it `rw`;
+  §9.2 needs the tool to write it). To be reconciled against EN 50325-5:2010 in #289.
+* **Bit-granular SRDO mapping, more than 8 objects per SRDO, 29-bit SRDO COB-IDs** — as for PDOs.
+* **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
+  SCT.
+
 What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
 with such an entry instead of ignoring it.
@@ -477,6 +505,236 @@ timeout (`CanOpenNodeOptions.SdoServerTimeout`, default 5 s) matching the block 
 and block transfer retransmits from the first unconfirmed segment on a partial sub-block ACK
 (bounded by `CanOpenNodeOptions.SdoBlockMaxRetransmissions`, default 3).
 
+## CANopen Safety (CiA 304)
+
+The binding is **CiA DSP 304 version 1.0** (1 January 2001), the safety-relevant communication
+on top of CiA 301: SRDOs, the global failsafe command (GFC) and the objects `1300h`–`13FFh`.
+Version 1.1 moved into EN 50325-5:2010, which is not in this repository; what it changes is to
+be reconciled in #289. Sections cited here are those of DSP 304 V1.0. Everything lives in the
+namespace `CanKit.Pro.CANopen.Safety` and is reached through `node.Safety()`, an extension on
+`ICanOpenNode` (the interface is not widened); on a node this library did not create it throws
+`NotSupportedException`.
+
+### Opening a safety node
+
+`CanOpenNodeOptions.SrdoCount` (0..64, default 0) is the number of SRDOs the node implements.
+With 0 the node is the plain CiA 301 node it was before: none of `1300h`–`13FFh` is created and
+`001h` is not handled, so an application may declare those objects itself (§9.4: "The
+implementation of CANopen Safety shall be allowed only in safety devices"). Records above the
+count are not reserved either.
+
+A device description raises the count to the highest SRDO record it declares
+(`1301h`–`1340h`, `1381h`–`13C0h`); the option is a floor. The safety objects of the file are
+loaded like the PDO records: through the validated write path, the mapping before the SRDO is
+created, the file's access type honoured, every value the node refuses reported as a finding with
+its abort code. A record below the highest one that the file omits does not exist, a mapping
+record without its communication record is not created, and a mapping the node refuses leaves
+that SRDO deleted. `13FEh` is applied last, so a file whose checksums match its records loads as a
+valid configuration; a file whose checksum does not match loads without a finding and is simply
+not valid. EdsDcfNet evaluates `$NODEID` in the form `$NODEID+<constant>`: the pre-defined
+COB-ID FFh + 2 × node-id is not of that form, so a file states it as a number or as
+`$NODEID+<constant>` for its own node-id.
+
+```csharp
+using CanKit.Pro.CANopen.Safety;
+
+using var node = CanOpen.OpenNode(bus, nodeId: 0x05, new CanOpenNodeOptions { SrdoCount = 2 });
+node.ObjectDictionary.AddU8(0x2001, 0x00, 0);   // the safety input it transmits
+
+var safety = node.Safety();
+safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30));
+safety.CommitSafetyConfiguration();             // checksums, then 13FEh = A5h
+safety.SrdoStateChanged += (s, e) => Console.WriteLine($"SRDO{e.SrdoNumber} valid={e.IsValid} {e.Reason}");
+```
+
+`EnableChangeOfStateSrdo` (default on) makes an application write to an object mapped in a
+transmit SRDO transmit that SRDO at once, as `EnableChangeOfStateTpdo` does for TPDOs; a write
+from the bus never triggers one.
+
+### The objects
+
+DSP 304 §8.4.2.2 Table 6, created at these defaults:
+
+| Object | Sub-index | Default | Each write is held to |
+| --- | --- | --- | --- |
+| `1300h` GFC parameter | `00h` | 0 | 0 or 1 (`0609 0030h`). Writable in Operational: it is not covered by the checksum. |
+| `1301h`–`1340h` communication record of SRDO n | `00h` | 6 | Constant (`0601 0002h`). |
+| | `01h` direction | 0 | 0 deleted, 1 transmit, 2 receive; 3..255 `0609 0030h`. Creating needs both COB-IDs set, in range, consecutive and not held by another existing SRDO, and every mapped object accessible in that direction (a producer reads, a consumer writes). |
+| | `02h` refresh time (tx) / SCT (rx), ms | 25 | 1..65535 (`0609 0030h` for 0). |
+| | `03h` SRVT, ms | 20 | 1..255. Part of the checksum for both directions; only a consumer acts on it. |
+| | `04h` transmission type | 254 | Constant; every write `0609 0030h`. |
+| | `05h` COB-ID 1 | FFh + 2 × node-id for SRDO 1 of a node-id 1..64, else 0 | 0 or an odd CAN-ID 101h..17Fh, bits 11..31 clear; not changeable while the SRDO exists; not one of another existing SRDO (`0609 0030h`). |
+| | `06h` COB-ID 2 | 100h + 2 × node-id, likewise | 0 or COB-ID 1 + 1 (102h..180h), same rules. |
+| `1381h`–`13C0h` mapping of SRDO n | `00h` | 0 | 0 or an even count 2..16 (`0609 0030h`); every slot up to it filled (`0602 0000h`), each even slot equal to the odd one before it — plain, then inverted (`0604 0041h`), at most 8 bytes in total (`0604 0042h`). |
+| | `01h`–`10h` | 0 | Byte-aligned 8..64 bits, an existing mappable object outside `1000h`–`1FFFh` of that width, no dummy (`0607 0010h`, `0602 0000h`, `0604 0041h`). Mapping writes while the SRDO exists, and slot writes while the count is not 0, `0601 0000h`. |
+| `13FEh` configuration valid | `00h` | 0 | Any value; only `A5h` means valid. |
+| `13FFh` safety configuration checksum | `00h` | `SrdoCount` | Constant (`0601 0002h`). |
+| | `01h`–n | 0 | UNSIGNED16, the checksum of SRDO n. |
+
+The records, `13FEh` and `13FFh` refuse every write in Operational with `0800 0022h` (§8.3.2.4,
+note 1); reading stays allowed. Every accepted write to a record or to `13FFh` sets `13FEh` back to
+0 (§8.4.2.2, "automatically 0"), so a changed parameter can never sit beside a stale `A5h`. A
+PDO cannot take a CAN-ID in 101h..180h (CiA 301 Table 40), so SRDO COB-IDs are only checked
+against each other.
+
+The objects are communication-profile objects like the PDO records: read-only on the bus unless
+the node is opened with `WritableCommunicationParameters` or the file declares them `rw`, always
+writable locally. Reset Node and Reset Communication return them to their power-on values, `1010h`
+"save" stores them and `1011h` "load" brings them back. Putting a stored configuration back does
+not clear `13FEh`, so a configuration that was valid when it was saved is valid again after the
+reset.
+
+### Configuring and committing
+
+`ConfigureSrdoProducer(n, mapping, refreshTime)` and `ConfigureSrdoConsumer(n, mapping, sct,
+srvt)` write record n in the order §8.4.2.2 requires for a mapping change: the SRDO deleted
+(sub-index `01h` = 0), the mapping disabled, its slots (each object twice, plain and inverted),
+its count, the times, the COB-IDs, and the direction last. Without COB-IDs SRDO 1 of a node-id
+1..64 takes its pre-defined pair (§8.3.3 Table 4); any other SRDO needs them
+(`ArgumentException`). A producer's sub-index `03h` keeps its value (default 20 ms).
+`DeleteSrdo(n)` sets the direction to 0. All three throw `InvalidOperationException` in
+Operational and on a node without SRDOs, and `ArgumentException` naming the abort code for a value
+the dictionary refuses.
+
+`CommitSafetyConfiguration()` is §9.2 for a node configured locally: it writes `13FFh:n` for
+every SRDO, computed by `SrdoCrc.Compute`, and then `13FEh` = `A5h`. `A5h` has to come last,
+because every checksum write clears it. The checksum (§8.4.2.2) runs over the direction (1 byte),
+the refresh time or SCT (2), the SRVT (1), COB-ID 1 (4), COB-ID 2 (4), the mapping count (1) and,
+per mapping sub-index, that sub-index (1) and its value (4). V1.0 gives the polynomial
+x¹⁶ + x¹² + x⁵ + 1 and nothing else: the initial value and byte order chosen here are those of
+CRC-16/XMODEM (`SrdoCrc.Crc16Xmodem`, also used by the SDO block transfer), multi-byte fields
+MSB-first.
+
+At every transition to Operational each SRDO is checked (§9.5, last rule; §8.3.1 step D):
+`13FEh` = `A5h` and `13FFh:n` equal to the checksum of the record. Without both the SRDO is
+`ConfigurationInvalid`: a producer does not transmit, a consumer reports invalid at once. The
+node's NMT state is not affected.
+
+### Producer
+
+A valid transmit SRDO sends its pair every refresh time while the node is Operational. The first
+transmission is delayed by 0.5 ms × node-id (§9.5), so the producers of a network do not start in
+step. Each transmission is the plain frame on COB-ID 1 followed by its bitwise inverse on COB-ID
+2 (§8.1), handed on as one unit; the pairs of all SRDOs of the node go out on one ordered send
+chain, so an inverted frame can never overtake its plain frame. `TriggerSrdoAsync(n)` and a change
+of state transmit at once and restart the refresh cycle from there; the refresh time is the
+longest interval between two transmissions.
+
+At most one pair per SRDO is in flight. A pair that comes due while the previous one is not yet
+confirmed becomes that SRDO's pending pair, replacing an older pending one — the latest data wins —
+and is sent as soon as the previous pair completes. Leaving Operational drops the pending pair. A
+send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
+SRDO stays valid. `GetSrdoState(n)` of a producer is valid while the node is Operational with a
+valid configuration.
+
+### Consumer
+
+A receive SRDO starts each Operational period invalid with `NotReceived` and its SCT running.
+Then (§8.1.1, §8.1.3.1, §9.5):
+
+* the plain frame starts the SRVT; a second plain frame replaces the first and restarts it;
+* the inverted frame must follow within the SRVT (`ValidationTimeExpired` otherwise), must have
+  a plain frame before it (`OutOfOrder`), and must be its bitwise inverse with the same length
+  (`Mismatch`);
+* a complete pair writes the mapped objects, raises `SrdoReceived` and restarts the SCT; when the
+  SCT elapses without one the SRDO is `SafeguardCycleExpired`;
+* a pair shorter than the mapping is not processed and produces EMCY `8210h` (when EMCY is
+  enabled) once, until a pair of the right length arrives or the SRDO is rebuilt — as for an
+  RPDO; a longer one uses its first bytes.
+
+The next valid pair makes an invalid SRDO valid again — there is nothing to reset.
+`SrdoStateChanged` reports the transitions, not every pair, and is a critical event like a
+heartbeat timeout: it is never discarded to make room in the event queue, and a second identical
+one still waiting behind the first is folded into it. A remote frame, a frame outside Operational
+and the node's own producer frames (on a bus that echoes) are ignored. Leaving Operational makes
+every SRDO `NotOperational` and stops SCT and SRVT.
+
+### GFC
+
+The global failsafe command is COB-ID `001h` with no data (§8.2). `SendGlobalFailsafeCommandAsync`
+sends it at once — it does not wait behind SRDO pairs — and only with `1300h` = 1 in Operational;
+otherwise it throws `InvalidOperationException`. A GFC is reported by
+`GlobalFailsafeCommandReceived` under the same two conditions, and only with DLC 0. On a bus that
+echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event is critical, and
+identical ones still waiting are folded into one.
+
+### Configuring a peer
+
+`ConfigurePeerSafetyAsync(peer, configuration)` is the tool side of §9.2, Figure 9. A
+`PeerSafetyConfiguration` holds `1300h` and, per SRDO number, the communication parameter and the
+mapping; `PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId)` builds it from a DCF's
+parameter values (default value where none, `$NODEID` resolved; a record with direction 0, or with
+a value that does not parse, is left out; a missing or zero SRVT becomes the default 20 ms, the
+value the device stores and checksums).
+
+The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
+above it (`ArgumentException`) before writing anything; a peer that returns no count is an
+`InvalidOperationException`. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
+direction, because the checksum covers it) are refused before the first frame. Then it writes
+sub-index `01h` = 0 for every SRDO of the peer — so that two SRDOs can exchange their COB-IDs —
+then per SRDO the record in delete-first order (an SRDO the configuration does not name stays
+deleted), then `1300h`, then every checksum. It reads all of it back and compares byte for byte.
+Only without a difference does it write `13FEh` = `A5h` and read that back too.
+
+`PeerSafetyResult.Succeeded` means acknowledged; otherwise `Mismatches` lists each
+(index, sub-index) with the bytes written and the bytes read, and `A5h` was not written — the
+peer keeps a configuration it will not run. An SDO abort (`0800 0022h` when the peer is
+Operational), a timeout or a refusal by the peer-SDO gate propagates as from `SdoDownloadAsync`;
+the peer is then left with `13FEh` = 0, because every parameter write clears it. Every transfer
+passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
+One configuration or verification per peer runs at a time.
+
+### Verifying, and the boot-up
+
+`VerifyPeerSafetyConfigurationAsync(peer, expected)` is §8.3.1 step D without writing anything:
+it uploads `13FEh` (must be `A5h`), `13FFh:n` (must equal the checksum of the expected record)
+and the records, and compares them with what a configuration with `expected` would have written (`1300h` aside,
+which step D does not list).
+
+The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
+least one SRDO is a safety slave; an EDS carries no parameter values and never makes one. Before
+NMT Start the master verifies the slave against its DCF:
+
+* verified — the slave is started as any other;
+* not verified (a difference, or an upload that failed; an exception is also reported on
+  `BackgroundExceptionOccurred`) — `FlyingMasterChanged` signals
+  `SlaveSafetyConfigurationInvalid` for that slave and it is not started. A mandatory slave, or
+  any safety slave under a simultaneous start (`1F80h` bit 1), halts the boot with the error
+  reaction of `1F80h` bits 4 and 6, as a boot timeout does; an optional one is skipped and the
+  boot goes on.
+
+This node's own self-start and the simultaneous-start broadcast wait for verifications still
+running. A verification that ends while a forced Reset Communication is held is acted on only
+after the hold — a success is kept, a failure is verified again — and a result from a boot that
+has since been cancelled is discarded. A safety slave that is already Operational when first
+seen — running before this master took over, keep-alive, or reached by a simultaneous-start
+broadcast before it had announced — is not started by this master and therefore not verified:
+step D is "before NMT Start".
+
+### Observing a peer SRDO
+
+`ObserveForeignSrdoAsync(peer, cobId1, frame1, frame2, description, sink)` splits another node's
+SRDO pair into the sink, as `ObserveForeignPdoAsync` does for a PDO, and writes nothing to this
+node's dictionary. The record is the one whose live `1301h`–`1340h:05` equals `cobId1`; a word
+that was read decides, matching or not, and the file's value is used only for a record whose
+upload failed or returned no word. A COB-ID word with a bit above bit 10 does not match. The two frames must have
+the same length and be bitwise inverse (§8.1). The mapping is read live from the odd sub-indices
+of `1381h`–`13C0h`, or from the file when that read fails. Unlike for a PDO (FR-CO-030), a live
+mapping of which the peer-SDO gate refuses part — the count was read, a slot was not — is not
+replaced by the file's: the device is known to use a mapping the file does not describe, and
+splitting safety data by the wrong one would hand the caller wrong values marked decoded. Such a
+pair, a mapping with a dummy entry and a frame shorter than the mapping are reported not decoded.
+Signals carry `ForeignPdoKind.Srdo` and the SRDO number. SRVT and SCT are not judged: the caller
+holds the timestamps.
+
+### What this is not
+
+This library is not developed to IEC 61508 / DIN V VDE 0801 and claims no safety integrity level.
+It implements the data transport of DSP 304 V1.0 — the frame pair, the timing checks, the objects,
+the checksum — and has not been run against a certified safety device or tester. The diverse
+redundancy of §9.5 (the pair "built by two different ways", the data "compared … in the
+application") and the safe state a safety controller enters are the device's to provide.
+
 ## Flying master
 
 A master application joins the NMT flying-master election with `StartFlyingMaster`. The binding
@@ -661,6 +919,9 @@ CanKit.Pro.CANopen/
   CanOpenNode.BootUp.cs               // partial: boot-up of the slaves in 1F81h once the master is active
   CanOpenNode.PeerSdo.cs              // partial: peer EDS/DCF binding and the client SDO gate
   CanOpenNode.ForeignPdo.cs           // partial: splitting a peer's PDO
+  CanOpenNode.Safety.cs               // partial: CiA 304 objects, their validation, ICanOpenSafety, the SRDO send chain
+  CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2) and verifying (step D) a peer's safety parameters
+  CanOpenNode.ForeignSrdo.cs          // partial: splitting a peer's SRDO pair
   CanOpenDiscovery.cs                 // listen-only discovery and the scan on request
   CanOpenNodeOptions.cs
   CanOpenCobId.cs                     // pre-defined connection set, COB-ID control bits, restricted CAN-IDs
@@ -671,6 +932,7 @@ CanKit.Pro.CANopen/
   Sdo/                                // codec, abort codes, exception, block-transfer codec + mode enum
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
+  Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
 ```
 
 ## Migrating from 1.2.x
@@ -753,6 +1015,13 @@ Each item names what a caller does about it.
   node's SDO client, NMT master and consumers work alongside its own object dictionary and
   PDOs. That was so in 1.2.x too; what is new is that the device side can be configured by a
   master over the bus.
+
+## Changes since 1.3.0
+
+* **`CanOpenNodeOptions.With(...)` validates the copy it returns**, as the node does when it is
+  opened: an out-of-range value now throws `ArgumentOutOfRangeException` from `With` rather than
+  from `OpenNode`. It gained `srdoCount` and `enableChangeOfStateSrdo`; the 1.3.0 signature is
+  kept beside it, so compiled callers keep working.
 
 ## Install
 
