@@ -274,25 +274,14 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
     /// declares at least one SRDO (spec decision 4). An EDS has no parameter values and never
-    /// makes a safety slave. Building it runs the device loader over a dictionary of its own, so
-    /// it is kept per slave and per bound description instance. Actor only.</summary>
+    /// makes a safety slave. Built from the description on every call, not kept: a description
+    /// can be edited in place, and the peer-SDO gate reads it live too.</summary>
     private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId)
     {
-        if (!_peerDescriptions.TryGetValue(nodeId, out var description)) return null;
-        if (_safetyExpectations.TryGetValue(nodeId, out var kept) && ReferenceEquals(kept.Description, description)) return kept.Expected;
-        PeerSafetyConfiguration? expected = null;
-        if (description.IsConfigurationFile)
-        {
-            var built = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
-            if (built.DeclaresAnySrdo) expected = built;
-        }
-        _safetyExpectations[nodeId] = (description, expected);
-        return expected;
+        if (!_peerDescriptions.TryGetValue(nodeId, out var description) || !description.IsConfigurationFile) return null;
+        var expected = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
+        return expected.DeclaresAnySrdo ? expected : null;
     }
-
-    // No invalidation: the expectation depends only on the description and the node-id, and a
-    // rebind replaces the instance, which the reference check above notices.
-    private readonly Dictionary<byte, (CanOpenDeviceDescription Description, PeerSafetyConfiguration? Expected)> _safetyExpectations = new();
 
     /// <summary>Whether any assigned slave is a safety slave: then the master sends no Start to node 0.</summary>
     private bool HasAssignedSafetySlave()

@@ -179,22 +179,32 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0));
     }
 
-    /// <summary>The expectation is kept for the boot, but per bound description: binding a DCF
-    /// with SRDOs after a plain one makes the slave a safety slave at once, and binding the plain
-    /// one again makes it an ordinary slave.</summary>
+    /// <summary>A bound description can be edited in place, and the peer-SDO gate reads it live:
+    /// step D must read it live too. The first boot verifies and starts the slave; the bound
+    /// instance is then edited (SRDO 1's refresh time 30 → 40 ms) and a second boot verifies
+    /// against the new content, which the slave no longer matches.</summary>
     [Fact]
-    public async Task The_Kept_Expectation_Follows_The_Bound_Description()
+    public async Task Step_D_Uses_The_Bound_Description_As_It_Is_Now()
     {
         using var rig = OpenMaster();
-        var expectationOf = typeof(CanOpenNode).GetMethod("SafetyExpectationOf", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Task<object?> ExpectationAsync() => OnActorAsync<object?>(rig.Node, () => expectationOf.Invoke(rig.Node, new object[] { Slave }));
-        var plain = PlainDcf();
-        rig.Node.BindPeerDeviceDescription(Slave, plain);
-        (await ExpectationAsync()).Should().BeNull("the plain DCF declares no SRDO");
-        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
-        (await ExpectationAsync()).Should().NotBeNull("the newly bound DCF declares SRDO 1");
-        rig.Node.BindPeerDeviceDescription(Slave, plain);
-        (await ExpectationAsync()).Should().BeNull();
+        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        var dcf = SlaveDcf(validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, dcf);
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        var signals = Record(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational, 2000, "the first boot verified and started the slave");
+
+        dcf.Objects.Objects[0x1301].SubObjects[0x02].ParameterValue = "40";
+        PeerSafetyConfiguration.FromDeviceDescription(dcf, Slave).Srdos[1].Parameter.RefreshOrSafeguardCycleTime
+            .Should().Be(TimeSpan.FromMilliseconds(40), "the edit is in the bound instance");
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave); // a live edit boots the network again
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid), 2000,
+            "the second step D compares with 40 ms, and the slave holds 30 ms");
+        signals.Should().Contain((FlyingMasterSignal.SlaveSafetyConfigurationInvalid, (byte?)Slave));
     }
 
     /// <summary>The simultaneous start keeps its moment — every mandatory slave seen, no
