@@ -156,6 +156,20 @@ public sealed class CanOpenNodeOptions
     /// </summary>
     public CanOpenNodeProfile Profile { get; init; } = CanOpenNodeProfile.Device;
 
+    /// <summary>
+    /// How many SRDOs (CiA DSP 304 V1.0) this node implements, 0..64. With 0 — the default — the
+    /// node creates none of the safety objects 1300h–13FFh and is a plain CiA 301 node
+    /// (§9.4: "The implementation of CANopen Safety shall be allowed only in safety devices").
+    /// A device description that declares SRDO records raises the count to the highest record
+    /// it declares. The safety API is reached through <c>node.Safety()</c>.
+    /// </summary>
+    public int SrdoCount { get; init; }
+
+    /// <summary>A write by the application to an object mapped in a transmit SRDO transmits the
+    /// SRDO at once (CiA DSP 304 V1.0 §8.1, "event-driven … to ensure fast reaction"), like
+    /// <see cref="EnableChangeOfStateTpdo"/>. The refresh cycle restarts from that transmission.</summary>
+    public bool EnableChangeOfStateSrdo { get; init; } = true;
+
     /// <summary>Returns a copy of this options record with the provided overrides.</summary>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -170,9 +184,11 @@ public sealed class CanOpenNodeOptions
         bool? respondToNodeGuardingRtr = null,
         bool? enableChangeOfStateTpdo = null,
         bool? writableCommunicationParameters = null,
-        CanOpenNodeProfile? profile = null)
+        CanOpenNodeProfile? profile = null,
+        int? srdoCount = null,
+        bool? enableChangeOfStateSrdo = null)
     {
-        return new CanOpenNodeOptions
+        var options = new CanOpenNodeOptions
         {
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,
@@ -187,7 +203,11 @@ public sealed class CanOpenNodeOptions
             EnableChangeOfStateTpdo = enableChangeOfStateTpdo ?? EnableChangeOfStateTpdo,
             WritableCommunicationParameters = writableCommunicationParameters ?? WritableCommunicationParameters,
             Profile = profile ?? Profile,
+            SrdoCount = srdoCount ?? SrdoCount,
+            EnableChangeOfStateSrdo = enableChangeOfStateSrdo ?? EnableChangeOfStateSrdo,
         };
+        options.Validate();
+        return options;
     }
 
     internal void Validate()
@@ -217,5 +237,8 @@ public sealed class CanOpenNodeOptions
         if (SdoBlockMaxRetransmissions < 0)
             throw new ArgumentOutOfRangeException(nameof(SdoBlockMaxRetransmissions), SdoBlockMaxRetransmissions,
                 "SdoBlockMaxRetransmissions must be >= 0.");
+        if (SrdoCount is < 0 or > 64)
+            throw new ArgumentOutOfRangeException(nameof(SrdoCount), SrdoCount,
+                "SrdoCount must be 0..64: CiA DSP 304 limits a network to 64 SRDOs (§3).");
     }
 }
