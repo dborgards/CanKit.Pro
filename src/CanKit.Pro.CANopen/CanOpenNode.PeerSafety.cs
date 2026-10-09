@@ -62,10 +62,11 @@ internal sealed partial class CanOpenNode
         {
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount);
+            // 1300h is not part of step D's list (§8.3.1 D). A deleted SRDO's checksum is not
+            // checked by the device (§9.5, last rule: the checksums of the SRDOs that exist), so a
+            // stale one is no mismatch; that SRDO's sub1 = 0 still is compared.
             var expectedValues = SafetyWrites(expected, peerCount)
-                .Where(w => w.Index != SrdoRecords.GfcParameter) // 1300h is not part of step D's list (§8.3.1 D)
-                // A deleted SRDO's checksum is not checked by the device (§9.5, last rule: the
-                // checksums of the SRDOs that exist), so a stale one is no mismatch; its sub1 = 0 still is compared.
+                .Where(w => w.Index != SrdoRecords.GfcParameter)
                 .Where(w => w.Index != SrdoRecords.Checksum || expected.Srdos.ContainsKey(w.Subindex))
                 .Append((SrdoRecords.ConfigurationValid, (byte)0x00, new[] { SrdoRecords.ConfigurationValidValue }))
                 .ToList();
