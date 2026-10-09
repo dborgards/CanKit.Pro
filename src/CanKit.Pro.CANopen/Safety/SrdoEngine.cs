@@ -31,8 +31,9 @@ internal sealed partial class SrdoEngine : IDisposable
         byte nodeId, int srdoCount, ISrdoEngineHost host)
     {
         _actor = actor ?? throw new ArgumentNullException(nameof(actor));
-        // The node's time source: the engine reads no clock itself — cycles run on the actor's
-        // scheduler and SCT/SRVT on the deadline scheduler, both driven by it — so it is only checked.
+        // The node's time source: the engine reads no monotonic time itself — cycles run on the
+        // actor's scheduler and SCT/SRVT on the deadline scheduler, both driven by this source —
+        // so it is only checked. LastValidAt is wall-clock UTC (DateTime.UtcNow in SetValid).
         _ = time ?? throw new ArgumentNullException(nameof(time));
         _deadlines = deadlines ?? throw new ArgumentNullException(nameof(deadlines));
         _od = od ?? throw new ArgumentNullException(nameof(od));
