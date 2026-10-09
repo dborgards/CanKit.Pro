@@ -677,7 +677,9 @@ above it (`ArgumentException`) before writing anything; a peer that returns no c
 direction, because the checksum covers it) are refused before the first frame. Then it writes
 sub-index `01h` = 0 for every SRDO of the peer — so that two SRDOs can exchange their COB-IDs —
 then per SRDO the record in delete-first order (an SRDO the configuration does not name stays
-deleted), then `1300h`, then every checksum. It reads all of it back and compares byte for byte.
+deleted), then `1300h`, then every checksum. The mapping is its count and the slots its objects
+use; a slot above the count is no part of the SRDO and is neither written nor read, so the peer's
+file need not declare it. It reads all of it back and compares byte for byte.
 Only without a difference does it write `13FEh` = `A5h` and read that back too.
 
 `PeerSafetyResult.Succeeded` means acknowledged. Otherwise `Mismatches` lists each

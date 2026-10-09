@@ -341,6 +341,89 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         fake.Written.Keys.Should().OnlyContain(k => k.Item1 == 0x13FF, "nothing was written");
     }
 
+    /// <summary>The fixture with mapping record 1381h declaring only sub-indices 0..4 — the two
+    /// objects of <see cref="Configuration"/>, plain and inverted — as a conforming DCF may: the
+    /// peer gate then refuses every slot above them.</summary>
+    private static CanOpenDeviceDescription PeerFileDeclaringOnlyTheUsedMappingSlots()
+    {
+        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf"));
+        var sb = new System.Text.StringBuilder();
+        bool skip = false, in1381 = false;
+        foreach (var line in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            if (line.StartsWith('['))
+            {
+                in1381 = line == "[1381]";
+                skip = System.Text.RegularExpressions.Regex.IsMatch(line, @"^\[1381sub([5-9A-F]|10)\]$");
+            }
+            if (skip) continue;
+            sb.Append(in1381 && line.StartsWith("SubNumber=", StringComparison.Ordinal) ? "SubNumber=5" : line).Append('\n');
+        }
+        var narrow = CanOpenDeviceDescription.ParseDcf(sb.ToString());
+        narrow.Contains(0x1381, 0x04).Should().BeTrue();
+        narrow.Contains(0x1381, 0x05).Should().BeFalse();
+        return narrow;
+    }
+
+    /// <summary>§9.2 writes the mapping the configuration has — the count and its 2k slots — and
+    /// nothing above it: a slot above the count is not part of the mapping (§8.4.2.3), and a peer
+    /// whose file declares only the used slots refuses the others at the gate.</summary>
+    [Fact]
+    public async Task Configure_Needs_Only_The_Mapping_Slots_It_Uses()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFileDeclaringOnlyTheUsedMappingSlots());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        device.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 1).Should().BeTrue();
+    }
+
+    /// <summary>Step D reads what §9.2 wrote, so the same file is enough to verify the peer.</summary>
+    [Fact]
+    public async Task Verify_Needs_Only_The_Mapping_Slots_It_Uses()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        master.BindPeerDeviceDescription(Device, PeerFileDeclaringOnlyTheUsedMappingSlots());
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+    }
+
+    /// <summary>A non-zero slot above the count is no part of the SRDO: the device neither uses
+    /// nor checksums it (§8.4.2.2 field g covers sub-indices 1..sub0), so step D does not fail on it.</summary>
+    [Fact]
+    public async Task Verify_Ignores_A_Leftover_Mapping_Slot_Above_The_Count()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        var od = device.ObjectDictionary;
+        od.WriteUnsigned(0x1301, 1, 0);
+        od.WriteUnsigned(0x1381, 0, 0);
+        od.WriteUnsigned(0x1381, 5, 0x20010008);
+        od.WriteUnsigned(0x1381, 6, 0x20010008);
+        od.WriteUnsigned(0x1381, 0, 4);
+        od.WriteUnsigned(0x1301, 1, 1);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue("the device itself finds SRDO 1 valid with the leftover slots");
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+    }
+
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
     /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
     /// plus one so the readback differs.</summary>

@@ -117,7 +117,9 @@ internal sealed partial class CanOpenNode
     /// <summary>The writes of §9.2 in order: a first pass that deletes every SRDO; then per SRDO
     /// the deletion, the mapping (disabled, slots, count), the times, the ids, the creation (SRDOs
     /// the configuration does not name stay deleted); then 1300h; then every checksum. The same
-    /// list is what the readback compares.</summary>
+    /// list is what the readback compares. The mapping is sub-index 0 and the 2k slots of its k
+    /// objects: a slot above the count is no part of the SRDO (§8.4.2.3) — the device neither
+    /// uses nor checksums it (§8.4.2.2 field g) — and a peer may not implement it at all.</summary>
     private static IEnumerable<(ushort Index, byte Subindex, byte[] Value)> SafetyWrites(PeerSafetyConfiguration configuration, int peerSrdoCount)
     {
         ValidateSafetyTimes(configuration);
@@ -143,11 +145,8 @@ internal sealed partial class CanOpenNode
             var entries = mapping.ToArray();
             yield return (comm, 0x01, new byte[] { 0 });
             yield return (map, 0x00, new byte[] { 0 });
-            for (byte s = 1; s <= SrdoRecords.MappingSubindices; s++)
-            {
-                int i = (s - 1) / 2;
-                yield return (map, s, ObjectDictionary.EncodeU32(i < entries.Length ? EncodeMappingEntry(entries[i]) : 0u));
-            }
+            for (byte s = 1; s <= 2 * entries.Length; s++)
+                yield return (map, s, ObjectDictionary.EncodeU32(EncodeMappingEntry(entries[(s - 1) / 2])));
             yield return (map, 0x00, new[] { (byte)(2 * entries.Length) });
             ushort cycle = CheckMilliseconds(n, "cycle time", p.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue);
             yield return (comm, 0x02, new[] { (byte)cycle, (byte)(cycle >> 8) });
