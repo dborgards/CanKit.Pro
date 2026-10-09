@@ -85,7 +85,7 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-042 | `ICanOpenSafety` through `node.Safety()`, without widening `ICanOpenNode`; configuration, delete, commit, state, options ([Opening a safety node](#opening-a-safety-node)) |
 | FR-CO-043 | EDS/DCF: the safety objects loaded like the PDO records, with findings; the file's highest SRDO record raises `SrdoCount` ([Opening a safety node](#opening-a-safety-node)) |
 | FR-CO-044 | `ConfigurePeerSafetyAsync` after §9.2 (write, read back, compare, `A5h` only without a difference) and `VerifyPeerSafetyConfigurationAsync` after §8.3.1 step D, both through the peer-SDO gate ([Configuring a peer](#configuring-a-peer)) |
-| FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
+| FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start, and no Start goes to node 0 while one is assigned; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
 
 ## Not built, and why
@@ -727,13 +727,21 @@ NMT Start the master verifies the slave against its DCF:
   with the error reaction of `1F80h` bits 4 and 6, as a boot timeout does; an optional one is
   skipped and the boot goes on.
 
-This node's own self-start and the simultaneous-start broadcast wait for verifications still
+This node's own self-start and the moment of a simultaneous start wait for verifications still
 running. A verification that ends while a forced Reset Communication is held is acted on only
 after the hold — a success is kept, a failure is verified again — and a result from a boot that
 has since been cancelled is discarded. A safety slave that is already Operational when first
-seen — running before this master took over, keep-alive, or reached by a simultaneous-start
-broadcast before it had announced — is not started by this master and therefore not verified:
-step D is "before NMT Start".
+seen — running before this master took over, or keep-alive — is not started by this master and
+therefore not verified: step D is "before NMT Start".
+
+While any assigned slave is a safety slave, the master sends no NMT Start to node 0: a broadcast
+would also reach a safety slave that has not announced yet — keep-alive, running before this
+master took over, or with its boot-up still in flight — before step D. A simultaneous start
+(`1F80h` bit 1) keeps its moment — every mandatory slave seen, no verification running — but at
+that moment every slave seen so far is started with an NMT Start of its own, a safety slave only
+once verified, and a slave that announces later is started on its own as it announces. The cost:
+one frame per slave instead of one broadcast, and a keep-alive slave that never announces (no
+heartbeat, no boot-up) is not started by this master — as with bit 1 clear.
 
 ### Observing a peer SRDO
 
@@ -850,7 +858,7 @@ DCF are not implemented.
 
 | Bit | Clear | Set |
 | --- | --- | --- |
-| 1 | Start each slave on its own. | One NMT Start, target 0, after every mandatory slave has been seen. Sent only when bit 2 is also clear, so the master enters Operational together with the slaves. The master does not apply that broadcast to itself. |
+| 1 | Start each slave on its own. | One NMT Start, target 0, after every mandatory slave has been seen. Sent only when bit 2 is also clear, so the master enters Operational together with the slaves. The master does not apply that broadcast to itself. With a CiA 304 safety slave assigned there is no broadcast: at the same moment each seen slave gets an NMT Start of its own, a safety slave only after step D, and a keep-alive slave that never announces is not started ([Verifying, and the boot-up](#verifying-and-the-boot-up)). |
 | 2 | This node enters Operational when the mandatory slaves have been seen, or at once when there are none. | This node stays in its current NMT state. |
 | 3 | Boot the assigned slaves. | Do not reset them and do not send NMT Start. |
 | 4 | On a mandatory-slave timeout, reset that slave. | On a mandatory-slave timeout, NMT Reset Node to every assigned slave. |

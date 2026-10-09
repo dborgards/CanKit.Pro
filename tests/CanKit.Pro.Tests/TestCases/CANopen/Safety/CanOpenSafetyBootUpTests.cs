@@ -27,6 +27,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Slave = 0x05; // safety.dcf is commissioned for node 5
     private const byte Other = 0x06;
+    private const uint KeepAlive = 0x10; // 1F81h bit 4: the master does not reset the slave
 
     private static CanOpenDeviceDescription SlaveDcf(bool validChecksum)
     {
@@ -134,12 +135,94 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
         Tighten(rig.Node);
         rig.Node.StartFlyingMaster(0, Heartbeat);
-        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational, 2000, "the broadcast start went out after the verification");
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational, 2000, "the start went out after the verification");
         var log = rig.Log.Snapshot();
         int lastReply = log.FindLastIndex(f => f.Id == 0x580u + Slave);
-        int start = log.FindIndex(f => IsNmt(f, NmtCommand.Start, 0));
+        int start = log.FindIndex(f => IsNmt(f, NmtCommand.Start, Slave));
         lastReply.Should().BeGreaterThanOrEqualTo(0);
-        start.Should().BeGreaterThan(lastReply, "the broadcast waits until the verification has its last reply");
+        start.Should().BeGreaterThan(lastReply, "the start waits until the verification has its last reply");
+        log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0), "with a safety slave assigned the master starts each slave on its own");
+    }
+
+    /// <summary>1F81h bit 4: a keep-alive slave is not reset, so it may sit in Pre-Operational
+    /// without having announced to this master when the start moment comes. A broadcast Start
+    /// would reach it before step D (§8.3.1: "before NMT Start"); the master therefore sends
+    /// none while a safety slave is assigned, and starts that slave on its own once it has
+    /// announced and verified.</summary>
+    [Fact]
+    public async Task A_Simultaneous_Start_Does_Not_Reach_A_Safety_Slave_Before_Its_Verification()
+    {
+        using var rig = OpenMaster();
+        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, 0x02); // bit 1: simultaneous start; no mandatory slave
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | KeepAlive);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.State == NmtState.Operational, 2000, "the start moment passed: the master started itself");
+
+        // Ordering witness: a request queued after the start moment goes through the same FIFO
+        // NMT queue, so a Start the moment had queued is ahead of it on the wire.
+        od.WriteUnsigned(0x1F82, Slave, (byte)NmtState.PreOperational);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.EnterPreOperational, Slave), 200, "the witness request was sent");
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0) || IsNmt(f, NmtCommand.Start, Slave),
+            "nothing may start the unverified safety slave");
+        slave.State.Should().Be(NmtState.PreOperational);
+
+        TransmitHeartbeat(rig.Peer, Slave, (byte)NmtState.PreOperational); // the slave announces
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational, 2000, "verified, then started");
+        var log = rig.Log.Snapshot();
+        int lastReply = log.FindLastIndex(f => f.Id == 0x580u + Slave);
+        lastReply.Should().BeGreaterThanOrEqualTo(0, "step D read the slave");
+        log.FindIndex(f => IsNmt(f, NmtCommand.Start, Slave)).Should().BeGreaterThan(lastReply);
+        log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0));
+    }
+
+    /// <summary>The expectation is kept for the boot, but per bound description: binding a DCF
+    /// with SRDOs after a plain one makes the slave a safety slave at once, and binding the plain
+    /// one again makes it an ordinary slave.</summary>
+    [Fact]
+    public async Task The_Kept_Expectation_Follows_The_Bound_Description()
+    {
+        using var rig = OpenMaster();
+        var expectationOf = typeof(CanOpenNode).GetMethod("SafetyExpectationOf", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        Task<object?> ExpectationAsync() => OnActorAsync(rig.Node, () => expectationOf.Invoke(rig.Node, new object[] { Slave }));
+        var plain = PlainDcf();
+        rig.Node.BindPeerDeviceDescription(Slave, plain);
+        (await ExpectationAsync()).Should().BeNull("the plain DCF declares no SRDO");
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        (await ExpectationAsync()).Should().NotBeNull("the newly bound DCF declares SRDO 1");
+        rig.Node.BindPeerDeviceDescription(Slave, plain);
+        (await ExpectationAsync()).Should().BeNull();
+    }
+
+    /// <summary>The simultaneous start keeps its moment — every mandatory slave seen, no
+    /// verification running — but with a safety slave assigned it is one Start per slave: the
+    /// non-safety slave that has been waiting is started at that moment, the safety slave only
+    /// after its verification, and no Start goes to node 0.</summary>
+    [Fact]
+    public async Task A_Simultaneous_Start_With_A_Safety_Slave_Starts_Each_Slave_On_Its_Own()
+    {
+        using var rig = OpenMaster();
+        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        using var other = CanOpen.OpenNode(rig.Peer, Other);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, 0x02); // bit 1: simultaneous start
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
+        od.WriteUnsigned(0x1F81, Other, Assigned | BootSlave | MandatorySlave);
+        Tighten(rig.Node);
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational && other.State == NmtState.Operational, 2000,
+            "both slaves started");
+        var log = rig.Log.Snapshot();
+        int lastReply = log.FindLastIndex(f => f.Id == 0x580u + Slave);
+        lastReply.Should().BeGreaterThanOrEqualTo(0, "step D read the safety slave");
+        log.FindIndex(f => IsNmt(f, NmtCommand.Start, Other)).Should().BeGreaterThan(lastReply,
+            "the non-safety slave waits for the start moment, which waits for the verification");
+        log.FindIndex(f => IsNmt(f, NmtCommand.Start, Slave)).Should().BeGreaterThan(lastReply);
+        log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0), "no Start to node 0 while a safety slave is assigned");
     }
 
     [Fact]

@@ -66,8 +66,8 @@ public enum FlyingMasterSignal
     /// is that slave. It is not started; a mandatory one, or any one under a simultaneous start,
     /// halts the boot like <see cref="SlaveBootTimeout"/>.
     /// A safety slave that is already Operational when first seen — because it was running before
-    /// this master took over, is keep-alive, or was reached by a simultaneous-start broadcast
-    /// (<c>1F80h</c> bit 1) before it had announced — is not started by this master and is
-    /// therefore not verified; step D is "before NMT Start".</summary>
+    /// this master took over, or is keep-alive — is not started by this master and is therefore
+    /// not verified; step D is "before NMT Start". While a safety slave is assigned, a
+    /// simultaneous start (<c>1F80h</c> bit 1) starts each slave on its own, never node 0.</summary>
     SlaveSafetyConfigurationInvalid,
 }

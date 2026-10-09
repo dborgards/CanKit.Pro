@@ -30,7 +30,10 @@ internal sealed partial class CanOpenNode
 
     private readonly bool[] _slaveSeen = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly bool[] _slaveStarted = new bool[CanOpenCobId.MaxNodeId + 1];
-    private bool _bootBroadcastSent;
+    // 1F80h bit 1: the moment the simultaneous start happens has passed — every mandatory slave
+    // seen and no verification running. Without a safety slave that is one Start to node 0;
+    // with one, every seen slave is started on its own then (see TryFinishBoot).
+    private bool _bootStartMoment;
     private bool _bootHalted;
     private bool _bootSelfStarted;
     private IDeadline? _bootDeadline;
@@ -93,7 +96,8 @@ internal sealed partial class CanOpenNode
         _bootDeadline = null;
         Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
         Array.Clear(_slaveStarted, 0, _slaveStarted.Length);
-        _bootBroadcastSent = false;
+        _bootStartMoment = false;
+        _safetyExpectations.Clear();
         _bootHalted = false;
         _bootSelfStarted = false;
         Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
@@ -154,9 +158,9 @@ internal sealed partial class CanOpenNode
 
         // Step D before step E: a safety slave is started only once its configuration verified.
         // A safety slave that is already Operational when first seen — because it was running
-        // before this master took over, is keep-alive, or was reached by a simultaneous-start
-        // broadcast before it had announced — is not started by this master (returned above) and
-        // is therefore not verified; step D is "before NMT Start".
+        // before this master took over, or is keep-alive — is not started by this master
+        // (returned above) and is therefore not verified; step D is "before NMT Start". This
+        // master never starts one unseen: with a safety slave assigned it sends no Start to node 0.
         if (!_slaveVerified[nodeId])
         {
             if (_slaveVerifying[nodeId]) return;
@@ -167,10 +171,10 @@ internal sealed partial class CanOpenNode
             }
         }
 
-        // Bit 1 waits for one broadcast, and only when this node may enter Operational too.
+        // Bit 1 waits for the start moment, and only when this node may enter Operational too.
         // Self-start is applied locally; the active master does not take the broadcast as its own.
         bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
-        if (simultaneous && !_bootBroadcastSent) return;
+        if (simultaneous && !_bootStartMoment) return;
 
         _slaveStarted[nodeId] = true;
         SendNmt(NmtCommand.Start, nodeId);
@@ -186,10 +190,25 @@ internal sealed partial class CanOpenNode
         bool simultaneous = mayStartSlaves
             && (startup & NmtStartAllNodesBit) != 0
             && (startup & NmtSuppressSelfStartBit) == 0;
-        if (simultaneous && !_bootBroadcastSent && HasBootableSlave() && !AnySlaveVerifying())
+        if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
-            _bootBroadcastSent = true;
-            SendNmt(NmtCommand.Start, 0);
+            _bootStartMoment = true;
+            if (HasAssignedSafetySlave())
+            {
+                // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
+                // Start to node 0 reaches one that has not announced yet — keep-alive, running
+                // before this master took over, or with its boot-up still in flight — unverified.
+                // Every seen slave is started on its own instead, a safety slave only once
+                // verified; one announcing later is started on its own as it announces.
+                for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+                {
+                    if (_slaveSeen[id]) ConsiderStart(id, (byte)_od.ReadUnsigned(Co.RequestNmt, id));
+                }
+            }
+            else
+            {
+                SendNmt(NmtCommand.Start, 0);
+            }
         }
 
         if ((startup & NmtSuppressSelfStartBit) == 0 && !_bootSelfStarted && !AnySlaveVerifying())
@@ -256,12 +275,33 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
     /// declares at least one SRDO (spec decision 4). An EDS has no parameter values and never
-    /// makes a safety slave.</summary>
+    /// makes a safety slave. Building it runs the device loader over a dictionary of its own, so
+    /// it is kept for the boot, per slave and per bound description: CancelBootUp drops it, and
+    /// binding another description for the slave makes it stale by reference. Actor only.</summary>
     private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId)
     {
-        if (!_peerDescriptions.TryGetValue(nodeId, out var description) || !description.IsConfigurationFile) return null;
-        var expected = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
-        return expected.DeclaresAnySrdo ? expected : null;
+        if (!_peerDescriptions.TryGetValue(nodeId, out var description)) return null;
+        if (_safetyExpectations.TryGetValue(nodeId, out var kept) && ReferenceEquals(kept.Description, description)) return kept.Expected;
+        PeerSafetyConfiguration? expected = null;
+        if (description.IsConfigurationFile)
+        {
+            var built = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
+            if (built.DeclaresAnySrdo) expected = built;
+        }
+        _safetyExpectations[nodeId] = (description, expected);
+        return expected;
+    }
+
+    private readonly Dictionary<byte, (CanOpenDeviceDescription Description, PeerSafetyConfiguration? Expected)> _safetyExpectations = new();
+
+    /// <summary>Whether any assigned slave is a safety slave: then the master sends no Start to node 0.</summary>
+    private bool HasAssignedSafetySlave()
+    {
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
+            if (IsAssignedSlave(id) && SafetyExpectationOf(id) is not null) return true;
+        }
+        return false;
     }
 
     private bool AnySlaveVerifying()
@@ -319,8 +359,8 @@ internal sealed partial class CanOpenNode
         bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
         if (IsMandatory(nodeId) || simultaneous)
         {
-            // A broadcast cannot leave one slave out, and a mandatory slave gates the network:
-            // the boot halts, with the 1F80h error reaction, as on a boot timeout.
+            // The simultaneous start is one moment for the whole network, and a mandatory slave
+            // gates the network: the boot halts, with the 1F80h error reaction, as on a boot timeout.
             ApplyBootErrorReaction(new[] { nodeId }, FlyingMasterSignal.SlaveSafetyConfigurationInvalid);
             return;
         }
