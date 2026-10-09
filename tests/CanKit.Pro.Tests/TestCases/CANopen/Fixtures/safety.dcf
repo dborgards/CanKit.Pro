@@ -180,7 +180,7 @@ ParameterName=COB-ID 1
 ObjectType=0x7
 DataType=0x0007
 AccessType=rw
-DefaultValue=$NODEID+0x0FF+$NODEID
+DefaultValue=$NODEID+0x104
 ParameterValue=0x109
 PDOMapping=0
 
@@ -189,7 +189,7 @@ ParameterName=COB-ID 2
 ObjectType=0x7
 DataType=0x0007
 AccessType=rw
-DefaultValue=$NODEID+0x100+$NODEID
+DefaultValue=$NODEID+0x105
 ParameterValue=0x10A
 PDOMapping=0
 

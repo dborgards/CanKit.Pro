@@ -112,6 +112,20 @@ internal sealed partial class CanOpenNode
         // write to a checksummed record, so it clears 13FEh: that object is applied after it.
         foreach (var (srdo, direction, raw) in pendingSrdoCreates)
         {
+            var srdoComm = SrdoRecords.CommIndex(srdo);
+            var srdoMap = SrdoRecords.MapIndex(srdo);
+            if (!objects.ContainsKey(srdoMap))
+            {
+                findings.Add(new DeviceDescriptionFinding(srdoComm, 0x01, DeviceDescriptionOutcome.Corrected,
+                    $"the description declares no mapping record 0x{srdoMap:X4} for this SRDO; the SRDO stays deleted", raw));
+                continue;
+            }
+            if (failedMappings.Contains(srdoMap))
+            {
+                findings.Add(new DeviceDescriptionFinding(srdoComm, 0x01, DeviceDescriptionOutcome.Corrected,
+                    "the SRDO stays deleted because its mapping record could not be applied as described", raw));
+                continue;
+            }
             if (!_od.TryWriteRaw(SrdoRecords.CommIndex(srdo), 0x01, new[] { direction }, out var abort))
                 findings.Add(new DeviceDescriptionFinding(SrdoRecords.CommIndex(srdo), 0x01, DeviceDescriptionOutcome.Corrected,
                     "the direction was rejected; the SRDO stays deleted", raw, abort));
@@ -254,7 +268,7 @@ internal sealed partial class CanOpenNode
             if (SrdoRecords.IsCommunicationRecord(index))
                 return ApplySrdoCommunicationRecord(index, entries, findings, pendingSrdoCreates);
             if (SrdoRecords.IsMappingRecord(index))
-                return ApplySrdoMappingRecord(index, entries, findings);
+                return ApplySrdoMappingRecord(index, entries, findings, failedMappings);
         }
 
         // Everything else is data: created as described. Communication-profile objects the node
@@ -621,9 +635,20 @@ internal sealed partial class CanOpenNode
 
     /// <summary>1381h–13C0h: the entries go in with the SRDO deleted and the count at 0, then the
     /// count (CiA DSP 304 §8.4.2.3: plain and inverted object alternate, so at most 16 sub-indices).</summary>
-    private int ApplySrdoMappingRecord(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
+    private int ApplySrdoMappingRecord(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings,
+        HashSet<ushort> failedMappings)
     {
         int n = index - SrdoRecords.MappingBase;
+        // An SRDO exists only with both records (Table 6 footnote), and writing a mapping reads
+        // and deletes the communication record's direction: without it the record is not created.
+        if (!_od.TryGet(SrdoRecords.CommIndex(n), 0x01, out _))
+        {
+            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
+                $"the description declares no communication record 0x{SrdoRecords.CommIndex(n):X4} for this SRDO; an SRDO exists only with both records (Table 6 footnote), so the mapping record is not created"));
+            RemoveObject(index);
+            failedMappings.Add(index);
+            return 0;
+        }
         int loaded = 0;
         var byIndex = entries.ToDictionary(e => e.Subindex);
         foreach (var entry in entries)
@@ -656,7 +681,11 @@ internal sealed partial class CanOpenNode
             { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry was rejected; the slot stays empty and the mapping stays disabled", raw, abort)); failed = true; }
         }
         if (!failed && count > 0 && !_od.TryWriteRaw(index, 0x00, new[] { (byte)count }, out var countAbort))
+        {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected, "the mapping count was rejected; the mapping stays disabled", sub0.Value, countAbort));
+            failed = true;
+        }
+        if (failed) failedMappings.Add(index);
         return loaded;
     }
 
