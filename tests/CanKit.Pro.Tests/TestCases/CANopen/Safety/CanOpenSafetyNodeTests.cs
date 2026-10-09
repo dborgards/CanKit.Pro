@@ -547,6 +547,111 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
     /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
+    /// <summary>A node with SRDO 1 producing, 1300h = 1, Operational: the GFC can be sent.</summary>
+    private static async Task<CanOpenNode> OpenGfcNodeAsync(HoldingService service, Wire wire, bool ownsService = true)
+    {
+        var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService, new ManualTimeSource());
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        node.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        return node;
+    }
+
+    /// <summary>§8.2: the GFC is sent only in Operational. It is handed over with the token of
+    /// the Operational period, like an SRDO frame, so leaving Operational cancels a GFC send that
+    /// has not started yet.</summary>
+    [Fact]
+    public async Task Leaving_Operational_Cancels_A_Gfc_Send_Not_Yet_Started()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var service = new HoldingService(new CanBusService(bus), holdGfc: true);
+        using var node = await OpenGfcNodeAsync(service, wire);
+        await node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
+        var token = service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0);
+        token.CanBeCanceled.Should().BeTrue("the GFC carries its period's token");
+        token.IsCancellationRequested.Should().BeFalse();
+
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped"); // through the actor, behind the Stop
+        token.IsCancellationRequested.Should().BeTrue("leaving Operational cancels the period's sends, the GFC's included");
+        service.Release();
+    }
+
+    /// <summary>Disposing the node cancels a GFC send as leaving Operational does.</summary>
+    [Fact]
+    public async Task Disposing_The_Node_Cancels_A_Gfc_Send_Not_Yet_Started()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var service = new HoldingService(new CanBusService(bus), holdGfc: true);
+        CancellationToken token;
+        using (var wire = new Wire(session, 2))
+        {
+            var node = await OpenGfcNodeAsync(service, wire, ownsService: false);
+            await node.Safety().SendGlobalFailsafeCommandAsync();
+            await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
+            token = service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0);
+            token.IsCancellationRequested.Should().BeFalse();
+            node.Dispose(); // returns after the actor ran its cleanup
+        }
+        token.IsCancellationRequested.Should().BeTrue("disposing cancels the period's sends, the GFC's included");
+        service.Release();
+    }
+
+    /// <summary>A GFC of the next Operational period carries a token that is not cancelled.</summary>
+    [Fact]
+    public async Task A_Gfc_Of_The_Next_Operational_Period_Is_Not_Cancelled()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var service = new HoldingService(new CanBusService(bus), holdGfc: true);
+        using var node = await OpenGfcNodeAsync(service, wire);
+        await node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "first GFC handed to the service");
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
+        service.Release();
+
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "started again");
+        await node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 2, "second GFC handed to the service");
+        service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0).IsCancellationRequested.Should().BeTrue();
+        service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 1).IsCancellationRequested.Should().BeFalse("a fresh period");
+    }
+
+    /// <summary>A GFC send the period's token cancels ends quietly: no background exception, and
+    /// the send's task completes rather than ending cancelled — it is discarded, so nothing would
+    /// observe it.</summary>
+    [Fact]
+    public async Task A_Gfc_Send_Cancelled_By_Its_Period_Ends_Quietly()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var service = new HoldingService(new CanBusService(bus), holdGfc: true, honourTokens: true);
+        using var node = await OpenGfcNodeAsync(service, wire);
+        var background = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+        await node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
+        Task send = Task.CompletedTask;
+        await node.PostToActorAsync(() => send = node.GfcSendForTests!);
+
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
+        await send.WithTimeoutAsync(ShortTimeout).ContinueWith(_ => { }); // ended, however
+        send.Status.Should().Be(TaskStatus.RanToCompletion, "the period's own cancellation is no failure");
+        lock (background) background.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task Disposing_The_Node_Ends_The_Pairs_Still_On_The_Send_Chain()
     {
@@ -769,8 +874,18 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         private readonly List<(uint CobId, byte[] Data)> _handed = new();
         private readonly List<(CanFrame Frame, TaskCompletionSource<TxConfirmation> Confirmation)> _held = new();
         private bool _holding = true;
+        private readonly bool _holdGfc;
+        private readonly bool _honourTokens;
 
-        public HoldingService(ICanBusService inner) => _inner = inner;
+        /// <param name="holdGfc">Also hold the GFC (001h), not only the SRDO frames.</param>
+        /// <param name="honourTokens">Abandon a held send when its token is cancelled, as a
+        /// service does that has not handed the frame to the driver yet.</param>
+        public HoldingService(ICanBusService inner, bool holdGfc = false, bool honourTokens = false)
+        {
+            _inner = inner;
+            _holdGfc = holdGfc;
+            _honourTokens = honourTokens;
+        }
 
         public ICanBus Bus => _inner.Bus;
         public int SubscriptionCount => _inner.SubscriptionCount;
@@ -792,10 +907,12 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
             {
                 _handed.Add((id, frame.Data.ToArray()));
                 _tokens.Add((id, cancellationToken));
-                if (_holding && id is >= CanOpenCobId.SrdoFirstCobId and <= CanOpenCobId.SrdoLastCobId)
+                if (_holding && (id is >= CanOpenCobId.SrdoFirstCobId and <= CanOpenCobId.SrdoLastCobId
+                                 || (_holdGfc && id == CanOpenCobId.GlobalFailsafeCommand)))
                 {
                     var confirmation = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
                     _held.Add((frame, confirmation));
+                    if (_honourTokens) cancellationToken.Register(() => confirmation.TrySetCanceled(cancellationToken));
                     return confirmation.Task;
                 }
             }

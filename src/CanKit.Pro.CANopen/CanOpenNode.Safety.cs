@@ -447,12 +447,38 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // outside Operational. That covers the pairs queued behind a held one —
     // one per SRDO — and the inverted half of the held one: a consumer that times out on its SRVT
     // is safer than one that refreshes its SCT on a stale pair. Created with the period's first
-    // pair. A frame the service has already taken goes out, as on any controller.
+    // send, a pair or the GFC. A frame the service has already taken goes out, as on any controller.
     private CancellationTokenSource? _srdoSendPeriod;
 
+    /// <summary>The token of the current Operational period, the one place the SRDO pairs and the
+    /// GFC take it from; the period's source is created with its first send. Actor only.</summary>
+    private CancellationToken CurrentSrdoSendPeriod() => (_srdoSendPeriod ??= new CancellationTokenSource()).Token;
+
     // The GFC is not an SRDO and does not wait behind them (§8.2: it is the highest-priority
-    // safety message); it goes out at once, as every other control frame of the node.
-    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _ = SendControlFrame(cobId, payload);
+    // safety message); it goes out at once. It is sent only in Operational, so it is handed over
+    // with the token of the Operational period, as an SRDO frame is: leaving Operational or
+    // disposing cancels it, honoured until the send task starts. A send task already running
+    // still hands its frame to the driver (#294).
+    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _gfcSend = SendInPeriodAsync(cobId, payload, CurrentSrdoSendPeriod());
+
+    private Task? _gfcSend;
+
+    /// <summary>Test seam, actor only: the last GFC send.</summary>
+    internal Task? GfcSendForTests => _gfcSend;
+
+    /// <summary>A send cancelled by its period's own token ends quietly; any other outcome is
+    /// SendControlFrame's, which reports a failure itself (a service-dispose cancellation as a
+    /// transport failure).</summary>
+    private async Task SendInPeriodAsync(uint cobId, byte[] payload, CancellationToken period)
+    {
+        try
+        {
+            await SendControlFrame(cobId, payload, period).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (period.IsCancellationRequested)
+        {
+        }
+    }
 
     void ISrdoEngineHost.SendPair(int srdoNumber, uint cobId1, byte[] plain, uint cobId2, byte[] inverted)
     {
@@ -468,7 +494,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private void QueueSrdoPair(int srdoNumber, SrdoPair pair)
     {
         _srdoInFlight[srdoNumber] = true;
-        var period = (_srdoSendPeriod ??= new CancellationTokenSource()).Token;
+        var period = CurrentSrdoSendPeriod();
         var link = _srdoSendChain.ContinueWith(
             _ => SendSrdoPairAsync(pair, period),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
