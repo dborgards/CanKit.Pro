@@ -64,8 +64,10 @@ public interface ICanOpenSafety
     /// with 13FEh = 0, because every parameter write clears it.</summary>
     Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration, CancellationToken cancellationToken = default);
 
-    /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n (must equal the checksum of
-    /// the expected record) and the records themselves, and compares. Nothing is written.</summary>
+    /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n of every expected SRDO (must
+    /// equal the checksum of the expected record) and the records themselves, and compares. An
+    /// SRDO the expectation does not name must be deleted; its checksum is not compared, because
+    /// the device checks only those of existing SRDOs (§9.5). Nothing is written.</summary>
     Task<PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, PeerSafetyConfiguration expected, CancellationToken cancellationToken = default);
 
     /// <summary>Splits an SRDO pair of another node into <paramref name="sink"/>, like

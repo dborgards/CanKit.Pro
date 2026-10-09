@@ -424,6 +424,34 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
     }
 
+    /// <summary>Step D checks the SRDOs it expects. A deleted SRDO's checksum is not compared:
+    /// the device checks the checksums of existing SRDOs only (§9.5, last rule), so a stale one
+    /// is harmless; that the SRDO is deleted is still verified through its sub-index 1.</summary>
+    [Fact]
+    public async Task Verify_Ignores_The_Checksum_Of_A_Deleted_Srdo()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        var od = device.ObjectDictionary;
+        od.WriteUnsigned(0x13FF, 2, 0x1234);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+
+        od.WriteUnsigned(0x1302, 5, 0x10B);
+        od.WriteUnsigned(0x1302, 6, 0x10C);
+        od.WriteUnsigned(0x1302, 1, 1);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        var created = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        created.Succeeded.Should().BeFalse("SRDO 2 exists on the peer although the expectation has it deleted");
+        created.Mismatches.Should().ContainSingle(m => m.Index == 0x1302 && m.Subindex == 0x01);
+    }
+
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
     /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
     /// plus one so the readback differs.</summary>

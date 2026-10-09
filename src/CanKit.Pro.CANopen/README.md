@@ -695,9 +695,11 @@ One configuration or verification per peer runs at a time.
 ### Verifying, and the boot-up
 
 `VerifyPeerSafetyConfigurationAsync(peer, expected)` is §8.3.1 step D without writing anything:
-it uploads `13FEh` (must be `A5h`), `13FFh:n` (must equal the checksum of the expected record)
-and the records, and compares them with what a configuration with `expected` would have
-written (`1300h` aside, which step D does not list).
+it uploads `13FEh` (must be `A5h`), `13FFh:n` of every expected SRDO (must equal the checksum
+of the expected record) and the records, and compares them with what a configuration with
+`expected` would have written (`1300h` aside, which step D does not list). An SRDO the
+expectation does not name must be deleted (sub-index `01h` = 0); its checksum is not compared,
+because the device checks the checksums of existing SRDOs only (§9.5).
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
 least one SRDO is a safety slave; an EDS carries no parameter values and never makes one. Before
