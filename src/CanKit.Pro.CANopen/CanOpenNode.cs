@@ -561,17 +561,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         ValidateTransferMode(mode, nameof(mode));
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
         return InPeerSdoChannelAsync(serverNodeId, cancellationToken,
-            () => SdoUploadCoreAsync(serverNodeId, index, subindex, mode, cancellationToken));
+            release => SdoUploadCoreAsync(serverNodeId, index, subindex, mode, cancellationToken, release));
     }
 
-    /// <summary>The upload itself, without the peer's SDO channel: for a caller that holds it
-    /// (a safety transaction). Still passes the peer gate.</summary>
+    /// <summary>The upload itself, without taking the peer's SDO channel: for a caller that holds
+    /// it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public call).
+    /// Still passes the peer gate.</summary>
     private Task<byte[]> SdoUploadCoreAsync(byte serverNodeId, ushort index, byte subindex,
-        SdoTransferMode mode, CancellationToken cancellationToken)
+        SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null)
     {
         ThrowIfDisposed();
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
         {
@@ -588,7 +589,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // auto-switch is applied on the *download* path where we know the payload length.
             _actor.Post(() => BeginSdoUpload(serverNodeId, index, subindex, tcs));
         }
-        return tcs.Task;
+        return handedOut;
     }
 
     /// <inheritdoc />
@@ -625,17 +626,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var payload = data.ToArray();
         return InPeerSdoChannelAsync(serverNodeId, cancellationToken,
-            () => SdoDownloadCoreAsync(serverNodeId, index, subindex, payload, mode, cancellationToken));
+            release => SdoDownloadCoreAsync(serverNodeId, index, subindex, payload, mode, cancellationToken, release));
     }
 
-    /// <summary>The download itself, without the peer's SDO channel: for a caller that holds it
-    /// (a safety transaction). Still passes the peer gate. <paramref name="payload"/> is not empty.</summary>
+    /// <summary>The download itself, without taking the peer's SDO channel: for a caller that
+    /// holds it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public
+    /// call). Still passes the peer gate. <paramref name="payload"/> is not empty.</summary>
     private Task<byte[]> SdoDownloadCoreAsync(byte serverNodeId, ushort index, byte subindex,
-        byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken)
+        byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null)
     {
         ThrowIfDisposed();
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
 
         // Auto-select rules (FR-CO-004):
@@ -654,7 +656,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             _actor.Post(() => BeginSdoDownload(serverNodeId, index, subindex, payload, tcs));
         }
-        return tcs.Task;
+        return handedOut;
     }
 
     /// <inheritdoc />

@@ -19,42 +19,85 @@ internal sealed partial class CanOpenNode
     private SemaphoreSlim PeerSdoChannel(byte serverNodeId)
         => _peerSdoChannels.GetOrAdd(serverNodeId, static _ => new SemaphoreSlim(1, 1));
 
+    /// <summary>Test seam, any thread: whether nothing holds the peer's SDO channel.</summary>
+    internal bool PeerSdoChannelIsFreeForTests(byte serverNodeId) => PeerSdoChannel(serverNodeId).CurrentCount == 1;
+
     /// <summary>Runs <paramref name="transfer"/> holding the peer's SDO channel; the wait honours
-    /// <paramref name="cancellationToken"/>. With the channel free the transfer's own task is
-    /// returned, so the call completes exactly when the transfer does (a disposal that fails it
-    /// is visible at once), and a synchronous refusal is thrown synchronously as before.</summary>
-    private Task<T> InPeerSdoChannelAsync<T>(byte serverNodeId, CancellationToken cancellationToken, Func<Task<T>> transfer)
+    /// <paramref name="cancellationToken"/>. The transfer gets the release, which runs when it
+    /// ends — before its task completes (see <see cref="NewSdoTransfer"/>), so a caller that sees
+    /// the call completed finds the channel free. With the channel free the transfer starts at
+    /// once and a synchronous refusal is thrown synchronously, as before.</summary>
+    private Task<T> InPeerSdoChannelAsync<T>(byte serverNodeId, CancellationToken cancellationToken, Func<Action, Task<T>> transfer)
     {
         var channel = PeerSdoChannel(serverNodeId);
         var wait = channel.WaitAsync(cancellationToken);
         return wait.Status == TaskStatus.RanToCompletion
-            ? RunHoldingChannel(channel, transfer)
-            : WaitThenRunAsync(channel, wait, transfer);
+            ? StartHoldingChannel(channel, transfer)
+            : WaitThenStartAsync(channel, wait, transfer);
     }
 
-    private static async Task<T> WaitThenRunAsync<T>(SemaphoreSlim channel, Task wait, Func<Task<T>> transfer)
+    private static async Task<T> WaitThenStartAsync<T>(SemaphoreSlim channel, Task wait, Func<Action, Task<T>> transfer)
     {
         await wait.ConfigureAwait(false);
-        return await RunHoldingChannel(channel, transfer).ConfigureAwait(false);
+        return await StartHoldingChannel(channel, transfer).ConfigureAwait(false);
     }
 
-    /// <summary>Starts <paramref name="transfer"/> with the channel held and releases it when the
-    /// transfer has ended, however it ended.</summary>
-    private static Task<T> RunHoldingChannel<T>(SemaphoreSlim channel, Func<Task<T>> transfer)
+    /// <summary>Starts <paramref name="transfer"/> with the channel held; the release it is given
+    /// runs once, whether the transfer ends or fails to start.</summary>
+    private static Task<T> StartHoldingChannel<T>(SemaphoreSlim channel, Func<Action, Task<T>> transfer)
     {
-        Task<T> task;
+        int released = 0;
+        void Release()
+        {
+            if (Interlocked.Exchange(ref released, 1) == 0) channel.Release();
+        }
         try
         {
-            task = transfer();
+            return transfer(Release);
         }
         catch
         {
-            channel.Release();
+            Release();
             throw;
         }
-        _ = task.ContinueWith(static (_, state) => ((SemaphoreSlim)state!).Release(), channel,
-            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        return task;
+    }
+
+    /// <summary>
+    /// The completion source an SDO transfer is ended through, and the task handed out for it.
+    /// The source has synchronous continuations, so what has to happen the moment the transfer
+    /// ends — <paramref name="onEnded"/> releasing the peer's SDO channel, the cancellation
+    /// registration being dropped — happens there, before the handed-out task completes. That task
+    /// runs its own continuations asynchronously, so no caller's code runs on the thread that ended
+    /// the transfer (the actor, most of the time).
+    /// </summary>
+    private static TaskCompletionSource<byte[]> NewSdoTransfer(Action? onEnded, out Task<byte[]> handedOut)
+    {
+        var transfer = new TaskCompletionSource<byte[]>();
+        var outcome = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = transfer.Task.ContinueWith(static (ended, state) =>
+        {
+            var (outcome, onEnded) = ((TaskCompletionSource<byte[]>, Action?))state!;
+            onEnded?.Invoke();
+            if (ended.Status == TaskStatus.RanToCompletion)
+            {
+                outcome.TrySetResult(ended.Result);
+                return;
+            }
+            try
+            {
+                ended.GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException ex) when (ended.IsCanceled)
+            {
+                outcome.TrySetCanceled(ex.CancellationToken);
+            }
+            catch
+            {
+                outcome.TrySetException(ended.Exception!.InnerExceptions);
+            }
+        }, (outcome, onEnded), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        handedOut = outcome.Task;
+        return transfer;
     }
 
     /// <summary>An upload for the observers (ObserveForeignPdoAsync, ObserveForeignSrdoAsync): it
@@ -72,7 +115,7 @@ internal sealed partial class CanOpenNode
             return Task.FromException<byte[]>(new InvalidOperationException(
                 $"An SDO transfer with server 0x{serverNodeId:X2} is already in flight."));
         }
-        return RunHoldingChannel(channel, () => SdoUploadCoreAsync(serverNodeId, index, subindex, Sdo.SdoTransferMode.Auto, cancellationToken));
+        return StartHoldingChannel(channel, release => SdoUploadCoreAsync(serverNodeId, index, subindex, Sdo.SdoTransferMode.Auto, cancellationToken, release));
     }
 
     /// <inheritdoc />

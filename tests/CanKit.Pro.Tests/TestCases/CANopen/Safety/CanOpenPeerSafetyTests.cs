@@ -698,6 +698,53 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    /// <summary>The channel is free the moment an SDO call is seen completed: the release runs
+    /// when the transfer ends, before the call's task completes. An observer that tries the
+    /// channel right after a call therefore reads live instead of falling back (FR-CO-030).</summary>
+    [Fact]
+    public async Task The_Channel_Is_Free_When_An_Sdo_Call_Is_Seen_Completed()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var node = (CanOpenNode)master;
+        for (int i = 0; i < 50; i++)
+        {
+            await master.SdoUploadAsync(Device, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout);
+            node.PeerSdoChannelIsFreeForTests(Device).Should().BeTrue($"call {i} has completed, so its channel is released");
+            await master.SdoDownloadAsync(Device, 0x2001, 0x00, new byte[] { (byte)i }).WithTimeoutAsync(ShortTimeout);
+            node.PeerSdoChannelIsFreeForTests(Device).Should().BeTrue($"download {i} has completed, so its channel is released");
+        }
+    }
+
+    /// <summary>The order behind the test above, measured without timing: the release runs while
+    /// the handed-out task is still incomplete, for every way a transfer ends.</summary>
+    [Theory]
+    [InlineData("result")]
+    [InlineData("fault")]
+    [InlineData("cancel")]
+    public void A_Transfer_Releases_Its_Channel_Before_Its_Task_Completes(string ending)
+    {
+        var newTransfer = typeof(CanOpenNode).GetMethod("NewSdoTransfer", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        Task<byte[]>? handedOut = null;
+        bool? completedAtRelease = null;
+        Action onEnded = () => completedAtRelease = handedOut!.IsCompleted;
+        var args = new object?[] { onEnded, null };
+        var transfer = (System.Threading.Tasks.TaskCompletionSource<byte[]>)newTransfer.Invoke(null, args)!;
+        handedOut = (Task<byte[]>)args[1]!;
+        _ = ending switch
+        {
+            "result" => transfer.TrySetResult(new byte[] { 1 }),
+            "fault" => transfer.TrySetException(new InvalidOperationException("ended")),
+            _ => transfer.TrySetCanceled(),
+        };
+        completedAtRelease.Should().Be(false, "the release ran, and ran before the handed-out task completed");
+        handedOut.IsCompleted.Should().BeTrue("the handed-out task completes right after, on the same call");
+        handedOut.Status.Should().Be(ending switch { "result" => TaskStatus.RanToCompletion, "fault" => TaskStatus.Faulted, _ => TaskStatus.Canceled });
+    }
+
     /// <summary>Only the channel to that peer is reserved: a call to another server goes out at once.</summary>
     [Fact]
     public async Task An_Sdo_Call_To_Another_Peer_Does_Not_Wait_For_The_Transaction()
