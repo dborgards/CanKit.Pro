@@ -66,6 +66,9 @@ internal sealed partial class CanOpenNode
         public const ushort TpdoComm = 0x1800;
         public const ushort TpdoMap = 0x1A00;
         public const int PdoCount = 4;
+        public const ushort GfcParameter = Safety.SrdoRecords.GfcParameter;
+        public const ushort SrdoConfigurationValid = Safety.SrdoRecords.ConfigurationValid;
+        public const ushort SrdoChecksum = Safety.SrdoRecords.Checksum;
     }
 
     // "save" and "load" as the UNSIGNED32 signatures of CiA 301 Figures 55 and 57, little-endian
@@ -203,6 +206,8 @@ internal sealed partial class CanOpenNode
             }
         }
 
+        if (_srdoCount > 0) PopulateSafetyObjects();
+
         _od.DeclareGuard = (index, _) => !IsManagedCommunicationObject(index);
         _od.WriteValidator = ValidateCommunicationWrite;
         _od.EntryWritten += OnOdEntryWrittenForCommunicationProfile;
@@ -223,6 +228,7 @@ internal sealed partial class CanOpenNode
         >= Co.RpdoMap and < Co.RpdoMap + Co.PdoCount => true,
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
         >= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount => true,
+        _ when Safety.SrdoRecords.IsSafetyObject(index) => true,
         _ => false,
     };
 
@@ -252,6 +258,7 @@ internal sealed partial class CanOpenNode
 
     private OdWriteDecision ValidateCommunicationWrite(ushort index, byte subindex, byte[] value)
     {
+        if (Safety.SrdoRecords.IsSafetyObject(index)) return ValidateSafetyWrite(index, subindex, value);
         switch (index)
         {
             case Co.SyncCobId:
@@ -456,6 +463,13 @@ internal sealed partial class CanOpenNode
         // the runtime (Codex on #133).
         if (index is (>= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount) or (>= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount))
             RebuildCosRelevantEntries();
+        // CiA DSP 304 §8.4.2.2, 13FEh: "After a write access to the safety-relevant parameter the
+        // entry of object 13FEh is automatically 0". Still inside the write gate, so the next
+        // write cannot see A5h beside a changed parameter. Unchecked: the reset is not a
+        // configuration write and must not itself be refused in Operational (nothing reaches here
+        // in Operational anyway, the validator refuses the write that would).
+        if (Safety.SrdoRecords.IsChecksummed(index) && _od.TryGet(Co.SrdoConfigurationValid, 0, out _))
+            _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0, new byte[] { 0 });
         RunOnActor(() => ApplyCommunicationObject(index, subindex));
     }
 

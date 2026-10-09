@@ -98,7 +98,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // -----------------------------------------------------------------------------------------
     // State touched only on the actor loop.
     // -----------------------------------------------------------------------------------------
-    private NmtState _state = NmtState.Initializing;
+    private volatile NmtState _state = NmtState.Initializing;
 
     // SDO server: at most one outstanding segmented transfer against our own OD at a time (a
     // second Initiate from the same peer supersedes any previous open transfer per CiA 301
@@ -217,6 +217,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // The communication-profile objects at their CiA 301 defaults, plus the OD hooks that
         // validate writes to them and carry accepted values into the runtime
         // (CanOpenNode.CommunicationProfile.cs).
+        _srdoCount = Math.Max(_options.SrdoCount, DescribedSrdoCount(description));
         PopulateCommunicationProfile();
         // A device description shapes the dictionary on top of that, before the node is on the
         // bus (CanOpenNode.DeviceDescription.cs).
