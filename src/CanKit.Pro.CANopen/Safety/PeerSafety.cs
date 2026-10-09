@@ -36,10 +36,16 @@ public sealed class PeerSafetyConfiguration
     }
 
     /// <summary>Reads 1300h, 1301h–1340h and 1381h–13C0h from the file's ParameterValue (DefaultValue
-    /// when absent, $NODEID resolved with <paramref name="nodeId"/>). Records the file does not
-    /// declare, or declares with direction 0, are absent. Malformed values make the record absent too.
-    /// A record without a sub-index 3, or with 0 there, gets the default of 20 ms (§8.4.2.2): the
-    /// device stores that value and recomputes its checksum from it.</summary>
+    /// when absent, $NODEID resolved with <paramref name="nodeId"/>), by the rules a device loading
+    /// the same file follows, so that step D against a slave's own DCF expects what the slave holds.
+    /// Records the file does not declare, or declares with direction 0, are absent. A sub-index the
+    /// file leaves out keeps the device's default (§8.4.2.2): 25 ms for sub-index 2; for sub-indices
+    /// 5 and 6 the pre-defined pair of SRDO 1 of a node-id ≤ 64 (§8.3.3), and any other SRDO is
+    /// absent, because it has no COB-ID to be created with. A sub-index 3 left out, or 0, gets the
+    /// default of 20 ms: the device stores that value and recomputes its checksum from it. The SRDO
+    /// is absent without a mapping record, when a plain mapping slot up to the count is missing, 0
+    /// or not byte-aligned, or when an inverted slot is missing or differs from its plain slot
+    /// (§8.4.2.3): the device leaves it deleted then. Other malformed values make the record absent too.</summary>
     public static PeerSafetyConfiguration FromDeviceDescription(CanOpenDeviceDescription description, byte nodeId)
     {
         if (description is null) throw new ArgumentNullException(nameof(description));
@@ -48,27 +54,29 @@ public sealed class PeerSafetyConfiguration
         {
             GlobalFailsafeCommandEnabled = objects.TryGetValue(SrdoRecords.GfcParameter, out var gfc) && Value(gfc, 0, nodeId) == 1,
         };
+        bool predefined = nodeId is >= 1 and <= 64;
         for (int n = 1; n <= SrdoRecords.MaxSrdoCount; n++)
         {
             if (!objects.TryGetValue(SrdoRecords.CommIndex(n), out var comm)) continue;
             uint direction = Value(comm, 1, nodeId) ?? 0;
             if (direction is 0 or > 2) continue;
-            uint? cycle = Value(comm, 2, nodeId), srvt = Value(comm, 3, nodeId), cob1 = Value(comm, 5, nodeId), cob2 = Value(comm, 6, nodeId);
+            uint? srvt = Value(comm, 3, nodeId);
+            uint? cycle = Declares(comm, 2) ? Value(comm, 2, nodeId) : DefaultCycleTimeMilliseconds;
+            uint? cob1 = Declares(comm, 5) ? Value(comm, 5, nodeId) : n == 1 && predefined ? CanOpenCobId.SrdoDefaultCobId1(nodeId) : null;
+            uint? cob2 = Declares(comm, 6) ? Value(comm, 6, nodeId) : n == 1 && predefined ? CanOpenCobId.SrdoDefaultCobId2(nodeId) : null;
             if (cycle is null || cob1 is null || cob2 is null) continue;
+            if (!objects.TryGetValue(SrdoRecords.MapIndex(n), out var map)) continue;
             var mapping = new SrdoMapping();
-            if (objects.TryGetValue(SrdoRecords.MapIndex(n), out var map))
+            uint? count = Declares(map, 0) ? Value(map, 0, nodeId) : 0;
+            bool ok = count is { } c && (c & 1) == 0 && c <= SrdoRecords.MappingSubindices;
+            for (byte s = 1; ok && s <= count; s += 2)
             {
-                uint count = Value(map, 0, nodeId) ?? 0;
-                bool ok = (count & 1) == 0 && count <= SrdoRecords.MappingSubindices;
-                for (byte s = 1; ok && s <= count; s += 2)
-                {
-                    uint? raw = Value(map, s, nodeId);
-                    if (raw is null or 0) { ok = false; break; }
-                    try { mapping.Add(new PdoMappingEntry((ushort)(raw.Value >> 16), (byte)(raw.Value >> 8), (byte)raw.Value)); }
-                    catch (Exception ex) when (ex is ArgumentOutOfRangeException or InvalidOperationException) { ok = false; }
-                }
-                if (!ok) continue;
+                uint? raw = Value(map, s, nodeId);
+                if (raw is null or 0 || Value(map, (byte)(s + 1), nodeId) != raw) { ok = false; break; }
+                try { mapping.Add(new PdoMappingEntry((ushort)(raw.Value >> 16), (byte)(raw.Value >> 8), (byte)raw.Value)); }
+                catch (Exception ex) when (ex is ArgumentOutOfRangeException or InvalidOperationException) { ok = false; }
             }
+            if (!ok) continue;
             configuration.Add(n, new SrdoCommunicationParameter((SrdoDirection)direction,
                 TimeSpan.FromMilliseconds(cycle.Value), TimeSpan.FromMilliseconds(srvt is null or 0 ? DefaultValidationTimeMilliseconds : srvt.Value),
                 cob1.Value & CanOpenCobId.CanIdMask, cob2.Value & CanOpenCobId.CanIdMask), mapping);
@@ -76,22 +84,28 @@ public sealed class PeerSafetyConfiguration
         return configuration;
     }
 
+    /// <summary>The default of sub-index 2 (§8.4.2.2), in milliseconds.</summary>
+    private const uint DefaultCycleTimeMilliseconds = 25;
+
     /// <summary>The default of sub-index 3 (§8.4.2.2), in milliseconds.</summary>
     private const uint DefaultValidationTimeMilliseconds = 20;
 
+    /// <summary>Whether the file gives the sub-index a value at all: <see cref="Value"/> is null
+    /// both for one it leaves out and for one that does not parse.</summary>
+    private static bool Declares(CanOpenObject obj, byte subindex) => !string.IsNullOrEmpty(Text(obj, subindex));
+
+    private static string? Text(CanOpenObject obj, byte subindex)
+    {
+        if (obj.SubObjects.Count == 0)
+            return subindex != 0 ? null : string.IsNullOrEmpty(obj.ParameterValue) ? obj.DefaultValue : obj.ParameterValue;
+        return obj.SubObjects.TryGetValue(subindex, out var sub)
+            ? string.IsNullOrEmpty(sub.ParameterValue) ? sub.DefaultValue : sub.ParameterValue
+            : null;
+    }
+
     private static uint? Value(CanOpenObject obj, byte subindex, byte nodeId)
     {
-        string? text;
-        if (obj.SubObjects.Count == 0)
-        {
-            if (subindex != 0) return null;
-            text = string.IsNullOrEmpty(obj.ParameterValue) ? obj.DefaultValue : obj.ParameterValue;
-        }
-        else if (obj.SubObjects.TryGetValue(subindex, out var sub))
-        {
-            text = string.IsNullOrEmpty(sub.ParameterValue) ? sub.DefaultValue : sub.ParameterValue;
-        }
-        else return null;
+        var text = Text(obj, subindex);
         if (string.IsNullOrEmpty(text)) return null;
         try
         {

@@ -670,9 +670,14 @@ identical ones still waiting are folded into one.
 `ConfigurePeerSafetyAsync(peer, configuration)` is the tool side of §9.2, Figure 9. A
 `PeerSafetyConfiguration` holds `1300h` and, per SRDO number, the communication parameter and the
 mapping; `PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId)` builds it from a DCF's
-parameter values (default value where none, `$NODEID` resolved; a record with direction 0, or with
-a value that does not parse, is left out; a missing or zero SRVT becomes the default 20 ms, the
-value the device stores and checksums).
+parameter values (default value where none, `$NODEID` resolved) by the rules a device loading the
+same file follows, so that step D against a slave's own DCF expects what the slave holds. A
+sub-index the file leaves out keeps the device's default: 25 ms for the refresh time or SCT, the
+pre-defined COB-IDs for SRDO 1 of a node-id 1..64 (§8.3.3) — any other SRDO without COB-IDs is
+left out —, and 20 ms for a missing or zero SRVT, the value the device stores and checksums. A
+record with direction 0, without a mapping record, with a plain mapping slot up to the count
+missing or 0, with an inverted slot unequal to its plain one (§8.4.2.3), or with another value that
+does not parse, is left out: the device leaves that SRDO deleted.
 
 The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
 above it (`ArgumentException`) before writing anything; a peer that returns no count is an

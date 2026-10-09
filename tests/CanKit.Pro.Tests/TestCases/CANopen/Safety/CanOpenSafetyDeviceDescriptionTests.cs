@@ -258,6 +258,73 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         configuration.DeclaresAnySrdo.Should().BeFalse();
     }
 
+    /// <summary>The fixture without sub-index <paramref name="sub"/> of <paramref name="index"/>:
+    /// its section goes and the record's SubNumber drops by one.</summary>
+    private static string WithoutSubIndex(string text, ushort index, byte sub)
+    {
+        var section = $"[{index:X4}sub{sub:X}]\n";
+        int start = text.IndexOf(section, StringComparison.Ordinal);
+        start.Should().BeGreaterThan(-1, section);
+        int end = text.IndexOf("\n[", start + section.Length, StringComparison.Ordinal) + 1;
+        text = text[..start] + text[end..];
+        int record = text.IndexOf($"[{index:X4}]\n", StringComparison.Ordinal);
+        int at = text.IndexOf("SubNumber=", record, StringComparison.Ordinal);
+        int lineEnd = text.IndexOf('\n', at);
+        int count = int.Parse(text[(at + "SubNumber=".Length)..lineEnd], System.Globalization.CultureInfo.InvariantCulture);
+        return text[..at] + $"SubNumber={count - 1}" + text[lineEnd..];
+    }
+
+    /// <summary>The variants of <see cref="Peer_Configuration_Agrees_With_The_Device_Loading_The_Same_File"/>.</summary>
+    private static string Variant(string name) => name switch
+    {
+        "as shipped" => SafetyDcfText(),
+        "no mapping record" => WithOptional(SafetyDcfText(), 0x1300, 0x1301, 0x1302, 0x1382, 0x13FE, 0x13FF),
+        "no refresh time" => WithoutSubIndex(SafetyDcfText(), 0x1301, 2),
+        "no COB-ID 1" => WithoutSubIndex(SafetyDcfText(), 0x1301, 5),
+        "no COB-ID 2" => WithoutSubIndex(SafetyDcfText(), 0x1301, 6),
+        "no COB-IDs" => WithoutSubIndex(WithoutSubIndex(SafetyDcfText(), 0x1301, 5), 0x1301, 6),
+        "inverted slot differs" => Patch(SafetyDcfText(), "[1381sub2]", "ParameterValue=0x20000010", "ParameterValue=0x20010008"),
+        "inverted slot missing" => WithoutSubIndex(SafetyDcfText(), 0x1381, 2),
+        "mapping count unreadable" => Patch(SafetyDcfText(), "[1381sub0]", "ParameterValue=4", "ParameterValue=four"),
+        _ => throw new ArgumentOutOfRangeException(nameof(name), name, null),
+    };
+
+    /// <summary>Step D compares a slave with the expectation built from its own DCF, so the
+    /// expectation must read the file as the device does: an SRDO the device creates is
+    /// expected with the records it holds, and one it leaves deleted is not expected. The rules
+    /// that make the two agree are the loader's — a missing refresh time keeps 25 ms, missing
+    /// COB-IDs keep the pre-defined pair of SRDO 1 for a node-id ≤ 64 (§8.3.3), no mapping record
+    /// or an inverted slot unequal to its plain one leaves the SRDO deleted (§8.4.2.3).</summary>
+    [Theory]
+    [InlineData("as shipped", 5, true)]
+    [InlineData("no mapping record", 5, false)]
+    [InlineData("no refresh time", 5, true)]
+    [InlineData("no COB-ID 1", 5, true)]
+    [InlineData("no COB-ID 2", 5, true)]
+    [InlineData("no COB-IDs", 5, true)]
+    [InlineData("no COB-ID 1", 70, false)]
+    [InlineData("no COB-ID 2", 70, false)]
+    [InlineData("inverted slot differs", 5, false)]
+    [InlineData("inverted slot missing", 5, false)]
+    [InlineData("mapping count unreadable", 5, false)]
+    public void Peer_Configuration_Agrees_With_The_Device_Loading_The_Same_File(string variant, byte nodeId, bool created)
+    {
+        var dcf = CanOpenDeviceDescription.ParseDcf(Variant(variant));
+        var expected = PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId);
+        var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
+        using var bus = Open(session, 1);
+        using var device = CanOpen.OpenNode(bus, nodeId, dcf);
+        var od = device.ObjectDictionary;
+        (od.ReadUnsigned(0x1301, 1) != 0).Should().Be(created, string.Join("\n", device.DeviceDescription!.Findings));
+        expected.Srdos.ContainsKey(1).Should().Be(created, "the expectation has SRDO 1 exactly when the device created it");
+        if (!created) return;
+        SrdoRecords.TryReadCommunication(od, 1, out var held).Should().BeTrue();
+        var (parameter, mapping) = expected.Srdos[1];
+        parameter.Should().Be(held);
+        SrdoCrc.Compute(parameter, mapping).Should().Be(SrdoCrc.Compute(held, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, 1))),
+            "the checksum step D expects is the one of the records the device holds");
+    }
+
     [Fact]
     public void Peer_Configuration_From_A_Dcf()
     {
