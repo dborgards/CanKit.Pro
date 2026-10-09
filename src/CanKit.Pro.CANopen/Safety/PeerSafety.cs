@@ -26,12 +26,15 @@ public sealed class PeerSafetyConfiguration
     /// <summary>True when at least one SRDO is configured — what makes a peer a safety slave for the boot-up.</summary>
     public bool DeclaresAnySrdo => _srdos.Count > 0;
 
-    /// <summary>Adds or replaces SRDO <paramref name="srdoNumber"/> (1..64). The direction must not be None.</summary>
+    /// <summary>Adds or replaces SRDO <paramref name="srdoNumber"/> (1..64). The direction must not
+    /// be None. The configuration keeps a copy of <paramref name="mapping"/>: a later change to
+    /// the caller's instance does not change it.</summary>
     public PeerSafetyConfiguration Add(int srdoNumber, SrdoCommunicationParameter parameter, SrdoMapping mapping)
     {
         if (srdoNumber is < 1 or > SrdoRecords.MaxSrdoCount) throw new ArgumentOutOfRangeException(nameof(srdoNumber));
         if (parameter.Direction == SrdoDirection.None) throw new ArgumentException("An SRDO in a configuration has a direction; leave it out to delete it.", nameof(parameter));
-        _srdos[srdoNumber] = (parameter, mapping ?? throw new ArgumentNullException(nameof(mapping)));
+        if (mapping is null) throw new ArgumentNullException(nameof(mapping));
+        _srdos[srdoNumber] = (parameter, SrdoMapping.FromEntries(mapping.ToArray()));
         return this;
     }
 

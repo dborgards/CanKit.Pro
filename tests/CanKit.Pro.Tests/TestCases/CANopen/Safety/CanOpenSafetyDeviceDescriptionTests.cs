@@ -345,6 +345,19 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
             "the checksum step D expects is the one of the records the device holds");
     }
 
+    /// <summary>The configuration keeps the mapping it was given: a later change to the
+    /// caller's instance does not change what is written or verified.</summary>
+    [Fact]
+    public void Peer_Configuration_Add_Keeps_A_Copy_Of_The_Mapping()
+    {
+        var transmit = new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A);
+        var mapping = new SrdoMapping().Add(0x2001, 0x00, 8);
+        var configuration = new PeerSafetyConfiguration().Add(1, transmit, mapping);
+        mapping.Add(0x2000, 0x00, 16);
+        configuration.Srdos[1].Mapping.Entries.Select(e => (e.Index, e.Subindex, e.BitLength)).Should().Equal(((ushort)0x2001, (byte)0, (byte)8));
+        configuration.Srdos[1].Mapping.Should().NotBeSameAs(mapping);
+    }
+
     [Fact]
     public void Peer_Configuration_From_A_Dcf()
     {
