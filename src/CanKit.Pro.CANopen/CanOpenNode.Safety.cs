@@ -88,7 +88,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         ushort index, byte subindex, byte[] value)
     {
         // §8.3.2.4 note 1: "Writing to a safety entry in the OPERATIONAL state leads to an abort
-        // message (abort code: 0800 0022h). Reading … is allowed."
+        // message (abort code: 0800 0022h). Reading … is allowed." This runs under the write gate,
+        // and the transition into Operational publishes the state under the same gate
+        // (ApplyNmtTransition), so the state read here cannot change before the value is stored.
         if (SrdoRecords.IsStateGated(index) && operational)
             return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferredDeviceState);
         if (index == Co.GfcParameter)
@@ -537,6 +539,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         // timer or wait handle holds nothing that needs disposing.
         period.Cancel();
     }
+
+    /// <summary>Test seam, any thread: the NMT state as last published, read without a round trip
+    /// through the actor (which a test holding the write gate may be keeping busy).</summary>
+    internal NmtState StateForTests => _state;
 
     /// <summary>Test seam, actor only: the tail of the SRDO send chain.</summary>
     internal Task SrdoSendChainForTests => _srdoSendChain;

@@ -850,6 +850,51 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         return bytes;
     }
 
+    /// <summary>§8.3.2.4 note 1: a safety entry is not written in Operational. A direct write runs
+    /// its state check and its store under the dictionary's write gate on the writing thread; the
+    /// transition into Operational publishes the state and arms the SRDO engine under the same
+    /// gate. So a write holding the gate keeps the node out of Operational until it is stored, and
+    /// the transition then sees it: 13FEh is 0 and the SRDO is not armed on the old configuration.</summary>
+    [Fact]
+    public async Task A_Direct_Safety_Write_Holding_The_Gate_Is_Stored_Before_The_Node_Enters_Operational()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var node = new CanOpenNode(new CanBusService(bus), Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true, new ManualTimeSource());
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        var od = node.ObjectDictionary;
+        node.State.Should().Be(NmtState.PreOperational);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+
+        using var inside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = Task.Run(() => od.Transaction(() =>
+        {
+            od.WriteUnsigned(0x1301, 0x02, 40); // sees Pre-Operational: accepted, and 13FEh is cleared with it
+            inside.Set();
+            release.Wait(ShortTimeout);
+        }));
+        inside.Wait(ShortTimeout).Should().BeTrue();
+        wire.SendNmt(NmtCommand.Start, Producer);
+        // Positive witness that the actor has reached the transition: it waits at the write gate.
+        await WaitUntilAsync(() => od.WriteGateWaiters >= 1, "the transition into Operational waits at the write gate");
+        node.StateForTests.Should().Be(NmtState.PreOperational, "Operational is not published while a write holds the gate");
+        release.Set();
+        await holder.WithTimeoutAsync(ShortTimeout);
+
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "started");
+        od.ReadUnsigned(0x1301, 0x02).Should().Be(40u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the write before the transition cleared it");
+        var state = node.Safety().GetSrdoState(1);
+        state.IsValid.Should().BeFalse("the transition saw the write: the configuration is not valid");
+        state.Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+        Record.Exception(() => od.WriteUnsigned(0x1301, 0x02, 30)).Should().BeOfType<ArgumentException>()
+            .Which.Message.Should().Contain("0x08000022", "a write after the transition is refused");
+    }
+
     private static async Task AwaitSrdoChainAsync(CanOpenNode node)
     {
         Task chain = Task.CompletedTask;
@@ -877,6 +922,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         private readonly bool _holdGfc;
         private readonly bool _honourTokens;
 
+        /// <summary>Wraps <paramref name="inner"/>; holds the SRDO frames until <see cref="Release"/>.</summary>
+        /// <param name="inner">The service the frames that are not held go to.</param>
         /// <param name="holdGfc">Also hold the GFC (001h), not only the SRDO frames.</param>
         /// <param name="honourTokens">Abandon a held send when its token is cancelled, as a
         /// service does that has not handed the frame to the driver yet.</param>

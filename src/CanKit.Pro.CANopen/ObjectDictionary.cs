@@ -45,11 +45,11 @@ public sealed class ObjectDictionary
     private readonly object _writeGate = new();
 
     // Test seam (#171): the number of callers that have reached the write gate and are not yet
-    // inside it — WriteUnsigned's and Add's own <c>lock (_writeGate)</c>, the only two entry
-    // points a concurrent test "hammer" reaches. While a test holds the gate, every caller
-    // counted here is blocked on it; tests poll it as that signal instead of a fixed sleep that
-    // only ever guessed how long reaching the gate takes. Not counted for Transaction /
-    // WriteRawUnchecked / Declare, which no such test hammers.
+    // inside it — WriteUnsigned's, Add's and Transaction's own <c>lock (_writeGate)</c>; the
+    // node's transition into Operational is a Transaction. While a test holds the gate, every
+    // caller counted here is blocked on it; tests poll it as that signal instead of a fixed sleep
+    // that only ever guessed how long reaching the gate takes. Not counted for
+    // WriteRawUnchecked / Declare, which no such test waits for.
     private int _writeGateWaiters;
 
     /// <summary>Test seam (#171): see <see cref="_writeGateWaiters"/>.</summary>
@@ -246,8 +246,10 @@ public sealed class ObjectDictionary
     /// </summary>
     internal void Transaction(Action writes)
     {
+        Interlocked.Increment(ref _writeGateWaiters);
         lock (_writeGate)
         {
+            Interlocked.Decrement(ref _writeGateWaiters);
             writes();
         }
     }

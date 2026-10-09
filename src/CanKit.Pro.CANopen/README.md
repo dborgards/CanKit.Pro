@@ -587,7 +587,9 @@ DSP 304 §8.4.2.2 Table 6, created at these defaults:
 | | `01h`–n | 0 | UNSIGNED16, the checksum of SRDO n. |
 
 The records, `13FEh` and `13FFh` refuse every write in Operational with `0800 0022h` (§8.3.2.4,
-note 1); reading stays allowed. Every accepted write to a record or to `13FFh` sets `13FEh` back to
+note 1); reading stays allowed. The transition into Operational takes the dictionary's write gate,
+under which a direct write checks the state and stores its value, so a write racing it is either
+stored before it — and seen by its configuration check — or refused. Every accepted write to a record or to `13FFh` sets `13FEh` back to
 0 (§8.4.2.2, "automatically 0"), so a changed parameter can never sit beside a stale `A5h`. A
 PDO cannot take a CAN-ID in 101h..180h (CiA 301 Table 40), so SRDO COB-IDs are only checked
 against each other.

@@ -662,12 +662,33 @@ internal sealed partial class CanOpenNode
     private void ApplyNmtTransition(NmtState target)
     {
         var previous = _state;
-        _state = target;
-
-        if (previous == NmtState.Operational && target != NmtState.Operational) OnLeaveOperational();
-        if (target == NmtState.Operational && previous != NmtState.Operational) OnEnterOperational();
-        if (previous == NmtState.Operational && target != NmtState.Operational) LeaveSrdoOperational();
-        if (target == NmtState.Operational && previous != NmtState.Operational) _srdo.EnterOperational();
+        if (target == NmtState.Operational && previous != NmtState.Operational)
+        {
+            // CiA DSP 304 §8.3.2.4 note 1: no safety entry is written in Operational. A direct
+            // write checks the state and stores the value under the dictionary's write gate on
+            // the writing thread, so Operational is published and the SRDO engine armed — with
+            // its §9.5 configuration check — under the same gate: a write either is stored first
+            // and seen by the check (13FEh cleared, the SRDO not armed), or sees Operational and
+            // is refused with 0800 0022h. Nothing in here waits on another thread, and no hook
+            // that runs under the gate on a writer's thread waits on the actor.
+            _od.Transaction(() =>
+            {
+                _state = target;
+                OnEnterOperational();
+                _srdo.EnterOperational();
+            });
+        }
+        else
+        {
+            // Leaving needs no gate: a write that saw Operational is refused, and one that saw
+            // the previous state has nothing to race.
+            _state = target;
+            if (previous == NmtState.Operational && target != NmtState.Operational)
+            {
+                OnLeaveOperational();
+                LeaveSrdoOperational();
+            }
+        }
 
         if (target == NmtState.Stopped)
         {
