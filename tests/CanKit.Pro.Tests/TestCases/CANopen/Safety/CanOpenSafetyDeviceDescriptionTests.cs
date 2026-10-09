@@ -27,6 +27,23 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
 
     private static string SafetyDcfText() => File.ReadAllText(Fixture("safety.dcf"));
 
+    /// <summary>The fixture with its second SRDO renumbered to 3 and created (10Bh/10Ch, empty
+    /// mapping), and 13FFh declared for three: SRDO 2 is the gap the file does not declare.</summary>
+    internal static string GappedSafetyDcfText()
+    {
+        var text = SafetyDcfText().Replace("[1302", "[1303").Replace("[1382", "[1383")
+            .Replace("=0x1302\n", "=0x1303\n").Replace("=0x1382\n", "=0x1383\n");
+        text = Patch(text, "[1303sub1]", "DefaultValue=0", "DefaultValue=1");
+        text = Patch(text, "[1303sub5]", "DefaultValue=0", "DefaultValue=0x10B");
+        text = Patch(text, "[1303sub6]", "DefaultValue=0", "DefaultValue=0x10C");
+        text = Patch(text, "[13FF]", "SubNumber=3", "SubNumber=4");
+        text = Patch(text, "[13FFsub0]", "DefaultValue=2", "DefaultValue=3");
+        text = text.Replace("[ManufacturerObjects]",
+            "[13FFsub3]\nParameterName=Signature SRDO 3\nObjectType=0x7\nDataType=0x0006\nAccessType=rw\nDefaultValue=0\nPDOMapping=0\n\n[ManufacturerObjects]");
+        text.Should().NotContain("[1302").And.NotContain("[1382");
+        return text;
+    }
+
     /// <summary>The fixture with the optional-object list replaced (the list is read by position, so
     /// leaving a gap would hide the entries behind it).</summary>
     private static string WithOptional(string text, params ushort[] indices)
@@ -120,33 +137,43 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         node.ObjectDictionary.ReadUnsigned(0x13FF, 0).Should().Be(4u);
     }
 
+    /// <summary>13FFh:00 is the number of SRDOs (§8.4.2.2), so records 1..n exist: one below the
+    /// highest declared that the file leaves out is provided at its defaults, the SRDO deleted,
+    /// and reported. A master configuring or verifying the node reaches every record up to the count.</summary>
     [Fact]
-    public void A_Record_Below_The_Highest_Declared_One_That_The_File_Omits_Is_Removed()
+    public void A_Record_Below_The_Highest_Declared_One_That_The_File_Omits_Exists_Deleted()
     {
-        // 1301h/1381h are not declared, 1302h is: the node holds two SRDOs of which only the second exists.
-        var text = WithOptional(SafetyDcfText(), 0x1300, 0x1302, 0x1382, 0x13FE, 0x13FF);
         var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
         using var bus = Open(session, 1);
-        using var node = CanOpen.OpenNode(bus, CanOpenDeviceDescription.ParseDcf(text));
-        node.Safety().SrdoCount.Should().Be(2);
-        node.ObjectDictionary.ContainsIndex(0x1301).Should().BeFalse();
-        node.ObjectDictionary.ContainsIndex(0x1381).Should().BeFalse();
-        node.ObjectDictionary.ContainsIndex(0x1302).Should().BeTrue();
-        node.ObjectDictionary.ContainsIndex(0x1382).Should().BeTrue();
+        using var node = CanOpen.OpenNode(bus, CanOpenDeviceDescription.ParseDcf(GappedSafetyDcfText()));
+        var od = node.ObjectDictionary;
+        node.Safety().SrdoCount.Should().Be(3);
+        od.ReadUnsigned(0x13FF, 0).Should().Be(3u);
+        od.ContainsIndex(0x1302).Should().BeTrue();
+        od.ContainsIndex(0x1382).Should().BeTrue();
+        od.ReadUnsigned(0x1302, 1).Should().Be(0u, "the undeclared SRDO is deleted");
+        od.ReadUnsigned(0x1302, 2).Should().Be(25u, "at the §8.4.2.2 defaults");
+        od.ReadUnsigned(0x1303, 1).Should().Be(1u, "SRDO 3 is created as declared");
+        foreach (ushort record in new ushort[] { 0x1302, 0x1382 })
+            node.DeviceDescription!.Findings.Should().ContainSingle(f => f.Index == record && f.Subindex == 0 && f.Outcome == DeviceDescriptionOutcome.SuppliedDefault);
+        node.DeviceDescription!.Findings.Should().NotContain(f => f.Index == 0x1301 || f.Index == 0x1303, "declared records are not reported");
     }
 
+    /// <summary>A mapping record without its communication record: the communication record
+    /// exists all the same (13FFh:00 = 1), deleted and reported, and the mapping is applied as
+    /// described; no SRDO is created, because the file gives it no direction.</summary>
     [Fact]
-    public void A_Mapping_Record_Without_Its_Communication_Record_Is_Not_Created()
+    public void A_Mapping_Record_Without_Its_Communication_Record_Leaves_The_Srdo_Deleted()
     {
         var text = WithOptional(SafetyDcfText(), 0x1300, 0x1381, 0x13FE, 0x13FF);
         var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
         using var bus = Open(session, 1);
         using var node = CanOpen.OpenNode(bus, CanOpenDeviceDescription.ParseDcf(text));
         node.Safety().SrdoCount.Should().Be(1);
-        node.ObjectDictionary.ContainsIndex(0x1301).Should().BeFalse();
-        node.ObjectDictionary.ContainsIndex(0x1381).Should().BeFalse();
-        var finding = node.DeviceDescription!.Findings.Single(f => f.Index == 0x1381 && f.Subindex == 0);
-        finding.Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
+        node.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u);
+        node.ObjectDictionary.ReadUnsigned(0x1381, 0).Should().Be(4u, "the mapping is applied as described");
+        node.DeviceDescription!.Findings.Should().ContainSingle(f => f.Index == 0x1301 && f.Subindex == 0 && f.Outcome == DeviceDescriptionOutcome.SuppliedDefault);
+        node.DeviceDescription.Findings.Should().NotContain(f => f.Index == 0x1381);
     }
 
     [Fact]
@@ -301,6 +328,7 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         "mapping count unreadable" => Patch(SafetyDcfText(), "[1381sub0]", "ParameterValue=4", "ParameterValue=four"),
         "COB-ID 1 unreadable" => Patch(SafetyDcfText(), "[1301sub5]", "ParameterValue=0x109", "ParameterValue=not-a-number"),
         // SRDO 2 created on 10Bh/10Ch: the pre-defined pair of SRDO 1 at node-id 6.
+        "SRDO 2 not declared, SRDO 3 is" => GappedSafetyDcfText(),
         "SRDO 2 on the ids SRDO 1 defaults to" => Patch(Patch(Patch(WithoutSubIndex(WithoutSubIndex(SafetyDcfText(), 0x1301, 5), 0x1301, 6),
             "[1302sub1]", "DefaultValue=0", "DefaultValue=1"), "[1302sub5]", "DefaultValue=0", "DefaultValue=0x10B"), "[1302sub6]", "DefaultValue=0", "DefaultValue=0x10C"),
         _ => throw new ArgumentOutOfRangeException(nameof(name), name, null),
@@ -328,6 +356,7 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
     [InlineData("COB-ID 1 unreadable", 5, true, 0x109, 0x10A)]              // the default is kept
     [InlineData("COB-ID 1 unreadable", 6, true, 0x10B, 0x10C)]
     [InlineData("SRDO 2 on the ids SRDO 1 defaults to", 6, true, 0x10B, 0x10C, false)] // SRDO 2 is refused at its creation
+    [InlineData("SRDO 2 not declared, SRDO 3 is", 5, true, 0x109, 0x10A)]
     [InlineData("inverted slot differs", 5, false, 0, 0)]
     [InlineData("inverted slot missing", 5, false, 0, 0)]
     [InlineData("mapping count unreadable", 5, false, 0, 0)]

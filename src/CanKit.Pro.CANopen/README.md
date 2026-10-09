@@ -527,9 +527,11 @@ A device description raises the count to the highest SRDO record it declares
 (`1301h`–`1340h`, `1381h`–`13C0h`); the option is a floor. The safety objects of the file are
 loaded like the PDO records: through the validated write path, the mapping before the SRDO is
 created, the file's access type honoured, every value the node refuses reported as a finding with
-its abort code. A record below the highest one that the file omits does not exist, a mapping
-record without its communication record is not created, and a mapping the node refuses leaves
-that SRDO deleted. `13FEh` is applied last, so a file whose checksums match its records loads as a
+its abort code. A record below the highest one that the file omits exists all the same —
+`13FFh:00` is the number of SRDOs (§8.4.2.2), so records 1..n exist and a master reaches every
+one — at its defaults with the SRDO deleted, and is reported as `SuppliedDefault`. A mapping
+record without its communication record is applied with that SRDO deleted, and a mapping the
+node refuses leaves that SRDO deleted. `13FEh` is applied last, so a file whose checksums match its records loads as a
 valid configuration; a file whose checksum does not match loads without a finding and is simply
 not valid. EdsDcfNet evaluates `$NODEID` in the form `$NODEID+<constant>`: the pre-defined
 COB-ID FFh + 2 × node-id is not of that form, so a file states it as a number or as

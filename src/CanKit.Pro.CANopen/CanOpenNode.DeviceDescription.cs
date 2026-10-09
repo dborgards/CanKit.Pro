@@ -65,12 +65,18 @@ internal sealed partial class CanOpenNode
                 if (!objects.ContainsKey(index)) RemoveObject(index);
             }
         }
-        // The same for an SRDO (CiA DSP 304): a record the description does not declare does not
-        // exist — except the ones the SrdoCount option asked for, which is a floor.
-        for (int n = Math.Max(1, _options.SrdoCount + 1); n <= _srdoCount; n++)
+        // Not so for an SRDO (CiA DSP 304 §8.4.2.2): 13FFh:00 is the number of SRDOs, so records
+        // 1..n exist by definition, and a master configures and verifies every one of them. A
+        // record below the highest one the description declares that the file leaves out is
+        // provided at its defaults — the SRDO deleted — and reported.
+        for (int n = 1; n <= DescribedSrdoCount(description); n++)
         {
-            if (!objects.ContainsKey(SrdoRecords.CommIndex(n))) RemoveObject(SrdoRecords.CommIndex(n));
-            if (!objects.ContainsKey(SrdoRecords.MapIndex(n))) RemoveObject(SrdoRecords.MapIndex(n));
+            foreach (var record in new[] { SrdoRecords.CommIndex(n), SrdoRecords.MapIndex(n) })
+            {
+                if (!objects.ContainsKey(record))
+                    findings.Add(new DeviceDescriptionFinding(record, 0x00, DeviceDescriptionOutcome.SuppliedDefault,
+                        $"13FFh:00 counts {_srdoCount} SRDOs, so this record exists (CiA DSP 304 §8.4.2.2); the description does not declare it and the node provides it at its defaults, the SRDO deleted"));
+            }
         }
 
         // A mapping names application objects, so every other object comes first, then the
@@ -180,10 +186,6 @@ internal sealed partial class CanOpenNode
         od.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
             ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value)
             : OdWriteDecision.Accept;
-        // The node also removes the records the file does not declare. Not needed here: such a
-        // record has no create pending and stays at direction 0, which is what the expectation
-        // reads from a removed one too.
-
         var findings = new List<DeviceDescriptionFinding>();
         var pendingSrdoCreates = new List<(int Srdo, byte Direction, string Raw)>();
         var failedMappings = new HashSet<ushort>();
@@ -231,13 +233,11 @@ internal sealed partial class CanOpenNode
         _ => 0,
     };
 
-    private void RemoveObject(ushort index) => RemoveObject(_od, index);
-
-    private static void RemoveObject(ObjectDictionary od, ushort index)
+    private void RemoveObject(ushort index)
     {
-        foreach (var key in od.SnapshotKeys().Where(k => (ushort)(k >> 8) == index))
+        foreach (var key in _od.SnapshotKeys().Where(k => (ushort)(k >> 8) == index))
         {
-            od.Remove(index, (byte)(key & 0xFF));
+            _od.Remove(index, (byte)(key & 0xFF));
         }
     }
 
@@ -707,16 +707,8 @@ internal sealed partial class CanOpenNode
         List<DeviceDescriptionFinding> findings, HashSet<ushort> failedMappings)
     {
         int n = index - SrdoRecords.MappingBase;
-        // An SRDO exists only with both records (Table 6 footnote), and writing a mapping reads
-        // and deletes the communication record's direction: without it the record is not created.
-        if (!od.TryGet(SrdoRecords.CommIndex(n), 0x01, out _))
-        {
-            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
-                $"the description declares no communication record 0x{SrdoRecords.CommIndex(n):X4} for this SRDO; an SRDO exists only with both records (Table 6 footnote), so the mapping record is not created"));
-            RemoveObject(od, index);
-            failedMappings.Add(index);
-            return 0;
-        }
+        // The communication record exists: records 1..13FFh:00 always do (§8.4.2.2), whether the
+        // description declares them or not.
         int loaded = 0;
         var byIndex = entries.ToDictionary(e => e.Subindex);
         foreach (var entry in entries)
