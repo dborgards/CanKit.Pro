@@ -16,6 +16,17 @@ internal sealed partial class CanOpenNode
 {
     private readonly int _srdoCount;
 
+    // True while RestoreValues runs, under the dictionary's write gate: the 13FEh auto-reset is
+    // for configuration writes, not for putting a stored configuration back.
+    private bool _restoringValues;
+
+    /// <summary>Opt-in: without SRDOs none of 1300h-13FFh belongs to the node, and an SRDO record
+    /// above the count is not created, so an application may declare it itself.</summary>
+    private bool IsManagedSafetyObject(ushort index)
+        => _srdoCount > 0
+           && (index == Co.GfcParameter || index == Co.SrdoConfigurationValid || index == Co.SrdoChecksum
+               || (SrdoRecords.SrdoNumberOf(index) is { } n && n <= _srdoCount));
+
     /// <summary>The highest SRDO record a description declares; 0 without one. Completed when the
     /// loader learns the safety objects (device-description task).</summary>
     private static int DescribedSrdoCount(CanOpenDeviceDescription? description) => 0;

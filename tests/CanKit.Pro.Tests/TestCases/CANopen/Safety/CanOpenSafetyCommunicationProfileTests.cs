@@ -1,10 +1,12 @@
 using System;
+using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
+using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Safety;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
@@ -32,6 +34,21 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         const string marker = "SDO abort 0x";
         var hex = ex.Message.Substring(ex.Message.IndexOf(marker, StringComparison.Ordinal) + marker.Length, 8);
         return (SdoAbortCode)Convert.ToUInt32(hex, 16);
+    }
+
+    private static void SendNmt(ICanBus master, NmtCommand command, byte nodeId)
+        => master.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+            new[] { (byte)command, nodeId }, isExtendedFrame: false));
+
+    private static async Task WaitForStateAsync(ICanOpenNode node, NmtState state)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (node.State != state)
+        {
+            if (DateTime.UtcNow > deadline)
+                throw new TimeoutException($"Node 0x{node.NodeId:X2} did not reach {state}; it is in {node.State}.");
+            await Task.Delay(5);
+        }
     }
 
     [Fact]
@@ -132,6 +149,99 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.WriteUnsigned(0x1301, 1, 1);
         Rejected(() => od.WriteUnsigned(0x1302, 1, 2)).Should().Be(SdoAbortCode.ValueRangeExceeded,
             "SRDO 1 exists on these ids; one CAN-ID carries one communication object");
+    }
+
+    [Fact]
+    public void A_CobId_Of_Another_Existing_Srdo_Is_Refused_On_The_Write()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.WriteUnsigned(0x1301, 1, 1);
+        // 0x121 is COB-ID 1 of the existing SRDO 1: SRDO 2 may not take it (0609 0030h).
+        Rejected(() => od.WriteUnsigned(0x1302, 5, 0x0FFu + 2 * Device)).Should().Be(SdoAbortCode.ValueRangeExceeded);
+        od.WriteUnsigned(0x1302, 5, 0x0FFu + 2 * Device + 2);
+        od.ReadUnsigned(0x1302, 5).Should().Be(0x0FFu + 2 * Device + 2, "a free id is accepted");
+    }
+
+    [Fact]
+    public void Without_Srdos_The_Application_Declares_1301h_Itself()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, Device);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x1301, 0x01, 0);
+        od.AddU32(0x13FE, 0x00, 0);
+        od.WriteUnsigned(0x1301, 1, 7);
+        od.ReadUnsigned(0x1301, 1).Should().Be(7u, "an application object, not validated as an SRDO record");
+    }
+
+    [Fact]
+    public void With_Two_Srdos_Only_Their_Records_Are_Reserved()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus, srdoCount: 2);
+        var od = node.ObjectDictionary;
+        Assert.Throws<InvalidOperationException>(() => od.AddU8(0x1301, 0x01, 0));
+        Assert.Throws<InvalidOperationException>(() => od.AddU8(0x1382, 0x01, 0));
+        Assert.Throws<InvalidOperationException>(() => od.AddU8(0x13FE, 0x00, 0));
+        od.AddU8(0x1303, 0x01, 0);
+        od.AddU8(0x1383, 0x01, 0);
+        od.WriteUnsigned(0x1303, 1, 5);
+        od.ReadUnsigned(0x1303, 1).Should().Be(5u);
+    }
+
+    [Fact]
+    public async Task Writes_To_The_Safety_Entries_Are_Refused_In_Operational_Except_1300h()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var master = Open(session, 2);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        SendNmt(master, NmtCommand.Start, Device);
+        await WaitForStateAsync(node, NmtState.Operational);
+        Rejected(() => od.WriteUnsigned(0x1301, 2, 30)).Should().Be(SdoAbortCode.DataCannotBeTransferredDeviceState);
+        Rejected(() => od.WriteUnsigned(0x13FE, 0, 0xA5)).Should().Be(SdoAbortCode.DataCannotBeTransferredDeviceState);
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u, "reading stays allowed");
+        od.WriteUnsigned(0x1300, 0, 1);
+        od.ReadUnsigned(0x1300, 0).Should().Be(1u);
+    }
+
+    [Fact]
+    public async Task A_Stored_Valid_Configuration_Survives_An_Nmt_Reset()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var master = Open(session, 2);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x2000, 0x00, 0);
+        od.WriteUnsigned(0x1381, 1, 0x2000_0008);
+        od.WriteUnsigned(0x1381, 2, 0x2000_0008);
+        od.WriteUnsigned(0x1381, 0, 2);
+        od.WriteUnsigned(0x1301, 1, 1);
+        od.WriteUnsigned(0x13FF, 1, 0x1234);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        node.StoreParameters();
+
+        od.WriteUnsigned(0x13FE, 0, 0);
+        od.WriteUnsigned(0x1301, 2, 40);
+        od.WriteUnsigned(0x13FF, 1, 0x4321);
+
+        // Operational first, so that the wait below ends on the PreOperational the reset enters
+        // after it has restored the dictionary, not on the state the node was in before it.
+        SendNmt(master, NmtCommand.Start, Device);
+        await WaitForStateAsync(node, NmtState.Operational);
+        SendNmt(master, NmtCommand.ResetCommunication, Device);
+        await WaitForStateAsync(node, NmtState.PreOperational);
+
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u, "the reset restored the stored values");
+        od.ReadUnsigned(0x13FF, 1).Should().Be(0x1234u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "restoring is not a write to a safety-relevant parameter");
     }
 
     [Fact]

@@ -218,7 +218,7 @@ internal sealed partial class CanOpenNode
 
     /// <summary>Objects whose values drive the node and which the application therefore writes
     /// rather than re-declares.</summary>
-    private static bool IsManagedCommunicationObject(ushort index) => index switch
+    private bool IsManagedCommunicationObject(ushort index) => index switch
     {
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
@@ -228,7 +228,7 @@ internal sealed partial class CanOpenNode
         >= Co.RpdoMap and < Co.RpdoMap + Co.PdoCount => true,
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
         >= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount => true,
-        _ when Safety.SrdoRecords.IsSafetyObject(index) => true,
+        _ when IsManagedSafetyObject(index) => true,
         _ => false,
     };
 
@@ -258,7 +258,7 @@ internal sealed partial class CanOpenNode
 
     private OdWriteDecision ValidateCommunicationWrite(ushort index, byte subindex, byte[] value)
     {
-        if (Safety.SrdoRecords.IsSafetyObject(index)) return ValidateSafetyWrite(index, subindex, value);
+        if (IsManagedSafetyObject(index)) return ValidateSafetyWrite(index, subindex, value);
         switch (index)
         {
             case Co.SyncCobId:
@@ -468,7 +468,9 @@ internal sealed partial class CanOpenNode
         // write cannot see A5h beside a changed parameter. Unchecked: the reset is not a
         // configuration write and must not itself be refused in Operational (nothing reaches here
         // in Operational anyway, the validator refuses the write that would).
-        if (Safety.SrdoRecords.IsChecksummed(index) && _od.TryGet(Co.SrdoConfigurationValid, 0, out _))
+        // Not for a restore: that puts back a stored configuration, 13FEh among it, and the A5h
+        // that was stored with it must survive the restoring of 13FFh that follows it.
+        if (!_restoringValues && Safety.SrdoRecords.IsChecksummed(index) && _od.TryGet(Co.SrdoConfigurationValid, 0, out _))
             _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0, new byte[] { 0 });
         RunOnActor(() => ApplyCommunicationObject(index, subindex));
     }
@@ -777,26 +779,35 @@ internal sealed partial class CanOpenNode
         {
             _od.Transaction(() =>
             {
-                foreach (var key in _od.SnapshotKeys())
+                // Set under the write gate, so no other writer's write is taken for part of the restore.
+                _restoringValues = true;
+                try
                 {
-                    var index = (ushort)(key >> 8);
-                    var subindex = (byte)(key & 0xFF);
-                    if (!IsRestorableObject(index)) continue;
-                    if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
-                    if (values.TryGetValue(key, out var stored))
+                    foreach (var key in _od.SnapshotKeys())
                     {
-                        // Snapshot keys are entries that exist. The width check is the only branch.
-                        _od.TryGet(index, subindex, out var current);
-                        int size = OdEntryLayout.FixedSize(current.DataType);
-                        if (size > 0 && stored.Length != size)
-                            continue; // re-declared with another width since the snapshot: no power-on value for it
-                        _od.WriteRawUnchecked(index, subindex, stored);
+                        var index = (ushort)(key >> 8);
+                        var subindex = (byte)(key & 0xFF);
+                        if (!IsRestorableObject(index)) continue;
+                        if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
+                        if (values.TryGetValue(key, out var stored))
+                        {
+                            // Snapshot keys are entries that exist. The width check is the only branch.
+                            _od.TryGet(index, subindex, out var current);
+                            int size = OdEntryLayout.FixedSize(current.DataType);
+                            if (size > 0 && stored.Length != size)
+                                continue; // re-declared with another width since the snapshot: no power-on value for it
+                            _od.WriteRawUnchecked(index, subindex, stored);
+                        }
+                        else if (IsManagedCommunicationObject(index))
+                        {
+                            _od.TryGet(index, subindex, out var entry);
+                            _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
+                        }
                     }
-                    else if (IsManagedCommunicationObject(index))
-                    {
-                        _od.TryGet(index, subindex, out var entry);
-                        _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
-                    }
+                }
+                finally
+                {
+                    _restoringValues = false;
                 }
             });
         }
