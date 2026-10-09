@@ -167,7 +167,7 @@ internal sealed partial class SrdoEngine : IDisposable
             ScheduleCycle(rt, TimeSpan.FromTicks(TimeSpan.TicksPerMillisecond * _nodeId / 2));
             return;
         }
-        ArmConsumer(rt); // Task 6
+        ArmConsumer(rt);
     }
 
     private void Disarm(SrdoRuntime rt)
@@ -175,7 +175,7 @@ internal sealed partial class SrdoEngine : IDisposable
         rt.Generation++;
         rt.CycleHandle?.Dispose();
         rt.CycleHandle = null;
-        DisarmConsumer(rt); // Task 6
+        DisarmConsumer(rt);
     }
 
     private void ScheduleCycle(SrdoRuntime rt, TimeSpan delay)
@@ -274,7 +274,7 @@ internal sealed partial class SrdoEngine : IDisposable
         public DateTime? LastValidAt { get; set; }
         public int Generation;
         public IDisposable? CycleHandle { get; set; }
-        // Consumer (Task 6).
+        // Consumer.
         public byte[]? Pending { get; set; }
         public IDeadline? SctDeadline { get; set; }
         public IDeadline? SrvtDeadline { get; set; }

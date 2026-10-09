@@ -147,7 +147,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         }
     }
 
-    /// <summary>One CAN-ID carries one communication object (Codex on #133). PDO, SYNC and EMCY
+    /// <summary>One CAN-ID carries one communication object (#133). PDO, SYNC and EMCY
     /// cannot sit on 101h–180h at all: CiA 301 Table 40 restricts the range and their validators
     /// refuse it, so only SRDO against SRDO is checked here.</summary>
     private bool IsCanIdOfAnExistingSrdo(uint canId, int exceptSrdo)
