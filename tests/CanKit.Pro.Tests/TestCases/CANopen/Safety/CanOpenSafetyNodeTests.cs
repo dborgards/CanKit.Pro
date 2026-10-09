@@ -448,8 +448,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>The check before each frame cannot see a thread that has passed it and is still
     /// on its way to the service. Each frame of a pair is therefore handed over with the token of
-    /// its Operational period, which leaving Operational cancels: a send the service has not taken
-    /// yet is abandoned, and the inverted frame of a pair in flight is not handed over.</summary>
+    /// its Operational period, which leaving Operational cancels: a send whose task has not started
+    /// is not started, and the inverted frame of a pair in flight is not handed over.</summary>
     [Fact]
     public async Task Leaving_Operational_Cancels_The_Send_Of_A_Pair_In_Flight()
     {

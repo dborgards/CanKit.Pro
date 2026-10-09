@@ -646,7 +646,7 @@ behind a stalled one (below).
 At most one pair per SRDO is in flight. A pair that comes due while the previous one is not yet
 confirmed becomes that SRDO's pending pair, replacing an older pending one — the latest data wins —
 and is sent as soon as the previous pair completes. Leaving Operational, or disposing the node,
-drops the pending pair, and a pair already on the send chain sends nothing more — neither another
+drops the pending pair, and a pair already on the send chain starts no further send — neither another
 SRDO's pair queued behind the one in flight nor the inverted half of the one in flight (§8.3.2.2):
 a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair.
 Each frame is handed to the bus service with a cancellation token of its Operational period,

@@ -439,7 +439,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     // The Operational period a link on the chain belongs to, as a token: leaving Operational and
     // disposing cancel it (actor only). A link checks it before each of its two frames and hands
-    // each frame over with it, so a link of an ended period sends nothing more — including a
+    // each frame over with it, so a link of an ended period starts no further send — including a
     // frame whose thread had passed the check but whose send task had not started: the token is
     // honoured until that task starts. A send task already running — waiting for the bus
     // service's pending gate, say — still hands its frame to the driver, because the service does
