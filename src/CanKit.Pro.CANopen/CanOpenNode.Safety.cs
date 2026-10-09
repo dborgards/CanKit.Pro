@@ -255,10 +255,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             ? CanOpenCobId.SrdoDefaultCobId1(_nodeId)
             : throw new ArgumentException("No pre-defined COB-ID for this SRDO (only SRDO 1 of a node-id 1..64 has one, CiA DSP 304 §8.3.3); pass cobId1.", nameof(cobId1)));
         uint id2 = cobId2 ?? id1 + 1;
-        RequireNotOperationalForSafetyWrite();
         var entries = mapping.ToArray();
         RunOnActorAndWait(() =>
         {
+            RequireNotOperationalForSafetyWrite();
             var comm = SrdoRecords.CommIndex(srdoNumber);
             var map = SrdoRecords.MapIndex(srdoNumber);
             try
@@ -291,17 +291,20 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         ThrowIfDisposed();
         RequireSrdo(srdoNumber);
-        RequireNotOperationalForSafetyWrite();
-        RunOnActorAndWait(() => _od.WriteUnsigned(SrdoRecords.CommIndex(srdoNumber), 0x01, 0));
+        RunOnActorAndWait(() =>
+        {
+            RequireNotOperationalForSafetyWrite();
+            _od.WriteUnsigned(SrdoRecords.CommIndex(srdoNumber), 0x01, 0);
+        });
     }
 
     public void CommitSafetyConfiguration()
     {
         ThrowIfDisposed();
         if (_srdoCount == 0) throw NoSrdos();
-        RequireNotOperationalForSafetyWrite();
         RunOnActorAndWait(() => _od.Transaction(() =>
         {
+            RequireNotOperationalForSafetyWrite();
             // Every 13FFh:n write clears 13FEh, so the checksums go first and A5h last (§9.2).
             for (int n = 1; n <= _srdoCount; n++)
             {
@@ -345,8 +348,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private static InvalidOperationException NoSrdos()
         => new("This node has no SRDOs: open it with CanOpenNodeOptions.SrdoCount > 0 or with a device description that declares SRDO records.");
 
-    /// <summary>§8.3.2.4 note 1, surfaced as the exception the caller can act on; the validator
-    /// refuses the write with 0800 0022h as well, should the state change in between.</summary>
+    /// <summary>§8.3.2.4 note 1, surfaced as the exception the caller can act on. Called on the
+    /// actor loop, where the NMT state is authoritative: no transition can come between the check
+    /// and the writes that follow it in the same actor turn.</summary>
     private void RequireNotOperationalForSafetyWrite()
     {
         if (_state == NmtState.Operational)
@@ -355,7 +359,17 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     // ---- ISrdoEngineHost (actor loop) ----------------------------------------------------------
 
-    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _ = SendControlFrame(cobId, payload);
+    // Every SRDO frame and every GFC of this node goes out through one chain, in the order the
+    // engine sent them on the actor: §8.1 "the redundant transmission is sent after the first
+    // transmission", and §9.5 has the consumer refuse a pair whose inverted frame comes first.
+    // Two independent SendControlFrame calls are two Task.Runs that can overtake each other.
+    // Actor loop only.
+    private Task _srdoSendChain = Task.CompletedTask;
+
+    void ISrdoEngineHost.Send(uint cobId, byte[] payload)
+        => _srdoSendChain = _srdoSendChain.ContinueWith(
+            _ => SendControlFrame(cobId, payload),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
 
     void ISrdoEngineHost.EmitEmcy(ushort errorCode)
     {
@@ -386,7 +400,8 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         {
             try { DeliverToSubscribers(SrdoStateChanged, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.SrdoState(srdoNumber, isValid, reason), emcyProducer: -1);
+        }, critical: true, EventKey.SrdoState(srdoNumber, isValid, reason), emcyProducer: -1,
+            producer: EventKey.SrdoProducerSlot(srdoNumber));
     }
 
     private void RaiseGlobalFailsafeCommandReceived()
@@ -396,6 +411,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         {
             try { DeliverToSubscribers(GlobalFailsafeCommandReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        }, critical: true, EventKey.GlobalFailsafeCommand(), emcyProducer: -1);
+        }, critical: true, EventKey.GlobalFailsafeCommand(), emcyProducer: -1,
+            producer: EventKey.GfcProducerSlot);
     }
 }

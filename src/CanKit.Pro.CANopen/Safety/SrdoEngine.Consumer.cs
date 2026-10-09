@@ -12,7 +12,9 @@ internal sealed partial class SrdoEngine
     public bool TryHandleFrame(uint cobId, byte[] data, bool isRtr)
     {
         if (_disposed) return false;
-        if (cobId == CanOpenCobId.GlobalFailsafeCommand)
+        // A node without SRDOs is no safety node: an application-declared 1300h on it is the
+        // application's object, and 001h is not this engine's frame.
+        if (cobId == CanOpenCobId.GlobalFailsafeCommand && SrdoCount > 0)
         {
             // §8.2.3 Write GFC: L = 0. §8.4.2.2 1300h: "0: GFC is not valid".
             if (!isRtr && data.Length == 0 && _operational && IsGfcEnabled()) _host.GlobalFailsafeCommandReceived();

@@ -73,6 +73,9 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
             };
         }
         public int Count(uint cobId) { lock (_gate) return _frames.TryGetValue(cobId, out var l) ? l.Count : 0; }
+        /// <summary>Heartbeats (or boot-ups) on <paramref name="cobId"/> that report <paramref name="state"/>.</summary>
+        public int CountState(uint cobId, NmtState state) { lock (_gate) return _frames.TryGetValue(cobId, out var l) ? l.Count(p => p.Length == 1 && p[0] == (byte)state) : 0; }
+        public Task WaitForStateCountAsync(uint cobId, NmtState state, int count) => WaitUntilAsync(() => CountState(cobId, state) >= count, $"expected {count} {state} frame(s) on 0x{cobId:X3}, saw {CountState(cobId, state)}");
         public byte[][] Payloads(uint cobId) { lock (_gate) return _frames.TryGetValue(cobId, out var l) ? l.ToArray() : Array.Empty<byte[]>(); }
         public Task WaitForCountAsync(uint cobId, int count) => WaitUntilAsync(() => Count(cobId) >= count, $"expected {count} frame(s) on 0x{cobId:X3}, saw {Count(cobId)}");
         public void Transmit(uint cobId, byte[] data) => _bus.Transmit(CanFrame.Classic(unchecked((int)cobId), data, isExtendedFrame: false));
@@ -87,15 +90,29 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public void Node_Without_Srdos_Is_Unchanged()
+    public async Task Node_Without_Srdos_Is_Unchanged()
     {
         var session = NewSession();
         using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
         using var node = CanOpen.OpenNode(bus, Producer);
         var safety = node.Safety();
         safety.SrdoCount.Should().Be(0);
         Assert.Throws<InvalidOperationException>(() => safety.ConfigureSrdoProducer(1, new SrdoMapping(), TimeSpan.FromMilliseconds(25)));
         Assert.Throws<ArgumentOutOfRangeException>(() => safety.GetSrdoState(1));
+        // 1300h declared by the application is the application's object: 001h raises nothing.
+        node.ObjectDictionary.AddU8(0x1300, 0x00, 1);
+        int gfcs = 0;
+        safety.GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
+        var preOperational = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.NmtCommandReceived += (_, e) => { if (e.Command == NmtCommand.EnterPreOperational) preOperational.TrySetResult(true); };
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        wire.Transmit(CanOpenCobId.GlobalFailsafeCommand, Array.Empty<byte>());
+        // The witness: an NMT command sent after the GFC, delivered on the same event queue.
+        wire.SendNmt(NmtCommand.EnterPreOperational, Producer);
+        await preOperational.Task.WithTimeoutAsync(ShortTimeout);
+        Volatile.Read(ref gfcs).Should().Be(0);
     }
 
     [Fact]
@@ -138,7 +155,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task Commit_Writes_Checksums_Then_Valid()
+    public void Commit_Writes_Checksums_Then_Valid()
     {
         var session = NewSession();
         using var bus = Open(session, 1);
@@ -150,7 +167,6 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.CommitSafetyConfiguration();
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "A5h is written after the checksums, which each clear it");
         node.ObjectDictionary.ReadUnsigned(0x13FF, 2).Should().NotBe(0u);
-        await Task.CompletedTask;
     }
 
     [Fact]
@@ -172,8 +188,11 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(100)); // the witness: the state-change heartbeat
         wire.SendNmt(NmtCommand.Start, Producer);
         await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
-        await wire.WaitForCountAsync(0x700u + Producer, 1);
+        await wire.WaitForStateCountAsync(0x700u + Producer, NmtState.Operational, 1);
         Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        // The cyclic heartbeat on the same clock is due after the first SRDO cycle (8.5 ms) would
+        // have been, so whatever the advance would have sent is queued before it.
+        await wire.WaitForStateCountAsync(0x700u + Producer, NmtState.Operational, 2);
         wire.Count(0x0FFu + 2 * Producer).Should().Be(0, "§8.3.1 D: the safety node shall not transmit SRDOs");
         await WaitUntilAsync(() => { lock (changes) return changes.Any(c => c.Reason == SrdoInvalidReason.ConfigurationInvalid); }, "state change");
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
@@ -262,6 +281,149 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         await node.TriggerTpdoAsync(1);
         await wire.WaitForCountAsync(tpdo1, 1);
         wire.Count(tpdo1).Should().Be(1, "EnableChangeOfStateTpdo = false: the write is no TPDO event");
+    }
+
+    /// <summary>§8.1: "the redundant transmission is sent after the first transmission"; §9.5:
+    /// the consumer takes the pair "in chronological order". Many pairs back to back, so that two
+    /// sends racing each other would put an inverted frame first somewhere among them.</summary>
+    [Fact]
+    public async Task Pairs_Reach_The_Consumer_In_Order()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var wire = new Wire(session, 3);
+        using var producer = OpenClocked(busA, Producer, new ManualTimeSource());
+        using var consumer = OpenClocked(busB, Consumer, new ManualTimeSource());
+        producer.ObjectDictionary.AddU8(0x2001, 0x00, 0);
+        consumer.ObjectDictionary.AddU8(0x3001, 0x00, 0);
+        producer.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        producer.Safety().CommitSafetyConfiguration();
+        consumer.Safety().ConfigureSrdoConsumer(1, new SrdoMapping().Add(0x3001, 0x00, 8),
+            TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(20), CanOpenCobId.SrdoDefaultCobId1(Producer), CanOpenCobId.SrdoDefaultCobId2(Producer));
+        consumer.Safety().CommitSafetyConfiguration();
+        var failures = new List<SrdoInvalidReason>();
+        consumer.Safety().SrdoStateChanged += (_, e) =>
+        {
+            if (e.Reason is SrdoInvalidReason.OutOfOrder or SrdoInvalidReason.Mismatch) lock (failures) failures.Add(e.Reason.Value);
+        };
+        var last = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        consumer.Safety().SrdoReceived += (_, e) => { if (e.Payload.Length == 1 && e.Payload[0] == 0xEE) last.TrySetResult(true); };
+        wire.SendNmt(NmtCommand.Start, 0);
+        await WaitUntilAsync(() => producer.State == NmtState.Operational && consumer.State == NmtState.Operational, "start");
+
+        for (int i = 0; i < 200; i++) await producer.Safety().TriggerSrdoAsync(1);
+        // The last pair, by change of state: delivered after every event the earlier ones raised.
+        producer.ObjectDictionary.WriteUnsigned(0x2001, 0x00, 0xEE);
+        await last.Task.WithTimeoutAsync(ShortTimeout);
+        lock (failures) failures.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Enter_PreOperational_Stops_The_Producer()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Producer, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(100)); // the witness
+        uint cob1 = 0x0FFu + 2 * Producer;
+        uint heartbeat = 0x700u + Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await wire.WaitForCountAsync(cob1, 1);
+
+        wire.SendNmt(NmtCommand.EnterPreOperational, Producer);
+        // The state-change heartbeat goes out after the transition, so the SRDO has been left.
+        await wire.WaitForStateCountAsync(heartbeat, NmtState.PreOperational, 1);
+        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
+        int pairs = wire.Count(cob1);
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        // The cyclic heartbeat is due after four refresh cycles would have been.
+        await wire.WaitForStateCountAsync(heartbeat, NmtState.PreOperational, 2);
+        wire.Count(cob1).Should().Be(pairs, "§8.3.2.2: safety communication only in Operational");
+    }
+
+    [Fact]
+    public async Task Reset_Communication_From_Operational_Stops_The_Producer()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Producer, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        node.StartHeartbeatProducer(TimeSpan.FromMilliseconds(100)); // the witness
+        node.StoreParameters(); // the reset restores this configuration, not the defaults
+        uint cob1 = 0x0FFu + 2 * Producer;
+        uint heartbeat = 0x700u + Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await wire.WaitForCountAsync(cob1, 1);
+
+        wire.SendNmt(NmtCommand.ResetCommunication, Producer);
+        // Boot-up of the construction, then of the reset: the SRDO was left before it.
+        await wire.WaitForStateCountAsync(heartbeat, NmtState.Initializing, 2);
+        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
+        int pairs = wire.Count(cob1);
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        await wire.WaitForStateCountAsync(heartbeat, NmtState.PreOperational, 1);
+        wire.Count(cob1).Should().Be(pairs, "the node is Pre-Operational after the reset");
+        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
+    }
+
+    /// <summary>Modelled on <c>CanOpenCriticalEventQueueTests</c>: a SYNC subscriber holds the
+    /// event pump, three GFCs arrive, and the two that are identical to the one already waiting
+    /// fold into it — a repeating GFC sender cannot grow the critical queue.</summary>
+    [Fact]
+    public async Task Repeated_Gfcs_Waiting_For_The_Handler_Are_Folded_Into_One()
+    {
+        using var bus = ControllableBus.EchoCapable(VirtualAdapterFixture.NewSession("co-safety-gfc-fold"));
+        using var node = new CanOpenNode(new CanBusService(bus), Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true);
+        node.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int syncs = 0;
+        int gfcs = 0;
+        node.SyncReceived += (_, _) =>
+        {
+            if (Interlocked.Increment(ref syncs) == 1)
+            {
+                entered.TrySetResult(true);
+                release.Task.GetAwaiter().GetResult();
+            }
+        };
+        node.Safety().GlobalFailsafeCommandReceived += (_, _) => Interlocked.Increment(ref gfcs);
+
+        try
+        {
+            bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), new byte[] { (byte)NmtCommand.Start, Producer }), isEcho: false);
+            await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+            bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.Sync), ReadOnlyMemory<byte>.Empty), isEcho: false);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+
+            for (int i = 0; i < 3; i++)
+                bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.GlobalFailsafeCommand), ReadOnlyMemory<byte>.Empty), isEcho: false);
+            await WaitUntilAsync(() => node.CoalescedEventCount == 2 && node.QueuedEventCount == 1, "two GFCs folded into the first");
+
+            release.TrySetResult(true);
+            await WaitUntilAsync(() => node.QueuedEventCount == 0 && Volatile.Read(ref gfcs) >= 1, "GFC delivered");
+            Volatile.Read(ref gfcs).Should().Be(1);
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
     }
 
     [Fact]

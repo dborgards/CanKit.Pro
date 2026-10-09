@@ -270,9 +270,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
                 // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
                 // reserves and this subscription otherwise skips. 0x001 is the CiA DSP 304 global
-                // failsafe command.
+                // failsafe command, heard only by a node that has SRDOs.
                 return id == CanOpenCobId.NmtCommand
-                    || id == CanOpenCobId.GlobalFailsafeCommand
+                    || (id == CanOpenCobId.GlobalFailsafeCommand && _srdoCount > 0)
                     || id is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
                         or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce
                     || (id >= 0x080 && id <= 0x77F);
@@ -1229,10 +1229,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
         public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
 
-        public static EventKey SrdoState(int srdo, bool isValid, Safety.SrdoInvalidReason? reason)
-            => new(4, (byte)srdo, isValid ? 0xFFUL : (ulong)(reason.HasValue ? (int)reason.Value : 0xFE));
+        // Producer slots of the CiA DSP 304 events, outside the node-id range 1..127 so that they
+        // never share a slot with a node's heartbeats, timeouts or EMCYs (ReconcileProducer and
+        // _lastForProducer read the slot as "who the event is about"): the GFC is slot 0, which
+        // no node has, and SRDO n (1..64) is slot 128 + n, i.e. 129..192. Every per-producer
+        // array is 256 long. The slot is passed to EnqueueEvent as its producer, so an identical
+        // event still waiting absorbs a new one unless a different event of the same slot was
+        // queued in between — a repeated GFC folds, an SRDO's alternating transitions do not.
+        public const int GfcProducerSlot = 0;
 
-        public static EventKey GlobalFailsafeCommand() => new(5, 0, 0);
+        public static int SrdoProducerSlot(int srdo) => 128 + srdo;
+
+        public static EventKey SrdoState(int srdo, bool isValid, Safety.SrdoInvalidReason? reason)
+            => new(4, (byte)SrdoProducerSlot(srdo), isValid ? 0xFFUL : (ulong)(reason.HasValue ? (int)reason.Value : 0xFE));
+
+        public static EventKey GlobalFailsafeCommand() => new(5, GfcProducerSlot, 0);
 
         public static EventKey Emcy(EmcyMessage msg)
         {
