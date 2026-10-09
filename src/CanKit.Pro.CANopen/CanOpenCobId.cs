@@ -85,6 +85,28 @@ public static class CanOpenCobId
     /// <summary>Base COB-ID for NMT error control (heartbeat + bootup): <c>0x700 + node-id</c>.</summary>
     public const uint HeartbeatBase = 0x700;
 
+    /// <summary>Global failsafe command, CiA DSP 304 V1.0 §8.2.3 / Table 3: COB-ID 001h, DLC 0.</summary>
+    public const uint GlobalFailsafeCommand = 0x001;
+
+    /// <summary>First CAN-ID of the SRDO range (CiA DSP 304 V1.0 Table 4; CiA 301 Table 40 restricts 101h–180h for this use).</summary>
+    public const uint SrdoFirstCobId = 0x101;
+
+    /// <summary>Last CAN-ID of the SRDO range.</summary>
+    public const uint SrdoLastCobId = 0x180;
+
+    /// <summary>COB-ID 1 of the first SRDO of a node in the pre-defined connection set: FFh + 2 × node-id (Table 4, object 1301h:05 default).</summary>
+    /// <exception cref="ArgumentOutOfRangeException">Node-ids above 64 have no pre-defined SRDO COB-ID (§8.3.3).</exception>
+    public static uint SrdoDefaultCobId1(byte nodeId)
+    {
+        if (nodeId is < MinNodeId or > 64)
+            throw new ArgumentOutOfRangeException(nameof(nodeId), nodeId, "Only node-ids 1..64 have a pre-defined SRDO COB-ID (CiA DSP 304 §8.3.3).");
+        return 0x0FFu + 2u * nodeId;
+    }
+
+    /// <summary>COB-ID 2 of the first SRDO: 100h + 2 × node-id (Table 4, object 1301h:06 default).</summary>
+    /// <exception cref="ArgumentOutOfRangeException">Node-ids above 64 have no pre-defined SRDO COB-ID (§8.3.3).</exception>
+    public static uint SrdoDefaultCobId2(byte nodeId) => SrdoDefaultCobId1(nodeId) + 1;
+
     /// <summary>Bit 31 of a COB-ID object (<c>1014h</c>, <c>1200h</c>, <c>1400h:01</c>,
     /// <c>1800h:01</c>): set means the communication object "does not exist / is not valid"
     /// (CiA 301 Tables 59, 64, 66, 70).</summary>

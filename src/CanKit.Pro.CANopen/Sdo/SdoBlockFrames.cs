@@ -240,18 +240,5 @@ internal static class SdoBlockFrames
     /// polynomial x^16 + x^12 + x^5 + 1, width 16 bit, initial value 0000h, and the check value
     /// it supplies — CRC of "123456789" = 31C3h — is pinned by a unit test. The end-of-block
     /// frames that carry it are §7.2.4.3.11 (download) and §7.2.4.3.15 (upload).</summary>
-    internal static ushort ComputeCrc16Xmodem(ReadOnlySpan<byte> data)
-    {
-        ushort crc = 0;
-        for (int i = 0; i < data.Length; i++)
-        {
-            crc ^= (ushort)(data[i] << 8);
-            for (int j = 0; j < 8; j++)
-            {
-                if ((crc & 0x8000) != 0) crc = (ushort)((crc << 1) ^ 0x1021);
-                else crc <<= 1;
-            }
-        }
-        return crc;
-    }
+    internal static ushort ComputeCrc16Xmodem(ReadOnlySpan<byte> data) => Safety.SrdoCrc.Crc16Xmodem(data);
 }

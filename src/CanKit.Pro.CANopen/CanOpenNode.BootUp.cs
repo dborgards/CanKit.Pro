@@ -1,10 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Safety;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
 
@@ -28,10 +30,24 @@ internal sealed partial class CanOpenNode
 
     private readonly bool[] _slaveSeen = new bool[CanOpenCobId.MaxNodeId + 1];
     private readonly bool[] _slaveStarted = new bool[CanOpenCobId.MaxNodeId + 1];
-    private bool _bootBroadcastSent;
+    // 1F80h bit 1: the moment the simultaneous start happens has passed — every mandatory slave
+    // seen and no verification running. Without a safety slave that is one Start to node 0;
+    // with one, every seen slave is started on its own then (see TryFinishBoot).
+    private bool _bootStartMoment;
     private bool _bootHalted;
     private bool _bootSelfStarted;
     private IDeadline? _bootDeadline;
+
+    // CiA DSP 304 §8.3.1 step D. A slave whose bound DCF declares SRDOs is verified before it is
+    // started; the verification is SDO traffic and runs off the actor, its result is posted back.
+    private readonly bool[] _slaveVerifying = new bool[CanOpenCobId.MaxNodeId + 1];
+    private readonly bool[] _slaveVerified = new bool[CanOpenCobId.MaxNodeId + 1];
+    private CancellationTokenSource? _slaveVerificationCts;
+
+    // Counts the boots: CancelBootUp moves it on. A verification carries the value it began
+    // under, so a result that was already posted when its boot was cancelled is not taken for
+    // the verification a newer boot started for the same slave.
+    private int _bootGeneration;
 
     // NMT the master sends, in the order it was asked for. Each frame waits for the previous
     // send to finish, so a simultaneous Start cannot pass the Reset Communication that was
@@ -80,9 +96,15 @@ internal sealed partial class CanOpenNode
         _bootDeadline = null;
         Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
         Array.Clear(_slaveStarted, 0, _slaveStarted.Length);
-        _bootBroadcastSent = false;
+        _bootStartMoment = false;
         _bootHalted = false;
         _bootSelfStarted = false;
+        Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
+        Array.Clear(_slaveVerified, 0, _slaveVerified.Length);
+        _slaveVerificationCts?.Cancel();
+        _slaveVerificationCts?.Dispose();
+        _slaveVerificationCts = null;
+        _bootGeneration++;
     }
 
     private void NoteSlaveNmtState(byte nodeId, byte state)
@@ -133,10 +155,25 @@ internal sealed partial class CanOpenNode
         }
         if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
 
-        // Bit 1 waits for one broadcast, and only when this node may enter Operational too.
+        // Step D before step E: a safety slave is started only once its configuration verified.
+        // A safety slave that is already Operational when first seen — because it was running
+        // before this master took over, or is keep-alive — is not started by this master
+        // (returned above) and is therefore not verified; step D is "before NMT Start". This
+        // master never starts one unseen: with a safety slave assigned it sends no Start to node 0.
+        if (!_slaveVerified[nodeId])
+        {
+            if (_slaveVerifying[nodeId]) return;
+            if (SafetyExpectationOf(nodeId) is { } expected)
+            {
+                BeginSlaveVerification(nodeId, expected);
+                return;
+            }
+        }
+
+        // Bit 1 waits for the start moment, and only when this node may enter Operational too.
         // Self-start is applied locally; the active master does not take the broadcast as its own.
         bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
-        if (simultaneous && !_bootBroadcastSent) return;
+        if (simultaneous && !_bootStartMoment) return;
 
         _slaveStarted[nodeId] = true;
         SendNmt(NmtCommand.Start, nodeId);
@@ -152,13 +189,28 @@ internal sealed partial class CanOpenNode
         bool simultaneous = mayStartSlaves
             && (startup & NmtStartAllNodesBit) != 0
             && (startup & NmtSuppressSelfStartBit) == 0;
-        if (simultaneous && !_bootBroadcastSent && HasBootableSlave())
+        if (simultaneous && !_bootStartMoment && HasBootableSlave() && !AnySlaveVerifying())
         {
-            _bootBroadcastSent = true;
-            SendNmt(NmtCommand.Start, 0);
+            _bootStartMoment = true;
+            if (HasAssignedSafetySlave())
+            {
+                // CiA DSP 304 §8.3.1 step D is "before NMT Start" for every safety slave, and a
+                // Start to node 0 reaches one that has not announced yet — keep-alive, running
+                // before this master took over, or with its boot-up still in flight — unverified.
+                // Every seen slave is started on its own instead, a safety slave only once
+                // verified; one announcing later is started on its own as it announces.
+                for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+                {
+                    if (_slaveSeen[id]) ConsiderStart(id, (byte)_od.ReadUnsigned(Co.RequestNmt, id));
+                }
+            }
+            else
+            {
+                SendNmt(NmtCommand.Start, 0);
+            }
         }
 
-        if ((startup & NmtSuppressSelfStartBit) == 0 && !_bootSelfStarted)
+        if ((startup & NmtSuppressSelfStartBit) == 0 && !_bootSelfStarted && !AnySlaveVerifying())
         {
             _bootSelfStarted = true;
             if (_state != NmtState.Operational)
@@ -168,6 +220,9 @@ internal sealed partial class CanOpenNode
 
     private void OnBootTimeout()
     {
+        // A halt already applied its reaction (a failed safety verification, say). The network is
+        // not started past it, so a second stop-all or reset-all would only repeat it.
+        if (_bootHalted) return;
         if (_coldResetPending)
         {
             // This tick landed in the wait. Arm the same timeout again instead of commanding
@@ -181,7 +236,24 @@ internal sealed partial class CanOpenNode
             return;
         }
 
+        var unseenMandatory = new List<byte>();
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
+        {
+            if (IsMandatory(id) && !_slaveSeen[id]) unseenMandatory.Add(id);
+        }
+        ApplyBootErrorReaction(unseenMandatory, FlyingMasterSignal.SlaveBootTimeout);
+    }
+
+    /// <summary>The 1F80h bit 6 / bit 4 reaction, else Reset Node to the failing slave; then the
+    /// signal. Used by the boot timeout (SlaveBootTimeout for each unseen mandatory slave) and by
+    /// a failed safety verification (SlaveSafetyConfigurationInvalid).</summary>
+    private void ApplyBootErrorReaction(IEnumerable<byte> failedSlaves, FlyingMasterSignal signal)
+    {
         _bootHalted = true;
+        // One reaction per boot: a halt from a failed verification must not be followed by the
+        // boot timeout's own for a mandatory slave that is still unseen.
+        _bootDeadline?.Dispose();
+        _bootDeadline = null;
         uint startup = ReadStartup();
         bool stopAll = (startup & NmtStopAllOnErrorBit) != 0;
         bool resetAll = !stopAll && (startup & NmtResetAllOnErrorBit) != 0;
@@ -190,18 +262,100 @@ internal sealed partial class CanOpenNode
             var command = stopAll ? NmtCommand.Stop : NmtCommand.ResetNode;
             for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
             {
-                if (!IsAssignedSlave(id)) continue;
-                SendNmt(command, id);
+                if (IsAssignedSlave(id)) SendNmt(command, id);
             }
         }
+        foreach (var id in failedSlaves)
+        {
+            if (!stopAll && !resetAll) SendNmt(NmtCommand.ResetNode, id);
+            RaiseFlyingMaster(signal, id, null);
+        }
+    }
 
+    /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
+    /// declares at least one SRDO (spec decision 4). An EDS has no parameter values and never
+    /// makes a safety slave. Built from the description on every call, not kept: a description
+    /// can be edited in place, and the peer-SDO gate reads it live too.</summary>
+    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId)
+    {
+        if (!_peerDescriptions.TryGetValue(nodeId, out var description) || !description.IsConfigurationFile) return null;
+        var expected = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
+        return expected.DeclaresAnySrdo ? expected : null;
+    }
+
+    /// <summary>Whether any assigned slave is a safety slave: then the master sends no Start to node 0.</summary>
+    private bool HasAssignedSafetySlave()
+    {
         for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++)
         {
-            if (!IsMandatory(id) || _slaveSeen[id]) continue;
-            if (!stopAll && !resetAll)
-                SendNmt(NmtCommand.ResetNode, id);
-            RaiseFlyingMaster(FlyingMasterSignal.SlaveBootTimeout, id, null);
+            if (IsAssignedSlave(id) && SafetyExpectationOf(id) is not null) return true;
         }
+        return false;
+    }
+
+    private bool AnySlaveVerifying()
+    {
+        for (byte id = 1; id <= CanOpenCobId.MaxNodeId; id++) if (_slaveVerifying[id]) return true;
+        return false;
+    }
+
+    private void BeginSlaveVerification(byte nodeId, PeerSafetyConfiguration expected)
+    {
+        _slaveVerifying[nodeId] = true;
+        var cts = _slaveVerificationCts ??= new CancellationTokenSource();
+        var token = cts.Token;
+        int generation = _bootGeneration;
+        _ = Task.Run(async () =>
+        {
+            bool verified = false;
+            Exception? failure = null;
+            try
+            {
+                verified = (await VerifyPeerSafetyConfigurationAsync(nodeId, expected, token).ConfigureAwait(false)).Succeeded;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+            catch (Exception ex) { failure = ex; } // a cancellation of anything else is a failure
+            try { _actor.Post(() => OnSlaveVerified(nodeId, generation, verified, failure)); }
+            catch (ObjectDisposedException) { }
+        });
+    }
+
+    private void OnSlaveVerified(byte nodeId, int generation, bool verified, Exception? failure)
+    {
+        // Cancelled by a reset, a role change or dispose; or begun by a boot that has been
+        // cancelled since, while a newer boot is verifying the same slave.
+        if (generation != _bootGeneration || !_slaveVerifying[nodeId]) return;
+        _slaveVerifying[nodeId] = false;
+        if (_disposed != 0 || _flyingMasterRole != FlyingMasterRole.Active || _bootHalted) return;
+        if (_coldResetPending)
+        {
+            // A forced Reset Communication is held: nothing is started, reset or signalled in the
+            // window, as for an announcement. A confirmed reset cancels this boot; an abandoned
+            // one resumes it, which starts a verified slave and verifies a failed one again.
+            if (verified) _slaveVerified[nodeId] = true;
+            return;
+        }
+        if (failure is not null) RaiseBackgroundException(failure);
+        if (verified)
+        {
+            _slaveVerified[nodeId] = true;
+            byte state = (byte)_od.ReadUnsigned(Co.RequestNmt, nodeId);
+            ConsiderStart(nodeId, state);
+            TryFinishBoot();
+            return;
+        }
+        uint startup = ReadStartup();
+        bool simultaneous = (startup & NmtStartAllNodesBit) != 0 && (startup & NmtSuppressSelfStartBit) == 0;
+        if (IsMandatory(nodeId) || simultaneous)
+        {
+            // The simultaneous start is one moment for the whole network, and a mandatory slave
+            // gates the network: the boot halts, with the 1F80h error reaction, as on a boot timeout.
+            ApplyBootErrorReaction(new[] { nodeId }, FlyingMasterSignal.SlaveSafetyConfigurationInvalid);
+            return;
+        }
+        _slaveStarted[nodeId] = true; // skipped: never started by this boot
+        RaiseFlyingMaster(FlyingMasterSignal.SlaveSafetyConfigurationInvalid, nodeId, null);
+        TryFinishBoot();
     }
 
     private OdWriteDecision ValidateSlaveAssignmentWrite(byte subindex, byte[] value)

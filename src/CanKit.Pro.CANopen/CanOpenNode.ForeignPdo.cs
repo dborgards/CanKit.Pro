@@ -250,6 +250,35 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private async Task<PdoMappingEntry[]?> TryReadLiveMappingAsync(byte peerNodeId, ushort mapIndex,
         CancellationToken cancellationToken)
+        => (await TryReadLiveMappingCoreAsync(peerNodeId, mapIndex, 1, PdoMapping.MaxEntries, cancellationToken)
+            .ConfigureAwait(false)).Entries;
+
+    /// <summary>What <see cref="TryReadLiveMappingCoreAsync"/> found. <see cref="Entries"/> is null
+    /// when the live record is unavailable or malformed; <see cref="GateRefusedAfterCount"/> is
+    /// set when the count was read and a later slot was refused by the peer-SDO gate, so the
+    /// live mapping is known to exist and the caller has not seen all of it.</summary>
+    private readonly struct LiveMappingRead
+    {
+        public LiveMappingRead(PdoMappingEntry[]? entries, int declaredEntries, bool gateRefusedAfterCount)
+        {
+            Entries = entries;
+            DeclaredEntries = declaredEntries;
+            GateRefusedAfterCount = gateRefusedAfterCount;
+        }
+
+        public PdoMappingEntry[]? Entries { get; }
+        public int DeclaredEntries { get; }
+        public bool GateRefusedAfterCount { get; }
+    }
+
+    /// <summary>
+    /// Uploads sub-index 0 and then the slots 1, 1+stride, … up to the count, whether or not the
+    /// description lists them (a PDO record has stride 1; an SRDO record has stride 2 — its even
+    /// slots are the inverted copies). The count must be at most <paramref name="maxCount"/> and,
+    /// for stride 2, even. Each slot must be non-zero and byte-aligned and the total at most 8 bytes.
+    /// </summary>
+    private async Task<LiveMappingRead> TryReadLiveMappingCoreAsync(byte peerNodeId, ushort mapIndex, int stride,
+        int maxCount, CancellationToken cancellationToken)
     {
         byte[] countBytes;
         try
@@ -258,28 +287,29 @@ internal sealed partial class CanOpenNode
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
-            return null;
+            return default;
         }
-        if (countBytes.Length < 1) return null;
+        if (countBytes.Length < 1) return default;
         int count = countBytes[0];
-        if (count > PdoMapping.MaxEntries) return null;
+        if (count > maxCount || (stride == 2 && (count & 1) != 0)) return default;
 
-        var entries = new PdoMappingEntry[count];
+        int declared = (count + stride - 1) / stride;
+        var entries = new List<PdoMappingEntry>(declared);
         int total = 0;
-        for (byte s = 1; s <= count; s++)
+        for (int s = 1; s <= count; s += stride)
         {
             byte[] raw;
             try
             {
-                raw = await SdoUploadAsync(peerNodeId, mapIndex, s, cancellationToken).ConfigureAwait(false);
+                raw = await SdoUploadAsync(peerNodeId, mapIndex, (byte)s, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex))
             {
-                return null;
+                return new LiveMappingRead(null, declared, ex is PeerSdoAccessException);
             }
-            if (raw.Length < 4) return null;
+            if (raw.Length < 4) return default;
             uint word = (uint)(raw[0] | (raw[1] << 8) | (raw[2] << 16) | (raw[3] << 24));
-            if (word == 0) return null;
+            if (word == 0) return default;
             PdoMappingEntry entry;
             try
             {
@@ -287,13 +317,13 @@ internal sealed partial class CanOpenNode
             }
             catch (ArgumentOutOfRangeException)
             {
-                return null;
+                return default;
             }
             total += entry.ByteLength;
-            if (total > 8) return null;
-            entries[s - 1] = entry;
+            if (total > 8) return default;
+            entries.Add(entry);
         }
-        return entries;
+        return new LiveMappingRead(entries.ToArray(), declared, false);
     }
 
     /// <summary>

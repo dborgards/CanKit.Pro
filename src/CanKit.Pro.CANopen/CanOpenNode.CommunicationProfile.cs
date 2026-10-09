@@ -66,6 +66,9 @@ internal sealed partial class CanOpenNode
         public const ushort TpdoComm = 0x1800;
         public const ushort TpdoMap = 0x1A00;
         public const int PdoCount = 4;
+        public const ushort GfcParameter = Safety.SrdoRecords.GfcParameter;
+        public const ushort SrdoConfigurationValid = Safety.SrdoRecords.ConfigurationValid;
+        public const ushort SrdoChecksum = Safety.SrdoRecords.Checksum;
     }
 
     // "save" and "load" as the UNSIGNED32 signatures of CiA 301 Figures 55 and 57, little-endian
@@ -203,6 +206,8 @@ internal sealed partial class CanOpenNode
             }
         }
 
+        if (_srdoCount > 0) PopulateSafetyObjects();
+
         _od.DeclareGuard = (index, _) => !IsManagedCommunicationObject(index);
         _od.WriteValidator = ValidateCommunicationWrite;
         _od.EntryWritten += OnOdEntryWrittenForCommunicationProfile;
@@ -213,7 +218,7 @@ internal sealed partial class CanOpenNode
 
     /// <summary>Objects whose values drive the node and which the application therefore writes
     /// rather than re-declares.</summary>
-    private static bool IsManagedCommunicationObject(ushort index) => index switch
+    private bool IsManagedCommunicationObject(ushort index) => index switch
     {
         Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
@@ -223,6 +228,7 @@ internal sealed partial class CanOpenNode
         >= Co.RpdoMap and < Co.RpdoMap + Co.PdoCount => true,
         >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount => true,
         >= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount => true,
+        _ when IsManagedSafetyObject(index) => true,
         _ => false,
     };
 
@@ -252,6 +258,7 @@ internal sealed partial class CanOpenNode
 
     private OdWriteDecision ValidateCommunicationWrite(ushort index, byte subindex, byte[] value)
     {
+        if (IsManagedSafetyObject(index)) return ValidateSafetyWrite(index, subindex, value);
         switch (index)
         {
             case Co.SyncCobId:
@@ -454,8 +461,19 @@ internal sealed partial class CanOpenNode
         // thread and still inside the write gate, so that the writer's next write — the first
         // value of an object it has just mapped — is already seen, before the actor has rebuilt
         // the runtime (Codex on #133).
-        if (index is (>= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount) or (>= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount))
+        // A transmit SRDO record likewise: its mapped objects are change-of-state sources too.
+        if (index is (>= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount) or (>= Co.TpdoMap and < Co.TpdoMap + Co.PdoCount)
+            || Safety.SrdoRecords.IsCommunicationRecord(index) || Safety.SrdoRecords.IsMappingRecord(index))
             RebuildCosRelevantEntries();
+        // CiA DSP 304 §8.4.2.2, 13FEh: "After a write access to the safety-relevant parameter the
+        // entry of object 13FEh is automatically 0". Still inside the write gate, so the next
+        // write cannot see A5h beside a changed parameter. Unchecked: the reset is not a
+        // configuration write and must not itself be refused in Operational (nothing reaches here
+        // in Operational anyway, the validator refuses the write that would).
+        // Not for a restore: that puts back a stored configuration, 13FEh among it, and the A5h
+        // that was stored with it must survive the restoring of 13FFh that follows it.
+        if (!_restoringValues && Safety.SrdoRecords.IsChecksummed(index) && _od.TryGet(Co.SrdoConfigurationValid, 0, out _))
+            _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0, new byte[] { 0 });
         RunOnActor(() => ApplyCommunicationObject(index, subindex));
     }
 
@@ -524,11 +542,17 @@ internal sealed partial class CanOpenNode
             RebuildRpdo(n);
             RebuildTpdo(n);
         }
+        for (int n = 1; n <= _srdoCount; n++) _srdo.Rebuild(n);
     }
 
     private void ApplyCommunicationObject(ushort index, byte subindex)
     {
         if (_disposed != 0) return;
+        if (Safety.SrdoRecords.SrdoNumberOf(index) is { } srdo)
+        {
+            _srdo.Rebuild(srdo);
+            return;
+        }
         switch (index)
         {
             case Co.SyncCobId:
@@ -638,10 +662,33 @@ internal sealed partial class CanOpenNode
     private void ApplyNmtTransition(NmtState target)
     {
         var previous = _state;
-        _state = target;
-
-        if (previous == NmtState.Operational && target != NmtState.Operational) OnLeaveOperational();
-        if (target == NmtState.Operational && previous != NmtState.Operational) OnEnterOperational();
+        if (target == NmtState.Operational && previous != NmtState.Operational)
+        {
+            // CiA DSP 304 §8.3.2.4 note 1: no safety entry is written in Operational. A direct
+            // write checks the state and stores the value under the dictionary's write gate on
+            // the writing thread, so Operational is published and the SRDO engine armed — with
+            // its §9.5 configuration check — under the same gate: a write either is stored first
+            // and seen by the check (13FEh cleared, the SRDO not armed), or sees Operational and
+            // is refused with 0800 0022h. Nothing in here waits on another thread, and no hook
+            // that runs under the gate on a writer's thread waits on the actor.
+            _od.Transaction(() =>
+            {
+                _state = target;
+                OnEnterOperational();
+                _srdo.EnterOperational();
+            });
+        }
+        else
+        {
+            // No gate here: a write that saw Operational is refused, and a write that saw any
+            // other state has nothing to race — only entering Operational arms the engine.
+            _state = target;
+            if (previous == NmtState.Operational && target != NmtState.Operational)
+            {
+                OnLeaveOperational();
+                LeaveSrdoOperational();
+            }
+        }
 
         if (target == NmtState.Stopped)
         {
@@ -682,7 +729,11 @@ internal sealed partial class CanOpenNode
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
         SuspendFlyingMasterForReset();
-        if (_state == NmtState.Operational) OnLeaveOperational();
+        if (_state == NmtState.Operational)
+        {
+            OnLeaveOperational();
+            LeaveSrdoOperational();
+        }
         _state = NmtState.Initializing;
 
         if (_restoreDefaultsOnReset)
@@ -763,26 +814,35 @@ internal sealed partial class CanOpenNode
         {
             _od.Transaction(() =>
             {
-                foreach (var key in _od.SnapshotKeys())
+                // Set under the write gate, so no other writer's write is taken for part of the restore.
+                _restoringValues = true;
+                try
                 {
-                    var index = (ushort)(key >> 8);
-                    var subindex = (byte)(key & 0xFF);
-                    if (!IsRestorableObject(index)) continue;
-                    if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
-                    if (values.TryGetValue(key, out var stored))
+                    foreach (var key in _od.SnapshotKeys())
                     {
-                        // Snapshot keys are entries that exist. The width check is the only branch.
-                        _od.TryGet(index, subindex, out var current);
-                        int size = OdEntryLayout.FixedSize(current.DataType);
-                        if (size > 0 && stored.Length != size)
-                            continue; // re-declared with another width since the snapshot: no power-on value for it
-                        _od.WriteRawUnchecked(index, subindex, stored);
+                        var index = (ushort)(key >> 8);
+                        var subindex = (byte)(key & 0xFF);
+                        if (!IsRestorableObject(index)) continue;
+                        if (communicationOnly && !IsCommunicationProfileArea(index)) continue;
+                        if (values.TryGetValue(key, out var stored))
+                        {
+                            // Snapshot keys are entries that exist. The width check is the only branch.
+                            _od.TryGet(index, subindex, out var current);
+                            int size = OdEntryLayout.FixedSize(current.DataType);
+                            if (size > 0 && stored.Length != size)
+                                continue; // re-declared with another width since the snapshot: no power-on value for it
+                            _od.WriteRawUnchecked(index, subindex, stored);
+                        }
+                        else if (IsManagedCommunicationObject(index))
+                        {
+                            _od.TryGet(index, subindex, out var entry);
+                            _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
+                        }
                     }
-                    else if (IsManagedCommunicationObject(index))
-                    {
-                        _od.TryGet(index, subindex, out var entry);
-                        _od.WriteRawUnchecked(index, subindex, new byte[entry.Size]);
-                    }
+                }
+                finally
+                {
+                    _restoringValues = false;
                 }
             });
         }

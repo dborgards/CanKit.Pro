@@ -701,7 +701,7 @@ internal sealed partial class CanOpenNode
     /// </remarks>
     private void OnOdEntryWrittenForCoS(ushort index, byte subindex)
     {
-        if (!_options.EnableChangeOfStateTpdo) return;
+        if (!_options.EnableChangeOfStateTpdo && !_options.EnableChangeOfStateSrdo) return;
         if (_actor.IsOnCurrentActor) return; // bus-originated write — never re-trigger (see remarks)
         if (Volatile.Read(ref _disposed) != 0) return;
 
@@ -742,22 +742,45 @@ internal sealed partial class CanOpenNode
         if (dirty is null || dirty.Count == 0) return;
         if (_disposed != 0 || _state != NmtState.Operational) return;
 
-        for (int n = 1; n <= Co.PdoCount; n++)
+        // Each kind only on its own option: an entry mapped in both a TPDO and an SRDO is dirty
+        // for the SRDO's sake even when change-of-state TPDOs are off.
+        if (_options.EnableChangeOfStateTpdo)
         {
-            var rt = _tpdos[n];
-            if (rt is null || !rt.Valid || !IsChangeOfStateTriggered(rt.TransmissionType)) continue;
-            bool hit = false;
-            foreach (var e in rt.Mapping)
+            for (int n = 1; n <= Co.PdoCount; n++)
             {
-                if (dirty.Contains(CosKey(e.Index, e.Subindex)))
+                var rt = _tpdos[n];
+                if (rt is null || !rt.Valid || !IsChangeOfStateTriggered(rt.TransmissionType)) continue;
+                bool hit = false;
+                foreach (var e in rt.Mapping)
                 {
-                    hit = true;
-                    break;
+                    if (dirty.Contains(CosKey(e.Index, e.Subindex)))
+                    {
+                        hit = true;
+                        break;
+                    }
                 }
+                if (!hit) continue;
+                if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
+                else RequestEventDrivenTransmission(rt);
             }
-            if (!hit) continue;
-            if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
-            else RequestEventDrivenTransmission(rt);
+        }
+
+        if (_options.EnableChangeOfStateSrdo)
+        {
+            for (int n = 1; n <= _srdoCount; n++)
+            {
+                if (_srdo.GetState(n).Direction != Safety.SrdoDirection.Transmit) continue;
+                bool hit = false;
+                foreach (var e in Safety.SrdoRecords.ReadMapping(_od, n))
+                {
+                    if (dirty.Contains(CosKey(e.Index, e.Subindex)))
+                    {
+                        hit = true;
+                        break;
+                    }
+                }
+                if (hit) _srdo.Trigger(n);
+            }
         }
     }
 
@@ -784,6 +807,7 @@ internal sealed partial class CanOpenNode
                 foreach (var e in ReadMappingRecord((ushort)(Co.TpdoMap + n - 1))) set.Add(CosKey(e.Index, e.Subindex));
             }
         }
+        if (_options.EnableChangeOfStateSrdo) _srdo.CollectChangeOfStateEntries(set, CosKey);
         _cosRelevantEntries = set;
     }
 
