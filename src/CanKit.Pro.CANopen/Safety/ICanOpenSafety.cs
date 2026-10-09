@@ -69,7 +69,9 @@ public interface ICanOpenSafety
     /// the peer's bound EDS/DCF (declared, mappable, width, access in the SRDO's direction), since
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
-    /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight. An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync. The peer's 13FEh is 0 once at least one parameter write has been
+    /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
+    /// An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync.
+    /// The peer's 13FEh is 0 once at least one parameter write has been
     /// accepted, because every such write clears it; an abort before that — for example
     /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
     /// <exception cref="InvalidOperationException">The peer returned no count from 13FFh:00, or a

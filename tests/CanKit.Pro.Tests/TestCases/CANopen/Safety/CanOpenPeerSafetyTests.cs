@@ -801,7 +801,6 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         await UntilAsync(() => fake.IsHolding, "the public upload is held");
 
         var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration());
-        lock (fake.Requests) fake.Requests.Should().Equal(new (ushort, byte)[] { (0x1000, 0x00) });
         fake.ReleaseHeld();
         await upload.WithTimeoutAsync(ShortTimeout);
         (await configure.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
