@@ -73,7 +73,37 @@ public class SrdoEngineConsumerTests : IDisposable
         _od.ReadUnsigned(0x2001, 0).Should().Be(0x01u);
         _host.States.Should().ContainInOrder((1, false, SrdoInvalidReason.NotReceived), (1, true, null));
         _host.Received.Should().ContainSingle().Which.Should().Be((1, 0x123u, Plain));
-        _host.States.IndexOf((1, true, null)).Should().BeLessThan(_host.States.Count, "the state change precedes the payload event");
+        _host.Log.IndexOf("state:1:valid").Should().BeGreaterThanOrEqualTo(0);
+        _host.Log.IndexOf("state:1:valid").Should().BeLessThan(_host.Log.IndexOf("received:1"), "the state change precedes the payload event");
+    }
+
+    [Fact]
+    public void Leaving_Operational_Cancels_Sct_And_Srvt()
+    {
+        StartConsumer();
+        Frame(0x123, Plain); Frame(0x124, Inverse);   // valid, SCT running
+        Frame(0x123, Plain);                          // pending first frame, SRVT running
+        OnActor(() => _engine.LeaveOperational());
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
+        int events = _host.Log.Count;
+        Advance(TimeSpan.FromMilliseconds(100));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational, "no deadline survives leaving Operational");
+        _host.Log.Should().HaveCount(events, "no state event after the NotOperational one");
+    }
+
+    [Fact]
+    public void A_Rebuild_Drops_The_Pending_First_Frame_And_Its_Srvt()
+    {
+        StartConsumer();
+        Frame(0x123, Plain);
+        OnActor(() => _engine.Rebuild(1));
+        int events = _host.Log.Count;
+        Advance(TimeSpan.FromMilliseconds(30));
+        _host.States.Should().NotContain(s => s.Reason == SrdoInvalidReason.ValidationTimeExpired, "the old SRVT was cancelled by the rebuild");
+        _host.Log.Count.Should().Be(events);
+        Frame(0x124, Inverse);
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _host.States.Last().Reason.Should().Be(SrdoInvalidReason.OutOfOrder, "the pending first frame did not survive the rebuild");
     }
 
     [Fact]

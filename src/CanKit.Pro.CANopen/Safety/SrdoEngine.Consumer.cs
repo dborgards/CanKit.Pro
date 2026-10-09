@@ -59,9 +59,11 @@ internal sealed partial class SrdoEngine
     private void ArmSct(SrdoRuntime rt)
     {
         rt.SctDeadline?.Dispose();
+        // A callback that lost the race with Dispose()/re-arm is neutralised by the deadline's own
+        // cancelled/expired state, so no staleness guard is needed here beyond _disposed.
         rt.SctDeadline = _deadlines.Arm(rt.CycleTime, () =>
         {
-            if (_disposed || !ReferenceEquals(_runtimes[rt.Number], rt)) return;
+            if (_disposed) return;
             rt.SctDeadline = null;
             Invalidate(rt, SrdoInvalidReason.SafeguardCycleExpired);
         });
@@ -75,7 +77,7 @@ internal sealed partial class SrdoEngine
         rt.SrvtDeadline?.Dispose();
         rt.SrvtDeadline = _deadlines.Arm(rt.ValidationTime, () =>
         {
-            if (_disposed || !ReferenceEquals(_runtimes[rt.Number], rt)) return;
+            if (_disposed) return;
             rt.SrvtDeadline = null;
             rt.Pending = null;
             Invalidate(rt, SrdoInvalidReason.ValidationTimeExpired);

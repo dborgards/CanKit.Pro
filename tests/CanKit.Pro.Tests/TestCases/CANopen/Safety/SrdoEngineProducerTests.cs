@@ -44,6 +44,10 @@ public class SrdoEngineProducerTests : IDisposable
         public readonly List<(int Srdo, bool IsValid, SrdoInvalidReason? Reason)> States = new();
         public int Gfcs;
         public readonly List<Exception> Exceptions = new();
+        /// <summary>Every host call in the order it happened, as a short tag, for the tests that
+        /// assert ordering between the typed lists (<c>state:1:valid</c>, <c>received:1</c>,
+        /// <c>emcy:8210</c>, <c>gfc</c>, <c>send:123</c>).</summary>
+        public readonly List<string> Log = new();
         /// <summary>Makes the next <see cref="Send"/> throw (once) instead of recording.</summary>
         public volatile bool ThrowOnNextSend;
         public void Send(uint cobId, byte[] payload)
@@ -54,11 +58,16 @@ public class SrdoEngineProducerTests : IDisposable
                 throw new InvalidOperationException("bus off");
             }
             Sent.Add((cobId, payload));
+            Log.Add($"send:{cobId:X3}");
         }
-        public void EmitEmcy(ushort errorCode) => Emcys.Add(errorCode);
-        public void SrdoReceived(int srdoNumber, uint cobId, byte[] payload) => Received.Add((srdoNumber, cobId, payload));
-        public void SrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason) => States.Add((srdoNumber, isValid, reason));
-        public void GlobalFailsafeCommandReceived() => Gfcs++;
+        public void EmitEmcy(ushort errorCode) { Emcys.Add(errorCode); Log.Add($"emcy:{errorCode:X4}"); }
+        public void SrdoReceived(int srdoNumber, uint cobId, byte[] payload) { Received.Add((srdoNumber, cobId, payload)); Log.Add($"received:{srdoNumber}"); }
+        public void SrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason)
+        {
+            States.Add((srdoNumber, isValid, reason));
+            Log.Add($"state:{srdoNumber}:{(isValid ? "valid" : reason?.ToString() ?? "gone")}");
+        }
+        public void GlobalFailsafeCommandReceived() { Gfcs++; Log.Add("gfc"); }
         public void ReportBackgroundException(Exception exception) => Exceptions.Add(exception);
     }
 
