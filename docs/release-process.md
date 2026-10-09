@@ -139,6 +139,8 @@ prepare        →  CHANGELOG.md regenerated                     (@semantic-rele
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
    ↓
 publish        →  dotnet nuget push … --skip-duplicate         (@semantic-release/exec, publishCmd)
+               →  package-validation baseline set to X.Y.Z,
+                  committed and pushed [skip ci]               (same publishCmd, chained behind the push)
                →  GitHub Release with the .nupkg attached      (@semantic-release/github)
 ```
 
@@ -153,6 +155,19 @@ nine are there, each carries a README, a license expression and a `.snupkg`, and
 them is stamped at exactly that version. It is the same script the CI pack job runs, so a package
 that would be rejected on a pull request is rejected here too — this time with a version to check
 against.
+
+**The package-validation baseline moves the moment the packages are on nuget.org.** Chained
+behind `dotnet nuget push` in the same `publishCmd`, `eng/set-package-validation-baseline.py`
+writes the version into `PackageValidationBaselineVersion` in `src/Directory.Build.props`,
+commits it as `chore(release): point package validation at X.Y.Z [skip ci]` and pushes, with the
+same token the changelog commit used. From the next pull request on, every pack is compared with
+the release that just went out (see § *Package validation* below). The place is deliberate: not
+with the changelog commit, because a publish that fails would then point every later pack at a
+version nuget.org never got; and not in semantic-release's `success` step, because that runs only
+once every publish plugin is through, so a GitHub Release failing after the push would have left
+the baseline behind. Directly behind the push, it moves exactly when the packages exist. If the
+commit or its push fails, `publishCmd` fails with the packages already out: that is the case
+Option A below finishes by hand, and the baseline is part of what it finishes.
 
 **The tag is created after `prepare` and before `publish`.** So a failed `dotnet nuget push`
 leaves behind:
@@ -174,6 +189,28 @@ The `[skip ci]` marker on the changelog commit suppresses every push-triggered w
 website (`.github/workflows/docs.yml`) additionally listens for the Release workflow's completion
 and rebuilds right after a successful release. Without that, the changelog page would lag until
 the next unrelated documentation change.
+
+## Package validation
+
+Every `dotnet pack` compares the public surface of each of the nine packages, per target
+framework, with the last release on nuget.org — `PackageValidationBaselineVersion` in
+`src/Directory.Build.props`, set by the release that published it, after the publish (above). The
+API approval tests
+show *that* the surface changed; this says whether the change is additive or breaking, and fails
+the pack on the pull request that introduces a break rather than after the release that shipped
+it (#257).
+
+A pack at version 0.0.0 — a plain `dotnet pack` on a developer machine, or CI's
+`0.0.0-unversioned.<run>` fallback for a ref GitVersion could not name — has the assembly-version
+comparison (CP0003) switched off, since it would fail on the number rather than on the API; the
+API comparison is not. Every real version is at or above the baseline, so there both run.
+
+A breaking change is a major release (`!` and a `BREAKING CHANGE:` footer in the commit, see
+`CONTRIBUTING.md`), and until that release is out the comparison with the previous one will keep
+failing on it. The way through is ApiCompat's own: rebuild once with
+`-p:ApiCompatGenerateSuppressionFile=true`, which writes a `CompatibilitySuppressions.xml` next to
+the project naming each break, and commit it with the change so the review sees the list. Once
+the major is published the baseline moves past the break and the suppression file is deleted.
 
 ## Recovering a half-finished release
 
@@ -199,7 +236,16 @@ dotnet nuget push "artifacts/nuget/*.nupkg" \
 
 `--skip-duplicate` makes this safe to repeat when some packages made it and others did not. The
 API key comes from a fresh `NuGet/login` run or a temporary key from nuget.org. Afterwards, create
-the GitHub Release for the tag by hand and attach the `.nupkg` files.
+the GitHub Release for the tag by hand and attach the `.nupkg` files, and move the package-validation
+baseline to the version that is now published, which the failed run did not get to:
+
+```bash
+python3 eng/set-package-validation-baseline.py X.Y.Z   # edits src/Directory.Build.props
+# commit as "chore(release): point package validation at X.Y.Z [skip ci]" and get it onto main
+```
+
+Until that commit is on `main`, every pack compares against the release before this one, which
+is a weaker check, not a broken one.
 
 **Repacking from the tag is the fallback, and it is not equivalent.** Use it only if the artifact
 has expired or is otherwise gone:
@@ -237,7 +283,8 @@ happened.
 semantic-release will then compute the same version again from the same commits — the changelog
 entry it regenerates supersedes the reverted one. Packages already pushed at that version stay
 published; `--skip-duplicate` lets the rerun past them, but they will not be rebuilt, so use
-Option A instead if their content matters.
+Option A instead if their content matters. The baseline commit, if the failed run got that far,
+can stay: the rerun finds the baseline already at that version and commits nothing.
 
 Note what Option B is *not* for: a failure in the build or the test step. Those run before
 semantic-release is invoked, so nothing has been tagged, committed or published. Fix the failure

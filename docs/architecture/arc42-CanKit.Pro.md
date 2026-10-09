@@ -1145,6 +1145,12 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   allen echten Adaptern) und wurde dafür ergänzt — sonst wäre Echo-Matching mangels
   hardwareunabhängiger CI gar nicht testbar gewesen. Abgesichert per Virtual-Loopback
   (`tests/CanKit.Tests/TestCases/TxConfirmTests.cs`).
+  **Einschränkung (gemessen, #249):** Echo-Matching setzt voraus, dass der Adapter das eigene
+  Frame mit `IsEcho` zurückmeldet. PCAN liefert es im Echo-Modus ungeflaggt, Kvaser (CanKit 0.5.6)
+  auf einem ruhigen Bus gar nicht; dort läuft jede Bestätigung in den Timeout. Mit diesen Adaptern
+  gilt der Normal-Modus mit approximierter Bestätigung
+  (`docs/reviews/2026-10-06-echo-hardware-measurements.md`). J1939 erkennt ein geflaggtes Echo des
+  eigenen Address Claim auch außerhalb des Echo-Modus.
 
 ### ADR-8: Fake-Native + Virtual-Loopback als Teststrategie
 - **Kontext:** CI ohne CAN-Hardware, deterministische Protokolltests.

@@ -86,7 +86,7 @@ jobs:
           cache: npm
 
       - name: Install release tooling
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Same analyser the release job will run, without the GitHub/git plugins (those need a
       # write token). Empty output means nothing to publish; build and test still run.
@@ -158,7 +158,8 @@ jobs:
     # The only job holding the OIDC grant. It installs the release tooling, exchanges the token
     # for a one-hour NuGet key, and runs semantic-release against packages `verify` already packed.
     #
-    # `npm ci` still runs here, so an npm lifecycle script remains inside the grant. That is
+    # `npm ci --ignore-scripts` installs the release tooling without running any package's
+    # lifecycle script inside the grant (#257); the tooling's own code still runs here, which is
     # unavoidable while semantic-release is the release driver. Restore, build, test and pack
     # do not: they happen in `verify` above, which has no OIDC grant and none of the publishing
     # secrets.
@@ -178,10 +179,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # No credential is written into .git/config. `npm ci` still runs third-party code in
-          # this job, and a PAT sitting in the working tree while it does is a credential one
-          # postinstall script away from leaving the runner. The repository is public, so the
-          # clone itself needs no token.
+          # No credential is written into .git/config. semantic-release is third-party code
+          # running in this job, and a PAT sitting in the working tree while it does is a
+          # credential one dependency away from leaving the runner (its install scripts no
+          # longer run, see `npm ci --ignore-scripts` below, but its code does). The repository
+          # is public, so the clone itself needs no token.
           #
           # semantic-release does not need one here either: it builds its own authenticated push
           # URL from the token it is given in the release step's `env`. That is where
@@ -202,7 +204,7 @@ jobs:
           cache: npm
 
       - name: Install release tooling
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Download packed packages
         if: needs.verify.outputs.version != ''

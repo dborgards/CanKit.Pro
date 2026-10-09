@@ -40,6 +40,38 @@ if (!Array.isArray(config.branches) || config.branches.length === 0) {
   problems.push('branches must list at least one release branch');
 }
 
+// What a Dependabot commit publishes (#257). A shipped dependency moving is a patch; the
+// `test-tooling` group (.github/dependabot.yml) tests nothing that ships, so it publishes nothing
+// -- the rule tells them apart by the group's name in the subject. Run through the analyser
+// itself, with the configured rules, because the matching is not obvious: a later `release: false`
+// rule beats an earlier match, a glob negation lives in the subject, and a typo in either passes
+// every resolvability check above while releasing nine packages for a coverlet bump.
+const analyzerOptions = (config.plugins ?? [])
+  .filter(Array.isArray)
+  .find(([name]) => name === '@semantic-release/commit-analyzer')?.[1];
+
+if (analyzerOptions) {
+  const { analyzeCommits } = await import('@semantic-release/commit-analyzer');
+  const expectRelease = async (subject, expected) => {
+    const commit = { message: subject, subject, body: '', hash: '0' };
+    const actual = await analyzeCommits(analyzerOptions, {
+      commits: [commit],
+      logger: { log() {} },
+      cwd: process.cwd(),
+    });
+    if (actual !== expected) {
+      problems.push(`"${subject}" would publish ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+    } else {
+      console.log(`ok       "${subject}" -> ${JSON.stringify(expected)}`);
+    }
+  };
+  await expectRelease('build(deps): Bump the test-tooling group with 1 update', null);
+  await expectRelease('build(deps): Bump the test-tooling group across 1 directory with 2 updates', null);
+  await expectRelease('build(deps): Bump the test-tooling-security group with 1 update', null);
+  await expectRelease('build(deps): Bump EdsDcfNet from 1.14.0 to 1.15.0', 'patch');
+  await expectRelease('chore(deps): Bump the semantic-release group with 3 updates', null);
+}
+
 // The temporary breaking -> minor override, and the guards that make it temporary.
 //
 // docs/decisions/0001-versioning-and-api-stability.md puts the public API in a window where

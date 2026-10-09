@@ -10,7 +10,7 @@
         { "type": "fix", "release": "patch" },
         { "type": "perf", "release": "patch" },
         { "type": "revert", "release": "patch" },
-        { "type": "build", "scope": "deps", "release": "patch" },
+        { "type": "build", "scope": "deps", "subject": "!(*test-tooling*)", "release": "patch" },
         { "type": "docs", "release": false },
         { "type": "test", "release": false },
         { "type": "chore", "release": false },
@@ -47,7 +47,7 @@
     ["@semantic-release/exec", {
       "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
       "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version}",
-      "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate"
+      "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate && python3 eng/set-package-validation-baseline.py ${nextRelease.version} --commit-and-push ${branch.name}"
     }],
 
     ["@semantic-release/git", {

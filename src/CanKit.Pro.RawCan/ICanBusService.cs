@@ -155,6 +155,15 @@ namespace CanKit.Pro.RawCan
         /// (<see cref="TxConfirmation.IsApproximated"/>, FR-RAW-032). Never hangs: timeout,
         /// bus-off, and outright rejection all resolve the returned task within bounded time
         /// (FR-RAW-033) — see <see cref="TxConfirmation"/> for exactly how.
+        /// <para>
+        /// <b>Which adapters can take the echo path.</b> It needs the adapter to hand the sent frame
+        /// back <em>flagged</em> (<see cref="CanFrameEvent.IsEcho"/>). Measured against CanKit
+        /// 0.5.6: PCAN in Echo mode delivers its own frames unflagged and Kvaser delivers none on a
+        /// quiet bus, so on both every confirmation times out although the frame was on the wire;
+        /// Vector is not measured and is read from its source as not delivering one in Echo mode
+        /// either. Use <see cref="ChannelWorkMode.Normal"/> with those adapters: the approximated
+        /// confirmation is what they support. See docs/reviews/2026-10-06-echo-hardware-measurements.md.
+        /// </para>
         /// </summary>
         /// <param name="frame">
         /// The frame to send. As with <see cref="ICanBus.Transmit(in CanFrame)"/>, the caller
