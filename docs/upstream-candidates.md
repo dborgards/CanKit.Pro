@@ -81,13 +81,13 @@ CanKit.Pro kept the half of that file it actually owns, the demultiplex-service 
 
 Evidence: [`reviews/2026-10-06-echo-hardware-measurements.md`](reviews/2026-10-06-echo-hardware-measurements.md).
 
-- **Kvaser** (`KvaserBus.cs`, notify mask): the callback is registered with `canNOTIFY_RX` (and
+- **Kvaser** (`KvaserBus.cs`, notify mask; filed as [pkuyo/CanKit#70](https://github.com/pkuyo/CanKit/issues/70)): the callback is registered with `canNOTIFY_RX` (and
   `canNOTIFY_ERROR`) only, although `canIOCTL_SET_TXACK` is switched on. TX acknowledgements are
   reported with `canNOTIFY_TX` (0x2), which `Canlib.cs` does not define. Measured on a Leaf Light
   v2: with mask 0x3 three callbacks for three sends, with 0x1 none; in Echo mode a quiet bus
   delivers no own frame at all. Proposal: define `canNOTIFY_TX` and add it to the mask when the
   channel is in Echo mode.
-- **PCAN** (`PcanBus.cs`, `PcanClassicTransceiver.cs`): in Echo mode (`AllowEchoFrames`) the own
+- **PCAN** (`PcanBus.cs`, `PcanClassicTransceiver.cs`; filed as [pkuyo/CanKit#71](https://github.com/pkuyo/CanKit/issues/71)): in Echo mode (`AllowEchoFrames`) the own
   frames arrive but without `IsEcho` set. Measured on a PCAN USB Pro FD, classic and FD. Proposal:
   set `IsEcho` for frames received with the self-receive message type.
 - **Vector** (not measured, from source): Classic drops its own TX event in Echo mode
