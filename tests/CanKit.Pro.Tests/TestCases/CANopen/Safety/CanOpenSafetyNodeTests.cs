@@ -569,7 +569,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         using var wire = new Wire(session, 2);
         var service = new HoldingService(new CanBusService(bus), holdGfc: true);
         using var node = await OpenGfcNodeAsync(service, wire);
-        await node.Safety().SendGlobalFailsafeCommandAsync();
+        var call = node.Safety().SendGlobalFailsafeCommandAsync();
         await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
         var token = service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0);
         token.CanBeCanceled.Should().BeTrue("the GFC carries its period's token");
@@ -579,6 +579,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped"); // through the actor, behind the Stop
         token.IsCancellationRequested.Should().BeTrue("leaving Operational cancels the period's sends, the GFC's included");
         service.Release();
+        await call.WithTimeoutAsync(ShortTimeout);
     }
 
     /// <summary>Disposing the node cancels a GFC send as leaving Operational does.</summary>
@@ -592,7 +593,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         using (var wire = new Wire(session, 2))
         {
             var node = await OpenGfcNodeAsync(service, wire, ownsService: false);
-            await node.Safety().SendGlobalFailsafeCommandAsync();
+            _ = node.Safety().SendGlobalFailsafeCommandAsync(); // completes when the service lets the held frame go
             await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
             token = service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0);
             token.IsCancellationRequested.Should().BeFalse();
@@ -611,11 +612,12 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         using var wire = new Wire(session, 2);
         var service = new HoldingService(new CanBusService(bus), holdGfc: true);
         using var node = await OpenGfcNodeAsync(service, wire);
-        await node.Safety().SendGlobalFailsafeCommandAsync();
+        var first = node.Safety().SendGlobalFailsafeCommandAsync();
         await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "first GFC handed to the service");
         wire.SendNmt(NmtCommand.Stop, Producer);
         await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
         service.Release();
+        await first.WithTimeoutAsync(ShortTimeout);
 
         wire.SendNmt(NmtCommand.Start, Producer);
         await WaitUntilAsync(() => node.State == NmtState.Operational, "started again");
@@ -626,8 +628,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>A GFC send the period's token cancels ends quietly: no background exception, and
-    /// the send's task completes rather than ending cancelled — it is discarded, so nothing would
-    /// observe it.</summary>
+    /// the call completes rather than ending cancelled — the caller did not ask for it.</summary>
     [Fact]
     public async Task A_Gfc_Send_Cancelled_By_Its_Period_Ends_Quietly()
     {
@@ -638,16 +639,77 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         using var node = await OpenGfcNodeAsync(service, wire);
         var background = new List<Exception>();
         node.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
-        await node.Safety().SendGlobalFailsafeCommandAsync();
+        var send = node.Safety().SendGlobalFailsafeCommandAsync();
         await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
-        Task send = Task.CompletedTask;
-        await node.PostToActorAsync(() => send = node.GfcSendForTests!);
 
         wire.SendNmt(NmtCommand.Stop, Producer);
         await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
         await send.WithTimeoutAsync(ShortTimeout).ContinueWith(_ => { }); // ended, however
         send.Status.Should().Be(TaskStatus.RanToCompletion, "the period's own cancellation is no failure");
         lock (background) background.Should().BeEmpty();
+    }
+
+    /// <summary>The call is the send: it completes when the frame was handed over, not when the
+    /// actor's turn ended — while the service holds the GFC the call is still running.</summary>
+    [Fact]
+    public async Task The_Gfc_Call_Completes_When_The_Frame_Was_Handed_Over()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var service = new HoldingService(new CanBusService(bus), holdGfc: true);
+        using var node = await OpenGfcNodeAsync(service, wire);
+        var call = node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
+        await node.PostToActorAsync(() => { }); // the actor's turn that sent it is long over
+        call.IsCompleted.Should().BeFalse("the service still holds the frame");
+        service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0).IsCancellationRequested.Should().BeFalse("nobody cancelled");
+
+        service.Release();
+        await call.WithTimeoutAsync(ShortTimeout);
+        call.Status.Should().Be(TaskStatus.RanToCompletion);
+    }
+
+    /// <summary>The caller's token reaches the send, linked with the Operational period's: a
+    /// caller that cancels while the service holds the GFC cancels the send, and the call ends
+    /// with OperationCanceledException — the caller asked for it — and no background exception.</summary>
+    [Fact]
+    public async Task Cancelling_The_Callers_Token_Cancels_The_Gfc_Send()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var service = new HoldingService(new CanBusService(bus), holdGfc: true, honourTokens: true);
+        using var node = await OpenGfcNodeAsync(service, wire);
+        var background = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+        using var cts = new CancellationTokenSource();
+        var call = node.Safety().SendGlobalFailsafeCommandAsync(cts.Token);
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
+        var token = service.TokenOf(CanOpenCobId.GlobalFailsafeCommand, 0);
+        token.IsCancellationRequested.Should().BeFalse();
+
+        cts.Cancel();
+        token.IsCancellationRequested.Should().BeTrue("the send's token is linked with the caller's");
+        await call.Invoking(c => c.WithTimeoutAsync(ShortTimeout)).Should().ThrowAsync<OperationCanceledException>();
+        node.State.Should().Be(NmtState.Operational, "the period goes on");
+        lock (background) background.Should().BeEmpty();
+    }
+
+    /// <summary>A caller cancelled before the actor's turn gets OperationCanceledException and no
+    /// GFC is handed over.</summary>
+    [Fact]
+    public async Task A_Gfc_Call_Cancelled_Before_It_Runs_Sends_Nothing()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var service = new HoldingService(new CanBusService(bus), holdGfc: true);
+        using var node = await OpenGfcNodeAsync(service, wire);
+        await node.Safety().Invoking(s => s.SendGlobalFailsafeCommandAsync(new CancellationToken(true)))
+            .Should().ThrowAsync<OperationCanceledException>();
+        await node.PostToActorAsync(() => { });
+        service.Handed(CanOpenCobId.GlobalFailsafeCommand).Should().Be(0);
     }
 
     /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:

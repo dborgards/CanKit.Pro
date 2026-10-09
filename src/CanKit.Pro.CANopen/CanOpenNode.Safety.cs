@@ -401,14 +401,27 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         return _srdo.GetState(srdoNumber);
     }
 
+    // The returned task is the send itself, not the actor's turn: it completes when the frame was
+    // handed over, or the send failed (reported on BackgroundExceptionOccurred) or was cancelled.
+    // The send's token is the caller's linked with the Operational period's (_gfcCaller, read by
+    // ISrdoEngineHost.Send in the same actor turn).
     public Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
         return _actor.PostAsync(() =>
         {
-            if (!_srdo.TrySendGfc())
-                throw new InvalidOperationException("The global failsafe command needs 1300h = 1 and NMT state Operational (CiA DSP 304 §8.2).");
-        }, cancellationToken);
+            _gfcCaller = cancellationToken;
+            try
+            {
+                if (!_srdo.TrySendGfc())
+                    throw new InvalidOperationException("The global failsafe command needs 1300h = 1 and NMT state Operational (CiA DSP 304 §8.2).");
+                return _gfcSend!;
+            }
+            finally
+            {
+                _gfcCaller = default;
+            }
+        }, cancellationToken).Unwrap();
     }
 
     private void RequireSrdo(int srdoNumber)
@@ -474,26 +487,30 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     // The GFC is not an SRDO and does not wait behind them (§8.2: it is the highest-priority
     // safety message); it goes out at once. It is sent only in Operational, so it is handed over
-    // with the token of the Operational period, as an SRDO frame is: leaving Operational or
-    // disposing cancels it, honoured until the send task starts. A send task already running
-    // still hands its frame to the driver (#294).
-    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _gfcSend = SendInPeriodAsync(cobId, payload, CurrentSrdoSendPeriod());
+    // with the token of the Operational period, as an SRDO frame is, linked with the token of the
+    // SendGlobalFailsafeCommandAsync call: leaving Operational, disposing or the caller cancels it,
+    // honoured until the send task starts. A send task already running still hands its frame to
+    // the driver (#294). The engine sends nothing else through Send: TrySendGfc, called only by
+    // SendGlobalFailsafeCommandAsync, is its one caller.
+    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _gfcSend = SendGfcAsync(cobId, payload, CurrentSrdoSendPeriod(), _gfcCaller);
 
     private Task? _gfcSend;
 
-    /// <summary>Test seam, actor only: the last GFC send.</summary>
-    internal Task? GfcSendForTests => _gfcSend;
+    // The token of the SendGlobalFailsafeCommandAsync call whose actor turn is running. Actor only.
+    private CancellationToken _gfcCaller;
 
-    /// <summary>A send cancelled by its period's own token ends quietly; any other outcome is
-    /// SendControlFrame's, which reports a failure itself (a service-dispose cancellation as a
-    /// transport failure).</summary>
-    private async Task SendInPeriodAsync(uint cobId, byte[] payload, CancellationToken period)
+    /// <summary>A send cancelled by its period's own token ends quietly; one the caller cancelled
+    /// ends with <see cref="OperationCanceledException"/>, the caller asked for it; any other
+    /// outcome is SendControlFrame's, which reports a failure itself (a service-dispose
+    /// cancellation as a transport failure). The linked source lives as long as the send.</summary>
+    private async Task SendGfcAsync(uint cobId, byte[] payload, CancellationToken period, CancellationToken caller)
     {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(period, caller);
         try
         {
-            await SendControlFrame(cobId, payload, period).ConfigureAwait(false);
+            await SendControlFrame(cobId, payload, linked.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (period.IsCancellationRequested)
+        catch (OperationCanceledException) when (period.IsCancellationRequested && !caller.IsCancellationRequested)
         {
         }
     }

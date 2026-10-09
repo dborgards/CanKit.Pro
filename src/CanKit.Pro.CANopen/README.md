@@ -716,10 +716,15 @@ every SRDO `NotOperational` and stops SCT and SRVT.
 
 The global failsafe command is COB-ID `001h` with no data (§8.2). `SendGlobalFailsafeCommandAsync`
 sends it at once — it does not wait behind SRDO pairs — and only with `1300h` = 1 in Operational;
-otherwise it throws `InvalidOperationException`. Like an SRDO frame it is handed to the bus service
-with the token of the Operational period, so leaving Operational or disposing the node right after
-the call cancels a send whose task has not started yet; a send task already running still hands
-the frame to the driver (#294). A send cancelled that way ends quietly. A GFC is reported by
+otherwise it throws `InvalidOperationException`. The returned task is the send itself: it
+completes when the frame was handed over — or the send failed, which is reported on
+`BackgroundExceptionOccurred` as for every frame, or was cancelled — not when the node's actor
+has merely started it. Like an SRDO frame it is handed to the bus service with the token of the
+Operational period, here linked with the caller's token, so leaving Operational, disposing the
+node or cancelling the caller's token cancels a send whose task has not started yet; a send task
+already running still hands the frame to the driver (#294). A send cancelled by the period ends
+quietly; one the caller cancelled — before the call ran or while the send waited — ends with
+`OperationCanceledException`. A GFC is reported by
 `GlobalFailsafeCommandReceived` under the same two conditions, and only with DLC 0. On a bus that
 echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event is critical, and
 identical ones still waiting are folded into one.

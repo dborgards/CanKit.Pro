@@ -59,8 +59,16 @@ public interface ICanOpenSafety
     SrdoState GetSrdoState(int srdoNumber);
 
     /// <summary>Sends the global failsafe command (§8.2: COB-ID 001h, DLC 0). Requires
-    /// <c>1300h</c> = 1 and Operational.</summary>
+    /// <c>1300h</c> = 1 and Operational. The returned task is the send itself, not the node's
+    /// actor turn that started it: it completes when the bus service has confirmed the frame or
+    /// reported its failure (on <c>BackgroundExceptionOccurred</c>, as for every frame), or when
+    /// the send was cancelled. The send carries
+    /// <paramref name="cancellationToken"/> linked with the token of the Operational period:
+    /// leaving Operational or disposing the node ends a send not yet started quietly, the caller's
+    /// cancellation ends it with <see cref="OperationCanceledException"/>. A send task already
+    /// running still hands its frame to the driver (#294).</summary>
     /// <exception cref="InvalidOperationException">1300h is 0 or the node is not Operational.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled before the frame was handed over.</exception>
     Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default);
 
     /// <summary>§9.2 Figure 9: downloads 1300h, every record (deleted first, created last), the
