@@ -97,7 +97,6 @@ internal sealed partial class CanOpenNode
         Array.Clear(_slaveSeen, 0, _slaveSeen.Length);
         Array.Clear(_slaveStarted, 0, _slaveStarted.Length);
         _bootStartMoment = false;
-        _safetyExpectations.Clear();
         _bootHalted = false;
         _bootSelfStarted = false;
         Array.Clear(_slaveVerifying, 0, _slaveVerifying.Length);
@@ -276,8 +275,7 @@ internal sealed partial class CanOpenNode
     /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
     /// declares at least one SRDO (spec decision 4). An EDS has no parameter values and never
     /// makes a safety slave. Building it runs the device loader over a dictionary of its own, so
-    /// it is kept for the boot, per slave and per bound description: CancelBootUp drops it, and
-    /// binding another description for the slave makes it stale by reference. Actor only.</summary>
+    /// it is kept per slave and per bound description instance. Actor only.</summary>
     private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId)
     {
         if (!_peerDescriptions.TryGetValue(nodeId, out var description)) return null;
@@ -292,6 +290,8 @@ internal sealed partial class CanOpenNode
         return expected;
     }
 
+    // No invalidation: the expectation depends only on the description and the node-id, and a
+    // rebind replaces the instance, which the reference check above notices.
     private readonly Dictionary<byte, (CanOpenDeviceDescription Description, PeerSafetyConfiguration? Expected)> _safetyExpectations = new();
 
     /// <summary>Whether any assigned slave is a safety slave: then the master sends no Start to node 0.</summary>
