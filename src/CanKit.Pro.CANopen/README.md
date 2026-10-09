@@ -674,14 +674,15 @@ identical ones still waiting are folded into one.
 `ConfigurePeerSafetyAsync(peer, configuration)` is the tool side of §9.2, Figure 9. A
 `PeerSafetyConfiguration` holds `1300h` and, per SRDO number, the communication parameter and the
 mapping; `PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId)` builds it from a DCF's
-parameter values (default value where none, `$NODEID` resolved) by the rules a device loading the
-same file follows, so that step D against a slave's own DCF expects what the slave holds. A
-sub-index the file leaves out keeps the device's default: 25 ms for the refresh time or SCT, the
-pre-defined COB-IDs for SRDO 1 of a node-id 1..64 (§8.3.3) — any other SRDO without COB-IDs is
-left out —, and 20 ms for a missing or zero SRVT, the value the device stores and checksums. A
-record with direction 0, without a mapping record, with a plain mapping slot up to the count
-missing or 0, with an inverted slot unequal to its plain one (§8.4.2.3), or with another value that
-does not parse, is left out: the device leaves that SRDO deleted.
+parameter values (default value where none, `$NODEID` resolved) as what a device with that
+node-id holds after loading the file, so that step D against a slave's own DCF expects what the
+slave holds. It is not a second reading of the file: the node's own loader — the same code, over
+a dictionary of its own — applies the file, and the expectation is every SRDO that exists
+afterwards, with the records it holds. A value the file leaves out, does not parse or the device
+refuses keeps the device's default (25 ms refresh time or SCT, 20 ms SRVT, the pre-defined
+COB-IDs of SRDO 1 for a node-id 1..64, §8.3.3); an SRDO whose creation the device refuses —
+COB-IDs that are not a consecutive pair or that another existing SRDO holds, no mapping record,
+a mapping that does not apply (§8.4.2.3) — is left out, as the device leaves it deleted.
 
 The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
 above it (`ArgumentException`) before writing anything; a peer that returns no count is an

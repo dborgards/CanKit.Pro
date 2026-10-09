@@ -110,6 +110,33 @@ internal sealed partial class CanOpenNode
 
         // The same for every SRDO the description creates (direction not 0). Creating one is a
         // write to a checksummed record, so it clears 13FEh: that object is applied after it.
+        CreateDescribedSrdos(_od, description, pendingSrdoCreates, failedMappings, findings);
+        foreach (var obj in ordered.Where(o => PdoRecordRank(o.Index) >= ConfigurationValidRank))
+        {
+            loaded += ApplyDescribedObject(obj, description, findings, pendingPdoCreates, pendingSrdoCreates, failedMappings);
+        }
+
+        // What the description declared has a power-on value from now on: the objects it
+        // created and the managed ones it gave values to, as far as they still exist.
+        foreach (var index in objects.Keys.Where(index => _od.ContainsIndex(index))) _describedObjects.Add(index);
+
+        _factoryDefaults = SnapshotRestorableValues();
+        _powerOnValues = _factoryDefaults;
+        _deviceDescription = new DeviceDescriptionReport(description, _nodeId, loaded,
+            findings.OrderBy(f => f.Index).ThenBy(f => f.Subindex).ToList());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CiA DSP 304: the loader's SRDO steps are static over the dictionary they write, so that
+    // LoadDescribedSafetyObjects runs the very same code for PeerSafetyConfiguration.
+    // -----------------------------------------------------------------------------------------
+
+    /// <summary>The deferred "create SRDO" step: the direction is written last, once the mapping
+    /// is in, and only over a mapping record that exists and was applied as described.</summary>
+    private static void CreateDescribedSrdos(ObjectDictionary od, CanOpenDeviceDescription description,
+        List<(int Srdo, byte Direction, string Raw)> pendingSrdoCreates, HashSet<ushort> failedMappings, List<DeviceDescriptionFinding> findings)
+    {
+        var objects = description.Objects.Objects;
         foreach (var (srdo, direction, raw) in pendingSrdoCreates)
         {
             var srdoComm = SrdoRecords.CommIndex(srdo);
@@ -126,23 +153,59 @@ internal sealed partial class CanOpenNode
                     "the SRDO stays deleted because its mapping record could not be applied as described", raw));
                 continue;
             }
-            if (!_od.TryWriteRaw(SrdoRecords.CommIndex(srdo), 0x01, new[] { direction }, out var abort))
+            if (!od.TryWriteRaw(SrdoRecords.CommIndex(srdo), 0x01, new[] { direction }, out var abort))
                 findings.Add(new DeviceDescriptionFinding(SrdoRecords.CommIndex(srdo), 0x01, DeviceDescriptionOutcome.Corrected,
                     "the direction was rejected; the SRDO stays deleted", raw, abort));
         }
-        foreach (var obj in ordered.Where(o => PdoRecordRank(o.Index) >= ConfigurationValidRank))
+    }
+
+    /// <summary>
+    /// The safety objects a node with node-id <paramref name="nodeId"/> holds after loading
+    /// <paramref name="description"/>, in a dictionary of their own: 1300h and the SRDO records,
+    /// written by the loader's own steps in the loader's order — the §8.4.2.2 defaults, the
+    /// application objects a mapping can name, 1300h, the communication records with the SRDO
+    /// deleted, the mapping records, the deferred creates — through the node's own write
+    /// validator (CiA DSP 304 §8.4.2.2, §8.4.2.3), as in Pre-Operational. Findings are not
+    /// kept; the node reports them when it loads the file. What
+    /// <see cref="Safety.PeerSafetyConfiguration.FromDeviceDescription"/> reads, so that step D
+    /// against a slave's own DCF expects what the slave holds.
+    /// </summary>
+    internal static ObjectDictionary LoadDescribedSafetyObjects(CanOpenDeviceDescription description, byte nodeId)
+    {
+        if (description is null) throw new ArgumentNullException(nameof(description));
+        CanOpenCobId.ValidateNodeId(nodeId);
+        var od = new ObjectDictionary();
+        int srdoCount = DescribedSrdoCount(description);
+        PopulateSafetyObjects(od, nodeId, srdoCount, writable: true);
+        od.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
+            ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value)
+            : OdWriteDecision.Accept;
+        // The node also removes the records the file does not declare. Not needed here: such a
+        // record has no create pending and stays at direction 0, which is what the expectation
+        // reads from a removed one too.
+
+        var findings = new List<DeviceDescriptionFinding>();
+        var pendingSrdoCreates = new List<(int Srdo, byte Direction, string Raw)>();
+        var failedMappings = new HashSet<ushort>();
+        var objects = description.Objects.Objects;
+        // Rank 0 as in ApplyDeviceDescription: what a mapping names is data the loader declares
+        // first (1000h–1FFFh cannot be mapped, so only the application area matters).
+        foreach (var obj in objects.Values.Where(o => o.Index >= 0x2000).OrderBy(o => o.Index))
         {
-            loaded += ApplyDescribedObject(obj, description, findings, pendingPdoCreates, pendingSrdoCreates, failedMappings);
+            foreach (var entry in EntriesOf(obj)) DeclareDescribedEntry(od, nodeId, obj.Index, entry, findings);
         }
-
-        // What the description declared has a power-on value from now on: the objects it
-        // created and the managed ones it gave values to, as far as they still exist.
-        foreach (var index in objects.Keys.Where(index => _od.ContainsIndex(index))) _describedObjects.Add(index);
-
-        _factoryDefaults = SnapshotRestorableValues();
-        _powerOnValues = _factoryDefaults;
-        _deviceDescription = new DeviceDescriptionReport(description, _nodeId, loaded,
-            findings.OrderBy(f => f.Index).ThenBy(f => f.Subindex).ToList());
+        // 1300h is managed only on a node with SRDOs; without, it is data like any other object.
+        if (objects.TryGetValue(Co.GfcParameter, out var gfc))
+        {
+            if (srdoCount > 0) ApplyManagedVariable(od, nodeId, Co.GfcParameter, EntriesOf(gfc), findings);
+            else foreach (var entry in EntriesOf(gfc)) DeclareDescribedEntry(od, nodeId, Co.GfcParameter, entry, findings);
+        }
+        foreach (var obj in objects.Values.Where(o => IsManagedSafetyObject(srdoCount, o.Index) && SrdoRecords.IsCommunicationRecord(o.Index)).OrderBy(o => o.Index))
+            ApplySrdoCommunicationRecord(od, nodeId, srdoCount, obj.Index, EntriesOf(obj), findings, pendingSrdoCreates);
+        foreach (var obj in objects.Values.Where(o => IsManagedSafetyObject(srdoCount, o.Index) && SrdoRecords.IsMappingRecord(o.Index)).OrderBy(o => o.Index))
+            ApplySrdoMappingRecord(od, nodeId, obj.Index, EntriesOf(obj), findings, failedMappings);
+        CreateDescribedSrdos(od, description, pendingSrdoCreates, failedMappings, findings);
+        return od;
     }
 
     /// <summary>13FEh is applied after everything else: every validated write to a checksummed
@@ -168,11 +231,13 @@ internal sealed partial class CanOpenNode
         _ => 0,
     };
 
-    private void RemoveObject(ushort index)
+    private void RemoveObject(ushort index) => RemoveObject(_od, index);
+
+    private static void RemoveObject(ObjectDictionary od, ushort index)
     {
-        foreach (var key in _od.SnapshotKeys().Where(k => (ushort)(k >> 8) == index))
+        foreach (var key in od.SnapshotKeys().Where(k => (ushort)(k >> 8) == index))
         {
-            _od.Remove(index, (byte)(key & 0xFF));
+            od.Remove(index, (byte)(key & 0xFF));
         }
     }
 
@@ -266,9 +331,9 @@ internal sealed partial class CanOpenNode
             if (index == Co.SrdoChecksum)
                 return ApplySafetyChecksumArray(entries, findings);
             if (SrdoRecords.IsCommunicationRecord(index))
-                return ApplySrdoCommunicationRecord(index, entries, findings, pendingSrdoCreates);
+                return ApplySrdoCommunicationRecord(_od, _nodeId, _srdoCount, index, entries, findings, pendingSrdoCreates);
             if (SrdoRecords.IsMappingRecord(index))
-                return ApplySrdoMappingRecord(index, entries, findings, failedMappings);
+                return ApplySrdoMappingRecord(_od, _nodeId, index, entries, findings, failedMappings);
         }
 
         // Everything else is data: created as described. Communication-profile objects the node
@@ -454,19 +519,22 @@ internal sealed partial class CanOpenNode
     /// <summary>1005h, 1006h, 1014h, 1017h, 100Ch, 100Dh, 1001h, 1F80h, 1F89h: the node's type stays, the
     /// description's access and value are taken — the value through the validated path.</summary>
     private int ApplyManagedVariable(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
+        => ApplyManagedVariable(_od, _nodeId, index, entries, findings);
+
+    private static int ApplyManagedVariable(ObjectDictionary od, byte nodeId, ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings)
     {
         int loaded = 0;
         foreach (var entry in entries)
         {
-            if (entry.Subindex != 0 || !_od.TryGet(index, 0, out var current))
+            if (entry.Subindex != 0 || !od.TryGet(index, 0, out var current))
             {
                 findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
                     "this object is a VAR; only sub-index 00h exists", entry.Value));
                 continue;
             }
-            _od.Declare(index, 0, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            od.Declare(index, 0, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
             loaded++;
-            ApplyManagedValue(index, 0, current.DataType, entry, findings);
+            ApplyManagedValue(od, nodeId, index, 0, current.DataType, entry, findings);
         }
         return loaded;
     }
@@ -588,11 +656,11 @@ internal sealed partial class CanOpenNode
     /// the constant 254. The values go in with the SRDO deleted — times first, then COB-ID 1
     /// before COB-ID 2 — and the direction is applied last, in a deferred step, because it
     /// creates the SRDO.</summary>
-    private int ApplySrdoCommunicationRecord(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings,
-        List<(int, byte, string)> pendingSrdoCreates)
+    private static int ApplySrdoCommunicationRecord(ObjectDictionary od, byte nodeId, int srdoCount, ushort index,
+        List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings, List<(int Srdo, byte Direction, string Raw)> pendingSrdoCreates)
     {
         int n = index - SrdoRecords.CommunicationBase;
-        if (n > _srdoCount) return 0; // cannot happen: _srdoCount covers every declared record
+        if (n > srdoCount) return 0; // cannot happen: srdoCount covers every declared record
         int loaded = 0;
         var described = new Dictionary<byte, DescribedEntry>();
         foreach (var entry in entries) described[entry.Subindex] = entry;
@@ -604,25 +672,25 @@ internal sealed partial class CanOpenNode
                     "CiA DSP 304 §8.4.2.2 makes this sub-index mandatory; the node keeps its default"));
                 continue;
             }
-            if (!_od.TryGet(index, sub, out var current)) continue;
-            _od.Declare(index, sub, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            if (!od.TryGet(index, sub, out var current)) continue;
+            od.Declare(index, sub, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
             loaded++;
         }
         // Sub-index 4 is the constant 254: a description that says so promises nothing the node does not keep.
         foreach (var entry in entries.Where(e => e.Subindex is > 6 or 4 && e.Subindex != 0
-                     && !(e.Subindex == 4 && ParseUnsigned(e, out _) == SrdoRecords.TransmissionType)))
+                     && !(e.Subindex == 4 && ParseUnsigned(nodeId, e, out _) == SrdoRecords.TransmissionType)))
             findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
                 entry.Subindex == 4 ? "the transmission type is the constant 254 (CiA DSP 304 §8.4.2.2)" : "no such sub-index in an SRDO communication parameter record", entry.Value));
         // Values with the SRDO deleted: times first, then the ids (COB-ID 1 before COB-ID 2 — sub6 is validated against sub5).
-        _od.WriteUnsigned(index, 0x01, 0);
+        od.WriteUnsigned(index, 0x01, 0);
         foreach (byte sub in new byte[] { 2, 3, 5, 6 })
         {
-            if (!described.TryGetValue(sub, out var entry) || !_od.TryGet(index, sub, out var current)) continue;
-            ApplyManagedValue(index, sub, current.DataType, entry, findings);
+            if (!described.TryGetValue(sub, out var entry) || !od.TryGet(index, sub, out var current)) continue;
+            ApplyManagedValue(od, nodeId, index, sub, current.DataType, entry, findings);
         }
         if (described.TryGetValue(1, out var direction) && !string.IsNullOrEmpty(direction.Value))
         {
-            var value = ParseUnsigned(direction, out var raw);
+            var value = ParseUnsigned(nodeId, direction, out var raw);
             if (value is null)
                 findings.Add(new DeviceDescriptionFinding(index, 0x01, DeviceDescriptionOutcome.Corrected, "the direction could not be read as UNSIGNED8; the SRDO stays deleted", raw));
             else if (value.Value > byte.MaxValue)
@@ -635,17 +703,17 @@ internal sealed partial class CanOpenNode
 
     /// <summary>1381h–13C0h: the entries go in with the SRDO deleted and the count at 0, then the
     /// count (CiA DSP 304 §8.4.2.3: plain and inverted object alternate, so at most 16 sub-indices).</summary>
-    private int ApplySrdoMappingRecord(ushort index, List<DescribedEntry> entries, List<DeviceDescriptionFinding> findings,
-        HashSet<ushort> failedMappings)
+    private static int ApplySrdoMappingRecord(ObjectDictionary od, byte nodeId, ushort index, List<DescribedEntry> entries,
+        List<DeviceDescriptionFinding> findings, HashSet<ushort> failedMappings)
     {
         int n = index - SrdoRecords.MappingBase;
         // An SRDO exists only with both records (Table 6 footnote), and writing a mapping reads
         // and deletes the communication record's direction: without it the record is not created.
-        if (!_od.TryGet(SrdoRecords.CommIndex(n), 0x01, out _))
+        if (!od.TryGet(SrdoRecords.CommIndex(n), 0x01, out _))
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
                 $"the description declares no communication record 0x{SrdoRecords.CommIndex(n):X4} for this SRDO; an SRDO exists only with both records (Table 6 footnote), so the mapping record is not created"));
-            RemoveObject(index);
+            RemoveObject(od, index);
             failedMappings.Add(index);
             return 0;
         }
@@ -659,25 +727,25 @@ internal sealed partial class CanOpenNode
                     $"a byte-aligned SRDO mapping holds at most {SrdoMapping.MaxEntries} objects (16 sub-indices); this sub-index is not created", entry.Value));
                 continue;
             }
-            if (!_od.TryGet(index, entry.Subindex, out var current)) continue;
-            _od.Declare(index, entry.Subindex, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            if (!od.TryGet(index, entry.Subindex, out var current)) continue;
+            od.Declare(index, entry.Subindex, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
             loaded++;
         }
-        _od.WriteUnsigned(SrdoRecords.CommIndex(n), 0x01, 0); // the mapping is written with the SRDO deleted
+        od.WriteUnsigned(SrdoRecords.CommIndex(n), 0x01, 0); // the mapping is written with the SRDO deleted
         uint count = 0;
         bool failed = false;
         if (byIndex.TryGetValue(0, out var sub0) && !string.IsNullOrEmpty(sub0.Value))
         {
-            if (ParseUnsigned(sub0, out _) is { } parsed) count = parsed;
+            if (ParseUnsigned(nodeId, sub0, out _) is { } parsed) count = parsed;
             else { findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected, "the mapping count could not be read as UNSIGNED8; the mapping stays disabled", sub0.Value)); failed = true; }
         }
-        _od.WriteUnsigned(index, 0x00, 0);
+        od.WriteUnsigned(index, 0x00, 0);
         for (byte s = 1; s <= Math.Min(count, (uint)SrdoRecords.MappingSubindices); s++)
         {
             if (!byIndex.TryGetValue(s, out var entry) || string.IsNullOrEmpty(entry.Value)) continue;
-            var value = ParseUnsigned(entry, out var raw);
+            var value = ParseUnsigned(nodeId, entry, out var raw);
             if (value is null) { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry could not be read as UNSIGNED32; the slot stays empty and the mapping stays disabled", raw)); failed = true; continue; }
-            if (!_od.TryWriteRaw(index, s, ObjectDictionary.EncodeU32(value.Value), out var abort))
+            if (!od.TryWriteRaw(index, s, ObjectDictionary.EncodeU32(value.Value), out var abort))
             { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry was rejected; the slot stays empty and the mapping stays disabled", raw, abort)); failed = true; }
         }
         // The count is read as UNSIGNED32 and stored as UNSIGNED8: above 16 it is refused here,
@@ -688,7 +756,7 @@ internal sealed partial class CanOpenNode
                 $"an SRDO mapping has at most {SrdoRecords.MappingSubindices} sub-indices (CiA DSP 304 §8.4.2.3); the mapping stays disabled", sub0.Value));
             failed = true;
         }
-        if (!failed && count > 0 && !_od.TryWriteRaw(index, 0x00, new[] { (byte)count }, out var countAbort))
+        if (!failed && count > 0 && !od.TryWriteRaw(index, 0x00, new[] { (byte)count }, out var countAbort))
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected, "the mapping count was rejected; the mapping stays disabled", sub0.Value, countAbort));
             failed = true;
@@ -808,12 +876,16 @@ internal sealed partial class CanOpenNode
 
     private void ApplyManagedValue(ushort index, byte subindex, OdDataType type, DescribedEntry entry,
         List<DeviceDescriptionFinding> findings)
+        => ApplyManagedValue(_od, _nodeId, index, subindex, type, entry, findings);
+
+    private static void ApplyManagedValue(ObjectDictionary od, byte nodeId, ushort index, byte subindex, OdDataType type, DescribedEntry entry,
+        List<DeviceDescriptionFinding> findings)
     {
         if (string.IsNullOrEmpty(entry.Value)) return;
         byte[]? bytes;
         try
         {
-            bytes = ToBytes(type, CanOpenValueConverter.Parse(entry.Value!, TypeCode(type), _nodeId));
+            bytes = ToBytes(type, CanOpenValueConverter.Parse(entry.Value!, TypeCode(type), nodeId));
         }
         catch (Exception ex) when (ex is FormatException or OverflowException or NotSupportedException or ArgumentException or InvalidCastException)
         {
@@ -822,7 +894,7 @@ internal sealed partial class CanOpenNode
             return;
         }
         if (bytes is null) return;
-        if (!_od.TryWriteRaw(index, subindex, bytes, out var abort))
+        if (!od.TryWriteRaw(index, subindex, bytes, out var abort))
         {
             findings.Add(new DeviceDescriptionFinding(index, subindex, DeviceDescriptionOutcome.Corrected,
                 "the value was rejected by the rule an SDO download would hit; the default is kept", entry.Value, abort));
@@ -830,6 +902,9 @@ internal sealed partial class CanOpenNode
     }
 
     private bool DeclareDescribedEntry(ushort index, DescribedEntry entry, List<DeviceDescriptionFinding> findings)
+        => DeclareDescribedEntry(_od, _nodeId, index, entry, findings);
+
+    private static bool DeclareDescribedEntry(ObjectDictionary od, byte nodeId, ushort index, DescribedEntry entry, List<DeviceDescriptionFinding> findings)
     {
         var type = MapType(entry.DataType);
         if (type is null)
@@ -849,7 +924,7 @@ internal sealed partial class CanOpenNode
         {
             try
             {
-                value = ToBytes(type.Value, CanOpenValueConverter.Parse(entry.Value!, TypeCode(type.Value), _nodeId)) ?? ZeroOf(type.Value);
+                value = ToBytes(type.Value, CanOpenValueConverter.Parse(entry.Value!, TypeCode(type.Value), nodeId)) ?? ZeroOf(type.Value);
             }
             catch (Exception ex) when (ex is FormatException or OverflowException or NotSupportedException or ArgumentException or InvalidCastException)
             {
@@ -859,7 +934,7 @@ internal sealed partial class CanOpenNode
             }
         }
         // Mandatory placeholders (1000h, 1018h) are replaced; everything else in the file is new.
-        _od.Declare(index, entry.Subindex, type.Value, MapAccess(entry.Access), value,
+        od.Declare(index, entry.Subindex, type.Value, MapAccess(entry.Access), value,
             pdoMappable: entry.PdoMappable && !IsCommunicationProfileArea(index));
         return true;
     }
@@ -868,13 +943,15 @@ internal sealed partial class CanOpenNode
     // Conversions.
     // -----------------------------------------------------------------------------------------
 
-    private uint? ParseUnsigned(DescribedEntry entry, out string? raw)
+    private uint? ParseUnsigned(DescribedEntry entry, out string? raw) => ParseUnsigned(_nodeId, entry, out raw);
+
+    private static uint? ParseUnsigned(byte nodeId, DescribedEntry entry, out string? raw)
     {
         raw = entry.Value;
         if (string.IsNullOrEmpty(entry.Value)) return null;
         try
         {
-            return Convert.ToUInt32(CanOpenValueConverter.Parse(entry.Value!, CanOpenDataType.Unsigned32, _nodeId), System.Globalization.CultureInfo.InvariantCulture);
+            return Convert.ToUInt32(CanOpenValueConverter.Parse(entry.Value!, CanOpenDataType.Unsigned32, nodeId), System.Globalization.CultureInfo.InvariantCulture);
         }
         catch (Exception ex) when (ex is FormatException or OverflowException or NotSupportedException or ArgumentException or InvalidCastException)
         {

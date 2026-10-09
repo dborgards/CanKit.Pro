@@ -260,13 +260,6 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
     }
 
     [Fact]
-    public void Peer_Configuration_Leaves_Out_A_Record_With_A_Malformed_Word()
-    {
-        var text = Patch(SafetyDcfText(), "[1301sub5]", "ParameterValue=0x109", "ParameterValue=not-a-number");
-        PeerSafetyConfiguration.FromDeviceDescription(CanOpenDeviceDescription.ParseDcf(text), 5).Srdos.Should().BeEmpty();
-    }
-
-    [Fact]
     public void Peer_Configuration_Add_Refuses_A_Direction_None_And_A_Number_Out_Of_Range()
     {
         var none = new SrdoCommunicationParameter(SrdoDirection.None, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A);
@@ -306,28 +299,40 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         "inverted slot differs" => Patch(SafetyDcfText(), "[1381sub2]", "ParameterValue=0x20000010", "ParameterValue=0x20010008"),
         "inverted slot missing" => WithoutSubIndex(SafetyDcfText(), 0x1381, 2),
         "mapping count unreadable" => Patch(SafetyDcfText(), "[1381sub0]", "ParameterValue=4", "ParameterValue=four"),
+        "COB-ID 1 unreadable" => Patch(SafetyDcfText(), "[1301sub5]", "ParameterValue=0x109", "ParameterValue=not-a-number"),
+        // SRDO 2 created on 10Bh/10Ch: the pre-defined pair of SRDO 1 at node-id 6.
+        "SRDO 2 on the ids SRDO 1 defaults to" => Patch(Patch(Patch(WithoutSubIndex(WithoutSubIndex(SafetyDcfText(), 0x1301, 5), 0x1301, 6),
+            "[1302sub1]", "DefaultValue=0", "DefaultValue=1"), "[1302sub5]", "DefaultValue=0", "DefaultValue=0x10B"), "[1302sub6]", "DefaultValue=0", "DefaultValue=0x10C"),
         _ => throw new ArgumentOutOfRangeException(nameof(name), name, null),
     };
 
     /// <summary>Step D compares a slave with the expectation built from its own DCF, so the
-    /// expectation must read the file as the device does: an SRDO the device creates is
-    /// expected with the records it holds, and one it leaves deleted is not expected. The rules
-    /// that make the two agree are the loader's — a missing refresh time keeps 25 ms, missing
-    /// COB-IDs keep the pre-defined pair of SRDO 1 for a node-id ≤ 64 (§8.3.3), no mapping record
-    /// or an inverted slot unequal to its plain one leaves the SRDO deleted (§8.4.2.3).</summary>
+    /// expectation must be what a device loading that file holds: every SRDO the device creates
+    /// is expected with the records it holds, and one it leaves deleted is not expected. Each row
+    /// also pins the outcome (SRDO 1 created or not and its COB-IDs, SRDO 2 created or not), so
+    /// that a rule broken on both sides at once still fails here. Node-id 5 has the fixture's ids
+    /// 109h/10Ah as its pre-defined pair (§8.3.3), node-id 6 has 10Bh/10Ch, node-id 70 none.</summary>
     [Theory]
-    [InlineData("as shipped", 5, true)]
-    [InlineData("no mapping record", 5, false)]
-    [InlineData("no refresh time", 5, true)]
-    [InlineData("no COB-ID 1", 5, true)]
-    [InlineData("no COB-ID 2", 5, true)]
-    [InlineData("no COB-IDs", 5, true)]
-    [InlineData("no COB-ID 1", 70, false)]
-    [InlineData("no COB-ID 2", 70, false)]
-    [InlineData("inverted slot differs", 5, false)]
-    [InlineData("inverted slot missing", 5, false)]
-    [InlineData("mapping count unreadable", 5, false)]
-    public void Peer_Configuration_Agrees_With_The_Device_Loading_The_Same_File(string variant, byte nodeId, bool created)
+    [InlineData("as shipped", 5, true, 0x109, 0x10A)]
+    [InlineData("as shipped", 6, true, 0x109, 0x10A)]
+    [InlineData("no mapping record", 5, false, 0, 0)]
+    [InlineData("no refresh time", 5, true, 0x109, 0x10A)]
+    [InlineData("no COB-ID 1", 5, true, 0x109, 0x10A)]
+    [InlineData("no COB-ID 2", 5, true, 0x109, 0x10A)]
+    [InlineData("no COB-IDs", 5, true, 0x109, 0x10A)]
+    [InlineData("no COB-ID 1", 6, true, 0x10B, 0x10C)]                       // the declared 10Ah is refused against 10Bh + 1
+    [InlineData("no COB-ID 2", 6, false, 0, 0)]                              // 109h with the default 10Ch is no pair
+    [InlineData("no COB-IDs", 6, true, 0x10B, 0x10C)]
+    [InlineData("no COB-ID 1", 70, false, 0, 0)]
+    [InlineData("no COB-ID 2", 70, false, 0, 0)]
+    [InlineData("COB-ID 1 unreadable", 5, true, 0x109, 0x10A)]              // the default is kept
+    [InlineData("COB-ID 1 unreadable", 6, true, 0x10B, 0x10C)]
+    [InlineData("SRDO 2 on the ids SRDO 1 defaults to", 6, true, 0x10B, 0x10C, false)] // SRDO 2 is refused at its creation
+    [InlineData("inverted slot differs", 5, false, 0, 0)]
+    [InlineData("inverted slot missing", 5, false, 0, 0)]
+    [InlineData("mapping count unreadable", 5, false, 0, 0)]
+    public void Peer_Configuration_Agrees_With_The_Device_Loading_The_Same_File(string variant, byte nodeId, bool created, int cobId1, int cobId2,
+        bool srdo2Created = false)
     {
         var dcf = CanOpenDeviceDescription.ParseDcf(Variant(variant));
         var expected = PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId);
@@ -335,14 +340,26 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         using var bus = Open(session, 1);
         using var device = CanOpen.OpenNode(bus, nodeId, dcf);
         var od = device.ObjectDictionary;
-        (od.ReadUnsigned(0x1301, 1) != 0).Should().Be(created, string.Join("\n", device.DeviceDescription!.Findings));
-        expected.Srdos.ContainsKey(1).Should().Be(created, "the expectation has SRDO 1 exactly when the device created it");
-        if (!created) return;
-        SrdoRecords.TryReadCommunication(od, 1, out var held).Should().BeTrue();
-        var (parameter, mapping) = expected.Srdos[1];
-        parameter.Should().Be(held);
-        SrdoCrc.Compute(parameter, mapping).Should().Be(SrdoCrc.Compute(held, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, 1))),
-            "the checksum step D expects is the one of the records the device holds");
+        var findings = string.Join("\n", device.DeviceDescription!.Findings);
+        (od.ReadUnsigned(0x1301, 1) != 0).Should().Be(created, findings);
+        if (created)
+        {
+            od.ReadUnsigned(0x1301, 5).Should().Be((uint)cobId1, findings);
+            od.ReadUnsigned(0x1301, 6).Should().Be((uint)cobId2, findings);
+        }
+        (od.ReadUnsigned(0x1302, 1) != 0).Should().Be(srdo2Created, findings);
+        for (int n = 1; n <= device.Safety().SrdoCount; n++)
+        {
+            bool exists = od.ReadUnsigned(SrdoRecords.CommIndex(n), 1) != 0;
+            expected.Srdos.ContainsKey(n).Should().Be(exists, $"the expectation has SRDO {n} exactly when the device created it");
+            if (!exists) continue;
+            SrdoRecords.TryReadCommunication(od, n, out var held).Should().BeTrue();
+            var (parameter, mapping) = expected.Srdos[n];
+            parameter.Should().Be(held);
+            SrdoCrc.Compute(parameter, mapping).Should().Be(SrdoCrc.Compute(held, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, n))),
+                "the checksum step D expects is the one of the records the device holds");
+        }
+        expected.Srdos.Keys.Should().OnlyContain(n => n <= device.Safety().SrdoCount);
     }
 
     /// <summary>The configuration keeps the mapping it was given: a later change to the

@@ -1,11 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Globalization;
-using CanKit.Pro.CANopen.Pdo;
-using EdsDcfNet;
-using EdsDcfNet.Models;
-using EdsDcfNet.Utilities;
 
 namespace CanKit.Pro.CANopen.Safety;
 
@@ -38,86 +33,33 @@ public sealed class PeerSafetyConfiguration
         return this;
     }
 
-    /// <summary>Reads 1300h, 1301h–1340h and 1381h–13C0h from the file's ParameterValue (DefaultValue
-    /// when absent, $NODEID resolved with <paramref name="nodeId"/>), by the rules a device loading
-    /// the same file follows, so that step D against a slave's own DCF expects what the slave holds.
-    /// Records the file does not declare, or declares with direction 0, are absent. A sub-index the
-    /// file leaves out keeps the device's default (§8.4.2.2): 25 ms for sub-index 2; for sub-indices
-    /// 5 and 6 the pre-defined pair of SRDO 1 of a node-id ≤ 64 (§8.3.3), and any other SRDO is
-    /// absent, because it has no COB-ID to be created with. A sub-index 3 left out, or 0, gets the
-    /// default of 20 ms: the device stores that value and recomputes its checksum from it. The SRDO
-    /// is absent without a mapping record, when a plain mapping slot up to the count is missing, 0
-    /// or not byte-aligned, or when an inverted slot is missing or differs from its plain slot
-    /// (§8.4.2.3): the device leaves it deleted then. Other malformed values make the record absent too.</summary>
+    /// <summary>What a device with node-id <paramref name="nodeId"/> holds after loading
+    /// <paramref name="description"/>: 1300h and every SRDO the device creates from the file,
+    /// with the records it then holds. It is built by the node's own loader — the same code, over
+    /// a dictionary of its own — not by a second reading of the file: the §8.4.2.2 defaults for
+    /// what the file leaves out or the device refuses (25 ms, 20 ms, the pre-defined COB-IDs of
+    /// SRDO 1 for a node-id 1..64, §8.3.3), the device's write rules (§8.4.2.2, §8.4.2.3:
+    /// consecutive COB-IDs, an inverted slot equal to its plain one, no COB-ID of another
+    /// existing SRDO, mapped objects the file declares), and the SRDO left deleted where the
+    /// loader leaves it deleted. So step D against a slave's own DCF expects what the slave
+    /// holds. Parameter values are read as ParameterValue, DefaultValue where none, $NODEID
+    /// resolved with <paramref name="nodeId"/>.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="description"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="nodeId"/> is not 1..127.</exception>
     public static PeerSafetyConfiguration FromDeviceDescription(CanOpenDeviceDescription description, byte nodeId)
     {
         if (description is null) throw new ArgumentNullException(nameof(description));
-        var objects = description.Objects.Objects;
+        var od = CanOpenNode.LoadDescribedSafetyObjects(description, nodeId);
         var configuration = new PeerSafetyConfiguration
         {
-            GlobalFailsafeCommandEnabled = objects.TryGetValue(SrdoRecords.GfcParameter, out var gfc) && Value(gfc, 0, nodeId) == 1,
+            GlobalFailsafeCommandEnabled = od.TryReadUnsigned(SrdoRecords.GfcParameter, 0x00, out var gfc) && gfc == 1,
         };
-        bool predefined = nodeId is >= 1 and <= 64;
         for (int n = 1; n <= SrdoRecords.MaxSrdoCount; n++)
         {
-            if (!objects.TryGetValue(SrdoRecords.CommIndex(n), out var comm)) continue;
-            uint direction = Value(comm, 1, nodeId) ?? 0;
-            if (direction is 0 or > 2) continue;
-            uint? srvt = Value(comm, 3, nodeId);
-            uint? cycle = Declares(comm, 2) ? Value(comm, 2, nodeId) : DefaultCycleTimeMilliseconds;
-            uint? cob1 = Declares(comm, 5) ? Value(comm, 5, nodeId) : n == 1 && predefined ? CanOpenCobId.SrdoDefaultCobId1(nodeId) : null;
-            uint? cob2 = Declares(comm, 6) ? Value(comm, 6, nodeId) : n == 1 && predefined ? CanOpenCobId.SrdoDefaultCobId2(nodeId) : null;
-            if (cycle is null || cob1 is null || cob2 is null) continue;
-            if (!objects.TryGetValue(SrdoRecords.MapIndex(n), out var map)) continue;
-            var mapping = new SrdoMapping();
-            uint? count = Declares(map, 0) ? Value(map, 0, nodeId) : 0;
-            bool ok = count is { } c && (c & 1) == 0 && c <= SrdoRecords.MappingSubindices;
-            for (byte s = 1; ok && s <= count; s += 2)
-            {
-                uint? raw = Value(map, s, nodeId);
-                if (raw is null or 0 || Value(map, (byte)(s + 1), nodeId) != raw) { ok = false; break; }
-                try { mapping.Add(new PdoMappingEntry((ushort)(raw.Value >> 16), (byte)(raw.Value >> 8), (byte)raw.Value)); }
-                catch (Exception ex) when (ex is ArgumentOutOfRangeException or InvalidOperationException) { ok = false; }
-            }
-            if (!ok) continue;
-            configuration.Add(n, new SrdoCommunicationParameter((SrdoDirection)direction,
-                TimeSpan.FromMilliseconds(cycle.Value), TimeSpan.FromMilliseconds(srvt is null or 0 ? DefaultValidationTimeMilliseconds : srvt.Value),
-                cob1.Value & CanOpenCobId.CanIdMask, cob2.Value & CanOpenCobId.CanIdMask), mapping);
+            if (!SrdoRecords.TryReadCommunication(od, n, out var parameter) || parameter.Direction == SrdoDirection.None) continue;
+            configuration.Add(n, parameter, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, n)));
         }
         return configuration;
-    }
-
-    /// <summary>The default of sub-index 2 (§8.4.2.2), in milliseconds.</summary>
-    private const uint DefaultCycleTimeMilliseconds = 25;
-
-    /// <summary>The default of sub-index 3 (§8.4.2.2), in milliseconds.</summary>
-    private const uint DefaultValidationTimeMilliseconds = 20;
-
-    /// <summary>Whether the file gives the sub-index a value at all: <see cref="Value"/> is null
-    /// both for one it leaves out and for one that does not parse.</summary>
-    private static bool Declares(CanOpenObject obj, byte subindex) => !string.IsNullOrEmpty(Text(obj, subindex));
-
-    private static string? Text(CanOpenObject obj, byte subindex)
-    {
-        if (obj.SubObjects.Count == 0)
-            return subindex != 0 ? null : string.IsNullOrEmpty(obj.ParameterValue) ? obj.DefaultValue : obj.ParameterValue;
-        return obj.SubObjects.TryGetValue(subindex, out var sub)
-            ? string.IsNullOrEmpty(sub.ParameterValue) ? sub.DefaultValue : sub.ParameterValue
-            : null;
-    }
-
-    private static uint? Value(CanOpenObject obj, byte subindex, byte nodeId)
-    {
-        var text = Text(obj, subindex);
-        if (string.IsNullOrEmpty(text)) return null;
-        try
-        {
-            return Convert.ToUInt32(CanOpenValueConverter.Parse(text!, CanOpenDataType.Unsigned32, nodeId), CultureInfo.InvariantCulture);
-        }
-        catch (Exception ex) when (ex is FormatException or OverflowException or NotSupportedException or ArgumentException or InvalidCastException)
-        {
-            return null;
-        }
     }
 }
 
