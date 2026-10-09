@@ -896,6 +896,9 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         node.ObjectDictionary.WriteUnsigned(0x1301, 2, 40);
         wire.SendNmt(NmtCommand.ResetCommunication, Producer);
         await WaitUntilAsync(() => node.ObjectDictionary.ReadUnsigned(0x1301, 2) == 30, "restored");
+        // The reset restores the objects in one actor turn, 13FEh after the records; a State read
+        // is a round trip queued behind that turn, so the reads below see all of it.
+        _ = node.State;
         node.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(1u);
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
     }
