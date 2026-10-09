@@ -125,8 +125,10 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         node.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(1u, "sub1 is written last and the kept ids are consistent");
     }
 
+    /// <summary>The file declares SRDO 1 only; the SrdoCount option asks for 4. The option is a
+    /// floor: the count is 4, 13FFh:00 says so, and the records above the file's exist.</summary>
     [Fact]
-    public void Undeclared_Srdo_Records_Do_Not_Exist_And_SrdoCount_Option_Adds_None()
+    public void The_SrdoCount_Option_Is_A_Floor_And_Its_Records_Exist_Above_The_Files()
     {
         var text = SafetyDcfText().Replace("3=0x1302\n", "").Replace("5=0x1382\n", "").Replace("SupportedObjects=7", "SupportedObjects=5");
         var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
