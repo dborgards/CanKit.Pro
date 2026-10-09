@@ -53,6 +53,27 @@ public class SafetyTypesTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new CanOpenNodeOptions { SrdoCount = -1 }.With());
     }
 
+    /// <summary>A caller compiled against 1.3.0 binds to <c>With</c> by its exact 13-parameter
+    /// signature; adding the SRDO parameters to that method would have been a binary break. The
+    /// kept overload carries the SRDO options of the record over.</summary>
+    [Fact]
+    public void The_1_3_0_With_Signature_Still_Exists_And_Keeps_The_Srdo_Options()
+    {
+        var signature = new[]
+        {
+            typeof(TimeSpan?), typeof(TimeSpan?), typeof(TimeSpan?), typeof(int?), typeof(int?), typeof(int?),
+            typeof(byte?), typeof(bool?), typeof(int?), typeof(bool?), typeof(bool?), typeof(bool?),
+            typeof(CanOpenNodeProfile?),
+        };
+        var method = typeof(CanOpenNodeOptions).GetMethod(nameof(CanOpenNodeOptions.With), signature);
+        method.Should().NotBeNull("the 1.3.0 signature of With is what compiled callers reference");
+
+        var source = new CanOpenNodeOptions { SrdoCount = 3, EnableChangeOfStateSrdo = false };
+        var copy = (CanOpenNodeOptions)method!.Invoke(source, new object?[] { null, null, null, null, null, null, null, null, null, null, null, null, null })!;
+        copy.SrdoCount.Should().Be(3);
+        copy.EnableChangeOfStateSrdo.Should().BeFalse();
+    }
+
     [Fact]
     public void State_And_Events_Carry_Their_Values()
     {

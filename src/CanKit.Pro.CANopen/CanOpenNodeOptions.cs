@@ -1,10 +1,11 @@
 using System;
+using System.ComponentModel;
 
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
 /// Runtime configuration for a <see cref="CanOpenNode"/>. All values are captured at construction
-/// time and treated as immutable for the node's lifetime; use <see cref="With"/> to derive a
+/// time and treated as immutable for the node's lifetime; use <c>With(...)</c> to derive a
 /// modified template for tests.
 /// </summary>
 /// <remarks>
@@ -170,7 +171,31 @@ public sealed class CanOpenNodeOptions
     /// <see cref="EnableChangeOfStateTpdo"/>. The refresh cycle restarts from that transmission.</summary>
     public bool EnableChangeOfStateSrdo { get; init; } = true;
 
-    /// <summary>Returns a copy of this options record with the provided overrides.</summary>
+    /// <summary>Returns a copy of this options record with the provided overrides. The 1.3.0
+    /// signature, kept so that callers compiled against it still bind; source callers resolve
+    /// to the overload with every parameter optional.</summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public CanOpenNodeOptions With(
+        TimeSpan? sdoTimeout,
+        TimeSpan? sdoServerTimeout,
+        TimeSpan? defaultTpdoEventTimerInterval,
+        int? eventQueueCapacity,
+        int? maxSdoTransferBytes,
+        int? sdoBlockThresholdBytes,
+        byte? sdoBlockSize,
+        bool? sdoBlockCrcSupported,
+        int? sdoBlockMaxRetransmissions,
+        bool? respondToNodeGuardingRtr,
+        bool? enableChangeOfStateTpdo,
+        bool? writableCommunicationParameters,
+        CanOpenNodeProfile? profile)
+        => With(sdoTimeout, sdoServerTimeout, defaultTpdoEventTimerInterval, eventQueueCapacity, maxSdoTransferBytes,
+            sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
+            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount: null, enableChangeOfStateSrdo: null);
+
+    /// <summary>Returns a copy of this options record with the provided overrides, validated
+    /// like the options a node is opened with.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">A resulting value is out of its range.</exception>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
         TimeSpan? sdoServerTimeout = null,
