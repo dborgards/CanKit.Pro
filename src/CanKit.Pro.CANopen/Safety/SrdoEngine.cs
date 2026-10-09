@@ -193,8 +193,9 @@ internal sealed partial class SrdoEngine : IDisposable
     /// <summary>Both frames as one unit handed to the host — "the redundant transmission is sent
     /// after the first transmission to the CAN controller with minimum delay" (§8.1) — then the
     /// refresh cycle restarts, so the refresh time is the maximum interval between transmissions.
-    /// A pair the host skips because the previous one is still being sent is simply not on the
-    /// bus; the consumer's SCT is what reports that.</summary>
+    /// A pair due while the previous one is still being sent waits as the host's pending pair
+    /// and is replaced by a later one (<see cref="ISrdoEngineHost.SendPair"/>); a send that
+    /// throws is reported and the cycle goes on.</summary>
     private void Transmit(SrdoRuntime rt)
     {
         try

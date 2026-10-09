@@ -9,8 +9,11 @@ internal interface ISrdoEngineHost
     /// <summary>A single frame, sent at once: the global failsafe command.</summary>
     void Send(uint cobId, byte[] payload);
 
-    /// <summary>One SRDO transmission: the plain frame, then the inverted one, as one unit. The
-    /// host may skip it while the previous pair of the same SRDO is still being sent.</summary>
+    /// <summary>One SRDO transmission: the plain frame, then the inverted one, as one unit, on
+    /// one ordered send chain for all SRDOs. While the previous pair of the same SRDO is still
+    /// being sent, the host keeps this one as that SRDO's pending pair — replacing an older
+    /// pending one, so the latest data wins — and sends it once the previous pair completes,
+    /// unless the node has left Operational by then.</summary>
     void SendPair(int srdoNumber, uint cobId1, byte[] plain, uint cobId2, byte[] inverted);
 
     void EmitEmcy(ushort errorCode);
