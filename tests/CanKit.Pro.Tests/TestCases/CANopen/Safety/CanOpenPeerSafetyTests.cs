@@ -654,6 +654,111 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent, not even the count read");
     }
 
+    private static async Task UntilAsync(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow + ShortTimeout;
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) throw new TimeoutException(what);
+            await Task.Delay(5);
+        }
+    }
+
+    /// <summary>A configuration held at its first write (1301h:01), the transaction's SDO channel
+    /// to the peer reserved.</summary>
+    private static async Task<Task<PeerSafetyResult>> HeldConfigurationAsync(ICanOpenNode master, FakeExpeditedServer fake)
+    {
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration());
+        await UntilAsync(() => fake.IsHolding, "the transaction is held at 1301h:01");
+        return configure;
+    }
+
+    /// <summary>The peer's SDO channel is reserved for the whole safety transaction: a public SDO
+    /// call to the same peer waits for it to end — it neither interleaves between two of its
+    /// transfers (where a write could stale the checksum it is about to acknowledge) nor meets
+    /// the transaction's transfer in flight.</summary>
+    [Fact]
+    public async Task An_Sdo_Call_To_The_Peer_Waits_For_A_Safety_Transaction_To_End()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
+        var configure = await HeldConfigurationAsync(master, fake);
+
+        var upload = master.SdoUploadAsync(Device, 0x1000, 0x00);
+        fake.ReleaseHeld();
+        (await configure.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        await upload.WithTimeoutAsync(ShortTimeout);
+        lock (fake.Requests)
+        {
+            fake.Requests.IndexOf((0x1000, 0x00)).Should().Be(fake.Requests.Count - 1, "the call reached the server after every request of the transaction");
+            fake.Requests.Count(r => r.Index == 0x1000 && r.Subindex == 0x00).Should().Be(1);
+        }
+    }
+
+    /// <summary>Only the channel to that peer is reserved: a call to another server goes out at once.</summary>
+    [Fact]
+    public async Task An_Sdo_Call_To_Another_Peer_Does_Not_Wait_For_The_Transaction()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
+        using var other = new FakeExpeditedServer(session, 3, 0x06, lieAt: (0, 0));
+        var configure = await HeldConfigurationAsync(master, fake);
+
+        await master.SdoUploadAsync(0x06, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout);
+        fake.IsHolding.Should().BeTrue("the transaction is still held");
+        fake.ReleaseHeld();
+        (await configure.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+    }
+
+    /// <summary>A call waiting for the channel is cancelled by its own token, and the transaction
+    /// it waited for is not touched.</summary>
+    [Fact]
+    public async Task A_Call_Waiting_For_The_Channel_Is_Cancelled_By_Its_Token()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
+        var configure = await HeldConfigurationAsync(master, fake);
+
+        using var cts = new System.Threading.CancellationTokenSource();
+        var upload = master.SdoUploadAsync(Device, 0x1000, 0x00, cts.Token);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => upload.WithTimeoutAsync(ShortTimeout));
+        fake.IsHolding.Should().BeTrue("cancelled while the transaction is still held");
+        fake.ReleaseHeld();
+        (await configure.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        lock (fake.Requests) fake.Requests.Should().NotContain((0x1000, 0x00));
+    }
+
+    /// <summary>Several calls arriving during a transaction all wait; none meets the "already in
+    /// flight" refusal, which stays only as the last line of defence.</summary>
+    [Fact]
+    public async Task Concurrent_Calls_During_A_Transaction_Wait_Instead_Of_Failing()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
+        var configure = await HeldConfigurationAsync(master, fake);
+
+        var calls = new[]
+        {
+            master.SdoUploadAsync(Device, 0x1000, 0x00),
+            master.SdoUploadAsync(Device, 0x1018, 0x01),
+            master.SdoDownloadAsync(Device, 0x2001, 0x00, new byte[] { 0x5A }),
+        };
+        fake.ReleaseHeld();
+        (await configure.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        foreach (var call in calls) await call.WithTimeoutAsync(ShortTimeout);
+        lock (fake.Requests) fake.Requests.TakeLast(3).Should().BeEquivalentTo(new (ushort, byte)[] { (0x1000, 0x00), (0x1018, 0x01), (0x2001, 0x00) });
+    }
+
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
     /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
     /// plus one so the readback differs.</summary>
@@ -664,6 +769,17 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         private readonly (ushort, byte) _lieAt;
         public readonly Dictionary<(ushort, byte), byte[]> Written = new();
         public readonly List<(ushort Index, byte Subindex)> Requests = new();
+        /// <summary>The first request to this pair is answered only on <see cref="ReleaseHeld"/>.</summary>
+        public (ushort, byte)? HoldAt { get; init; }
+        private Action? _heldReply;
+        private bool _held;
+        public bool IsHolding { get { lock (Requests) return _heldReply is not null; } }
+        public void ReleaseHeld()
+        {
+            Action? reply;
+            lock (Requests) { reply = _heldReply; _heldReply = null; }
+            reply?.Invoke();
+        }
         public FakeExpeditedServer(string session, int channel, byte nodeId, (ushort, byte) lieAt, bool emptyCount = false, byte srdoCount = 2)
         {
             _nodeId = nodeId;
@@ -707,6 +823,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
                     Array.Copy(value, 0, reply, 4, value.Length);
                 }
                 else return;
+                lock (Requests)
+                {
+                    if (!_held && HoldAt == (index, sub) && (d[0] & 0xE0) is 0x20 or 0x40)
+                    {
+                        _held = true;
+                        _heldReply = () => _bus.Transmit(CanFrame.Classic(0x580 + _nodeId, reply, isExtendedFrame: false));
+                        return;
+                    }
+                }
                 _bus.Transmit(CanFrame.Classic(0x580 + _nodeId, reply, isExtendedFrame: false));
             };
         }

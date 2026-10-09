@@ -560,6 +560,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CanOpenCobId.ValidateNodeId(serverNodeId);
         ValidateTransferMode(mode, nameof(mode));
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        return InPeerSdoChannelAsync(serverNodeId, cancellationToken,
+            () => SdoUploadCoreAsync(serverNodeId, index, subindex, mode, cancellationToken));
+    }
+
+    /// <summary>The upload itself, without the peer's SDO channel: for a caller that holds it
+    /// (a safety transaction). Still passes the peer gate.</summary>
+    private Task<byte[]> SdoUploadCoreAsync(byte serverNodeId, ushort index, byte subindex,
+        SdoTransferMode mode, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
@@ -613,6 +624,17 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var payload = data.ToArray();
+        return InPeerSdoChannelAsync(serverNodeId, cancellationToken,
+            () => SdoDownloadCoreAsync(serverNodeId, index, subindex, payload, mode, cancellationToken));
+    }
+
+    /// <summary>The download itself, without the peer's SDO channel: for a caller that holds it
+    /// (a safety transaction). Still passes the peer gate. <paramref name="payload"/> is not empty.</summary>
+    private Task<byte[]> SdoDownloadCoreAsync(byte serverNodeId, ushort index, byte subindex,
+        byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
 

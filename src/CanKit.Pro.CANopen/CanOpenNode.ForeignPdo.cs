@@ -159,7 +159,7 @@ internal sealed partial class CanOpenNode
         byte[] raw;
         try
         {
-            raw = await SdoUploadAsync(peerNodeId, commIndex, 0x01, cancellationToken).ConfigureAwait(false);
+            raw = await SdoUploadForObserverAsync(peerNodeId, commIndex, 0x01, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
@@ -283,7 +283,7 @@ internal sealed partial class CanOpenNode
         byte[] countBytes;
         try
         {
-            countBytes = await SdoUploadAsync(peerNodeId, mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
+            countBytes = await SdoUploadForObserverAsync(peerNodeId, mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
@@ -301,7 +301,7 @@ internal sealed partial class CanOpenNode
             byte[] raw;
             try
             {
-                raw = await SdoUploadAsync(peerNodeId, mapIndex, (byte)s, cancellationToken).ConfigureAwait(false);
+                raw = await SdoUploadForObserverAsync(peerNodeId, mapIndex, (byte)s, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex))
             {

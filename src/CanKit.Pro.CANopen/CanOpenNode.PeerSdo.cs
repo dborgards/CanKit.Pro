@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.Threading;
+using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Safety;
 
 namespace CanKit.Pro.CANopen;
@@ -7,6 +9,71 @@ namespace CanKit.Pro.CANopen;
 internal sealed partial class CanOpenNode
 {
     private readonly ConcurrentDictionary<byte, CanOpenDeviceDescription> _peerDescriptions = new();
+
+    // One SDO channel per peer. A public SDO call holds it for the length of the call, a safety
+    // transaction (ConfigurePeerSafetyAsync, VerifyPeerSafetyConfigurationAsync) for the whole
+    // transaction: nothing else of this node reaches that peer between two of its transfers. Not
+    // re-entrant — a path holding it calls the ...CoreAsync transfers, never the public ones.
+    private readonly ConcurrentDictionary<byte, SemaphoreSlim> _peerSdoChannels = new();
+
+    private SemaphoreSlim PeerSdoChannel(byte serverNodeId)
+        => _peerSdoChannels.GetOrAdd(serverNodeId, static _ => new SemaphoreSlim(1, 1));
+
+    /// <summary>Runs <paramref name="transfer"/> holding the peer's SDO channel; the wait honours
+    /// <paramref name="cancellationToken"/>. With the channel free the transfer's own task is
+    /// returned, so the call completes exactly when the transfer does (a disposal that fails it
+    /// is visible at once), and a synchronous refusal is thrown synchronously as before.</summary>
+    private Task<T> InPeerSdoChannelAsync<T>(byte serverNodeId, CancellationToken cancellationToken, Func<Task<T>> transfer)
+    {
+        var channel = PeerSdoChannel(serverNodeId);
+        var wait = channel.WaitAsync(cancellationToken);
+        return wait.Status == TaskStatus.RanToCompletion
+            ? RunHoldingChannel(channel, transfer)
+            : WaitThenRunAsync(channel, wait, transfer);
+    }
+
+    private static async Task<T> WaitThenRunAsync<T>(SemaphoreSlim channel, Task wait, Func<Task<T>> transfer)
+    {
+        await wait.ConfigureAwait(false);
+        return await RunHoldingChannel(channel, transfer).ConfigureAwait(false);
+    }
+
+    /// <summary>Starts <paramref name="transfer"/> with the channel held and releases it when the
+    /// transfer has ended, however it ended.</summary>
+    private static Task<T> RunHoldingChannel<T>(SemaphoreSlim channel, Func<Task<T>> transfer)
+    {
+        Task<T> task;
+        try
+        {
+            task = transfer();
+        }
+        catch
+        {
+            channel.Release();
+            throw;
+        }
+        _ = task.ContinueWith(static (_, state) => ((SemaphoreSlim)state!).Release(), channel,
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return task;
+    }
+
+    /// <summary>An upload for the observers (ObserveForeignPdoAsync, ObserveForeignSrdoAsync): it
+    /// does not wait for the peer's SDO channel. A busy channel — another SDO call or a safety
+    /// transaction with that peer — is reported as the "already in flight" refusal, which the
+    /// observers take as a live read that is unavailable and fall back to the file (FR-CO-030).</summary>
+    private Task<byte[]> SdoUploadForObserverAsync(byte serverNodeId, ushort index, byte subindex, CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        CanOpenCobId.ValidateNodeId(serverNodeId);
+        EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        var channel = PeerSdoChannel(serverNodeId);
+        if (!channel.Wait(0))
+        {
+            return Task.FromException<byte[]>(new InvalidOperationException(
+                $"An SDO transfer with server 0x{serverNodeId:X2} is already in flight."));
+        }
+        return RunHoldingChannel(channel, () => SdoUploadCoreAsync(serverNodeId, index, subindex, Sdo.SdoTransferMode.Auto, cancellationToken));
+    }
 
     /// <inheritdoc />
     public void BindPeerDeviceDescription(byte nodeId, CanOpenDeviceDescription description)

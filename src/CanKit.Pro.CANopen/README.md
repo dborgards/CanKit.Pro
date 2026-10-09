@@ -260,6 +260,11 @@ is not built.
 
 ## SDO client and a peer's device description
 
+Calls to one server are serialised: an SDO call waits for the previous call to that server, and
+for a safety transaction with it (`ConfigurePeerSafetyAsync`, `VerifyPeerSafetyConfigurationAsync`),
+to end — the wait honours the call's cancellation token — instead of failing because a transfer
+is in flight. Calls to different servers do not wait for each other.
+
 `SdoUploadAsync` and `SdoDownloadAsync` do not accept an arbitrary index. Before any frame is
 sent they check a peer EDS or DCF bound for that server:
 
@@ -323,7 +328,8 @@ is still not applied when it arrives.
 The COB-ID is read live from `1400h:01` / `1800h:01`. A word that comes back is used ahead of the
 peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID the file does
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
-by the peer-SDO gate, finds another SDO already in flight, or does not return a word.
+by the peer-SDO gate, finds the peer's SDO channel busy (another SDO call of this node, or a
+safety transaction, with that peer — the observer does not wait for it), or does not return a word.
 
 The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
 the peer description bound for that node applies. A read that aborts, times out, is refused by
@@ -743,7 +749,7 @@ result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates
 every such write clears it; an abort before that — for example `0800 0022h` from an Operational
 peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
-One configuration or verification per peer runs at a time.
+One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: another SDO call of this node to that peer waits until it has ended, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges).
 
 ### Verifying, and the boot-up
 

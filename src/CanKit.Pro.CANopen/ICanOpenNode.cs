@@ -343,7 +343,10 @@ public interface ICanOpenNode : IDisposable
     /// force block transfer (CiA 301 §7.2.4.3.15).
     /// (FR-CO-002 / FR-CO-003 / FR-CO-004). Refused locally with
     /// <see cref="PeerSdoAccessException"/> when the pair is not allowed for
-    /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.</summary>
+    /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.
+    /// Calls to one server are serialised: the call waits for the previous one to that server,
+    /// and for a safety transaction with it, to end; the wait honours
+    /// <paramref name="cancellationToken"/>.</summary>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
         CancellationToken cancellationToken = default);
@@ -365,7 +368,10 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="SdoTransferMode.Block"/> to force block transfer below that threshold; the
     /// expedited/segmented split itself is dictated by CiA 301 and is not selectable.
     /// Refused locally with <see cref="PeerSdoAccessException"/> when the pair is not allowed
-    /// for <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.</summary>
+    /// for <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.
+    /// Calls to one server are serialised: the call waits for the previous one to that server,
+    /// and for a safety transaction with it, to end; the wait honours
+    /// <paramref name="cancellationToken"/>.</summary>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,

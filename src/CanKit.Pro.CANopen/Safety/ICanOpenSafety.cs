@@ -67,9 +67,9 @@ public interface ICanOpenSafety
     /// checksums 13FFh:n, reads everything back and compares byte for byte, and only then writes
     /// 13FEh = A5h and reads it back. Before the first frame, every mapping entry is checked against
     /// the peer's bound EDS/DCF (declared, mappable, width, access in the SRDO's direction), since
-    /// the deletion comes first. Every transfer passes the peer-SDO gate. One operation per
-    /// peer at a time. An SDO abort, a timeout or a gate refusal propagates as from
-    /// SdoDownloadAsync. The peer's 13FEh is 0 once at least one parameter write has been
+    /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
+    /// channel is reserved for the whole transaction; other SDO calls of this node to that peer
+    /// wait. An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync. The peer's 13FEh is 0 once at least one parameter write has been
     /// accepted, because every such write clears it; an abort before that — for example
     /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
     /// <exception cref="InvalidOperationException">The peer returned no count from 13FFh:00, or a
@@ -84,7 +84,8 @@ public interface ICanOpenSafety
     /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n of every expected SRDO (must
     /// equal the checksum of the expected record) and the records themselves, and compares. An
     /// SRDO the expectation does not name must be deleted; its checksum is not compared, because
-    /// the device checks only those of existing SRDOs (§9.5). Nothing is written.</summary>
+    /// the device checks only those of existing SRDOs (§9.5). Nothing is written. The peer's SDO
+    /// channel is reserved for the whole transaction; other SDO calls of this node to that peer wait.</summary>
     /// <exception cref="InvalidOperationException">The peer returned no count from 13FFh:00, or a
     /// count above 64 (§8.4.2.2) — refused before any further frame.</exception>
     /// <exception cref="ArgumentException">The expectation names an SRDO above the peer's count.</exception>

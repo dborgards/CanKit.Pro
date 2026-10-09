@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Safety;
+using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
@@ -13,8 +14,6 @@ namespace CanKit.Pro.CANopen;
 /// transfer is a client SDO through the peer gate (FR-CO-029).</summary>
 internal sealed partial class CanOpenNode
 {
-    private readonly ConcurrentDictionary<byte, SemaphoreSlim> _peerSafetyGate = new();
-
     public async Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration,
         CancellationToken cancellationToken = default)
     {
@@ -25,7 +24,9 @@ internal sealed partial class CanOpenNode
         // Without a bound description the peer gate refuses the first transfer anyway.
         if (_peerDescriptions.TryGetValue(peerNodeId, out var description))
             EnsureMappingsFitDescription(configuration, description); // before the first frame
-        var gate = _peerSafetyGate.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
+        // The peer's SDO channel, for the whole transaction: no other SDO call of this node reaches
+        // the peer between two of its transfers. Every transfer below is a ...CoreAsync one.
+        var gate = PeerSdoChannel(peerNodeId);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -34,14 +35,14 @@ internal sealed partial class CanOpenNode
             var writes = SafetyWrites(configuration, peerCount).ToList();
             // "write all safety-relevant parameter incl. checksums"
             foreach (var (index, sub, value) in writes)
-                await SdoDownloadAsync(peerNodeId, index, sub, value, cancellationToken).ConfigureAwait(false);
+                await SdoDownloadCoreAsync(peerNodeId, index, sub, value, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
             // "read all safety-relevant parameter incl. checksums back" — "compared"
             var mismatches = await CompareAsync(peerNodeId, writes, cancellationToken).ConfigureAwait(false);
             if (mismatches.Count > 0) return new PeerSafetyResult(false, mismatches);
             // "configuration acknowledged"
             var valid = new[] { SrdoRecords.ConfigurationValidValue };
-            await SdoDownloadAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, valid, cancellationToken).ConfigureAwait(false);
-            var back = await SdoUploadAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, cancellationToken).ConfigureAwait(false);
+            await SdoDownloadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, valid, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
+            var back = await SdoUploadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
             if (!back.AsSpan().SequenceEqual(valid))
                 return new PeerSafetyResult(false, new[] { new PeerSafetyMismatch(SrdoRecords.ConfigurationValid, 0x00, valid, back) });
             return new PeerSafetyResult(true, Array.Empty<PeerSafetyMismatch>());
@@ -59,7 +60,9 @@ internal sealed partial class CanOpenNode
         if (expected is null) throw new ArgumentNullException(nameof(expected));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(expected); // before the first frame
-        var gate = _peerSafetyGate.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
+        // The peer's SDO channel, for the whole transaction: no other SDO call of this node reaches
+        // the peer between two of its transfers. Every transfer below is a ...CoreAsync one.
+        var gate = PeerSdoChannel(peerNodeId);
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -84,7 +87,7 @@ internal sealed partial class CanOpenNode
 
     private async Task<int> ReadPeerSrdoCountAsync(byte peerNodeId, CancellationToken cancellationToken)
     {
-        var count = await SdoUploadAsync(peerNodeId, SrdoRecords.Checksum, 0x00, cancellationToken).ConfigureAwait(false);
+        var count = await SdoUploadCoreAsync(peerNodeId, SrdoRecords.Checksum, 0x00, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
         if (count.Length < 1) throw new InvalidOperationException("The peer returned no SRDO count from 13FFh:00.");
         // Not clamped: SRDOs the peer claims beyond 64 could never be configured or verified,
         // and a configuration acknowledged over 1..64 would leave them unchecked.
@@ -219,7 +222,7 @@ internal sealed partial class CanOpenNode
         var mismatches = new List<PeerSafetyMismatch>();
         foreach (var (index, sub) in order)
         {
-            var actual = await SdoUploadAsync(peerNodeId, index, sub, cancellationToken).ConfigureAwait(false);
+            var actual = await SdoUploadCoreAsync(peerNodeId, index, sub, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
             if (!actual.AsSpan().SequenceEqual(final[(index, sub)]))
                 mismatches.Add(new PeerSafetyMismatch(index, sub, final[(index, sub)], actual));
         }

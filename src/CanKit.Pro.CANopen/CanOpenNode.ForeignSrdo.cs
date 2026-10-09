@@ -90,7 +90,7 @@ internal sealed partial class CanOpenNode
             uint? liveWord = null;
             try
             {
-                var raw = await SdoUploadAsync(peerNodeId, comm, 0x05, cancellationToken).ConfigureAwait(false);
+                var raw = await SdoUploadForObserverAsync(peerNodeId, comm, 0x05, cancellationToken).ConfigureAwait(false);
                 if (raw.Length >= 4) liveWord = ObjectDictionary.DecodeU32(raw);
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
@@ -114,7 +114,7 @@ internal sealed partial class CanOpenNode
     {
         try
         {
-            var raw = await SdoUploadAsync(peerNodeId, comm, 0x01, cancellationToken).ConfigureAwait(false);
+            var raw = await SdoUploadForObserverAsync(peerNodeId, comm, 0x01, cancellationToken).ConfigureAwait(false);
             if (raw.Length >= 1) return raw[0] == 0;
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
