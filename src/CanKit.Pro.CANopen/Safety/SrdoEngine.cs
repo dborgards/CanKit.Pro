@@ -18,7 +18,6 @@ namespace CanKit.Pro.CANopen.Safety;
 internal sealed partial class SrdoEngine : IDisposable
 {
     private readonly IProtocolActor _actor;
-    private readonly ITimeSource _time;
     private readonly IDeadlineScheduler _deadlines;
     private readonly ObjectDictionary _od;
     private readonly byte _nodeId;
@@ -32,7 +31,9 @@ internal sealed partial class SrdoEngine : IDisposable
         byte nodeId, int srdoCount, ISrdoEngineHost host)
     {
         _actor = actor ?? throw new ArgumentNullException(nameof(actor));
-        _time = time ?? throw new ArgumentNullException(nameof(time));
+        // The node's time source: the engine reads no clock itself — cycles run on the actor's
+        // scheduler and SCT/SRVT on the deadline scheduler, both driven by it — so it is only checked.
+        _ = time ?? throw new ArgumentNullException(nameof(time));
         _deadlines = deadlines ?? throw new ArgumentNullException(nameof(deadlines));
         _od = od ?? throw new ArgumentNullException(nameof(od));
         _host = host ?? throw new ArgumentNullException(nameof(host));
