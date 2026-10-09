@@ -251,8 +251,11 @@ OD-Write `1300h` = 1. `CanOpenNodeOptions`: `SrdoCount`, `EnableChangeOfStateSrd
 Typen: `PeerSafetyConfiguration` (`GlobalFailsafeCommandEnabled` + je SRDO-Nummer
 `(SrdoCommunicationParameter, SrdoMapping)`; `FromDeviceDescription(description, nodeId)` liest
 DCF-`ParameterValue`, Rückfall `DefaultValue`, `$NODEID` wie heute; Richtung 0 = gelöscht),
-`PeerSafetyResult { bool Acknowledged; IReadOnlyList<PeerSafetyMismatch> Mismatches }`,
-`PeerSafetyMismatch(Index, Subindex, Expected, Actual)`.
+`PeerSafetyResult { bool Succeeded; IReadOnlyList<PeerSafetyMismatch> Mismatches }` —
+`Succeeded` heißt bei `ConfigurePeerSafetyAsync` „quittiert", bei
+`VerifyPeerSafetyConfigurationAsync` „verifiziert" —, `PeerSafetyMismatch(Index, Subindex,
+Expected, Actual)`, `ForeignSrdoObserveResult { uint CobId1; ForeignPdoObservation? Observation;
+string? Reason }`.
 
 `ICanOpenSafety`, Master-Hälfte:
 
@@ -270,13 +273,13 @@ Task<ForeignSrdoObserveResult> ObserveForeignSrdoAsync(byte peerNodeId, uint cob
 Count aus `13FFh:00`; je SRDO Download in Lösch-zuerst-Reihenfolge, nicht genannte SRDOs
 sub1 = 0, dann `1300h`; `13FFh:n` = `SrdoCrc.Compute` (0 je gelöschtem); alles zurücklesen und
 byteweise vergleichen, zusätzlich CRC aus den zurückgelesenen Werten gegen zurückgelesenes
-`13FFh:n`; ohne Abweichung `13FEh` = `A5h` schreiben, zurücklesen → `Acknowledged`. Mit
+`13FFh:n`; ohne Abweichung `13FEh` = `A5h` schreiben, zurücklesen → `Succeeded`. Mit
 Abweichung kein `A5h`, Ergebnis listet die Paare. Abort, Timeout, Tor → Ausnahmen wie
 `SdoDownloadAsync`. Eine Operation je Peer gleichzeitig. Kein NMT-Kommando.
 
 **Schritt D** (`VerifyPeerSafetyConfigurationAsync`): nur Uploads. `13FEh` = `A5h`; je
 erwartetem SRDO `13FFh:n` gegen `SrdoCrc.Compute(expected)` sowie Comm-Record und Mapping gegen
-die Erwartung (§8.3.1 D nennt die Parameter selbst). Ergebnis `Verified`.
+die Erwartung (§8.3.1 D nennt die Parameter selbst). Ergebnis `Succeeded`; keine Writes.
 
 **Boot-up** (`ConsiderStart`): für einen Safety-Slave (Entscheidung 4) wird vor NMT Start
 `VerifyPeerSafetyConfigurationAsync(id, FromDeviceDescription(…))` angestoßen, Ergebnis auf den
