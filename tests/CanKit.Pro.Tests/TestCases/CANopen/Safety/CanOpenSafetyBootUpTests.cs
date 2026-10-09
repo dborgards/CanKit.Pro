@@ -187,7 +187,7 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
     {
         using var rig = OpenMaster();
         var expectationOf = typeof(CanOpenNode).GetMethod("SafetyExpectationOf", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        Task<object?> ExpectationAsync() => OnActorAsync(rig.Node, () => expectationOf.Invoke(rig.Node, new object[] { Slave }));
+        Task<object?> ExpectationAsync() => OnActorAsync<object?>(rig.Node, () => expectationOf.Invoke(rig.Node, new object[] { Slave }));
         var plain = PlainDcf();
         rig.Node.BindPeerDeviceDescription(Slave, plain);
         (await ExpectationAsync()).Should().BeNull("the plain DCF declares no SRDO");
