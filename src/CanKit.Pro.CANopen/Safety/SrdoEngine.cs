@@ -51,15 +51,21 @@ internal sealed partial class SrdoEngine : IDisposable
     /// <summary>Snapshot for any thread.</summary>
     public SrdoState GetState(int srdoNumber)
     {
+        CheckRange(srdoNumber);
+        return Volatile.Read(ref _snapshots[srdoNumber]);
+    }
+
+    private void CheckRange(int srdoNumber)
+    {
         if (srdoNumber < 1 || srdoNumber > SrdoCount)
             throw new ArgumentOutOfRangeException(nameof(srdoNumber), srdoNumber, $"SRDO number must be 1..{SrdoCount}.");
-        return Volatile.Read(ref _snapshots[srdoNumber]);
     }
 
     /// <summary>Reads record n and brings its runtime in line: configuration validity
     /// (§9.5 last rule), direction, times, ids and mapping. Re-arms when Operational.</summary>
     public void Rebuild(int srdoNumber)
     {
+        CheckRange(srdoNumber);
         if (_disposed) return;
         var rt = _runtimes[srdoNumber] ??= new SrdoRuntime(srdoNumber);
         Disarm(rt);
@@ -109,6 +115,7 @@ internal sealed partial class SrdoEngine : IDisposable
     /// transmits; the cycle restarts from this transmission.</summary>
     public void Trigger(int srdoNumber)
     {
+        CheckRange(srdoNumber);
         if (_disposed || !_operational) return;
         if (_runtimes[srdoNumber] is { Direction: SrdoDirection.Transmit, ConfigurationValid: true } rt) Transmit(rt);
     }
@@ -188,10 +195,22 @@ internal sealed partial class SrdoEngine : IDisposable
     /// cycle restarts, so the refresh time is the maximum interval between transmissions.</summary>
     private void Transmit(SrdoRuntime rt)
     {
-        var payload = BuildPayload(rt);
-        _host.Send(rt.CobId1, payload);
-        _host.Send(rt.CobId2, SrdoFrames.Invert(payload));
-        ScheduleCycle(rt, rt.CycleTime);
+        try
+        {
+            var payload = BuildPayload(rt);
+            _host.Send(rt.CobId1, payload);
+            _host.Send(rt.CobId2, SrdoFrames.Invert(payload));
+        }
+        catch (Exception ex)
+        {
+            // A transport failure is reported like every other send failure; it must not end the
+            // cycle, and the SRDO stays valid.
+            _host.ReportBackgroundException(ex);
+        }
+        finally
+        {
+            ScheduleCycle(rt, rt.CycleTime);
+        }
     }
 
     private byte[] BuildPayload(SrdoRuntime rt)
@@ -223,11 +242,14 @@ internal sealed partial class SrdoEngine : IDisposable
 
     private void SetInvalid(SrdoRuntime rt, SrdoInvalidReason? reason)
     {
-        bool changed = rt.IsValid || rt.Reason != reason;
+        bool wasValid = rt.IsValid;
+        bool changed = wasValid || rt.Reason != reason;
         rt.IsValid = false;
         rt.Reason = reason;
         Publish(rt);
-        if (changed && reason is not null) _host.SrdoStateChanged(rt.Number, false, reason);
+        // A null reason means the SRDO no longer exists (direction None): that is still a
+        // valid-to-invalid transition and is reported; an SRDO that was never valid is not.
+        if (changed && (reason is not null || wasValid)) _host.SrdoStateChanged(rt.Number, false, reason);
     }
 
     private void Publish(SrdoRuntime rt)

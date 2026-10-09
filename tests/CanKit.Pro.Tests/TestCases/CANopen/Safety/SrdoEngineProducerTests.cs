@@ -44,7 +44,17 @@ public class SrdoEngineProducerTests : IDisposable
         public readonly List<(int Srdo, bool IsValid, SrdoInvalidReason? Reason)> States = new();
         public int Gfcs;
         public readonly List<Exception> Exceptions = new();
-        public void Send(uint cobId, byte[] payload) => Sent.Add((cobId, payload));
+        /// <summary>Makes the next <see cref="Send"/> throw (once) instead of recording.</summary>
+        public volatile bool ThrowOnNextSend;
+        public void Send(uint cobId, byte[] payload)
+        {
+            if (ThrowOnNextSend)
+            {
+                ThrowOnNextSend = false;
+                throw new InvalidOperationException("bus off");
+            }
+            Sent.Add((cobId, payload));
+        }
         public void EmitEmcy(ushort errorCode) => Emcys.Add(errorCode);
         public void SrdoReceived(int srdoNumber, uint cobId, byte[] payload) => Received.Add((srdoNumber, cobId, payload));
         public void SrdoStateChanged(int srdoNumber, bool isValid, SrdoInvalidReason? reason) => States.Add((srdoNumber, isValid, reason));
@@ -95,10 +105,10 @@ public class SrdoEngineProducerTests : IDisposable
         od.WriteUnsigned(SrdoRecords.ConfigurationValid, 0, 0xA5);
     }
 
-    private SrdoEngine Start(int count = 2)
+    private SrdoEngine Start(int count = 2, IProtocolActor? actor = null)
     {
         Populate(_od, NodeId, count);
-        _engine = new SrdoEngine(_actor, _clock, _deadlines, _od, NodeId, count, _host);
+        _engine = new SrdoEngine(actor ?? _actor, _clock, _deadlines, _od, NodeId, count, _host);
         return _engine;
     }
 
@@ -221,6 +231,144 @@ public class SrdoEngineProducerTests : IDisposable
         Advance(TimeSpan.FromMilliseconds(NodeId));
         _host.Sent.Should().HaveCount(2);
         _host.Sent[0].Payload.Should().BeEmpty("0 ≤ L ≤ 8 (§8.1.3.1)");
+    }
+
+    [Fact]
+    public void A_Valid_Producer_Rebuilt_To_Direction_None_Is_Reported_As_Gone()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        engine.GetState(1).IsValid.Should().BeTrue();
+        _od.WriteUnsigned(SrdoRecords.CommIndex(1), 1, 0);
+        OnActor(() => engine.Rebuild(1));
+        engine.GetState(1).IsValid.Should().BeFalse();
+        _host.States.Should().Contain((1, false, null), "a null reason means the SRDO no longer exists, and snapshot and event must agree");
+        Advance(TimeSpan.FromMilliseconds(100));
+        _host.Sent.Should().HaveCount(2, "a record without a direction does not transmit");
+    }
+
+    [Fact]
+    public void A_Throwing_Send_Is_Reported_And_The_Cycle_Goes_On()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        _host.ThrowOnNextSend = true;
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        _host.Exceptions.Should().ContainSingle().Which.Should().BeOfType<InvalidOperationException>();
+        _host.Sent.Should().BeEmpty();
+        engine.GetState(1).IsValid.Should().BeTrue("a transport failure does not invalidate the SRDO");
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(2, "the refresh cycle was restarted despite the failure");
+    }
+
+    [Fact]
+    public void Rebuild_Mid_Cycle_Replaces_The_Pending_Cycle()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));   // t = 17 ms, first pair went out at 8.5 ms, next due 33.5 ms
+        Advance(TimeSpan.FromMilliseconds(10));       // t = 27 ms
+        _host.Sent.Should().HaveCount(2);
+        Configure(_od, 1, SrdoDirection.Transmit, 40, 20, 0x123, 0x124);
+        OnActor(() => engine.Rebuild(1));             // due again at 27 + 8.5 = 35.5 ms
+        Advance(TimeSpan.FromMilliseconds(7));        // t = 34 ms, past the old due time
+        _host.Sent.Should().HaveCount(2, "the cycle pending before the rebuild must not fire");
+        Advance(TimeSpan.FromMilliseconds(1.5));      // t = 35.5 ms
+        _host.Sent.Should().HaveCount(4, "exactly one pair, 0.5 ms × node-id after the rebuild");
+        Advance(TimeSpan.FromMilliseconds(39));
+        _host.Sent.Should().HaveCount(4);
+        Advance(TimeSpan.FromMilliseconds(1));
+        _host.Sent.Should().HaveCount(6, "then every 40 ms, the new refresh time");
+    }
+
+    [Fact]
+    public void Leave_And_Reenter_Mid_Cycle_Starts_Over_With_The_Initial_Delay()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));   // next due 33.5 ms
+        Advance(TimeSpan.FromMilliseconds(10));       // t = 27 ms
+        OnActor(() => engine.LeaveOperational());
+        OnActor(() => engine.EnterOperational());     // due 35.5 ms
+        Advance(TimeSpan.FromMilliseconds(7));        // t = 34 ms
+        _host.Sent.Should().HaveCount(2, "the cycle of the earlier Operational period must not fire");
+        Advance(TimeSpan.FromMilliseconds(1.5));
+        _host.Sent.Should().HaveCount(4);
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(6);
+    }
+
+    [Fact]
+    public void Entering_Operational_Twice_Does_Not_Double_The_Cycle()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.EnterOperational(); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        _host.Sent.Should().HaveCount(2, "one pair, not two");
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(4);
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(6);
+    }
+
+    /// <summary>Forwards to a real actor and remembers every timer the engine asked for, so a test
+    /// can see a timer being released, not just not firing.</summary>
+    private sealed class TrackingActor : IProtocolActor
+    {
+        private readonly IProtocolActor _inner;
+        public readonly List<Handle> Timers = new();
+        public TrackingActor(IProtocolActor inner) => _inner = inner;
+        public void Post(Action work) => _inner.Post(work);
+        public Task PostAsync(Action work, System.Threading.CancellationToken cancellationToken = default) => _inner.PostAsync(work, cancellationToken);
+        public Task<T> PostAsync<T>(Func<T> work, System.Threading.CancellationToken cancellationToken = default) => _inner.PostAsync(work, cancellationToken);
+        public IDisposable Schedule(TimeSpan delay, Action callback)
+        {
+            var handle = new Handle(_inner.Schedule(delay, callback));
+            Timers.Add(handle);
+            return handle;
+        }
+        public event EventHandler<Exception> BackgroundExceptionOccurred { add { } remove { } }
+        public void Dispose() { }
+
+        public sealed class Handle : IDisposable
+        {
+            private readonly IDisposable _inner;
+            public Handle(IDisposable inner) => _inner = inner;
+            public bool Disposed { get; private set; }
+            public void Dispose() { Disposed = true; _inner.Dispose(); }
+        }
+    }
+
+    [Fact]
+    public void Leaving_Operational_Releases_The_Pending_Timer()
+    {
+        var tracking = new TrackingActor(_actor);
+        var engine = Start(actor: tracking);
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        var pending = tracking.Timers[^1];
+        pending.Disposed.Should().BeFalse("the cycle is running");
+        OnActor(() => engine.LeaveOperational());
+        pending.Disposed.Should().BeTrue("a cycle that cannot fire any more must not stay scheduled");
+    }
+
+    [Fact]
+    public void An_SRDO_Number_Out_Of_Range_Is_Rejected()
+    {
+        var engine = Start();
+        foreach (var n in new[] { 0, 3, -1 })
+        {
+            engine.Invoking(e => e.Rebuild(n)).Should().Throw<ArgumentOutOfRangeException>();
+            engine.Invoking(e => e.Trigger(n)).Should().Throw<ArgumentOutOfRangeException>();
+            engine.Invoking(e => e.GetState(n)).Should().Throw<ArgumentOutOfRangeException>();
+        }
     }
 
     [Fact]
