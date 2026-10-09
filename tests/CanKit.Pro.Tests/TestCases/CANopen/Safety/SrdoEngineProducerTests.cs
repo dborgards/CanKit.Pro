@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.Actor;
@@ -172,6 +173,49 @@ public class SrdoEngineProducerTests : IDisposable
         _host.Sent[0].Payload.Should().Equal(0x34, 0x12, 0x5A);
         _host.Sent[1].CobId.Should().Be(0x124u);
         _host.Sent[1].Payload.Should().Equal(0xCB, 0xED, 0xA5);
+    }
+
+    /// <summary>§8.1.3.1: an SRDO carries its mapped objects at the length the mapping gives
+    /// them. A mapped object re-declared with another width after the configuration was
+    /// committed no longer fits its entry: the producer transmits nothing — no zero-filled pair —
+    /// and the SRDO is invalid with MappedObjectUnavailable until it is rebuilt. The engine rig
+    /// has no declare guard, so the dictionary is re-declared directly here; on a node the guard
+    /// refuses that (CanOpenSafetyNodeTests).</summary>
+    [Fact]
+    public void A_Mapped_Object_Of_Another_Width_Stops_The_Producer()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        _host.Sent.Should().HaveCount(2);
+
+        _od.AddU8(0x2000, 0, 0x34);   // UNSIGNED16 mapped with 16 bits, now UNSIGNED8
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(2, "no pair with a fabricated byte goes out");
+        engine.GetState(1).IsValid.Should().BeFalse();
+        engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.MappedObjectUnavailable);
+        _host.States.Last().Should().Be((1, false, SrdoInvalidReason.MappedObjectUnavailable));
+        _host.Exceptions.Should().ContainSingle().Which.Message.Should().Contain("0x2000:00");
+
+        OnActor(() => engine.Trigger(1));
+        Advance(TimeSpan.FromMilliseconds(100));
+        _host.Sent.Should().HaveCount(2, "neither the cycle nor an event-driven transmission sends again");
+        _host.Exceptions.Should().ContainSingle("the cycle stopped with the first failure");
+    }
+
+    /// <summary>A mapped object that is gone stops the producer the same way.</summary>
+    [Fact]
+    public void A_Missing_Mapped_Object_Stops_The_Producer()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        _od.Remove(0x2001, 0).Should().BeTrue();
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(2);
+        engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.MappedObjectUnavailable);
     }
 
     [Fact]

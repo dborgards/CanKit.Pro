@@ -4,6 +4,7 @@ using AwesomeAssertions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Safety;
+using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Reliability;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -206,6 +207,67 @@ public class SrdoEngineConsumerTests : IDisposable
         _engine.GetState(1).IsValid.Should().BeTrue();
         Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);
         _host.Emcys.Should().HaveCount(2, "a frame that fits ends the run");
+    }
+
+    private void RefuseWritesTo(ushort index)
+        => _od.WriteValidator = (i, _, _) => i == index ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
+
+    /// <summary>Data the consumer cannot use counts as not received, as §8.1.3.1 leaves a short
+    /// pair unprocessed. A pair whose second mapped object refuses its bytes makes the SRDO
+    /// invalid with ActuationRefused instead of valid: no SrdoReceived, the refusal reported once, the object written before it stays
+    /// written. The next pair the objects take makes it valid again.</summary>
+    [Fact]
+    public void A_Refused_Mapped_Write_Invalidates_With_ActuationRefused()
+    {
+        StartConsumer();
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _engine.GetState(1).IsValid.Should().BeTrue();
+        RefuseWritesTo(0x2001);
+        Frame(0x123, 0x22, 0x11, 0x02); Frame(0x124, 0xDD, 0xEE, 0xFD);
+        _engine.GetState(1).IsValid.Should().BeFalse("a pair the mapped objects refused is not received");
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ActuationRefused);
+        _host.States.Last().Should().Be((1, false, SrdoInvalidReason.ActuationRefused));
+        _host.Received.Should().ContainSingle("only the first pair was received").Which.Payload.Should().Equal(Plain);
+        _host.Exceptions.Should().ContainSingle().Which.Message.Should().Contain("0x2001:00");
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1122u, "the entry before the refusal stays written");
+        _od.ReadUnsigned(0x2001, 0).Should().Be(0x01u, "the refused entry keeps the value of the last pair");
+
+        _od.WriteValidator = null;
+        Frame(0x123, 0x22, 0x11, 0x03); Frame(0x124, 0xDD, 0xEE, 0xFC);
+        _engine.GetState(1).IsValid.Should().BeTrue("a pair the objects take re-validates");
+        _host.States.Last().Should().Be((1, true, (SrdoInvalidReason?)null));
+        _host.Received.Should().HaveCount(2);
+        _od.ReadUnsigned(0x2001, 0).Should().Be(0x03u);
+    }
+
+    /// <summary>The first refusal ends the pair: the objects after it are not written.</summary>
+    [Fact]
+    public void A_Refused_Mapped_Write_Stops_The_Pair_At_The_Refusal()
+    {
+        StartConsumer();
+        RefuseWritesTo(0x2000);
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ActuationRefused);
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u);
+        _od.ReadUnsigned(0x2001, 0).Should().Be(0x5Au, "the entry after the refusal is not written");
+        _host.Exceptions.Should().ContainSingle();
+        _host.Received.Should().BeEmpty();
+    }
+
+    /// <summary>A refused pair is not received (as a short one, §8.1.3.1), so it does not restart the SCT — the SCT
+    /// runs on from the last pair that was taken and, when it expires, replaces ActuationRefused
+    /// with SafeguardCycleExpired.</summary>
+    [Fact]
+    public void A_Refused_Pair_Does_Not_Restart_The_Sct()
+    {
+        StartConsumer();
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        Advance(TimeSpan.FromMilliseconds(40));
+        RefuseWritesTo(0x2001);
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ActuationRefused);
+        Advance(TimeSpan.FromMilliseconds(10));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.SafeguardCycleExpired, "50 ms since the last pair taken");
     }
 
     [Fact]

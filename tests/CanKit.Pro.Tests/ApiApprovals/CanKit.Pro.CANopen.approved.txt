@@ -584,6 +584,8 @@ namespace CanKit.Pro.CANopen.Safety
         ValidationTimeExpired = 4,
         OutOfOrder = 5,
         Mismatch = 6,
+        ActuationRefused = 7,
+        MappedObjectUnavailable = 8,
     }
     public sealed class SrdoMapping
     {

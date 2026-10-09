@@ -622,6 +622,15 @@ through the same validator against a copy of the dictionary — so one the dicti
 part-way (a mapped object the direction cannot use, COB-IDs another SRDO holds) changes nothing:
 the SRDO, its checksum and `13FEh` stay as they were.
 
+An object an existing SRDO maps (sub-index `01h` ≠ 0), producer or consumer, cannot be
+re-declared: `Add*` throws `InvalidOperationException` naming the SRDO. The checksum covers the
+mapping entry, not the declaration behind it, so a new width or access would otherwise reach the
+bus or the application with the configuration still valid. Writing the object's value is not
+affected. To re-declare it, delete the SRDO first (§8.4.2.2, object 1381h–13C0h: "For
+changing the SRDO mapping first the SRDO shall be deleted"); creating it again checks every
+mapped object anew. The PDOs have no such rule — a re-declared RPDO object only surfaces when a
+PDO is written into it.
+
 `CommitSafetyConfiguration()` is §9.2 for a node configured locally: it writes `13FFh:n` for
 every SRDO, computed by `SrdoCrc.Compute`, and then `13FEh` = `A5h`. `A5h` has to come last,
 because every checksum write clears it. The checksum (§8.4.2.2) runs over the direction (1 byte),
@@ -662,7 +671,13 @@ which leaving Operational or disposing cancels; the token is honoured until the 
 starts. A send task already running still hands its frame to the driver, because the bus service
 does not check the token before the driver call (#294) — as the driver queue would on any
 controller. A send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
-SRDO stays valid. `GetSrdoState(n)` of a producer is valid while the node is Operational with a
+SRDO stays valid. A mapped object that is gone, or a fixed-size one whose width no longer matches
+its mapping entry, stops the producer instead (§8.1.3.1): no pair padded or cut to fit goes out,
+the failure is reported on `BackgroundExceptionOccurred`, and the SRDO is
+`MappedObjectUnavailable` — no further cycle and no `TriggerSrdoAsync` transmission — until it is
+rebuilt (a record written, or Operational entered again). With the rule on re-declaring above this
+takes a path around `Add*`; it is the guard behind that rule.
+`GetSrdoState(n)` of a producer is valid while the node is Operational with a
 valid configuration. The state is a snapshot of the actor's view: right after `OpenNode` the
 records are taken on the actor's first turn, so a read before any call that round-trips the actor
 (`State`, say) has returned may still show direction `None`.
@@ -678,6 +693,13 @@ Then (§8.1.1, §8.1.3.1, §9.5):
   (`Mismatch`);
 * a complete pair writes the mapped objects, raises `SrdoReceived` and restarts the SCT; when the
   SCT elapses without one the SRDO is `SafeguardCycleExpired`;
+* a mapped object that refuses its bytes — its write validator, or a declaration that no longer
+  takes them — ends the writing there: the objects before it keep this pair's bytes, the refused
+  one and those after it keep their previous values, and the refusal is reported on
+  `BackgroundExceptionOccurred`. The SRDO is `ActuationRefused`, and the pair counts as not
+  received, as §8.1.3.1 leaves a pair too short for the mapping unprocessed: no `SrdoReceived`,
+  and the SCT runs on from the last pair taken, so its expiry turns the reason into
+  `SafeguardCycleExpired`;
 * a pair shorter than the mapping is not processed and produces EMCY `8210h` (when EMCY is
   enabled) once, until a pair of the right length arrives or the SRDO is rebuilt — as for an
   RPDO; a longer one uses its first bytes.

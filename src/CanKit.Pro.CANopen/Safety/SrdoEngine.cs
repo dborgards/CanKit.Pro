@@ -119,7 +119,8 @@ internal sealed partial class SrdoEngine : IDisposable
     {
         CheckRange(srdoNumber);
         if (_disposed || !_operational) return;
-        if (_runtimes[srdoNumber] is { Direction: SrdoDirection.Transmit, ConfigurationValid: true } rt) Transmit(rt);
+        // IsValid: a producer stopped by a mapped object it cannot read stays silent (MappedObjectUnavailable).
+        if (_runtimes[srdoNumber] is { Direction: SrdoDirection.Transmit, ConfigurationValid: true, IsValid: true } rt) Transmit(rt);
     }
 
     /// <summary>The OD entries mapped in a transmit SRDO, for the node's change-of-state
@@ -200,9 +201,16 @@ internal sealed partial class SrdoEngine : IDisposable
     /// throws is reported and the cycle goes on.</summary>
     private void Transmit(SrdoRuntime rt)
     {
+        if (BuildPayload(rt) is not { } payload)
+        {
+            // Not a pair padded or cut to fit: no pair at all, and no further cycle until the
+            // SRDO is rebuilt. Consumers see the silence as an SCT expiry.
+            Disarm(rt);
+            SetInvalid(rt, SrdoInvalidReason.MappedObjectUnavailable);
+            return;
+        }
         try
         {
-            var payload = BuildPayload(rt);
             _host.SendPair(rt.Number, rt.CobId1, payload, rt.CobId2, SrdoFrames.Invert(payload));
         }
         catch (Exception ex)
@@ -217,18 +225,38 @@ internal sealed partial class SrdoEngine : IDisposable
         }
     }
 
-    private byte[] BuildPayload(SrdoRuntime rt)
+    /// <summary>The mapped objects at the lengths the mapping gives them (§8.1.3.1), or null —
+    /// reported — when one is missing or a fixed-size one no longer has that width: it was
+    /// re-declared after the configuration was committed, and neither the CRC nor the records
+    /// cover a declaration. A variable-size object (a string, a domain) is cut or zero-padded to
+    /// its entry, as before; its width was never fixed.</summary>
+    private byte[]? BuildPayload(SrdoRuntime rt)
     {
         var payload = new byte[rt.TotalBytes];
         int offset = 0;
         foreach (var entry in rt.Mapping)
         {
-            if (_od.TryReadRaw(entry.Index, entry.Subindex, out var raw))
-                Buffer.BlockCopy(raw, 0, payload, offset, Math.Min(raw.Length, entry.ByteLength));
+            if (!_od.TryGet(entry.Index, entry.Subindex, out var od))
+            {
+                ReportUnavailable(rt, entry, "does not exist");
+                return null;
+            }
+            var raw = od.GetRawValue();
+            int fixedSize = OdEntryLayout.FixedSize(od.DataType);
+            if (fixedSize > 0 && fixedSize != entry.ByteLength)
+            {
+                ReportUnavailable(rt, entry, $"is {od.DataType} ({fixedSize} byte(s)), not the {entry.ByteLength} byte(s) mapped");
+                return null;
+            }
+            Buffer.BlockCopy(raw, 0, payload, offset, Math.Min(raw.Length, entry.ByteLength));
             offset += entry.ByteLength;
         }
         return payload;
     }
+
+    private void ReportUnavailable(SrdoRuntime rt, PdoMappingEntry entry, string what)
+        => _host.ReportBackgroundException(new InvalidOperationException(
+            $"SRDO{rt.Number}: the mapped object 0x{entry.Index:X4}:{entry.Subindex:X2} {what}; the producer transmits nothing until the SRDO is rebuilt (CiA DSP 304 §8.1.3.1)."));
 
     // -----------------------------------------------------------------------------------------
     // State (transitions only are reported; the snapshot is for any thread).

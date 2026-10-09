@@ -162,6 +162,20 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         }
     }
 
+    /// <summary>The lowest SRDO that exists (1300h+n:01 ≠ 0, §8.4.2.2) and maps the entry, or
+    /// null. A deleted SRDO does not count: creating it again checks every mapped object anew
+    /// (the direction write, <see cref="ValidateSrdoCommunicationWrite"/>).</summary>
+    private int? ExistingSrdoMapping(ushort index, byte subindex)
+    {
+        for (int n = 1; n <= _srdoCount; n++)
+        {
+            if (!_od.TryReadUnsigned(SrdoRecords.CommIndex(n), 0x01, out var direction) || direction == 0) continue;
+            foreach (var entry in SrdoRecords.ReadMapping(_od, n))
+                if (entry.Index == index && entry.Subindex == subindex) return n;
+        }
+        return null;
+    }
+
     /// <summary>One CAN-ID carries one communication object (#133). PDO, SYNC and EMCY
     /// cannot sit on 101h–180h at all: CiA 301 Table 40 restricts the range and their validators
     /// refuse it, so only SRDO against SRDO is checked here.</summary>

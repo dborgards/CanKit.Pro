@@ -74,14 +74,16 @@ public sealed class ObjectDictionary
 
     /// <summary>
     /// Internal hook for <see cref="CanOpenNode"/>: consulted for every <c>Add*</c> call, whether
-    /// it would replace an existing entry or add a new sub-index. Returning
-    /// <see langword="false"/> makes the call throw, which is how the node keeps its managed
-    /// communication objects from being re-declared with a different type or access, or extended
-    /// by a sub-index it does not implement (a reserved <c>1800h:04</c> the generic SDO server
-    /// would otherwise serve), behind its back. The node declares its own through
+    /// it would replace an existing entry (the third argument) or add a new sub-index. Returning
+    /// a message makes the call throw an <see cref="InvalidOperationException"/> carrying it,
+    /// which is how the node keeps its managed communication objects from being re-declared with
+    /// a different type or access, or extended by a sub-index it does not implement (a reserved
+    /// <c>1800h:04</c> the generic SDO server would otherwise serve), and the objects an existing
+    /// SRDO maps from being re-declared, behind its back. Runs under the write gate, so it reads
+    /// the dictionary as the declaration will find it. The node declares its own through
     /// <see cref="Declare"/>.
     /// </summary>
-    internal Func<ushort, byte, bool>? DeclareGuard { get; set; }
+    internal Func<ushort, byte, bool, string?>? DeclareGuard { get; set; }
 
     /// <summary>Total number of registered <c>(index, subindex)</c> entries.</summary>
     public int Count
@@ -461,14 +463,8 @@ public sealed class ObjectDictionary
             {
                 var key = Key(index, subindex);
                 replaced = _entries.ContainsKey(key);
-                if (DeclareGuard is { } guard && !guard(index, subindex))
-                {
-                    throw new InvalidOperationException(replaced
-                        ? $"OD entry 0x{index:X4}:{subindex:X2} is a communication object managed by the node and "
-                          + "cannot be re-declared; write its value instead (WriteUnsigned / WriteRaw)."
-                        : $"OD object 0x{index:X4} is a communication object managed by the node: its sub-indices are "
-                          + "declared by the node, not by the application (1016h grows through AddHeartbeatConsumer).");
-                }
+                if (DeclareGuard is { } guard && guard(index, subindex, replaced) is { } refusal)
+                    throw new InvalidOperationException(refusal);
                 _entries[key] = entry;
             }
             if (replaced) EntryWritten?.Invoke(index, subindex);

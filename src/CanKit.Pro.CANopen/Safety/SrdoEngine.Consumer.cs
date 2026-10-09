@@ -114,8 +114,15 @@ internal sealed partial class SrdoEngine
             return;
         }
         rt.ShortFrameReported = false;
+        // Data the consumer cannot use is not received, as §8.1.3.1 leaves a short pair
+        // unprocessed: a pair a mapped object refused neither validates the SRDO nor restarts the
+        // SCT, which runs on from the last pair taken.
+        if (!Actuate(rt, first))
+        {
+            Invalidate(rt, SrdoInvalidReason.ActuationRefused);
+            return;
+        }
         ArmSct(rt);
-        Actuate(rt, first);
         SetValid(rt);
         _host.SrdoReceived(rt.Number, rt.CobId1, first);
     }
@@ -129,8 +136,9 @@ internal sealed partial class SrdoEngine
     }
 
     /// <summary>"If L exceeds the number 'n' … only the first 'n' bytes are used" (§8.1.3.1).
-    /// Writes under the OD lock, like the RPDO path; a rejected write is reported, not swallowed.</summary>
-    private void Actuate(SrdoRuntime rt, byte[] payload)
+    /// Writes under the OD lock, like the RPDO path. A rejected write is reported, not swallowed,
+    /// and ends the pair there: false, with the objects before it written and the rest untouched.</summary>
+    private bool Actuate(SrdoRuntime rt, byte[] payload)
     {
         int offset = 0;
         foreach (var entry in rt.Mapping)
@@ -142,8 +150,10 @@ internal sealed partial class SrdoEngine
             {
                 _host.ReportBackgroundException(new InvalidOperationException(
                     $"SRDO{rt.Number}: the mapped object 0x{entry.Index:X4}:{entry.Subindex:X2} rejected {entry.ByteLength} byte(s): {ex.Message}", ex));
+                return false;
             }
             offset += entry.ByteLength;
         }
+        return true;
     }
 }

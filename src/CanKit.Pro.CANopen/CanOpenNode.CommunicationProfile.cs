@@ -208,12 +208,38 @@ internal sealed partial class CanOpenNode
 
         if (_srdoCount > 0) PopulateSafetyObjects();
 
-        _od.DeclareGuard = (index, _) => !IsManagedCommunicationObject(index);
+        _od.DeclareGuard = DeclareRefusal;
         _od.WriteValidator = ValidateCommunicationWrite;
         _od.EntryWritten += OnOdEntryWrittenForCommunicationProfile;
 
         _factoryDefaults = SnapshotRestorableValues();
         _powerOnValues = _factoryDefaults;
+    }
+
+    /// <summary>Why the application may not declare this entry, or null when it may: a managed
+    /// communication object (below), or an object an existing SRDO maps (CiA DSP 304 §8.4.2.2,
+    /// object 1381h–13C0h: "For changing the SRDO mapping first the SRDO shall be deleted").
+    /// The PDOs have no such rule — a re-declared RPDO object surfaces when it is actuated —
+    /// but an SRDO's CRC covers its mapping entries, not the declarations behind them, so a new
+    /// width or access would reach the bus or the application with the configuration still
+    /// valid. Runs under the dictionary's write gate.</summary>
+    private string? DeclareRefusal(ushort index, byte subindex, bool replaced)
+    {
+        if (IsManagedCommunicationObject(index))
+        {
+            return replaced
+                ? $"OD entry 0x{index:X4}:{subindex:X2} is a communication object managed by the node and "
+                  + "cannot be re-declared; write its value instead (WriteUnsigned / WriteRaw)."
+                : $"OD object 0x{index:X4} is a communication object managed by the node: its sub-indices are "
+                  + "declared by the node, not by the application (1016h grows through AddHeartbeatConsumer).";
+        }
+        if (ExistingSrdoMapping(index, subindex) is { } n)
+        {
+            return $"OD entry 0x{index:X4}:{subindex:X2} is mapped by SRDO {n}, which exists, and cannot be re-declared: "
+                   + "the SRDO's checksum covers the mapping entry, not the declaration behind it. Write its value instead, "
+                   + $"or delete the SRDO first (0x{Safety.SrdoRecords.CommIndex(n):X4}:01 = 0 in Pre-Operational, CiA DSP 304 §8.4.2.2).";
+        }
+        return null;
     }
 
     /// <summary>Objects whose values drive the node and which the application therefore writes

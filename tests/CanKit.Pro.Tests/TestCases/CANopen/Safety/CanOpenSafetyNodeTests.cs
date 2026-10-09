@@ -773,6 +773,39 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.Invoking(s => s.GetSrdoState(1)).Should().Throw<ObjectDisposedException>();
     }
 
+    /// <summary>An object an existing SRDO maps — producer or consumer — cannot be re-declared:
+    /// the CRC covers the mapping entry, not the object's declaration, so a new width or access
+    /// would reach the bus or the application unchecked. §8.4.2.2 (1381h–13C0h): "For changing
+    /// the SRDO mapping first the SRDO shall be deleted" — once it is, the object can be re-declared,
+    /// because creating the SRDO again checks every mapped object anew. An object no SRDO maps
+    /// stays re-declarable.</summary>
+    [Fact]
+    public void An_Object_An_Existing_Srdo_Maps_Cannot_Be_Redeclared()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var node = OpenClocked(bus, Producer, new ManualTimeSource(), srdoCount: 2);
+        var od = node.ObjectDictionary;
+        AddApplicationObjects(od);
+        od.AddU8(0x2002, 0x00, 0x01);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.ConfigureSrdoConsumer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(20), 0x125, 0x126);
+        safety.CommitSafetyConfiguration();
+
+        od.Invoking(o => o.AddU16(0x2001, 0x00, 0x0001)).Should().Throw<InvalidOperationException>()
+            .WithMessage("*0x2001:00*SRDO 1*");
+        od.Invoking(o => o.AddU8(0x2000, 0x00, 0x01)).Should().Throw<InvalidOperationException>()
+            .WithMessage("*0x2000:00*SRDO 2*");
+        od.TryGet(0x2001, 0x00, out var kept).Should().BeTrue();
+        kept.DataType.Should().Be(OdDataType.Unsigned8, "the refused declaration did not land");
+        od.Invoking(o => o.AddU16(0x2002, 0x00, 0x0002)).Should().NotThrow("no SRDO maps 0x2002");
+
+        od.WriteUnsigned(0x1301, 0x01, 0);   // SRDO 1 deleted
+        od.Invoking(o => o.AddU16(0x2001, 0x00, 0x0001)).Should().NotThrow("no existing SRDO maps 0x2001 any more");
+        od.Invoking(o => o.AddU8(0x2000, 0x00, 0x01)).Should().Throw<InvalidOperationException>("SRDO 2 still exists");
+    }
+
     /// <summary>A mapping that cannot be built does not reach the record: the configured SRDO
     /// survives the attempt instead of being deleted first and then left without a mapping.</summary>
     [Fact]
