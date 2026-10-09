@@ -8,7 +8,8 @@ using Xunit;
 namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>The value types of CiA DSP 304 V1.0: the pre-defined connection set (§8.3.3
-/// Table 4), the mapping builder (§8.4.2.2, 8 byte-aligned objects) and the node options.</summary>
+/// Table 4), the mapping builder (§8.4.2.2, 8 byte-aligned objects) and the node options
+/// (FR-CO-042).</summary>
 public class SafetyTypesTests
 {
     [Theory]

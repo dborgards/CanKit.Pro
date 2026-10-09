@@ -22,7 +22,9 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 /// <summary>Two nodes on the virtual bus: a producer and a consumer configured through
 /// <see cref="ICanOpenSafety"/>, and the master configuring the device over SDO. Wire-level
 /// expectations are awaited as positives; a negative is shown with an ordering witness
-/// (the heartbeat the node emits on an NMT transition, or a later SRDO pair).</summary>
+/// (the heartbeat the node emits on an NMT transition, or a later SRDO pair). FR-CO-042 the
+/// facade; FR-CO-038 the check at the transition to Operational; FR-CO-039 the pairs on the
+/// bus; FR-CO-041 the GFC; FR-CO-035 the reset.</summary>
 public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Producer = 0x11;

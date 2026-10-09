@@ -18,7 +18,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>A master configures a device's safety parameters over SDO (CiA DSP 304 V1.0 §9.2,
 /// Figure 9) and verifies them (§8.3.1 step D). The device is a real node; the mismatch path
-/// uses a fake expedited SDO server on a raw channel that answers one readback wrongly.</summary>
+/// uses a fake expedited SDO server on a raw channel that answers one readback wrongly
+/// (FR-CO-044).</summary>
 public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Master = 0x01;

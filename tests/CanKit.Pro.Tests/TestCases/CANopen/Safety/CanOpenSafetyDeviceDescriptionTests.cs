@@ -16,7 +16,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>The safety objects in an EDS/DCF (CiA 306) are loaded like the PDO records: the
 /// records the file declares exist, their values are taken through the validated path, and
-/// every deviation is a finding (FR-CO-025..028 applied to CiA 304).</summary>
+/// every deviation is a finding (FR-CO-025..028 applied to CiA 304: FR-CO-043).</summary>
 public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture>
 {
     private static string Fixture(string name) => Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", name);

@@ -9,7 +9,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 /// <summary>13FFh (CiA DSP 304 V1.0 §8.4.2.2): generator x^16+x^12+x^5+1 over the listed
 /// field order. V1.0 names no initial value and no byte order; the record (spec decision) is
 /// CRC-16/XMODEM, multi-byte fields MSB-first. The canonical sequence is pinned here as a
-/// golden vector so that #289 can tell a deliberate change from an accident.</summary>
+/// golden vector so that #289 can tell a deliberate change from an accident (FR-CO-037).</summary>
 public class SrdoCrcTests
 {
     private static readonly SrdoCommunicationParameter Parameter = new(

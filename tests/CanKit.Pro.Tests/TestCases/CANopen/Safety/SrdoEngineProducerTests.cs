@@ -13,7 +13,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>The producer half of <see cref="SrdoEngine"/> (CiA DSP 304 V1.0 §8.1, §8.1.3.1,
 /// §9.5), driven without a bus: a real actor on a <see cref="ManualTimeSource"/>, a dictionary
-/// holding the records, and a host that records what the engine asks it to send.</summary>
+/// holding the records, and a host that records what the engine asks it to send. FR-CO-039
+/// the producer, FR-CO-038 no transmission without a valid configuration.</summary>
 public class SrdoEngineProducerTests : IDisposable
 {
     private const byte NodeId = 0x11;

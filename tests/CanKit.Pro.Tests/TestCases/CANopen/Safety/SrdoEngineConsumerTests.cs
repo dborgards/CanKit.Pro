@@ -12,7 +12,8 @@ using static CanKit.Pro.Tests.TestCases.CANopen.Safety.SrdoEngineProducerTests;
 namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>The consumer half (CiA DSP 304 V1.0 §8.1.1 Figures 2 and 3, §8.1.3.1, §9.5) and
-/// the GFC (§8.2). SCT and SRVT are deadlines on the engine's clock; the tests move it.</summary>
+/// the GFC (§8.2). SCT and SRVT are deadlines on the engine's clock; the tests move it.
+/// FR-CO-040 the consumer, FR-CO-041 the GFC.</summary>
 public class SrdoEngineConsumerTests : IDisposable
 {
     private const byte NodeId = 0x11;

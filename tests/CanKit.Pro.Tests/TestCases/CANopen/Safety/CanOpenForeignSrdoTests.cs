@@ -15,7 +15,8 @@ using Xunit;
 namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>Decoding a peer's SRDO pair from its live records (FR-CO-030's rules applied to
-/// CiA DSP 304): live before file, the pair checked, the plain data split into the sink.</summary>
+/// CiA DSP 304): live before file, the pair checked, the plain data split into the sink
+/// (FR-CO-046).</summary>
 public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Master = 0x01;

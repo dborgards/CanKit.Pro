@@ -16,7 +16,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>The safety objects 1300h–13FFh as managed communication-profile objects (CiA DSP 304
 /// V1.0 §8.4.2): their defaults, the value rules a write is held to on every path, the 13FEh
-/// auto-reset, and that a node without SRDOs has none of them.</summary>
+/// auto-reset, and that a node without SRDOs has none of them (FR-CO-035, FR-CO-036).</summary>
 public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Device = 0x11;

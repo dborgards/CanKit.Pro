@@ -5,7 +5,8 @@ using Xunit;
 namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>CiA DSP 304 V1.0 §8.1: the second frame is the first "inverted bitwise"; Figure 7 /
-/// Table 4: COB-ID 1 is odd in 257..383, COB-ID 2 even in 258..384.</summary>
+/// Table 4: COB-ID 1 is odd in 257..383, COB-ID 2 even in 258..384 (FR-CO-036, FR-CO-039,
+/// FR-CO-040).</summary>
 public class SrdoFramesTests
 {
     [Fact]

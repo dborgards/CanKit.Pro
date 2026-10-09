@@ -21,7 +21,8 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>CiA DSP 304 V1.0 §8.3.1 step D in the boot-up manager (CiA 302-2): an assigned slave
 /// whose bound DCF declares SRDOs is verified over SDO before the master sends NMT Start. The
-/// slave is a real device node on the rig's peer bus, so it answers the SDO uploads.</summary>
+/// slave is a real device node on the rig's peer bus, so it answers the SDO uploads
+/// (FR-CO-045).</summary>
 public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Slave = 0x05; // safety.dcf is commissioned for node 5

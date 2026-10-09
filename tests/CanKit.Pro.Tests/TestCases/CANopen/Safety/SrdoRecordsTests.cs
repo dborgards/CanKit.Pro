@@ -6,7 +6,8 @@ using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
-/// <summary>Reading an SRDO's records out of a plain dictionary, without a node.</summary>
+/// <summary>Reading an SRDO's records out of a plain dictionary, without a node; the
+/// configuration-valid rule of FR-CO-038.</summary>
 public class SrdoRecordsTests
 {
     private static ObjectDictionary RecordFor(int n, byte direction, ushort cycle, byte srvt, uint cob1, uint cob2, params uint[] mappingSlots)
