@@ -504,8 +504,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         var period = _srdoSendPeriod;
         _srdoSendPeriod = null;
         if (period is null) return;
+        // Cancelled, not disposed: a link may still hand its token to the service after this
+        // turn, and registering on a disposed source throws on some runtimes. A source without a
+        // timer or wait handle holds nothing that needs disposing.
         period.Cancel();
-        period.Dispose();
     }
 
     /// <summary>Test seam, actor only: the tail of the SRDO send chain.</summary>
