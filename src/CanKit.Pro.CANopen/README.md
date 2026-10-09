@@ -824,7 +824,11 @@ existing record matches: one whose direction (sub-index `01h`, live, or the file
 fails) is 0 is skipped, because a deleted record keeps its COB-IDs and another SRDO may have taken
 them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The two
 frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from the
-odd sub-indices of `1381h`–`13C0h`, or from the file when that read fails. Unlike for a PDO
+odd sub-indices of `1381h`–`13C0h`, or from the file when that read fails. The file's mapping is
+used only when it is one the device's own loader takes: each even sub-index up to the count is
+declared and repeats the odd one before it (§8.4.2.2, `1381h`–`13C0h`: the inverted object), the
+same rule the dictionary's mapping validator applies; otherwise the pair is not decoded and the
+reason names the slot. Unlike for a PDO
 (FR-CO-030), a live mapping is read in full whenever its count is, even beyond the slots the file
 declares: the peer-SDO gate lets through every slot of an SRDO record the bound file implies
 ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)), so

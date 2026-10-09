@@ -42,6 +42,13 @@ internal static class SrdoRecords
     public static bool IsChecksummed(ushort index)
         => index == Checksum || IsCommunicationRecord(index) || IsMappingRecord(index);
 
+    /// <summary>§8.4.2.2, object 1381h–13C0h: the odd sub-indices map the objects "data not
+    /// inverted", each even one the inverted object of the odd one before it — the same entry.
+    /// True when <paramref name="inverted"/> is that entry. The one rule the dictionary's mapping
+    /// validator (and the device-description loader, which writes through it) and the
+    /// description fallback of <c>ObserveForeignSrdoAsync</c> share.</summary>
+    public static bool IsInvertedSlotOf(uint plain, uint inverted) => inverted != 0 && inverted == plain;
+
     public static int? SrdoNumberOf(ushort index)
     {
         if (IsCommunicationRecord(index)) return index - CommunicationBase;

@@ -141,6 +141,13 @@ internal sealed partial class CanOpenNode
         {
             if (!TryDescribedValue(record, s, out var text) || ParseDescribedUnsigned(text, peerNodeId) is not { } word || word == 0)
             { reason = $"the file's mapping entry {s} is missing or unreadable"; return false; }
+            // The device's own loader refuses a record whose inverted slot does not repeat its
+            // plain slot (the mapping validator), so such a record never reaches its dictionary.
+            byte inv = (byte)(s + 1);
+            if (!TryDescribedValue(record, inv, out var invText) || ParseDescribedUnsigned(invText, peerNodeId) is not { } inverted || inverted == 0)
+            { reason = $"the file's mapping entry {inv} (the inverted object) is missing or unreadable"; return false; }
+            if (!SrdoRecords.IsInvertedSlotOf(word, inverted))
+            { reason = $"the file's mapping entry {inv} does not repeat entry {s} (CiA DSP 304 §8.4.2.2: the inverted object of the one before it)"; return false; }
             try { list.Add(new PdoMappingEntry((ushort)(word >> 16), (byte)(word >> 8), (byte)word)); }
             catch (ArgumentOutOfRangeException) { reason = $"the file's mapping entry {s} is not byte-aligned"; return false; }
             total += list[list.Count - 1].ByteLength;

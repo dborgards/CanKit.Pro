@@ -35,13 +35,16 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>Replaces the first <paramref name="old"/> after <paramref name="section"/> in the fixture.</summary>
     private static CanOpenDeviceDescription PeerFilePatched(string section, string old, string replacement)
+        => CanOpenDeviceDescription.ParseDcf(PatchedText(PeerFileText(), section, old, replacement));
+
+    /// <summary>Replaces the first <paramref name="old"/> after <paramref name="section"/> in <paramref name="text"/>.</summary>
+    private static string PatchedText(string text, string section, string old, string replacement)
     {
-        var text = PeerFileText();
         int at = text.IndexOf(section, StringComparison.Ordinal);
         at.Should().BeGreaterThan(-1, section);
         int hit = text.IndexOf(old, at, StringComparison.Ordinal);
         hit.Should().BeGreaterThan(-1, old);
-        return CanOpenDeviceDescription.ParseDcf(text[..hit] + replacement + text[(hit + old.Length)..]);
+        return text[..hit] + replacement + text[(hit + old.Length)..];
     }
 
     /// <summary>The fixture without the sections 1381h:05 .. 1381h:16: a record that declares at most two mapped objects.</summary>
@@ -57,6 +60,16 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
             text = text[..at] + (next < 0 ? "" : text[(next + 1)..]);
         }
         return CanOpenDeviceDescription.ParseDcf(text);
+    }
+
+    /// <summary>The fixture without the section <paramref name="header"/>.</summary>
+    private static CanOpenDeviceDescription PeerFileWithout(string header)
+    {
+        var text = PeerFileText();
+        int at = text.IndexOf(header, StringComparison.Ordinal);
+        at.Should().BeGreaterThan(-1, header);
+        int next = text.IndexOf("\n[", at + header.Length, StringComparison.Ordinal);
+        return CanOpenDeviceDescription.ParseDcf(text[..at] + (next < 0 ? "" : text[(next + 1)..]));
     }
 
     private sealed class ListSink : IForeignPdoSink
@@ -235,13 +248,41 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         sink.Signals[2].Value.Should().Equal(4);
     }
 
+    /// <summary>The file fallback applies the rule the device's own loader applies (§8.4.2.2,
+    /// 1381h–13C0h: the even sub-index carries the inverted object of the odd one before it):
+    /// a slot that is missing, or that does not repeat its plain slot, is no mapping to decode
+    /// with, and the reason names the slot. The shipped fixture still decodes
+    /// (<see cref="Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer"/>).</summary>
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("different")]
+    public async Task A_File_Mapping_Whose_Inverted_Slot_Does_Not_Repeat_Its_Plain_Slot_Is_Not_Decoded(string fault)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        var file = fault == "missing"
+            ? PeerFileWithout("[1381sub4]")
+            : PeerFilePatched("[1381sub4]", "0x20010008", "0x20020008");
+        master.BindPeerDeviceDescription(Device, file);
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 0x34, 0x12, 0x5A }, new byte[] { 0xCB, 0xED, 0xA5 }, file, sink).WithTimeoutAsync(TimeSpan.FromSeconds(30));
+        result.Observation!.Decoded.Should().BeFalse();
+        result.Observation.Origin.Should().BeNull();
+        result.Observation.Reason.Should().Contain("entry 4");
+        result.Observation.Reason.Should().Contain(fault == "missing" ? "missing" : "does not repeat entry 3");
+        sink.Signals.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_Dummy_Entry_In_The_Mapping_Is_Not_Decoded()
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
-        var file = PeerFilePatched("[1381sub1]", "0x20000010", "0x00050010");
+        var file = CanOpenDeviceDescription.ParseDcf(PatchedText(PatchedText(PeerFileText(),
+            "[1381sub1]", "0x20000010", "0x00050010"), "[1381sub2]", "0x20000010", "0x00050010"));
         master.BindPeerDeviceDescription(Device, file);
         var sink = new ListSink();
         var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,

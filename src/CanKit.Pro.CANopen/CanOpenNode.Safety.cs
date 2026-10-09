@@ -210,7 +210,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                 if (!od.TryReadUnsigned(index, s, out var raw) || raw == 0) return OdWriteDecision.Reject(SdoAbortCode.ObjectDoesNotExist);
                 if ((s & 1) == 0)
                 {
-                    if (raw != od.ReadUnsigned(index, (byte)(s - 1))) return OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped); // inverted slot repeats the plain slot
+                    if (!SrdoRecords.IsInvertedSlotOf(od.ReadUnsigned(index, (byte)(s - 1)), raw)) return OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped); // inverted slot repeats the plain slot
                     continue;
                 }
                 if (ValidateSrdoMappingEntry(od, raw, SrdoDirection.None) is { } abort) return OdWriteDecision.Reject(abort);
@@ -225,7 +225,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         if ((subindex & 1) == 0)
         {
             uint plain = od.ReadUnsigned(index, (byte)(subindex - 1));
-            return plain != 0 && plain != entry ? OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped) : OdWriteDecision.Accept;
+            return plain != 0 && !SrdoRecords.IsInvertedSlotOf(plain, entry) ? OdWriteDecision.Reject(SdoAbortCode.ObjectCannotBeMapped) : OdWriteDecision.Accept;
         }
         int precedingBytes = 0;
         for (byte s = 1; s < subindex; s += 2)

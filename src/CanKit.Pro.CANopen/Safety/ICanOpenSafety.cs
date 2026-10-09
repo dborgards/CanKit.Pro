@@ -99,7 +99,10 @@ public interface ICanOpenSafety
     /// equals <paramref name="cobId1"/> (the file is the fallback when the upload fails; a record
     /// whose direction is 0, live or in the file, does not match: it may have kept the ids another SRDO now uses), the
     /// pair checked for equal length and bitwise inversion, the mapping read live from
-    /// 1381h–13C0h (odd sub-indices) or from the file. Signals carry
+    /// 1381h–13C0h (odd sub-indices) or from the file — the file's only when each even sub-index
+    /// up to the count is declared and repeats the odd one before it, the rule the device's own
+    /// loader applies (CiA DSP 304 §8.4.2.2, 1381h–13C0h); otherwise the pair is not decoded and
+    /// the reason names the slot. Signals carry
     /// <see cref="ForeignPdoKind.Srdo"/> and the SRDO number. SRVT and SCT are the caller's to
     /// judge: it holds the timestamps. Nothing is written to this node's dictionary.
     /// The live mapping is read in full whenever its count is: the peer-SDO gate lets through
