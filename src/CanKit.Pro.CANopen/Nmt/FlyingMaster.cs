@@ -59,4 +59,11 @@ public enum FlyingMasterSignal
     /// elapsed. <see cref="CanKit.Pro.CANopen.FlyingMasterChangedEventArgs.OtherNodeId"/> is that
     /// slave. The network is not started past this point.</summary>
     SlaveBootTimeout,
+
+    /// <summary>CiA DSP 304 V1.0 §8.3.1 step D: an assigned slave whose bound DCF declares SRDOs
+    /// did not verify — 13FEh is not A5h, a checksum or a record differs from the file, or the
+    /// uploads failed. <see cref="CanKit.Pro.CANopen.FlyingMasterChangedEventArgs.OtherNodeId"/>
+    /// is that slave. It is not started; a mandatory one, or any one under a simultaneous start,
+    /// halts the boot like <see cref="SlaveBootTimeout"/>.</summary>
+    SlaveSafetyConfigurationInvalid,
 }
