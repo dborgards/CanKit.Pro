@@ -211,10 +211,9 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         int end = text.IndexOf("[1301sub4]", StringComparison.Ordinal);
         start.Should().BeGreaterThan(-1);
         end.Should().BeGreaterThan(start);
-        if (removeSub3)
-            text = (text[..start] + text[end..]).Replace("SRDO communication parameter 1\nSubNumber=7", "SRDO communication parameter 1\nSubNumber=6");
-        else
-            text = text[..start] + text[start..end].Replace("DefaultValue=20", "DefaultValue=0") + text[end..]; // declared as 0
+        text = removeSub3
+            ? (text[..start] + text[end..]).Replace("SRDO communication parameter 1\nSubNumber=7", "SRDO communication parameter 1\nSubNumber=6")
+            : text[..start] + text[start..end].Replace("DefaultValue=20", "DefaultValue=0") + text[end..]; // declared as 0
         var configuration = PeerSafetyConfiguration.FromDeviceDescription(CanOpenDeviceDescription.ParseDcf(text), Device);
         configuration.Srdos[1].Parameter.ValidationTime.Should().Be(TimeSpan.FromMilliseconds(20));
 
