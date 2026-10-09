@@ -405,9 +405,121 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         wire.SendNmt(NmtCommand.EnterPreOperational, Producer);
         await WaitUntilAsync(() => node.State == NmtState.PreOperational, "pre-operational");
         service.Release();
-        await WaitUntilAsync(() => service.Handed(cob2) >= 1, "the held pair completed");
+        // The held pair's link has ended once nothing is in flight: its completion clears the flag.
         await WaitUntilAsync(() => !SrdoPairInFlight(node), "nothing in flight");
         service.Handed(cob1).Should().Be(1, "the pending pair was dropped with the transition");
+        service.Handed(cob2).Should().Be(0,
+            "the inverted half of the held pair is not sent after the transition either: a consumer timing out on its SRVT is safer than one refreshing its SCT on a stale pair");
+    }
+
+    /// <summary>§8.3.2.2: the pairs that came due in Operational but have not reached the bus yet
+    /// — another SRDO's pair queued behind the held one on the send chain — stay off it once the
+    /// node has left Operational.</summary>
+    [Fact]
+    public async Task A_Queued_Pair_Of_Another_Srdo_Does_Not_Reach_The_Bus_After_Leaving_Operational()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 2 }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25), 0x141, 0x142);
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // both first pairs due: SRDO 1's held, SRDO 2's queued behind it
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        SrdoPairInFlight(node, 2).Should().BeTrue("SRDO 2's pair is on the send chain");
+        service.Handed(0x141).Should().Be(0, "it waits behind SRDO 1's pair");
+
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
+        service.Release();
+        // Both links have ended once neither SRDO is in flight: each completion clears its flag.
+        await WaitUntilAsync(() => !SrdoPairInFlight(node, 1) && !SrdoPairInFlight(node, 2), "nothing in flight");
+        service.Handed(0x141).Should().Be(0, "SRDO 2's pair came due in Operational but must not reach the bus after NMT Stop (§8.3.2.2)");
+        service.Handed(0x142).Should().Be(0);
+        service.Handed(cob1 + 1).Should().Be(0, "nor the inverted half of the held pair");
+    }
+
+    /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
+    /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
+    [Fact]
+    public async Task Disposing_The_Node_Ends_The_Pairs_Still_On_The_Send_Chain()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        // The service outlives the node, so what the links would still send after the disposal reaches it.
+        using var service = new HoldingService(new CanBusService(bus));
+        var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 2 }, ownsService: false, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25), 0x141, 0x142);
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        using (var wire = new Wire(session, 2))
+        {
+            wire.SendNmt(NmtCommand.Start, Producer);
+            await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        }
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // SRDO 1's pair held, SRDO 2's queued behind it
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        SrdoPairInFlight(node, 2).Should().BeTrue("SRDO 2's pair is on the send chain");
+        Task chain = Task.CompletedTask;
+        await node.PostToActorAsync(() => chain = node.SrdoSendChainForTests);
+
+        node.Dispose();
+        service.Release();
+        await chain.WithTimeoutAsync(ShortTimeout);                         // both links have ended
+        service.Handed(cob1 + 1).Should().Be(0, "the held pair's inverted half is not sent by a disposed node");
+        service.Handed(0x141).Should().Be(0, "nor the pair queued behind it");
+        service.Handed(0x142).Should().Be(0);
+    }
+
+    /// <summary>A pair pending when the node leaves Operational is dropped then, not merely held
+    /// back while the node is not Operational: after a Stop and a new Start it does not go out
+    /// with the data it had before the Stop.</summary>
+    [Fact]
+    public async Task A_Pair_Pending_Before_A_Stop_Is_Not_Sent_After_The_Next_Start()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        // Change of state off: the writes below change the data, only the cycles transmit.
+        using var node = new CanOpenNode(service, Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, EnableChangeOfStateSrdo = false }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);   // 2001h = 5Ah
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // first pair at 8.5 ms, held
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        node.ObjectDictionary.WriteUnsigned(0x2001, 0x00, 0x66);
+        Advance(clock, node, TimeSpan.FromMilliseconds(25));                // a pair with 66h pending
+
+        wire.SendNmt(NmtCommand.Stop, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Stopped, "stopped");
+        node.ObjectDictionary.WriteUnsigned(0x2001, 0x00, 0x77);
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "started again");
+        service.Release();                                                  // before the new first cycle is due
+        await WaitUntilAsync(() => !SrdoPairInFlight(node), "nothing in flight");
+        service.Handed(cob1).Should().Be(1, "the pair pending before the Stop was dropped with it");
+
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // the new period's first pair
+        await WaitUntilAsync(() => service.Handed(cob1 + 1) >= 1, "the new first pair sent");
+        await WaitUntilAsync(() => !SrdoPairInFlight(node), "nothing in flight");
+        service.Payloads(cob1).Should().BeEquivalentTo(new[] { new byte[] { 0x5A }, new byte[] { 0x77 } },
+            options => options.WithStrictOrdering(), "no pair carries the 66h of before the Stop");
     }
 
     /// <summary>The GFC does not wait behind an SRDO pair whose confirmation is outstanding.</summary>
@@ -443,10 +555,10 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         await chain.WithTimeoutAsync(ShortTimeout);
     }
 
-    private static bool SrdoPairInFlight(CanOpenNode node)
+    private static bool SrdoPairInFlight(CanOpenNode node, int srdoNumber = 1)
     {
         bool inFlight = false;
-        node.PostToActorAsync(() => inFlight = node.SrdoPairInFlightForTests(1)).GetAwaiter().GetResult();
+        node.PostToActorAsync(() => inFlight = node.SrdoPairInFlightForTests(srdoNumber)).GetAwaiter().GetResult();
         return inFlight;
     }
 

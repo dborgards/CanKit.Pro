@@ -801,6 +801,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _syncProducerHandle = null;
         DisposePdoRuntime();
         _srdo.Dispose();
+        EndSrdoSendEpoch(); // a disposed node sends no pair still on the chain
         _lifeGuardingDeadline?.Dispose();
         _lifeGuardingDeadline = null;
         CancelFlyingMasterDeadline();

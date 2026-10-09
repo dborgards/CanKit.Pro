@@ -390,6 +390,14 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     private sealed record SrdoPair(uint CobId1, byte[] Plain, uint CobId2, byte[] Inverted);
 
+    // Which Operational period a link on the chain belongs to. Leaving Operational and disposing
+    // advance it (actor only); a link compares it with the value captured when it was queued,
+    // before each of its two frames, and a link of an earlier period sends nothing more: its pair
+    // came due in Operational, but §8.3.2.2 has no safety communication outside it. That covers
+    // the pairs queued behind a held one — one per SRDO — and the inverted half of the held one:
+    // a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair.
+    private int _srdoSendEpoch;
+
     // The GFC is not an SRDO and does not wait behind them (§8.2: it is the highest-priority
     // safety message); it goes out at once, as every other control frame of the node.
     void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _ = SendControlFrame(cobId, payload);
@@ -408,8 +416,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private void QueueSrdoPair(int srdoNumber, SrdoPair pair)
     {
         _srdoInFlight[srdoNumber] = true;
+        int epoch = _srdoSendEpoch;
         var link = _srdoSendChain.ContinueWith(
-            _ => SendSrdoPairAsync(pair),
+            _ => SendSrdoPairAsync(pair, epoch),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _srdoSendChain = link;
         _ = link.ContinueWith(
@@ -429,13 +438,17 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             _srdoInFlight[srdoNumber] = false;
     }
 
-    /// <summary>Leaving Operational: the engine stops, and a pair still pending for the bus is
-    /// dropped with it. Actor only.</summary>
+    /// <summary>Leaving Operational: the engine stops, a pair still pending for the bus is
+    /// dropped with it, and the links already on the chain send nothing more. Actor only.</summary>
     private void LeaveSrdoOperational()
     {
         _srdo.LeaveOperational();
         Array.Clear(_srdoPending, 0, _srdoPending.Length);
+        EndSrdoSendEpoch();
     }
+
+    /// <summary>The links queued so far belong to a period that has ended. Actor only.</summary>
+    private void EndSrdoSendEpoch() => Volatile.Write(ref _srdoSendEpoch, _srdoSendEpoch + 1);
 
     /// <summary>Test seam, actor only: the tail of the SRDO send chain.</summary>
     internal Task SrdoSendChainForTests => _srdoSendChain;
@@ -445,10 +458,12 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     // A failed or unconfirmed frame is reported by SendControlFrame itself and the inverted frame
     // still follows, as it would on the controller; only a cancelled send (the service is being
-    // disposed) ends the pair early.
-    private async Task SendSrdoPairAsync(SrdoPair pair)
+    // disposed) or the end of the Operational period the pair belongs to ends the pair early.
+    private async Task SendSrdoPairAsync(SrdoPair pair, int epoch)
     {
+        if (Volatile.Read(ref _srdoSendEpoch) != epoch) return;
         await SendControlFrame(pair.CobId1, pair.Plain).ConfigureAwait(false);
+        if (Volatile.Read(ref _srdoSendEpoch) != epoch) return;
         await SendControlFrame(pair.CobId2, pair.Inverted).ConfigureAwait(false);
     }
 
