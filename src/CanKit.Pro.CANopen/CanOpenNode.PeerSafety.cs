@@ -27,6 +27,7 @@ internal sealed partial class CanOpenNode
         try
         {
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, cancellationToken).ConfigureAwait(false);
+            EnsureConfigurationFitsPeer(configuration, peerCount);
             var writes = SafetyWrites(configuration, peerCount).ToList();
             // "write all safety-relevant parameter incl. checksums"
             foreach (var (index, sub, value) in writes)
@@ -60,6 +61,7 @@ internal sealed partial class CanOpenNode
         try
         {
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, cancellationToken).ConfigureAwait(false);
+            EnsureConfigurationFitsPeer(expected, peerCount);
             var expectedValues = SafetyWrites(expected, peerCount)
                 .Where(w => w.Index != SrdoRecords.GfcParameter) // 1300h is not part of step D's list (§8.3.1 D)
                 .Append((SrdoRecords.ConfigurationValid, (byte)0x00, new[] { SrdoRecords.ConfigurationValidValue }))
@@ -76,11 +78,21 @@ internal sealed partial class CanOpenNode
     private async Task<int> ReadPeerSrdoCountAsync(byte peerNodeId, CancellationToken cancellationToken)
     {
         var count = await SdoUploadAsync(peerNodeId, SrdoRecords.Checksum, 0x00, cancellationToken).ConfigureAwait(false);
-        return count.Length >= 1 ? Math.Min((int)count[0], SrdoRecords.MaxSrdoCount) : 0;
+        if (count.Length < 1) throw new InvalidOperationException("The peer returned no SRDO count from 13FFh:00.");
+        return Math.Min((int)count[0], SrdoRecords.MaxSrdoCount);
     }
 
-    /// <summary>The cycle time (sub2) is 1..65535 ms and the validation time (sub3, consumer only)
-    /// 1..255 ms; a hand-built configuration is not range-checked anywhere else, and the casts
+    /// <summary>A record above the peer's count does not exist on the peer: writing the others and
+    /// reporting success would leave that SRDO missing, so nothing is sent.</summary>
+    private static void EnsureConfigurationFitsPeer(PeerSafetyConfiguration configuration, int peerSrdoCount)
+    {
+        foreach (var number in configuration.Srdos.Keys)
+            if (number > peerSrdoCount)
+                throw new ArgumentException(
+                    $"SRDO {number} is configured, but the peer reports only {peerSrdoCount} SRDO(s) in 13FFh:00.", nameof(configuration));
+    }
+
+    /// <summary>The cycle time (sub2) is 1..65535 ms and the validation time (sub3) 1..255 ms; a hand-built configuration is not range-checked anywhere else, and the casts
     /// below would wrap silently.</summary>
     private static void ValidateSafetyTimes(PeerSafetyConfiguration configuration)
     {
@@ -88,8 +100,8 @@ internal sealed partial class CanOpenNode
         {
             var p = pair.Value.Parameter;
             CheckMilliseconds(pair.Key, "cycle time", p.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue);
-            if (p.Direction == SrdoDirection.Receive)
-                CheckMilliseconds(pair.Key, "validation time", p.ValidationTime, 1, byte.MaxValue);
+            // The CRC covers sub3 whatever the direction (§8.4.2.2 field c), so it is written and bounded for a producer too.
+            CheckMilliseconds(pair.Key, "validation time", p.ValidationTime, 1, byte.MaxValue);
         }
     }
 
@@ -102,9 +114,10 @@ internal sealed partial class CanOpenNode
         return (ushort)ms;
     }
 
-    /// <summary>The writes of §9.2 in order: per SRDO the deletion, the mapping (disabled, slots,
-    /// count), the times, the ids, the creation; SRDOs the configuration does not name are
-    /// deleted; then 1300h; then every checksum. The same list is what the readback compares.</summary>
+    /// <summary>The writes of §9.2 in order: a first pass that deletes every SRDO; then per SRDO
+    /// the deletion, the mapping (disabled, slots, count), the times, the ids, the creation (SRDOs
+    /// the configuration does not name stay deleted); then 1300h; then every checksum. The same
+    /// list is what the readback compares.</summary>
     private static IEnumerable<(ushort Index, byte Subindex, byte[] Value)> SafetyWrites(PeerSafetyConfiguration configuration, int peerSrdoCount)
     {
         ValidateSafetyTimes(configuration);
@@ -113,6 +126,10 @@ internal sealed partial class CanOpenNode
 
     private static IEnumerable<(ushort Index, byte Subindex, byte[] Value)> SafetyWritesCore(PeerSafetyConfiguration configuration, int peerSrdoCount)
     {
+        // Delete every SRDO first: the device refuses a COB-ID that another existing SRDO still
+        // holds, so a configuration that moves ids between SRDOs needs all of them gone before any is written.
+        for (int n = 1; n <= peerSrdoCount; n++)
+            yield return (SrdoRecords.CommIndex(n), 0x01, new byte[] { 0 });
         for (int n = 1; n <= peerSrdoCount; n++)
         {
             var comm = SrdoRecords.CommIndex(n);
@@ -134,8 +151,7 @@ internal sealed partial class CanOpenNode
             yield return (map, 0x00, new[] { (byte)(2 * entries.Length) });
             ushort cycle = CheckMilliseconds(n, "cycle time", p.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue);
             yield return (comm, 0x02, new[] { (byte)cycle, (byte)(cycle >> 8) });
-            if (p.Direction == SrdoDirection.Receive)
-                yield return (comm, 0x03, new[] { (byte)CheckMilliseconds(n, "validation time", p.ValidationTime, 1, byte.MaxValue) });
+            yield return (comm, 0x03, new[] { (byte)CheckMilliseconds(n, "validation time", p.ValidationTime, 1, byte.MaxValue) });
             yield return (comm, 0x05, ObjectDictionary.EncodeU32(p.CobId1));
             yield return (comm, 0x06, ObjectDictionary.EncodeU32(p.CobId2));
             yield return (comm, 0x01, new[] { (byte)p.Direction });

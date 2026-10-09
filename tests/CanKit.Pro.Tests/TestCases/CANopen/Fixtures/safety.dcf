@@ -415,13 +415,157 @@ PDOMapping=0
 
 [1382]
 ParameterName=SRDO mapping parameter 2
-SubNumber=1
+SubNumber=17
 ObjectType=0x8
 
 [1382sub0]
 ParameterName=Number of mapped objects
 ObjectType=0x7
 DataType=0x0005
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub1]
+ParameterName=Mapping entry 1
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub2]
+ParameterName=Mapping entry 2 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub3]
+ParameterName=Mapping entry 3
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub4]
+ParameterName=Mapping entry 4 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub5]
+ParameterName=Mapping entry 5
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub6]
+ParameterName=Mapping entry 6 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub7]
+ParameterName=Mapping entry 7
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub8]
+ParameterName=Mapping entry 8 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub9]
+ParameterName=Mapping entry 9
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382subA]
+ParameterName=Mapping entry 10 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382subB]
+ParameterName=Mapping entry 11
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382subC]
+ParameterName=Mapping entry 12 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382subD]
+ParameterName=Mapping entry 13
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382subE]
+ParameterName=Mapping entry 14 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382subF]
+ParameterName=Mapping entry 15
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1382sub10]
+ParameterName=Mapping entry 16 (inverted)
+ObjectType=0x7
+DataType=0x0007
 AccessType=rw
 DefaultValue=0
 ParameterValue=0

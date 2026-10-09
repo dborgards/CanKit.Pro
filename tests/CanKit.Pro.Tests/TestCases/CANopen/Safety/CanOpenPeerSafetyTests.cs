@@ -155,6 +155,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     [Theory]
     [InlineData(SrdoDirection.Transmit, 70000, 20)]
     [InlineData(SrdoDirection.Transmit, 0, 20)]
+    [InlineData(SrdoDirection.Transmit, 30, 0)]
+    [InlineData(SrdoDirection.Transmit, 30, 256)]
     [InlineData(SrdoDirection.Receive, 30, 0)]
     [InlineData(SrdoDirection.Receive, 30, 256)]
     public async Task A_Time_Outside_Its_Range_Is_Refused_Before_Any_Frame_Is_Sent(SrdoDirection direction, int cycleMs, int validationMs)
@@ -175,8 +177,140 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
     }
 
+    [Fact]
+    public async Task A_Producers_Validation_Time_Is_Written_Because_The_Checksum_Covers_It()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(30), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        device.ObjectDictionary.ReadUnsigned(0x1301, 3).Should().Be(30u, "the device recomputes the checksum from its stored sub-index 3");
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 1).Should().BeTrue();
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+    }
+
+    [Fact]
+    public async Task A_Consumer_With_A_Full_Mapping_Is_Configured_And_Verified()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        var mapping = new SrdoMapping();
+        for (byte i = 0; i < 8; i++)
+        {
+            device.ObjectDictionary.AddU8((ushort)(0x2010 + i), 0x00, 0);
+            mapping.Add((ushort)(0x2010 + i), 0x00, 8);
+        }
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Receive, TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(35), 0x109, 0x10A), mapping);
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        var od = device.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 1).Should().Be(2u);
+        od.ReadUnsigned(0x1301, 2).Should().Be(50u);
+        od.ReadUnsigned(0x1301, 3).Should().Be(35u);
+        od.ReadUnsigned(0x1381, 0).Should().Be(16u);
+        od.ReadUnsigned(0x1381, 16).Should().Be(0x20170008u, "the eighth object, inverted slot");
+        SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue();
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+    }
+
+    [Fact]
+    public async Task An_Existing_Configuration_Is_Replaced_Because_Every_Srdo_Is_Deleted_First()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        var replacement = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x10B, 0x10C),
+                new SrdoMapping().Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, replacement).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        var od = device.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 5).Should().Be(0x10Bu);
+        od.ReadUnsigned(0x1301, 6).Should().Be(0x10Cu);
+        od.ReadUnsigned(0x1381, 0).Should().Be(2u);
+        SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Two_Srdos_Can_Swap_Their_Cob_Ids_Because_All_Are_Deleted_Before_Any_Is_Written()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        static PeerSafetyConfiguration Two(uint first, uint second) => new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), first, first + 1),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8))
+            .Add(2, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(40), TimeSpan.FromMilliseconds(20), second, second + 1),
+                new SrdoMapping().Add(0x2001, 0x00, 8));
+        var initial = await master.Safety().ConfigurePeerSafetyAsync(Device, Two(0x109, 0x10B)).WithTimeoutAsync(ShortTimeout);
+        initial.Succeeded.Should().BeTrue(string.Join("\n", initial.Mismatches));
+        var swapped = await master.Safety().ConfigurePeerSafetyAsync(Device, Two(0x10B, 0x109)).WithTimeoutAsync(ShortTimeout);
+        swapped.Succeeded.Should().BeTrue(string.Join("\n", swapped.Mismatches));
+        var od = device.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 5).Should().Be(0x10Bu);
+        od.ReadUnsigned(0x1302, 5).Should().Be(0x109u);
+        SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue();
+        SrdoRecords.IsConfigurationValid(od, 2).Should().BeTrue();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_Srdo_Above_The_Peers_Count_Is_Refused_Before_Anything_Is_Sent(bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB); // SrdoCount = 2
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var tooMany = Configuration()
+            .Add(3, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x10D, 0x10E),
+                new SrdoMapping().Add(0x2001, 0x00, 8));
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, tooMany).WithTimeoutAsync(ShortTimeout)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, tooMany).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("SRDO 3").And.Contain("2 SRDO");
+        device.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u, "nothing was sent");
+        device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+    }
+
+    [Fact]
+    public async Task A_Missing_Srdo_Count_Is_An_Error_Not_Zero_Srdos()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), emptyCount: true);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("13FFh:00");
+        fake.Written.Keys.Should().OnlyContain(k => k.Item1 == 0x13FF, "nothing was written");
+    }
+
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
-    /// with what was stored (13FFh:00 reads 2), and answers one upload with the stored value
+    /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
     /// plus one so the readback differs.</summary>
     private sealed class FakeExpeditedServer : IDisposable
     {
@@ -184,11 +318,11 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         private readonly byte _nodeId;
         private readonly (ushort, byte) _lieAt;
         public readonly Dictionary<(ushort, byte), byte[]> Written = new();
-        public FakeExpeditedServer(string session, int channel, byte nodeId, (ushort, byte) lieAt)
+        public FakeExpeditedServer(string session, int channel, byte nodeId, (ushort, byte) lieAt, bool emptyCount = false)
         {
             _nodeId = nodeId;
             _lieAt = lieAt;
-            Written[(0x13FF, 0)] = new byte[] { 2 };
+            Written[(0x13FF, 0)] = emptyCount ? Array.Empty<byte>() : new byte[] { 2 };
             _bus = Open(session, channel);
             _bus.FrameObserved += (_, e) =>
             {
@@ -204,10 +338,21 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
                     lock (Written) Written[(index, sub)] = d.Skip(4).Take(n).ToArray();
                     reply = new byte[] { 0x60, d[1], d[2], d[3], 0, 0, 0, 0 };
                 }
+                else if ((d[0] & 0xEF) == 0x60)
+                {
+                    // Segment request for the one empty value: last segment, no data bytes (n = 7, c = 1).
+                    reply = new byte[] { (byte)(0x0F | (d[0] & 0x10)), 0, 0, 0, 0, 0, 0, 0 };
+                }
                 else if (d[0] == 0x40)
                 {
                     byte[] value;
                     lock (Written) value = Written.TryGetValue((index, sub), out var v) ? (byte[])v.Clone() : new byte[] { 0 };
+                    if (value.Length == 0)
+                    {
+                        // A segmented upload of zero bytes (size indicated, 0).
+                        _bus.Transmit(CanFrame.Classic(0x580 + _nodeId, new byte[] { 0x41, d[1], d[2], d[3], 0, 0, 0, 0 }, isExtendedFrame: false));
+                        return;
+                    }
                     if ((index, sub) == _lieAt) value[0]++;
                     reply = new byte[8];
                     reply[0] = (byte)(0x43 | ((4 - value.Length) << 2));
