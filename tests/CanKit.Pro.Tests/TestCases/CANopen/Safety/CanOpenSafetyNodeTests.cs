@@ -545,8 +545,6 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         service.TokenOf(cob1 + 1, 0).IsCancellationRequested.Should().BeFalse();
     }
 
-    /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
-    /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
     /// <summary>A node with SRDO 1 producing, 1300h = 1, Operational: the GFC can be sent.</summary>
     private static async Task<CanOpenNode> OpenGfcNodeAsync(HoldingService service, Wire wire, bool ownsService = true)
     {
@@ -652,6 +650,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         lock (background) background.Should().BeEmpty();
     }
 
+    /// <summary>Disposing the node ends the links on the send chain as leaving Operational does:
+    /// neither the held pair's inverted half nor a pair queued behind it reaches the service.</summary>
     [Fact]
     public async Task Disposing_The_Node_Ends_The_Pairs_Still_On_The_Send_Chain()
     {
