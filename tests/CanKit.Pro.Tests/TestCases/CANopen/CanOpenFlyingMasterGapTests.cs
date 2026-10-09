@@ -13,6 +13,7 @@ using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
+using static CanKit.Pro.Tests.TestCases.CANopen.FlyingMasterRig;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
 
