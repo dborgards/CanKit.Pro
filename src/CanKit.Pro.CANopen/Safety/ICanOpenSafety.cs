@@ -49,6 +49,8 @@ public interface ICanOpenSafety
     Task TriggerSrdoAsync(int srdoNumber, CancellationToken cancellationToken = default);
 
     /// <summary>The current validity of an SRDO.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The number is not 1..<see cref="SrdoCount"/> — on a node without SRDOs, every number.</exception>
+    /// <exception cref="ObjectDisposedException">The node has been disposed.</exception>
     SrdoState GetSrdoState(int srdoNumber);
 
     /// <summary>Sends the global failsafe command (§8.2: COB-ID 001h, DLC 0). Requires

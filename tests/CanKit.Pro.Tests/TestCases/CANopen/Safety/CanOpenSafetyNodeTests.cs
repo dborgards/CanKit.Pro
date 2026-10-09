@@ -548,6 +548,27 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         service.Release();
     }
 
+    /// <summary>A disposed node has no SRDO running: its state is not reported as the last
+    /// snapshot, which would still say valid, but refused as every other member is.</summary>
+    [Fact]
+    public async Task The_State_Of_A_Disposed_Node_Is_Refused()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var node = new CanOpenNode(new CanBusService(bus), Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true, new ManualTimeSource());
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        safety.GetSrdoState(1).IsValid.Should().BeTrue();
+
+        node.Dispose();
+        safety.Invoking(s => s.GetSrdoState(1)).Should().Throw<ObjectDisposedException>();
+    }
+
     private static async Task AwaitSrdoChainAsync(CanOpenNode node)
     {
         Task chain = Task.CompletedTask;

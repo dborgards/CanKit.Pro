@@ -333,8 +333,13 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     }
 
     // Range check only (the engine's): a node without SRDOs has no number in range, which is an
-    // ArgumentOutOfRangeException like any other number outside 1..SrdoCount.
-    public SrdoState GetSrdoState(int srdoNumber) => _srdo.GetState(srdoNumber);
+    // ArgumentOutOfRangeException like any other number outside 1..SrdoCount. A disposed node
+    // refuses, as every other member does: its last snapshot may still say valid.
+    public SrdoState GetSrdoState(int srdoNumber)
+    {
+        ThrowIfDisposed();
+        return _srdo.GetState(srdoNumber);
+    }
 
     public Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default)
     {
