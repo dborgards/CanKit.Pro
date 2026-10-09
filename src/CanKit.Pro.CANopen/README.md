@@ -284,7 +284,9 @@ provides one the file leaves out at its defaults, deleted. The gate lets through
 provides there — sub-indices `00h`–`06h` of `1301h`–(`1300h` + N) and `00h`–`10h` of
 `1381h`–(`1380h` + N) — so that a peer's safety configuration can be written and verified
 ([Configuring a peer](#configuring-a-peer)). Nothing else the file leaves out passes, and a file
-without an SRDO record implies none.
+without an SRDO record implies none. The implication is the file's, not the device's: a device
+opened with `SrdoCount` above the file's highest SRDO record has records the file does not imply,
+and a transfer to them is refused — the bound file has to describe the device.
 
 With **no** description bound for the server, only the three CiA 301 mandatory base objects are
 transferred:
@@ -646,7 +648,9 @@ SRDO's pair queued behind the one in flight nor the inverted half of the one in 
 a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair. A
 send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
 SRDO stays valid. `GetSrdoState(n)` of a producer is valid while the node is Operational with a
-valid configuration.
+valid configuration. The state is a snapshot of the actor's view: right after `OpenNode` the
+records are taken on the actor's first turn, so a read before any call that round-trips the actor
+(`State`, say) has returned may still show direction `None`.
 
 ### Consumer
 
@@ -753,6 +757,8 @@ that moment every slave seen so far is started with an NMT Start of its own, a s
 once verified, and a slave that announces later is started on its own as it announces. The cost:
 one frame per slave instead of one broadcast, and a keep-alive slave that never announces (no
 heartbeat, no boot-up) is not started by this master — as with bit 1 clear.
+Only the boot-up is gated: an NMT Start to node 0 the application requests itself — through
+`SendNmtCommandAsync` with node 0 or `1F82h` sub-index `80h` — goes out as requested.
 
 ### Observing a peer SRDO
 

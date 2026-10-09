@@ -48,7 +48,10 @@ public interface ICanOpenSafety
     /// restarts its refresh cycle. Nothing happens outside Operational.</summary>
     Task TriggerSrdoAsync(int srdoNumber, CancellationToken cancellationToken = default);
 
-    /// <summary>The current validity of an SRDO.</summary>
+    /// <summary>The current validity of an SRDO: a snapshot of the actor's view. Right after
+    /// the node is opened its records are taken on the actor's first turn, so a read before any
+    /// call that round-trips the actor (<see cref="ICanOpenNode.State"/>, say) has returned may
+    /// still show <see cref="SrdoDirection.None"/>.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The number is not 1..<see cref="SrdoCount"/> — on a node without SRDOs, every number.</exception>
     /// <exception cref="ObjectDisposedException">The node has been disposed.</exception>
     SrdoState GetSrdoState(int srdoNumber);
