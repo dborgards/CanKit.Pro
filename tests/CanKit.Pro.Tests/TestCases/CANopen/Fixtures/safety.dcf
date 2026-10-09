@@ -257,7 +257,7 @@ PDOMapping=0
 
 [1381]
 ParameterName=SRDO mapping parameter 1
-SubNumber=5
+SubNumber=17
 ObjectType=0x8
 
 [1381sub0]
@@ -303,6 +303,114 @@ DataType=0x0007
 AccessType=rw
 DefaultValue=0
 ParameterValue=0x20010008
+PDOMapping=0
+
+[1381sub5]
+ParameterName=Mapping entry 5
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381sub6]
+ParameterName=Mapping entry 6 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381sub7]
+ParameterName=Mapping entry 7
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381sub8]
+ParameterName=Mapping entry 8 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381sub9]
+ParameterName=Mapping entry 9
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381subA]
+ParameterName=Mapping entry 10 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381subB]
+ParameterName=Mapping entry 11
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381subC]
+ParameterName=Mapping entry 12 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381subD]
+ParameterName=Mapping entry 13
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381subE]
+ParameterName=Mapping entry 14 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381subF]
+ParameterName=Mapping entry 15
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
+PDOMapping=0
+
+[1381sub10]
+ParameterName=Mapping entry 16 (inverted)
+ObjectType=0x7
+DataType=0x0007
+AccessType=rw
+DefaultValue=0
+ParameterValue=0
 PDOMapping=0
 
 [1382]

@@ -56,6 +56,18 @@ public interface ICanOpenSafety
     /// <exception cref="InvalidOperationException">1300h is 0 or the node is not Operational.</exception>
     Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default);
 
+    /// <summary>§9.2 Figure 9: downloads 1300h, every record (deleted first, created last), the
+    /// checksums 13FFh:n, reads everything back and compares byte for byte, and only then writes
+    /// 13FEh = A5h and reads it back. Every transfer passes the peer-SDO gate. One operation per
+    /// peer at a time. An SDO abort (for example 0800 0022h — the peer is Operational), a
+    /// timeout or a gate refusal propagates as from SdoDownloadAsync; the peer is then left
+    /// with 13FEh = 0, because every parameter write clears it.</summary>
+    Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration, CancellationToken cancellationToken = default);
+
+    /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n (must equal the checksum of
+    /// the expected record) and the records themselves, and compares. Nothing is written.</summary>
+    Task<PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, PeerSafetyConfiguration expected, CancellationToken cancellationToken = default);
+
     /// <summary>A consumer SRDO received a valid pair and wrote it to the mapped objects.</summary>
     event EventHandler<SrdoReceivedEventArgs>? SrdoReceived;
 
