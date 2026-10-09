@@ -694,7 +694,8 @@ identical ones still waiting are folded into one.
 mapping. `Add` refuses what the peer's validator would refuse whatever its state, before a
 configuration can delete the peer's SRDOs (§8.4.2.2): a direction other than tx or rx, COB-IDs
 that are not an odd id of 101h..17Fh and the next one, a refresh time or SCT outside 1..65535 ms or
-an SRVT outside 1..255 ms, and a COB-ID another SRDO of the same configuration uses; `PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId)` builds it from a DCF's
+an SRVT outside 1..255 ms, and a COB-ID another SRDO of the same configuration uses;
+`PeerSafetyConfiguration.FromDeviceDescription(dcf, nodeId)` builds it from a DCF's
 parameter values (default value where none, `$NODEID` resolved) as what a device with that
 node-id holds after loading the file, so that step D against a slave's own DCF expects what the
 slave holds. It is not a second reading of the file: the node's own loader — the same code, over
