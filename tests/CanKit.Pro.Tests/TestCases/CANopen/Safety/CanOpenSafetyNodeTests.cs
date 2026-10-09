@@ -361,7 +361,7 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         Advance(clock, node, TimeSpan.FromMilliseconds(25));                // cycle at 58.5 ms
         node.ObjectDictionary.WriteUnsigned(0x2001, 0x00, 0x77);
         Advance(clock, node, TimeSpan.FromMilliseconds(25));                // cycle at 83.5 ms, with 77h
-        service.Handed(cob1).Should().Be(1, "one pair in flight; the three due meanwhile are not on the chain");
+        service.Handed(cob1).Should().Be(1, "only the held pair's plain frame has reached the service; none of the three pairs due meanwhile has");
         service.Handed(cob2).Should().Be(0, "the inverted frame follows the plain one's confirmation");
 
         service.Release();
