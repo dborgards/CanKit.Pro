@@ -191,8 +191,12 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         await wire.WaitForStateCountAsync(0x700u + Producer, NmtState.Operational, 1);
         Advance(clock, node, TimeSpan.FromMilliseconds(100));
         // The cyclic heartbeat on the same clock is due after the first SRDO cycle (8.5 ms) would
-        // have been, so whatever the advance would have sent is queued before it.
+        // have been: it witnesses that the actor has run that cycle. It is not a wire-order
+        // guarantee — heartbeats and SRDOs go out through different send chains.
         await wire.WaitForStateCountAsync(0x700u + Producer, NmtState.Operational, 2);
+        // The wire-order witness: the SRDO chain's tail, read on the actor after the cycles ran.
+        // Once it completes, every pair those cycles handed over has been confirmed on the bus.
+        await AwaitSrdoChainAsync((CanOpenNode)node);
         wire.Count(0x0FFu + 2 * Producer).Should().Be(0, "§8.3.1 D: the safety node shall not transmit SRDOs");
         await WaitUntilAsync(() => { lock (changes) return changes.Any(c => c.Reason == SrdoInvalidReason.ConfigurationInvalid); }, "state change");
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
@@ -247,7 +251,9 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         consumer.ObjectDictionary.ReadUnsigned(0x3000, 0).Should().Be(0x1234u);
         consumer.ObjectDictionary.ReadUnsigned(0x3001, 0).Should().Be(0x5Au);
         received[0].CobId.Should().Be(CanOpenCobId.SrdoDefaultCobId1(Producer));
-        // Change of state: the application writes a mapped object, the producer transmits at once.
+        // Change of state: the application writes a mapped object, the producer transmits at once —
+        // once the first pair is confirmed; one due while it is in flight would be skipped.
+        await WaitUntilAsync(() => !SrdoPairInFlight((CanOpenNode)producer), "first pair confirmed");
         producer.ObjectDictionary.WriteUnsigned(0x2001, 0, 0x07);
         await WaitUntilAsync(() => { lock (received) return received.Count >= 2; }, "CoS SRDO");
         consumer.ObjectDictionary.ReadUnsigned(0x3001, 0).Should().Be(0x07u);
@@ -284,8 +290,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>§8.1: "the redundant transmission is sent after the first transmission"; §9.5:
-    /// the consumer takes the pair "in chronological order". Many pairs back to back, so that two
-    /// sends racing each other would put an inverted frame first somewhere among them.</summary>
+    /// the consumer takes the pair "in chronological order". Many pairs, so that the two frames
+    /// of a pair racing each other would put an inverted frame first somewhere among them.</summary>
     [Fact]
     public async Task Pairs_Reach_The_Consumer_In_Order()
     {
@@ -312,11 +318,157 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         wire.SendNmt(NmtCommand.Start, 0);
         await WaitUntilAsync(() => producer.State == NmtState.Operational && consumer.State == NmtState.Operational, "start");
 
-        for (int i = 0; i < 200; i++) await producer.Safety().TriggerSrdoAsync(1);
+        // One pair at a time: a pair due while the previous one is in flight is skipped by design,
+        // so each trigger waits for the one before it to be confirmed.
+        var producerNode = (CanOpenNode)producer;
+        for (int i = 0; i < 200; i++)
+        {
+            await producer.Safety().TriggerSrdoAsync(1);
+            await AwaitSrdoChainAsync(producerNode);
+            await WaitUntilAsync(() => !SrdoPairInFlight(producerNode), "in-flight flag cleared");
+        }
         // The last pair, by change of state: delivered after every event the earlier ones raised.
         producer.ObjectDictionary.WriteUnsigned(0x2001, 0x00, 0xEE);
         await last.Task.WithTimeoutAsync(ShortTimeout);
         lock (failures) failures.Should().BeEmpty();
+    }
+
+    /// <summary>A bus whose confirmations stall: at most one pair per SRDO is in flight, the pairs
+    /// due meanwhile are skipped rather than queued, and the next cycle after the confirmation
+    /// transmits again.</summary>
+    [Fact]
+    public async Task Pairs_Due_While_One_Is_Unconfirmed_Are_Skipped()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        uint cob2 = cob1 + 1;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // first pair at 8.5 ms
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        for (int i = 0; i < 3; i++) Advance(clock, node, TimeSpan.FromMilliseconds(25)); // three more cycles due
+        service.Handed(cob2).Should().Be(0, "the inverted frame follows the plain one's confirmation");
+        service.Release();
+        // The chain's tail after the cycles ran: the held pair itself if the three were skipped,
+        // the last of them if they had been queued behind it.
+        await AwaitSrdoChainAsync(node);
+        service.Handed(cob1).Should().Be(1, "the three pairs due while the first was unconfirmed were skipped, not queued");
+        service.Handed(cob2).Should().Be(1);
+        await WaitUntilAsync(() => !SrdoPairInFlight(node), "in-flight flag cleared");
+
+        Advance(clock, node, TimeSpan.FromMilliseconds(25));
+        await AwaitSrdoChainAsync(node);
+        service.Handed(cob1).Should().Be(2, "the next cycle after the confirmation transmits");
+        service.Handed(cob2).Should().Be(2);
+    }
+
+    /// <summary>The GFC does not wait behind an SRDO pair whose confirmation is outstanding.</summary>
+    [Fact]
+    public async Task The_Gfc_Does_Not_Wait_For_An_Unconfirmed_Pair()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer, new CanOpenNodeOptions { SrdoCount = 1 }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        node.ObjectDictionary.WriteUnsigned(0x1300, 0, 1);
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+
+        await node.Safety().SendGlobalFailsafeCommandAsync();
+        await WaitUntilAsync(() => service.Handed(CanOpenCobId.GlobalFailsafeCommand) == 1, "GFC handed to the service");
+        service.Handed(cob1 + 1).Should().Be(0, "the pair is still unconfirmed");
+        service.Release();
+    }
+
+    private static async Task AwaitSrdoChainAsync(CanOpenNode node)
+    {
+        Task chain = Task.CompletedTask;
+        await node.PostToActorAsync(() => chain = node.SrdoSendChainForTests);
+        await chain.WithTimeoutAsync(ShortTimeout);
+    }
+
+    private static bool SrdoPairInFlight(CanOpenNode node)
+    {
+        bool inFlight = false;
+        node.PostToActorAsync(() => inFlight = node.SrdoPairInFlightForTests(1)).GetAwaiter().GetResult();
+        return inFlight;
+    }
+
+    /// <summary>A bus service that holds the confirmation of every SRDO frame (101h–180h) until
+    /// <see cref="Release"/>, as a bus does on which nobody acknowledges; everything else passes
+    /// through. Counts what was handed to <see cref="SendConfirmedAsync"/> per COB-ID.</summary>
+    private sealed class HoldingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly object _gate = new();
+        private readonly List<uint> _handed = new();
+        private readonly List<(CanFrame Frame, TaskCompletionSource<TxConfirmation> Confirmation)> _held = new();
+        private bool _holding = true;
+
+        public HoldingService(ICanBusService inner) => _inner = inner;
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            uint id = (uint)frame.ID;
+            lock (_gate)
+            {
+                _handed.Add(id);
+                if (_holding && id is >= CanOpenCobId.SrdoFirstCobId and <= CanOpenCobId.SrdoLastCobId)
+                {
+                    var confirmation = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _held.Add((frame, confirmation));
+                    return confirmation.Task;
+                }
+            }
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public int Handed(uint cobId) { lock (_gate) return _handed.Count(x => x == cobId); }
+
+        /// <summary>Stops holding and confirms what was held.</summary>
+        public void Release()
+        {
+            (CanFrame Frame, TaskCompletionSource<TxConfirmation> Confirmation)[] held;
+            lock (_gate)
+            {
+                _holding = false;
+                held = _held.ToArray();
+                _held.Clear();
+            }
+            foreach (var h in held) h.Confirmation.TrySetResult(new TxConfirmation { Confirmed = true });
+        }
+
+        public void Dispose() => _inner.Dispose();
     }
 
     [Fact]
@@ -345,8 +497,10 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
         int pairs = wire.Count(cob1);
         Advance(clock, node, TimeSpan.FromMilliseconds(100));
-        // The cyclic heartbeat is due after four refresh cycles would have been.
+        // The cyclic heartbeat is due after four refresh cycles would have been: a witness that
+        // the actor ran them, not a wire-order guarantee (the two go out on different send chains).
         await wire.WaitForStateCountAsync(heartbeat, NmtState.PreOperational, 2);
+        await AwaitSrdoChainAsync((CanOpenNode)node); // the wire-order witness, see Tampered_Checksum_…
         wire.Count(cob1).Should().Be(pairs, "§8.3.2.2: safety communication only in Operational");
     }
 
@@ -377,7 +531,11 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
         int pairs = wire.Count(cob1);
         Advance(clock, node, TimeSpan.FromMilliseconds(100));
-        await wire.WaitForStateCountAsync(heartbeat, NmtState.PreOperational, 1);
+        // The first Pre-Operational heartbeat is the one the reset sends after the boot-up; the
+        // second is the cyclic tick RestartCycle made due 100 ms after the reset: a witness that
+        // the actor ran every refresh cycle inside the advance, not a wire-order guarantee.
+        await wire.WaitForStateCountAsync(heartbeat, NmtState.PreOperational, 2);
+        await AwaitSrdoChainAsync((CanOpenNode)node); // the wire-order witness, see Tampered_Checksum_…
         wire.Count(cob1).Should().Be(pairs, "the node is Pre-Operational after the reset");
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational);
     }

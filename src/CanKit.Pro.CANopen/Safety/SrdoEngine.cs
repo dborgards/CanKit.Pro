@@ -190,16 +190,17 @@ internal sealed partial class SrdoEngine : IDisposable
         });
     }
 
-    /// <summary>Both frames in one actor turn — "the redundant transmission is sent after the
-    /// first transmission to the CAN controller with minimum delay" (§8.1) — then the refresh
-    /// cycle restarts, so the refresh time is the maximum interval between transmissions.</summary>
+    /// <summary>Both frames as one unit handed to the host — "the redundant transmission is sent
+    /// after the first transmission to the CAN controller with minimum delay" (§8.1) — then the
+    /// refresh cycle restarts, so the refresh time is the maximum interval between transmissions.
+    /// A pair the host skips because the previous one is still being sent is simply not on the
+    /// bus; the consumer's SCT is what reports that.</summary>
     private void Transmit(SrdoRuntime rt)
     {
         try
         {
             var payload = BuildPayload(rt);
-            _host.Send(rt.CobId1, payload);
-            _host.Send(rt.CobId2, SrdoFrames.Invert(payload));
+            _host.SendPair(rt.Number, rt.CobId1, payload, rt.CobId2, SrdoFrames.Invert(payload));
         }
         catch (Exception ex)
         {

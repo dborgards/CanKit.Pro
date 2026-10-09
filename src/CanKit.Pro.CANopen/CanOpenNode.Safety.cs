@@ -359,17 +359,53 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     // ---- ISrdoEngineHost (actor loop) ----------------------------------------------------------
 
-    // Every SRDO frame and every GFC of this node goes out through one chain, in the order the
-    // engine sent them on the actor: §8.1 "the redundant transmission is sent after the first
-    // transmission", and §9.5 has the consumer refuse a pair whose inverted frame comes first.
-    // Two independent SendControlFrame calls are two Task.Runs that can overtake each other.
-    // Actor loop only.
+    // Every SRDO pair of this node goes out through one chain, plain frame then inverted frame,
+    // in the order the engine sent them on the actor: §8.1 "the redundant transmission is sent
+    // after the first transmission", and §9.5 has the consumer refuse a pair whose inverted frame
+    // comes first. Two independent SendControlFrame calls are two Task.Runs that can overtake
+    // each other. Actor loop only.
     private Task _srdoSendChain = Task.CompletedTask;
 
-    void ISrdoEngineHost.Send(uint cobId, byte[] payload)
-        => _srdoSendChain = _srdoSendChain.ContinueWith(
-            _ => SendControlFrame(cobId, payload),
+    // At most one pair per SRDO on that chain. A link ends when both frames are confirmed or
+    // have failed or timed out, and on a bus where confirmations stall the cycles would otherwise
+    // queue pairs faster than they drain, and the backlog would later reach the consumer as
+    // current data. A pair due while the previous one of the same SRDO is still in flight is
+    // skipped; the consumer's SCT reports the gap. Actor-only, like every other piece of runtime
+    // state: the flag is set and read on the actor, and the continuation that ends a link posts
+    // its clear there, so no cycle can see a half-updated state and no lock is needed.
+    private readonly bool[] _srdoInFlight;
+
+    // The GFC is not an SRDO and does not wait behind them (§8.2: it is the highest-priority
+    // safety message); it goes out at once, as every other control frame of the node.
+    void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _ = SendControlFrame(cobId, payload);
+
+    void ISrdoEngineHost.SendPair(int srdoNumber, uint cobId1, byte[] plain, uint cobId2, byte[] inverted)
+    {
+        if (_srdoInFlight[srdoNumber]) return;
+        _srdoInFlight[srdoNumber] = true;
+        var link = _srdoSendChain.ContinueWith(
+            _ => SendSrdoPairAsync(cobId1, plain, cobId2, inverted),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+        _srdoSendChain = link;
+        _ = link.ContinueWith(
+            _ => RunOnActor(() => _srdoInFlight[srdoNumber] = false),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+    }
+
+    /// <summary>Test seam, actor only: the tail of the SRDO send chain.</summary>
+    internal Task SrdoSendChainForTests => _srdoSendChain;
+
+    /// <summary>Test seam, actor only: whether a pair of SRDO <paramref name="srdoNumber"/> is in flight.</summary>
+    internal bool SrdoPairInFlightForTests(int srdoNumber) => _srdoInFlight[srdoNumber];
+
+    // A failed or unconfirmed frame is reported by SendControlFrame itself and the inverted frame
+    // still follows, as it would on the controller; only a cancelled send (the service is being
+    // disposed) ends the pair early.
+    private async Task SendSrdoPairAsync(uint cobId1, byte[] plain, uint cobId2, byte[] inverted)
+    {
+        await SendControlFrame(cobId1, plain).ConfigureAwait(false);
+        await SendControlFrame(cobId2, inverted).ConfigureAwait(false);
+    }
 
     void ISrdoEngineHost.EmitEmcy(ushort errorCode)
     {

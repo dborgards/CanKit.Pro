@@ -48,15 +48,32 @@ public class SrdoEngineProducerTests : IDisposable
         /// assert ordering between the typed lists (<c>state:1:valid</c>, <c>received:1</c>,
         /// <c>emcy:8210</c>, <c>gfc</c>, <c>send:123</c>).</summary>
         public readonly List<string> Log = new();
-        /// <summary>Makes the next <see cref="Send"/> throw (once) instead of recording.</summary>
+        /// <summary>Makes the next <see cref="Send"/> or <see cref="SendPair"/> throw (once)
+        /// instead of recording.</summary>
         public volatile bool ThrowOnNextSend;
         public void Send(uint cobId, byte[] payload)
+        {
+            ThrowIfRequested();
+            Record(cobId, payload);
+        }
+        /// <summary>Records both frames of the pair, in order, as two entries of
+        /// <see cref="Sent"/> and <see cref="Log"/>.</summary>
+        public void SendPair(int srdoNumber, uint cobId1, byte[] plain, uint cobId2, byte[] inverted)
+        {
+            ThrowIfRequested();
+            Record(cobId1, plain);
+            Record(cobId2, inverted);
+        }
+        private void ThrowIfRequested()
         {
             if (ThrowOnNextSend)
             {
                 ThrowOnNextSend = false;
                 throw new InvalidOperationException("bus off");
             }
+        }
+        private void Record(uint cobId, byte[] payload)
+        {
             Sent.Add((cobId, payload));
             Log.Add($"send:{cobId:X3}");
         }
@@ -264,10 +281,10 @@ public class SrdoEngineProducerTests : IDisposable
         var engine = Start();
         Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
         OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
-        _host.ThrowOnNextSend = true;
+        _host.ThrowOnNextSend = true; // the pair is one SendPair call: it throws as a whole
         Advance(TimeSpan.FromMilliseconds(NodeId));
         _host.Exceptions.Should().ContainSingle().Which.Should().BeOfType<InvalidOperationException>();
-        _host.Sent.Should().BeEmpty();
+        _host.Sent.Should().BeEmpty("neither frame of the pair was handed over");
         engine.GetState(1).IsValid.Should().BeTrue("a transport failure does not invalidate the SRDO");
         Advance(TimeSpan.FromMilliseconds(25));
         _host.Sent.Should().HaveCount(2, "the refresh cycle was restarted despite the failure");
