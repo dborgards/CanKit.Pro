@@ -1228,8 +1228,9 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
 ### ADR-12 (umgesetzt): CANopen Safety (CiA 304) im CANopen-Paket, als eigene Engine-Klasse
 - **Kontext:** CiA DSP 304 ergänzt CiA 301 um SRDO, GFC und die Objekte 1300h–13FFh. Alles, was
   eine Umsetzung braucht — Aktor, Deadline-Scheduler, Bus-Subscription, Validator-Kette,
-  NMT-Übergänge, EDS-Pfad — ist intern in `CanOpenNode`; `ICanOpenNode` darf seit 1.3.0 nicht
-  erweitert werden (`c636a17`).
+  NMT-Übergänge, EDS-Pfad — ist intern in `CanOpenNode`; `ICanOpenNode` zu erweitern bräche
+  seit 1.3.0 jeden Implementierer (SemVer). Präzedenz für den Weg über eine Erweiterungsmethode
+  ist `DisposeAsync` (`c636a17`).
 - **Entscheidung:** im Paket `CanKit.Pro.CANopen` (kein eigenes Paket: eine öffentliche
   Erweiterungs-SPI wäre ein zweites Designprojekt und friert eine Plugin-API ein, die sonst
   niemand nutzt; Präzedenz CiA 302-2 und CiA 306). Laufzeit als `Safety/SrdoEngine` mit

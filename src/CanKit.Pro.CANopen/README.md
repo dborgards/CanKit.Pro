@@ -542,9 +542,11 @@ using var node = CanOpen.OpenNode(bus, nodeId: 0x05, new CanOpenNodeOptions { Sr
 node.ObjectDictionary.AddU8(0x2001, 0x00, 0);   // the safety input it transmits
 
 var safety = node.Safety();
-safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30));
+safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8),
+    TimeSpan.FromMilliseconds(30));
 safety.CommitSafetyConfiguration();             // checksums, then 13FEh = A5h
-safety.SrdoStateChanged += (s, e) => Console.WriteLine($"SRDO{e.SrdoNumber} valid={e.IsValid} {e.Reason}");
+safety.SrdoStateChanged += (s, e) =>
+    Console.WriteLine($"SRDO{e.SrdoNumber} valid={e.IsValid} {e.Reason}");
 ```
 
 `EnableChangeOfStateSrdo` (default on) makes an application write to an object mapped in a
@@ -618,7 +620,8 @@ step. Each transmission is the plain frame on COB-ID 1 followed by its bitwise i
 2 (§8.1), handed on as one unit; the pairs of all SRDOs of the node go out on one ordered send
 chain, so an inverted frame can never overtake its plain frame. `TriggerSrdoAsync(n)` and a change
 of state transmit at once and restart the refresh cycle from there; the refresh time is the
-longest interval between two transmissions.
+longest interval between two transmissions the engine schedules. On the bus a pending pair waits
+behind a stalled one (below).
 
 At most one pair per SRDO is in flight. A pair that comes due while the previous one is not yet
 confirmed becomes that SRDO's pending pair, replacing an older pending one — the latest data wins —
@@ -642,7 +645,8 @@ Then (§8.1.1, §8.1.3.1, §9.5):
   enabled) once, until a pair of the right length arrives or the SRDO is rebuilt — as for an
   RPDO; a longer one uses its first bytes.
 
-The next valid pair makes an invalid SRDO valid again — there is nothing to reset.
+The next valid pair makes an invalid SRDO valid again — there is nothing to reset — except
+`ConfigurationInvalid`, which needs a new commit and a transition to Operational.
 `SrdoStateChanged` reports the transitions, not every pair, and is a critical event like a
 heartbeat timeout: it is never discarded to make room in the event queue, and a second identical
 one still waiting behind the first is folded into it. A remote frame, a frame outside Operational
@@ -676,11 +680,13 @@ then per SRDO the record in delete-first order (an SRDO the configuration does n
 deleted), then `1300h`, then every checksum. It reads all of it back and compares byte for byte.
 Only without a difference does it write `13FEh` = `A5h` and read that back too.
 
-`PeerSafetyResult.Succeeded` means acknowledged; otherwise `Mismatches` lists each
-(index, sub-index) with the bytes written and the bytes read, and `A5h` was not written — the
-peer keeps a configuration it will not run. An SDO abort (`0800 0022h` when the peer is
-Operational), a timeout or a refusal by the peer-SDO gate propagates as from `SdoDownloadAsync`;
-the peer is then left with `13FEh` = 0, because every parameter write clears it. Every transfer
+`PeerSafetyResult.Succeeded` means acknowledged. Otherwise `Mismatches` lists each
+(index, sub-index) with the bytes written and the bytes read, and the result is not `Succeeded`:
+`A5h` is written only after a clean readback, and a readback of `A5h` that differs fails the
+result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates as from
+`SdoDownloadAsync`. `13FEh` is 0 once at least one parameter write has been accepted, because
+every such write clears it; an abort before that — for example `0800 0022h` from an Operational
+peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
 One configuration or verification per peer runs at a time.
 
@@ -688,8 +694,8 @@ One configuration or verification per peer runs at a time.
 
 `VerifyPeerSafetyConfigurationAsync(peer, expected)` is §8.3.1 step D without writing anything:
 it uploads `13FEh` (must be `A5h`), `13FFh:n` (must equal the checksum of the expected record)
-and the records, and compares them with what a configuration with `expected` would have written (`1300h` aside,
-which step D does not list).
+and the records, and compares them with what a configuration with `expected` would have
+written (`1300h` aside, which step D does not list).
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
 least one SRDO is a safety slave; an EDS carries no parameter values and never makes one. Before
@@ -697,11 +703,12 @@ NMT Start the master verifies the slave against its DCF:
 
 * verified — the slave is started as any other;
 * not verified (a difference, or an upload that failed; an exception is also reported on
-  `BackgroundExceptionOccurred`) — `FlyingMasterChanged` signals
+  `BackgroundExceptionOccurred`, except when the result arrives during a held cold reset, where it
+  is acted on after the hold) — `FlyingMasterChanged` signals
   `SlaveSafetyConfigurationInvalid` for that slave and it is not started. A mandatory slave, or
-  any safety slave under a simultaneous start (`1F80h` bit 1), halts the boot with the error
-  reaction of `1F80h` bits 4 and 6, as a boot timeout does; an optional one is skipped and the
-  boot goes on.
+  any safety slave under a simultaneous start (`1F80h` bit 1 set and bit 2 clear), halts the boot
+  with the error reaction of `1F80h` bits 4 and 6, as a boot timeout does; an optional one is
+  skipped and the boot goes on.
 
 This node's own self-start and the simultaneous-start broadcast wait for verifications still
 running. A verification that ends while a forced Reset Communication is held is acted on only
@@ -717,15 +724,15 @@ step D is "before NMT Start".
 SRDO pair into the sink, as `ObserveForeignPdoAsync` does for a PDO, and writes nothing to this
 node's dictionary. The record is the one whose live `1301h`–`1340h:05` equals `cobId1`; a word
 that was read decides, matching or not, and the file's value is used only for a record whose
-upload failed or returned no word. A COB-ID word with a bit above bit 10 does not match. The two frames must have
-the same length and be bitwise inverse (§8.1). The mapping is read live from the odd sub-indices
-of `1381h`–`13C0h`, or from the file when that read fails. Unlike for a PDO (FR-CO-030), a live
-mapping of which the peer-SDO gate refuses part — the count was read, a slot was not — is not
-replaced by the file's: the device is known to use a mapping the file does not describe, and
-splitting safety data by the wrong one would hand the caller wrong values marked decoded. Such a
-pair, a mapping with a dummy entry and a frame shorter than the mapping are reported not decoded.
-Signals carry `ForeignPdoKind.Srdo` and the SRDO number. SRVT and SCT are not judged: the caller
-holds the timestamps.
+upload failed or returned no word. A COB-ID word with a bit above bit 10 does not match. The two
+frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from the
+odd sub-indices of `1381h`–`13C0h`, or from the file when that read fails. Unlike for a PDO
+(FR-CO-030), a live mapping of which the peer-SDO gate refuses part — the count was read, a slot
+was not — is not replaced by the file's: the device is known to use a mapping the file does not
+describe, and splitting safety data by the wrong one would hand the caller wrong values marked
+decoded. Such a pair, a mapping with a dummy entry and a frame shorter than the mapping are
+reported not decoded. Signals carry `ForeignPdoKind.Srdo` and the SRDO number. SRVT and SCT are
+not judged: the caller holds the timestamps.
 
 ### What this is not
 
