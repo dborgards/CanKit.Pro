@@ -369,6 +369,40 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         Rejected(() => od.WriteUnsigned(0x1301, 1, 2)).Should().Be(SdoAbortCode.ObjectCannotBeMapped, "a consumer writes the object; it is read-only");
     }
 
+    /// <summary>"Two following COB-IDs" is checked again at the creation: COB-ID 1 can be moved
+    /// after COB-ID 2 was accepted against the old one.</summary>
+    [Fact]
+    public void Creating_An_Srdo_Needs_Consecutive_CobIds()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 6).Should().Be(0x122u, "the pre-defined COB-ID 2 of node 11h");
+        od.WriteUnsigned(0x1301, 5, 0x111);
+        Rejected(() => od.WriteUnsigned(0x1301, 1, 1)).Should().Be(SdoAbortCode.ValueRangeExceeded, "122h does not follow 111h");
+        od.WriteUnsigned(0x1301, 6, 0x112);
+        od.WriteUnsigned(0x1301, 1, 1);
+    }
+
+    /// <summary>The count checks every pair again: an inverted slot written while its plain
+    /// slot was still empty is compared when the mapping is enabled.</summary>
+    [Fact]
+    public void The_Count_Checks_That_Each_Inverted_Slot_Repeats_Its_Plain_Slot()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0);
+        od.AddU8(0x2001, 0x00, 0);
+        od.WriteUnsigned(0x1381, 2, 0x2001_0008);
+        od.WriteUnsigned(0x1381, 1, 0x2000_0010);
+        Rejected(() => od.WriteUnsigned(0x1381, 0, 2)).Should().Be(SdoAbortCode.ObjectCannotBeMapped, "sub 2 does not repeat sub 1");
+        od.WriteUnsigned(0x1381, 2, 0x2000_0010);
+        od.WriteUnsigned(0x1381, 0, 2);
+    }
+
     [Fact]
     public void Creating_An_Srdo_Needs_Both_CobIds()
     {
