@@ -17,6 +17,7 @@ namespace CanKit.Pro.CANopen
         public const uint FlyingMasterDetect = 115u;
         public const uint FlyingMasterForce = 118u;
         public const uint FlyingMasterTrigger = 114u;
+        public const uint GlobalFailsafeCommand = 1u;
         public const uint HeartbeatBase = 1792u;
         public const uint InvalidBit = 2147483648u;
         public const byte MaxNodeId = 127;
@@ -29,6 +30,8 @@ namespace CanKit.Pro.CANopen
         public const uint Rpdo4Base = 1280u;
         public const uint SdoRxBase = 1536u;
         public const uint SdoTxBase = 1408u;
+        public const uint SrdoFirstCobId = 257u;
+        public const uint SrdoLastCobId = 384u;
         public const uint Sync = 128u;
         public const uint SyncGenerateBit = 1073741824u;
         public const uint Tpdo1Base = 384u;
@@ -41,6 +44,8 @@ namespace CanKit.Pro.CANopen
         public static uint RpdoDefault(byte nodeId, int pdoIndex) { }
         public static uint SdoRx(byte nodeId) { }
         public static uint SdoTx(byte nodeId) { }
+        public static uint SrdoDefaultCobId1(byte nodeId) { }
+        public static uint SrdoDefaultCobId2(byte nodeId) { }
         public static uint TpdoDefault(byte nodeId, int pdoIndex) { }
         public static void ValidateNodeId(byte nodeId) { }
     }
@@ -83,6 +88,7 @@ namespace CanKit.Pro.CANopen
     {
         public CanOpenNodeOptions() { }
         public System.TimeSpan DefaultTpdoEventTimerInterval { get; init; }
+        public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
         public int EventQueueCapacity { get; init; }
         public int MaxSdoTransferBytes { get; init; }
@@ -94,8 +100,10 @@ namespace CanKit.Pro.CANopen
         public int SdoBlockThresholdBytes { get; init; }
         public System.TimeSpan SdoServerTimeout { get; init; }
         public System.TimeSpan SdoTimeout { get; init; }
+        public int SrdoCount { get; init; }
         public bool WritableCommunicationParameters { get; init; }
-        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default, CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default, CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default, int? srdoCount = default, bool? enableChangeOfStateSrdo = default) { }
     }
     public enum CanOpenNodeProfile
     {
@@ -160,6 +168,7 @@ namespace CanKit.Pro.CANopen
     {
         Tpdo = 0,
         Rpdo = 1,
+        Srdo = 2,
     }
     public enum ForeignPdoMappingOrigin
     {
@@ -410,6 +419,7 @@ namespace CanKit.Pro.CANopen.Nmt
         ActiveMasterLost = 3,
         ConfigurationError = 4,
         SlaveBootTimeout = 5,
+        SlaveSafetyConfigurationInvalid = 6,
     }
     public enum NmtCommand : byte
     {
@@ -484,6 +494,130 @@ namespace CanKit.Pro.CANopen.Pdo
         SynchronousAcyclic = 3,
         RtrOnlySynchronous = 4,
         RtrOnlyEventDriven = 5,
+    }
+}
+namespace CanKit.Pro.CANopen.Safety
+{
+    public static class CanOpenSafetyExtensions
+    {
+        public static CanKit.Pro.CANopen.Safety.ICanOpenSafety Safety(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+    }
+    public sealed class ForeignSrdoObserveResult
+    {
+        public uint CobId1 { get; }
+        public CanKit.Pro.CANopen.ForeignPdoObservation? Observation { get; }
+        public string? Reason { get; }
+    }
+    public sealed class GlobalFailsafeCommandReceivedEventArgs : System.EventArgs
+    {
+        public GlobalFailsafeCommandReceivedEventArgs(System.DateTime timestamp) { }
+        public System.DateTime Timestamp { get; }
+    }
+    public interface ICanOpenSafety
+    {
+        int SrdoCount { get; }
+        event System.EventHandler<CanKit.Pro.CANopen.Safety.GlobalFailsafeCommandReceivedEventArgs>? GlobalFailsafeCommandReceived;
+        event System.EventHandler<CanKit.Pro.CANopen.Safety.SrdoReceivedEventArgs>? SrdoReceived;
+        event System.EventHandler<CanKit.Pro.CANopen.Safety.SrdoStateChangedEventArgs>? SrdoStateChanged;
+        void CommitSafetyConfiguration();
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration configuration, System.Threading.CancellationToken cancellationToken = default);
+        void ConfigureSrdoConsumer(int srdoNumber, CanKit.Pro.CANopen.Safety.SrdoMapping mapping, System.TimeSpan safeguardCycleTime, System.TimeSpan validationTime, uint? cobId1 = default, uint? cobId2 = default);
+        void ConfigureSrdoProducer(int srdoNumber, CanKit.Pro.CANopen.Safety.SrdoMapping mapping, System.TimeSpan refreshTime, uint? cobId1 = default, uint? cobId2 = default);
+        void DeleteSrdo(int srdoNumber);
+        CanKit.Pro.CANopen.Safety.SrdoState GetSrdoState(int srdoNumber);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.ForeignSrdoObserveResult> ObserveForeignSrdoAsync(byte peerNodeId, uint cobId1, System.ReadOnlyMemory<byte> frame1, System.ReadOnlyMemory<byte> frame2, CanKit.Pro.CANopen.CanOpenDeviceDescription peerDescription, CanKit.Pro.CANopen.IForeignPdoSink sink, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task SendGlobalFailsafeCommandAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task TriggerSrdoAsync(int srdoNumber, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Safety.PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration expected, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public sealed class PeerSafetyConfiguration
+    {
+        public PeerSafetyConfiguration() { }
+        public bool DeclaresAnySrdo { get; }
+        public bool GlobalFailsafeCommandEnabled { get; init; }
+        [System.Runtime.CompilerServices.TupleElementNames(new string[] {
+                "Parameter",
+                "Mapping"})]
+        public System.Collections.Generic.IReadOnlyDictionary<int, System.ValueTuple<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter, CanKit.Pro.CANopen.Safety.SrdoMapping>> Srdos { get; }
+        public CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration Add(int srdoNumber, CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter parameter, CanKit.Pro.CANopen.Safety.SrdoMapping mapping) { }
+        public static CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration FromDeviceDescription(CanKit.Pro.CANopen.CanOpenDeviceDescription description, byte nodeId) { }
+    }
+    public sealed class PeerSafetyMismatch
+    {
+        public byte[] Actual { get; }
+        public byte[] Expected { get; }
+        public ushort Index { get; }
+        public byte Subindex { get; }
+        public override string ToString() { }
+    }
+    public sealed class PeerSafetyResult
+    {
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetyMismatch> Mismatches { get; }
+        public bool Succeeded { get; }
+    }
+    public readonly struct SrdoCommunicationParameter : System.IEquatable<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter>
+    {
+        public SrdoCommunicationParameter(CanKit.Pro.CANopen.Safety.SrdoDirection Direction, System.TimeSpan RefreshOrSafeguardCycleTime, System.TimeSpan ValidationTime, uint CobId1, uint CobId2) { }
+        public uint CobId1 { get; init; }
+        public uint CobId2 { get; init; }
+        public CanKit.Pro.CANopen.Safety.SrdoDirection Direction { get; init; }
+        public System.TimeSpan RefreshOrSafeguardCycleTime { get; init; }
+        public System.TimeSpan ValidationTime { get; init; }
+    }
+    public static class SrdoCrc
+    {
+        public static ushort Compute(in CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter parameter, CanKit.Pro.CANopen.Safety.SrdoMapping mapping) { }
+        public static ushort Crc16Xmodem(System.ReadOnlySpan<byte> data) { }
+    }
+    public enum SrdoDirection : byte
+    {
+        None = 0,
+        Transmit = 1,
+        Receive = 2,
+    }
+    public enum SrdoInvalidReason
+    {
+        NotReceived = 0,
+        NotOperational = 1,
+        ConfigurationInvalid = 2,
+        SafeguardCycleExpired = 3,
+        ValidationTimeExpired = 4,
+        OutOfOrder = 5,
+        Mismatch = 6,
+    }
+    public sealed class SrdoMapping
+    {
+        public const int MaxEntries = 8;
+        public SrdoMapping() { }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Entries { get; }
+        public int TotalBytes { get; }
+        public CanKit.Pro.CANopen.Safety.SrdoMapping Add(CanKit.Pro.CANopen.Pdo.PdoMappingEntry entry) { }
+        public CanKit.Pro.CANopen.Safety.SrdoMapping Add(ushort index, byte subindex, byte bitLength) { }
+        public CanKit.Pro.CANopen.Pdo.PdoMappingEntry[] ToArray() { }
+    }
+    public sealed class SrdoReceivedEventArgs : System.EventArgs
+    {
+        public SrdoReceivedEventArgs(int srdoNumber, uint cobId, byte[] payload, System.DateTime timestamp) { }
+        public uint CobId { get; }
+        public byte[] Payload { get; }
+        public int SrdoNumber { get; }
+        public System.DateTime Timestamp { get; }
+    }
+    public sealed class SrdoState
+    {
+        public CanKit.Pro.CANopen.Safety.SrdoDirection Direction { get; }
+        public bool IsValid { get; }
+        public System.DateTime? LastValidAt { get; }
+        public CanKit.Pro.CANopen.Safety.SrdoInvalidReason? Reason { get; }
+        public int SrdoNumber { get; }
+    }
+    public sealed class SrdoStateChangedEventArgs : System.EventArgs
+    {
+        public SrdoStateChangedEventArgs(int srdoNumber, bool isValid, CanKit.Pro.CANopen.Safety.SrdoInvalidReason? reason, System.DateTime timestamp) { }
+        public bool IsValid { get; }
+        public CanKit.Pro.CANopen.Safety.SrdoInvalidReason? Reason { get; }
+        public int SrdoNumber { get; }
+        public System.DateTime Timestamp { get; }
     }
 }
 namespace CanKit.Pro.CANopen.Sdo
