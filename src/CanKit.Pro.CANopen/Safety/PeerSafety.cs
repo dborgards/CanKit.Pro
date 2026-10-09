@@ -21,16 +21,54 @@ public sealed class PeerSafetyConfiguration
     /// <summary>True when at least one SRDO is configured — what makes a peer a safety slave for the boot-up.</summary>
     public bool DeclaresAnySrdo => _srdos.Count > 0;
 
-    /// <summary>Adds or replaces SRDO <paramref name="srdoNumber"/> (1..64). The direction must not
-    /// be None. The configuration keeps a copy of <paramref name="mapping"/>: a later change to
-    /// the caller's instance does not change it.</summary>
+    /// <summary>Adds or replaces SRDO <paramref name="srdoNumber"/> (1..64). What the peer's
+    /// validator would refuse whatever its state is refused here, before a configuration can delete
+    /// the peer's SRDOs (CiA DSP 304 §8.4.2.2): the direction is tx or rx (None: leave the SRDO out
+    /// to delete it); COB-ID 1 is an odd id of 101h..17Fh and COB-ID 2 the next one; the refresh
+    /// time or SCT is 1..65535 ms and the SRVT 1..255 ms after rounding to whole milliseconds; and
+    /// no other SRDO of this configuration uses either COB-ID. The configuration keeps a copy of
+    /// <paramref name="mapping"/>: a later change to the caller's instance does not change it.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">The number is not 1..64, or a time is out of range.</exception>
+    /// <exception cref="ArgumentException">The direction, the COB-IDs, or a COB-ID another SRDO of the configuration uses.</exception>
     public PeerSafetyConfiguration Add(int srdoNumber, SrdoCommunicationParameter parameter, SrdoMapping mapping)
     {
         if (srdoNumber is < 1 or > SrdoRecords.MaxSrdoCount) throw new ArgumentOutOfRangeException(nameof(srdoNumber));
         if (parameter.Direction == SrdoDirection.None) throw new ArgumentException("An SRDO in a configuration has a direction; leave it out to delete it.", nameof(parameter));
+        if (parameter.Direction is not (SrdoDirection.Transmit or SrdoDirection.Receive))
+            throw new ArgumentException($"SRDO {srdoNumber}: the direction is 1 (tx) or 2 (rx), not {(byte)parameter.Direction} (CiA DSP 304 §8.4.2.2, sub-index 1).", nameof(parameter));
+        if (!SrdoFrames.IsCobIdPair(parameter.CobId1, parameter.CobId2))
+            throw new ArgumentException(
+                $"SRDO {srdoNumber}: COB-ID 1 is an odd id of 101h..17Fh and COB-ID 2 the next one, not {parameter.CobId1:X}h/{parameter.CobId2:X}h (CiA DSP 304 §8.4.2.2, Figure 7).", nameof(parameter));
+        ValidateTimes(srdoNumber, parameter, nameof(parameter));
         if (mapping is null) throw new ArgumentNullException(nameof(mapping));
+        foreach (var other in _srdos)
+        {
+            if (other.Key == srdoNumber) continue;
+            var ids = other.Value.Parameter;
+            if (ids.CobId1 == parameter.CobId1 || ids.CobId1 == parameter.CobId2 || ids.CobId2 == parameter.CobId1 || ids.CobId2 == parameter.CobId2)
+                throw new ArgumentException(
+                    $"SRDO {srdoNumber}: COB-IDs {parameter.CobId1:X}h/{parameter.CobId2:X}h are used by SRDO {other.Key} of this configuration; one CAN-ID carries one SRDO (CiA DSP 304 §8.4.2.2).", nameof(parameter));
+        }
         _srdos[srdoNumber] = (parameter, SrdoMapping.FromEntries(mapping.ToArray()));
         return this;
+    }
+
+    /// <summary>Sub-index 2 is 1..65535 ms and sub-index 3 1..255 ms (§8.4.2.2), checked after
+    /// rounding to whole milliseconds. Sub-index 3 is bounded for a producer too: the checksum
+    /// covers it whatever the direction (§8.4.2.2 field c).</summary>
+    internal static void ValidateTimes(int srdoNumber, in SrdoCommunicationParameter parameter, string paramName)
+    {
+        CheckMilliseconds(srdoNumber, "cycle time", parameter.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue, paramName);
+        CheckMilliseconds(srdoNumber, "validation time", parameter.ValidationTime, 1, byte.MaxValue, paramName);
+    }
+
+    internal static ushort CheckMilliseconds(int srdoNumber, string what, TimeSpan time, int min, int max, string paramName)
+    {
+        var ms = Math.Round(time.TotalMilliseconds);
+        if (!(ms >= min && ms <= max))
+            throw new ArgumentOutOfRangeException(paramName, time,
+                $"SRDO {srdoNumber}: the {what} must be {min}..{max} ms, not {time.TotalMilliseconds} ms (CiA DSP 304 §8.4.2.2).");
+        return (ushort)ms;
     }
 
     /// <summary>What a device with node-id <paramref name="nodeId"/> holds after loading

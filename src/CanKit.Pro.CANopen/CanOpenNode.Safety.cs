@@ -118,7 +118,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                     // accessible in this direction (a producer reads them, a consumer writes them).
                     uint cob1 = od.ReadUnsigned(index, 0x05) & CanOpenCobId.CanIdMask;
                     uint cob2 = od.ReadUnsigned(index, 0x06) & CanOpenCobId.CanIdMask;
-                    if (!SrdoFrames.IsCobId1(cob1) || !SrdoFrames.IsCobId2(cob2) || cob2 != cob1 + 1)
+                    if (!SrdoFrames.IsCobIdPair(cob1, cob2))
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     if (IsCanIdOfAnExistingSrdo(od, srdoCount, cob1, n) || IsCanIdOfAnExistingSrdo(od, srdoCount, cob2, n))
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);

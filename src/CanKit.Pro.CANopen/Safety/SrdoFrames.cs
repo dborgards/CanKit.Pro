@@ -28,4 +28,8 @@ internal static class SrdoFrames
 
     /// <summary>Sub-index 6 value range: 258, 260..384 — the even ids of 102h..180h.</summary>
     public static bool IsCobId2(uint canId) => canId is >= 0x102 and <= 0x180 && (canId & 1) == 0;
+
+    /// <summary>The pair an SRDO is created with (§8.4.2.2): COB-ID 1 in its range, COB-ID 2 in
+    /// its range and "two following COB-IDs". A bit above bit 10 puts an id out of range.</summary>
+    public static bool IsCobIdPair(uint cobId1, uint cobId2) => IsCobId1(cobId1) && IsCobId2(cobId2) && cobId2 == cobId1 + 1;
 }

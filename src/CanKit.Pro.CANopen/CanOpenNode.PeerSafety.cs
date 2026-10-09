@@ -105,23 +105,13 @@ internal sealed partial class CanOpenNode
     /// below would wrap silently.</summary>
     private static void ValidateSafetyTimes(PeerSafetyConfiguration configuration)
     {
+        // PeerSafetyConfiguration.Add refuses these already; kept as the check before the first frame.
         foreach (var pair in configuration.Srdos)
-        {
-            var p = pair.Value.Parameter;
-            CheckMilliseconds(pair.Key, "cycle time", p.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue);
-            // The CRC covers sub3 whatever the direction (§8.4.2.2 field c), so it is written and bounded for a producer too.
-            CheckMilliseconds(pair.Key, "validation time", p.ValidationTime, 1, byte.MaxValue);
-        }
+            PeerSafetyConfiguration.ValidateTimes(pair.Key, pair.Value.Parameter, "configuration");
     }
 
     private static ushort CheckMilliseconds(int srdoNumber, string what, TimeSpan time, int min, int max)
-    {
-        var ms = Math.Round(time.TotalMilliseconds);
-        if (!(ms >= min && ms <= max))
-            throw new ArgumentOutOfRangeException("configuration", time,
-                $"SRDO {srdoNumber}: the {what} must be {min}..{max} ms, not {time.TotalMilliseconds} ms.");
-        return (ushort)ms;
-    }
+        => PeerSafetyConfiguration.CheckMilliseconds(srdoNumber, what, time, min, max, "configuration");
 
     /// <summary>The writes of §9.2 in order: a first pass that deletes every SRDO; then per SRDO
     /// the deletion, the mapping (disabled, slots, count), the times, the ids, the creation (SRDOs

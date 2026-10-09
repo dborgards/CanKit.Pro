@@ -163,22 +163,53 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(SrdoDirection.Transmit, 30, 256)]
     [InlineData(SrdoDirection.Receive, 30, 0)]
     [InlineData(SrdoDirection.Receive, 30, 256)]
-    public async Task A_Time_Outside_Its_Range_Is_Refused_Before_Any_Frame_Is_Sent(SrdoDirection direction, int cycleMs, int validationMs)
+    public void A_Time_Outside_Its_Range_Is_Refused_When_The_Srdo_Is_Added(SrdoDirection direction, int cycleMs, int validationMs)
     {
-        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
-        using var busA = Open(session, 1);
-        using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
-        using var device = OpenDevice(busB);
-        master.BindPeerDeviceDescription(Device, PeerFile());
-        var bad = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+        // Refused by Add, so no configuration that could reach a peer carries it (§8.4.2.2:
+        // sub2 1..65535 ms, sub3 1..255 ms for every direction, because the checksum covers it).
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true };
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => configuration
             .Add(1, new SrdoCommunicationParameter(direction, TimeSpan.FromMilliseconds(cycleMs), TimeSpan.FromMilliseconds(validationMs), 0x109, 0x10A),
-                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
-        var ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, bad).WithTimeoutAsync(ShortTimeout));
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8)));
         ex.Message.Should().Contain("SRDO 1");
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => master.Safety().VerifyPeerSafetyConfigurationAsync(Device, bad).WithTimeoutAsync(ShortTimeout));
-        device.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u, "nothing was sent");
-        device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+        ex.ParamName.Should().Be("parameter");
+        configuration.Srdos.Should().BeEmpty("nothing was added");
+    }
+
+    /// <summary>What the device's validator would refuse regardless of the peer's state is
+    /// refused by Add, before a configuration can delete the peer's SRDOs (§8.4.2.2): a direction
+    /// other than tx or rx, COB-IDs outside the odd 101h..17Fh / even 102h..180h pair (a bit above
+    /// bit 10 included), and a second SRDO of the configuration on the same COB-IDs.</summary>
+    [Theory]
+    [InlineData(3, 0x109u, 0x10Au)]
+    [InlineData(255, 0x109u, 0x10Au)]
+    [InlineData(1, 0x109u, 0x10Cu)]   // COB-ID 2 even and in range, but not COB-ID 1 + 1
+    [InlineData(1, 0x10Au, 0x10Bu)]   // COB-ID 1 even
+    [InlineData(1, 0x181u, 0x182u)]   // above 17Fh / 180h
+    [InlineData(1, 0x0FFu, 0x100u)]   // below 101h / 102h
+    [InlineData(1, 0x909u, 0x90Au)]   // a bit above bit 10
+    public void Add_Refuses_What_The_Device_Would_Refuse_Anyway(int direction, uint cobId1, uint cobId2)
+    {
+        var configuration = new PeerSafetyConfiguration()
+            .Add(2, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x141, 0x142),
+                new SrdoMapping().Add(0x2001, 0x00, 8));
+        var bad = new SrdoCommunicationParameter((SrdoDirection)direction, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), cobId1, cobId2);
+        var ex = Assert.ThrowsAny<ArgumentException>(() => configuration.Add(1, bad, new SrdoMapping().Add(0x2001, 0x00, 8)));
+        ex.ParamName.Should().Be("parameter");
+        ex.Message.Should().Contain("8.4.2.2");
+        configuration.Srdos.Keys.Should().Equal(new[] { 2 }, "nothing was added");
+    }
+
+    [Fact]
+    public void Add_Refuses_A_Second_Srdo_On_The_Same_Cob_Ids()
+    {
+        var parameter = new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A);
+        var configuration = new PeerSafetyConfiguration().Add(1, parameter, new SrdoMapping().Add(0x2001, 0x00, 8));
+        var ex = Assert.Throws<ArgumentException>(() => configuration.Add(2, parameter, new SrdoMapping().Add(0x2001, 0x00, 8)));
+        ex.Message.Should().Contain("SRDO 1");
+        configuration.Srdos.Keys.Should().Equal(new[] { 1 }, "nothing was added");
+        configuration.Add(1, parameter with { RefreshOrSafeguardCycleTime = TimeSpan.FromMilliseconds(40) }, new SrdoMapping().Add(0x2001, 0x00, 8));
+        configuration.Srdos[1].Parameter.RefreshOrSafeguardCycleTime.Should().Be(TimeSpan.FromMilliseconds(40), "replacing an SRDO with its own ids is no collision");
     }
 
     [Fact]
