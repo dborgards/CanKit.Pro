@@ -59,9 +59,10 @@ public interface ICanOpenSafety
     /// <summary>§9.2 Figure 9: downloads 1300h, every record (deleted first, created last), the
     /// checksums 13FFh:n, reads everything back and compares byte for byte, and only then writes
     /// 13FEh = A5h and reads it back. Every transfer passes the peer-SDO gate. One operation per
-    /// peer at a time. An SDO abort (for example 0800 0022h — the peer is Operational), a
-    /// timeout or a gate refusal propagates as from SdoDownloadAsync; the peer is then left
-    /// with 13FEh = 0, because every parameter write clears it.</summary>
+    /// peer at a time. An SDO abort, a timeout or a gate refusal propagates as from
+    /// SdoDownloadAsync. The peer's 13FEh is 0 once at least one parameter write has been
+    /// accepted, because every such write clears it; an abort before that — for example
+    /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
     Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration, CancellationToken cancellationToken = default);
 
     /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n of every expected SRDO (must
