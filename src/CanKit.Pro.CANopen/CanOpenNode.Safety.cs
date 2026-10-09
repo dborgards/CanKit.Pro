@@ -148,8 +148,8 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
                     if (word == 0) return OdWriteDecision.Accept; // disabled
                     bool inRange = subindex == 0x05 ? SrdoFrames.IsCobId1(word) : SrdoFrames.IsCobId2(word);
                     if (!inRange) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-                    if (subindex == 0x06 && word != (od.ReadUnsigned(index, 0x05) & CanOpenCobId.CanIdMask) + 1)
-                        return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded); // "two following COB-IDs"
+                    if (subindex == 0x06 && !SrdoFrames.IsCobIdPair(od.ReadUnsigned(index, 0x05) & CanOpenCobId.CanIdMask, word))
+                        return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded); // "two following COB-IDs", the one rule Add applies too
                     if (IsCanIdOfAnExistingSrdo(od, srdoCount, word, n)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     return OdWriteDecision.Accept;
                 }
