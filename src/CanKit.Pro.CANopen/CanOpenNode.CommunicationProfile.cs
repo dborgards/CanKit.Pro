@@ -680,8 +680,8 @@ internal sealed partial class CanOpenNode
         }
         else
         {
-            // Leaving needs no gate: a write that saw Operational is refused, and one that saw
-            // the previous state has nothing to race.
+            // No gate here: a write that saw Operational is refused, and a write that saw any
+            // other state has nothing to race — only entering Operational arms the engine.
             _state = target;
             if (previous == NmtState.Operational && target != NmtState.Operational)
             {

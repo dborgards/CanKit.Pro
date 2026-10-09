@@ -875,14 +875,20 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         {
             od.WriteUnsigned(0x1301, 0x02, 40); // sees Pre-Operational: accepted, and 13FEh is cleared with it
             inside.Set();
-            release.Wait(ShortTimeout);
+            release.Wait(ShortTimeout).Should().BeTrue("the test releases the gate");
         }));
         inside.Wait(ShortTimeout).Should().BeTrue();
-        wire.SendNmt(NmtCommand.Start, Producer);
-        // Positive witness that the actor has reached the transition: it waits at the write gate.
-        await WaitUntilAsync(() => od.WriteGateWaiters >= 1, "the transition into Operational waits at the write gate");
-        node.StateForTests.Should().Be(NmtState.PreOperational, "Operational is not published while a write holds the gate");
-        release.Set();
+        try
+        {
+            wire.SendNmt(NmtCommand.Start, Producer);
+            // Positive witness that the actor has reached the transition: it waits at the write gate.
+            await WaitUntilAsync(() => od.WriteGateWaiters >= 1, "the transition into Operational waits at the write gate");
+            node.StateForTests.Should().Be(NmtState.PreOperational, "Operational is not published while a write holds the gate");
+        }
+        finally
+        {
+            release.Set(); // a failed assertion must not leave the gate held for the node's disposal
+        }
         await holder.WithTimeoutAsync(ShortTimeout);
 
         await WaitUntilAsync(() => node.State == NmtState.Operational, "started");

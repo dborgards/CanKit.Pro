@@ -90,7 +90,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         // §8.3.2.4 note 1: "Writing to a safety entry in the OPERATIONAL state leads to an abort
         // message (abort code: 0800 0022h). Reading … is allowed." This runs under the write gate,
         // and the transition into Operational publishes the state under the same gate
-        // (ApplyNmtTransition), so the state read here cannot change before the value is stored.
+        // (ApplyNmtTransition), so the node cannot enter Operational between this read and the
+        // store: a write that saw another state is stored before the engine arms, and the arming
+        // sees it. Other transitions take no gate; none of them makes a write unsafe.
         if (SrdoRecords.IsStateGated(index) && operational)
             return OdWriteDecision.Reject(SdoAbortCode.DataCannotBeTransferredDeviceState);
         if (index == Co.GfcParameter)
