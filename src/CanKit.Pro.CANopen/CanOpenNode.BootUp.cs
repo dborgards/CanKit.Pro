@@ -153,10 +153,10 @@ internal sealed partial class CanOpenNode
         if (state is not (0x00 or RequestStopped or RequestPreOperational)) return;
 
         // Step D before step E: a safety slave is started only once its configuration verified.
-        // Step D is "before NMT Start", so it covers only a slave this master starts itself: one
-        // already Operational (keep-alive, or a running network taken over) is returned above and
-        // is not verified, and under a simultaneous start (1F80h bit 1) a slave that announces
-        // after the broadcast went out was started by that broadcast and is not verified either.
+        // A safety slave that is already Operational when first seen — because it was running
+        // before this master took over, is keep-alive, or was reached by a simultaneous-start
+        // broadcast before it had announced — is not started by this master (returned above) and
+        // is therefore not verified; step D is "before NMT Start".
         if (!_slaveVerified[nodeId])
         {
             if (_slaveVerifying[nodeId]) return;

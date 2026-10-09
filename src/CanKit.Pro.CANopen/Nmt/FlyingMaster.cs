@@ -65,9 +65,9 @@ public enum FlyingMasterSignal
     /// uploads failed. <see cref="CanKit.Pro.CANopen.FlyingMasterChangedEventArgs.OtherNodeId"/>
     /// is that slave. It is not started; a mandatory one, or any one under a simultaneous start,
     /// halts the boot like <see cref="SlaveBootTimeout"/>.
-    /// Step D comes before NMT Start, so it covers only a slave this master starts. A slave that
-    /// is already Operational (keep-alive, or a running network taken over) is not started and
-    /// not verified. Under a simultaneous start (<c>1F80h</c> bit 1), a slave that announces after
-    /// the broadcast was started by that broadcast and is not verified either.</summary>
+    /// A safety slave that is already Operational when first seen — because it was running before
+    /// this master took over, is keep-alive, or was reached by a simultaneous-start broadcast
+    /// (<c>1F80h</c> bit 1) before it had announced — is not started by this master and is
+    /// therefore not verified; step D is "before NMT Start".</summary>
     SlaveSafetyConfigurationInvalid,
 }

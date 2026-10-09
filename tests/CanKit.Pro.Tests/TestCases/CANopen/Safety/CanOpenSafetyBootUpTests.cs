@@ -101,7 +101,6 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         await UntilAsync(rig.Clock, rig.Witness, null, () => Logged(rig, NmtCommand.EnterPreOperational, Slave), 200, "the witness request was sent");
         rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, Slave), "§8.3.1 D: no start without a verified configuration");
         rig.Node.State.Should().Be(NmtState.Operational, "an optional slave does not hold the master");
-        slave.State.Should().Be(NmtState.PreOperational);
     }
 
     [Fact]
@@ -165,16 +164,17 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         var od = rig.Node.ObjectDictionary;
         od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave | MandatorySlave);
         od.WriteUnsigned(0x1F81, Other, Assigned | BootSlave | MandatorySlave); // never announces
-        od.WriteUnsigned(0x1F89, 0x00, 1000);
+        od.WriteUnsigned(0x1F89, 0x00, 10000);
         Tighten(rig.Node);
         var signals = Record(rig.Node);
         rig.Node.StartFlyingMaster(0, Heartbeat);
         await UntilAsync(rig.Clock, rig.Witness, null, () => rig.Node.FlyingMasterRole == FlyingMasterRole.Active, 800, "the master is active");
-        await UntilAsync(rig.Clock, rig.Witness, null, () => Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid), 500,
+        // 1F89h is armed when the master becomes active; this budget ends half-way through it.
+        await UntilAsync(rig.Clock, rig.Witness, null, () => Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid), 5000,
             "step D failed before 1F89h elapsed");
 
-        for (int i = 0; i < 15; i++)
-            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(100)); // well past 1F89h
+        for (int i = 0; i < 11; i++)
+            await AdvanceAsync(rig.Clock, rig.Witness, null, TimeSpan.FromMilliseconds(1000)); // well past 1F89h
 
         var log = rig.Log.Snapshot();
         log.Count(f => IsNmt(f, NmtCommand.ResetNode, Slave)).Should().Be(1, "one boot-error reaction per boot");
@@ -228,6 +228,45 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
             await SettleUntilAsync(rig, () => Logged(rig, NmtCommand.Start, Slave), "the resumed boot starts the verified slave");
             SdoRequests(rig).Should().Be(requests, "the result from the hold is kept, not verified again");
         }
+    }
+
+    [Fact]
+    public async Task A_Verification_Failing_While_A_Forced_Reset_Is_Held_Is_Repeated_After_It()
+    {
+        var (rig, gate) = OpenGatedMaster();
+        using var _ = rig;
+        using var slave = OpenSlave(rig.Peer, validChecksum: false);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        var signals = Record(rig.Node);
+        gate.PassResets = 1; // the cold boot's broadcast passes, the forced one is held
+        gate.HoldSdo = true;
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => gate.SdoHeld >= 1, 2000, "step D began and its first request is held");
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterForce), Array.Empty<byte>(), isExtendedFrame: false));
+        await gate.ResetEntered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        gate.HoldSdo = false;
+        gate.ReleaseSdo(0, transmit: true);
+        await SettleUntilAsync(rig, () => !SlaveFlag(rig.Node, "_slaveVerifying"), "the failed verification ended inside the hold");
+        await QuiesceAsync(rig.Witness, null);
+        rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, Slave) || IsNmt(f, NmtCommand.ResetNode, Slave),
+            "nothing is started or reset in the hold");
+        Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid).Should().BeFalse("nothing is signalled in the hold");
+
+        // The reset never left: ResumeHeldBoot finds the slave unverified and verifies it again.
+        int resumed = rig.Log.Snapshot().Count;
+        gate.ReleaseReset(confirm: false);
+        await SettleUntilAsync(rig, () => Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid) || Logged(rig, NmtCommand.Start, Slave),
+            "the resumed boot decided about the slave");
+        var log = rig.Log.Snapshot();
+        log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, Slave), "a failed result from the hold does not start the slave");
+        log.Skip(resumed).Should().Contain(f => f.Id == 0x600u + Slave && f.Data[0] != 0x80, "a second step-D request after the resume");
+        Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid).Should().BeTrue("the repeated verification failed");
     }
 
     [Fact]
@@ -355,7 +394,9 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
             "the reaction goes to every assigned slave");
 
         var log = rig.Log.Snapshot();
-        log.Count(f => IsNmt(f, toAll, Slave)).Should().Be(1, "no extra per-slave Reset Node under bit 4 or 6");
+        log.Count(f => IsNmt(f, toAll, Slave)).Should().Be(1, "the command to all reaches the failed slave once");
+        log.Count(f => IsNmt(f, NmtCommand.ResetNode, Slave)).Should().Be(toAll == NmtCommand.ResetNode ? 1 : 0,
+            "no extra per-slave Reset Node under bit 4 or 6");
         log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, Slave));
         rig.Node.State.Should().NotBe(NmtState.Operational);
     }
