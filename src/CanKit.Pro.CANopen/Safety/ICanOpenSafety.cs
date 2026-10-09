@@ -71,8 +71,9 @@ public interface ICanOpenSafety
     Task<PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, PeerSafetyConfiguration expected, CancellationToken cancellationToken = default);
 
     /// <summary>Splits an SRDO pair of another node into <paramref name="sink"/>, like
-    /// <see cref="ICanOpenNode.ObserveForeignPdoAsync"/>: the record whose live 1301h–1340h:05
-    /// equals <paramref name="cobId1"/> (the file is the fallback when the upload fails), the
+    /// <see cref="ICanOpenNode.ObserveForeignPdoAsync"/>: the existing record whose live 1301h–1340h:05
+    /// equals <paramref name="cobId1"/> (the file is the fallback when the upload fails; a record
+    /// whose direction is 0, live or in the file, does not match: it may have kept the ids another SRDO now uses), the
     /// pair checked for equal length and bitwise inversion, the mapping read live from
     /// 1381h–13C0h (odd sub-indices) or from the file. Signals carry
     /// <see cref="ForeignPdoKind.Srdo"/> and the SRDO number. SRVT and SCT are the caller's to

@@ -80,7 +80,10 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    /// <summary>The record n with live 1300h+n:05 == cobId1; the file's value when that upload fails.</summary>
+    /// <summary>The existing record n with live 1300h+n:05 == cobId1; the file's value when that
+    /// upload fails. A deleted record keeps its COB-IDs and another SRDO may take them over — the
+    /// device refuses only the ids of an existing SRDO (§8.4.2.2) — so a record whose direction
+    /// (live, or the file's when the upload fails) is 0 does not match.</summary>
     private async Task<int?> MatchSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, uint cobId1, CancellationToken cancellationToken)
     {
         int count = 0;
@@ -99,14 +102,29 @@ internal sealed partial class CanOpenNode
             // A live word that was read decides, whether it matches or not: the file is only for a record that could not be read.
             if (liveWord is { } live)
             {
-                if (SrdoCobId1(live) == cobId1) return n;
-                continue;
+                if (SrdoCobId1(live) != cobId1) continue;
             }
-            if (TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x05, out var text)
-                && ParseDescribedUnsigned(text, peerNodeId) is { } word && SrdoCobId1(word) == cobId1)
-                return n;
+            else if (!(TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x05, out var text)
+                && ParseDescribedUnsigned(text, peerNodeId) is { } word && SrdoCobId1(word) == cobId1))
+                continue;
+            if (await IsDeletedSrdoAsync(description, peerNodeId, comm, cancellationToken).ConfigureAwait(false)) continue;
+            return n;
         }
         return null;
+    }
+
+    /// <summary>Whether sub-index 1 of the record is 0: live, or the file's value when the upload
+    /// fails. A direction neither yields is not taken for a deletion.</summary>
+    private async Task<bool> IsDeletedSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, ushort comm, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var raw = await SdoUploadAsync(peerNodeId, comm, 0x01, cancellationToken).ConfigureAwait(false);
+            if (raw.Length >= 1) return raw[0] == 0;
+        }
+        catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
+        return TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x01, out var text)
+            && ParseDescribedUnsigned(text, peerNodeId) is 0;
     }
 
     /// <summary>The COB-ID 1 of a 1301h–1340h:05 word: its bits 0–10, and null when any bit above

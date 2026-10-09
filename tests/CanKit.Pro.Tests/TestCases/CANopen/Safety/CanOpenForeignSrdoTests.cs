@@ -118,6 +118,54 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         sink.Signals[1].Value.Should().Equal(0x5A);
     }
 
+    /// <summary>A deleted record keeps its COB-IDs, and another SRDO may take them over: the
+    /// device refuses only the ids of an existing SRDO (§8.4.2.2). The pair belongs to the SRDO
+    /// that exists, so a record whose live direction is 0 does not match.</summary>
+    [Fact]
+    public async Task A_Deleted_Record_That_Kept_The_Cob_Id_Does_Not_Match()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, new CanOpenNodeOptions { SrdoCount = 2, WritableCommunicationParameters = true });
+        device.ObjectDictionary.AddU16(0x2000, 0x00, 0x1234);
+        device.ObjectDictionary.AddU8(0x2001, 0x00, 0x5A);
+        var safety = device.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30), 0x109, 0x10A);
+        safety.DeleteSrdo(1);
+        safety.ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(30), 0x109, 0x10A);
+        device.ObjectDictionary.ReadUnsigned(0x1301, 5).Should().Be(0x109u, "the deleted record kept its COB-ID 1");
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 0x34, 0x12 }, new byte[] { 0xCB, 0xED }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation!.PdoNumber.Should().Be(2, "SRDO 2 is the one that exists on 0x109");
+        result.Observation.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        sink.Signals.Should().ContainSingle();
+        sink.Signals[0].Index.Should().Be((ushort)0x2000);
+        sink.Signals[0].Value.Should().Equal(0x34, 0x12);
+    }
+
+    /// <summary>The file is the fallback for the direction as for the COB-ID: a record the file
+    /// declares deleted does not match when the peer does not answer.</summary>
+    [Fact]
+    public async Task A_Record_The_File_Declares_Deleted_Does_Not_Match_When_The_Peer_Does_Not_Answer()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        var file = PeerFilePatched("[1301sub1]", "ParameterValue=1", "ParameterValue=0");
+        master.BindPeerDeviceDescription(Device, file);
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 0x34, 0x12, 0x5A }, new byte[] { 0xCB, 0xED, 0xA5 }, file, sink).WithTimeoutAsync(TimeSpan.FromSeconds(30));
+        result.Observation.Should().BeNull(result.Observation?.Reason);
+        result.Reason.Should().NotBeNull();
+        sink.Signals.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_Bad_Pair_Or_An_Unknown_Id_Is_Not_Decoded()
     {

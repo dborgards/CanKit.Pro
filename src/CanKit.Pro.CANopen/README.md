@@ -736,7 +736,10 @@ step D is "before NMT Start".
 SRDO pair into the sink, as `ObserveForeignPdoAsync` does for a PDO, and writes nothing to this
 node's dictionary. The record is the one whose live `1301h`–`1340h:05` equals `cobId1`; a word
 that was read decides, matching or not, and the file's value is used only for a record whose
-upload failed or returned no word. A COB-ID word with a bit above bit 10 does not match. The two
+upload failed or returned no word. A COB-ID word with a bit above bit 10 does not match. Only an
+existing record matches: one whose direction (sub-index `01h`, live, or the file's when that upload
+fails) is 0 is skipped, because a deleted record keeps its COB-IDs and another SRDO may have taken
+them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The two
 frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from the
 odd sub-indices of `1381h`–`13C0h`, or from the file when that read fails. Unlike for a PDO
 (FR-CO-030), a live mapping of which the peer-SDO gate refuses part — the count was read, a slot
