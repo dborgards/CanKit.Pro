@@ -45,6 +45,49 @@ public class SrdoCrcTests
         SrdoCrc.Compute(Parameter, new SrdoMapping()).Should().Be(SrdoCrc.Crc16Xmodem(new byte[] { 0x01, 0x00, 0x19, 0x14, 0, 0, 1, 1, 0, 0, 1, 2, 0x00 }));
     }
 
+    /// <summary>Exact to the tick: TimeSpan.FromMilliseconds rounds to whole milliseconds on .NET Framework.</summary>
+    private static TimeSpan Ms(double milliseconds) => TimeSpan.FromTicks((long)Math.Round(milliseconds * TimeSpan.TicksPerMillisecond));
+
+    /// <summary>The fields are UNSIGNED16 and UNSIGNED8 milliseconds and a direction 0..2
+    /// (§8.4.2.2): a value outside is refused rather than cut to the field, which would checksum
+    /// a record nobody wrote. 0 is allowed — the device path checksums what its dictionary holds.
+    /// The bound applies to the rounded value.</summary>
+    [Theory]
+    [InlineData(65535.0, 20.0, SrdoDirection.Transmit, true)]
+    [InlineData(65535.4, 20.0, SrdoDirection.Transmit, true)]
+    [InlineData(65535.5, 20.0, SrdoDirection.Transmit, false)]
+    [InlineData(65536.0, 20.0, SrdoDirection.Transmit, false)]
+    [InlineData(25.0, 255.0, SrdoDirection.Receive, true)]
+    [InlineData(25.0, 255.4, SrdoDirection.Receive, true)]
+    [InlineData(25.0, 255.5, SrdoDirection.Receive, false)]
+    [InlineData(25.0, 256.0, SrdoDirection.Receive, false)]
+    [InlineData(0.0, 0.0, SrdoDirection.None, true)]
+    [InlineData(-0.4, -0.4, SrdoDirection.Transmit, true)]
+    [InlineData(-1.0, 20.0, SrdoDirection.Transmit, false)]
+    [InlineData(25.0, -1.0, SrdoDirection.Transmit, false)]
+    [InlineData(25.0, 20.0, (SrdoDirection)3, false)]
+    [InlineData(25.0, 20.0, (SrdoDirection)255, false)]
+    public void Compute_Refuses_A_Field_Outside_Its_Range(double cycleMs, double validationMs, SrdoDirection direction, bool accepted)
+    {
+        var parameter = new SrdoCommunicationParameter(direction, Ms(cycleMs), Ms(validationMs), 0x101, 0x102);
+        var compute = () => SrdoCrc.Compute(parameter, new SrdoMapping());
+        if (accepted) compute.Should().NotThrow();
+        else compute.Should().Throw<ArgumentOutOfRangeException>().Which.ParamName.Should().Be("parameter");
+    }
+
+    /// <summary>The times go in as whole milliseconds, rounded half to even (Math.Round).</summary>
+    [Fact]
+    public void Times_Are_Rounded_To_Whole_Milliseconds_Half_To_Even()
+    {
+        static ushort Crc(double cycleMs, double validationMs) => SrdoCrc.Compute(
+            Parameter with { RefreshOrSafeguardCycleTime = Ms(cycleMs), ValidationTime = Ms(validationMs) },
+            new SrdoMapping());
+        Crc(24.5, 20).Should().Be(Crc(24, 20));
+        Crc(25.5, 20).Should().Be(Crc(26, 20));
+        Crc(25, 20.5).Should().Be(Crc(25, 20));
+        Crc(25, 21.5).Should().Be(Crc(25, 22));
+    }
+
     [Fact]
     public void Every_Field_Changes_The_Checksum()
     {

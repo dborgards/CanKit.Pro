@@ -605,7 +605,11 @@ the refresh time or SCT (2), the SRVT (1), COB-ID 1 (4), COB-ID 2 (4), the mappi
 per mapping sub-index, that sub-index (1) and its value (4). V1.0 gives the polynomial
 x¹⁶ + x¹² + x⁵ + 1 and nothing else: the initial value and byte order chosen here are those of
 CRC-16/XMODEM (`SrdoCrc.Crc16Xmodem`, also used by the SDO block transfer), multi-byte fields
-MSB-first.
+MSB-first. `SrdoCrc.Compute` takes the times as whole milliseconds, rounded half to even
+(`Math.Round`), and refuses with `ArgumentOutOfRangeException` what does not fit the field after
+rounding — a negative time, a refresh time or SCT above 65535 ms, an SRVT above 255 ms — and a
+direction above 2, rather than checksum a value cut to the field. 0 is accepted: the device's own
+records are checksummed as they are, and the dictionary refuses 0 itself.
 
 At every transition to Operational each SRDO is checked (§9.5, last rule; §8.3.1 step D):
 `13FEh` = `A5h` and `13FFh:n` equal to the checksum of the record. Without both the SRDO is

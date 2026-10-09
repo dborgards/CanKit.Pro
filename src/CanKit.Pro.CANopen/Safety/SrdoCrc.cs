@@ -15,7 +15,14 @@ namespace CanKit.Pro.CANopen.Safety;
 public static class SrdoCrc
 {
     /// <summary>The checksum the device compares at the transition to Operational and the tool
-    /// writes to 13FFh:n (§8.3.1 step D, §9.2).</summary>
+    /// writes to 13FFh:n (§8.3.1 step D, §9.2). The times go in as whole milliseconds, rounded
+    /// half to even (<see cref="Math.Round(double)"/>), and must fit their fields after rounding:
+    /// the refresh time or SCT 0..65535 ms (UNSIGNED16), the SRVT 0..255 ms (UNSIGNED8). 0 is
+    /// accepted — the device path checksums what its dictionary holds, and the dictionary refuses
+    /// 0 itself.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">A time is negative or does not fit its field
+    /// after rounding, or the direction is above 2 (§8.4.2.2).</exception>
+    /// <exception cref="ArgumentNullException"><paramref name="mapping"/> is null.</exception>
     public static ushort Compute(in SrdoCommunicationParameter parameter, SrdoMapping mapping)
     {
         if (mapping is null) throw new ArgumentNullException(nameof(mapping));
@@ -46,12 +53,15 @@ public static class SrdoCrc
     /// with the same mapping value.</summary>
     internal static byte[] CanonicalBytes(in SrdoCommunicationParameter parameter, SrdoMapping mapping)
     {
+        if ((byte)parameter.Direction > (byte)SrdoDirection.Receive)
+            throw new ArgumentOutOfRangeException(nameof(parameter), parameter.Direction, "The direction is 0..2 (CiA DSP 304 §8.4.2.2, sub-index 1).");
+        ushort cycle = (ushort)Milliseconds(parameter.RefreshOrSafeguardCycleTime, ushort.MaxValue, "refresh time or SCT (sub-index 2, UNSIGNED16)", nameof(parameter));
+        byte srvt = (byte)Milliseconds(parameter.ValidationTime, byte.MaxValue, "SRVT (sub-index 3, UNSIGNED8)", nameof(parameter));
         var bytes = new List<byte>(13 + 10 * mapping.Entries.Count);
         bytes.Add((byte)parameter.Direction);
-        ushort cycle = (ushort)Math.Round(parameter.RefreshOrSafeguardCycleTime.TotalMilliseconds);
         bytes.Add((byte)(cycle >> 8));
         bytes.Add((byte)cycle);
-        bytes.Add((byte)Math.Round(parameter.ValidationTime.TotalMilliseconds));
+        bytes.Add(srvt);
         AddU32(bytes, parameter.CobId1);
         AddU32(bytes, parameter.CobId2);
         bytes.Add((byte)(2 * mapping.Entries.Count));
@@ -65,6 +75,16 @@ public static class SrdoCrc
             AddU32(bytes, value);
         }
         return bytes.ToArray();
+    }
+
+    /// <summary>Whole milliseconds, rounded half to even, within 0..<paramref name="max"/>.</summary>
+    private static int Milliseconds(TimeSpan time, int max, string field, string paramName)
+    {
+        var ms = Math.Round(time.TotalMilliseconds);
+        if (!(ms >= 0 && ms <= max))
+            throw new ArgumentOutOfRangeException(paramName, time,
+                $"The {field} must be 0..{max} ms after rounding to whole milliseconds, not {time.TotalMilliseconds} ms (CiA DSP 304 §8.4.2.2).");
+        return (int)ms;
     }
 
     private static void AddU32(List<byte> bytes, uint value)
