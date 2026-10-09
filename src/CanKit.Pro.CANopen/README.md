@@ -700,8 +700,10 @@ COB-IDs that are not a consecutive pair or that another existing SRDO holds, no 
 a mapping that does not apply (§8.4.2.3) — is left out, as the device leaves it deleted.
 
 The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
-above it (`ArgumentException`) before writing anything; a peer that returns no count is an
-`InvalidOperationException`. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
+above it (`ArgumentException`) before writing anything; a peer that returns no count, or a count
+above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
+further frame and for a verification alike: SRDOs claimed beyond 64 could never be configured or
+verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
 direction, because the checksum covers it) are refused before the first frame. Then it writes
 sub-index `01h` = 0 for every SRDO of the peer — so that two SRDOs can exchange their COB-IDs —
 then per SRDO the record in delete-first order (an SRDO the configuration does not name stays

@@ -327,6 +327,47 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
     }
 
+    /// <summary>13FFh:00 is the number of SRDOs, at most 64 (§8.4.2.2). A peer reporting more is
+    /// not taken for 64: what it claims beyond could never be configured or verified, so the call
+    /// fails before any further frame.</summary>
+    [Theory]
+    [InlineData((byte)65, false)]
+    [InlineData((byte)255, false)]
+    [InlineData((byte)65, true)]
+    [InlineData((byte)255, true)]
+    public async Task A_Count_Above_64_Is_An_Error_Not_64_Srdos(byte count, bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: count);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain(count.ToString(System.Globalization.CultureInfo.InvariantCulture)).And.Contain("64");
+        lock (fake.Requests) fake.Requests.Should().Equal(new[] { ((ushort)0x13FF, (byte)0) }, "nothing after the count");
+    }
+
+    /// <summary>64 is the maximum and is taken: the verification reaches 1340h with a file whose
+    /// highest SRDO record is 64, which implies every record below it.</summary>
+    [Fact]
+    public async Task A_Count_Of_64_Is_Taken()
+    {
+        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf"))
+            .Replace("[1302", "[1340").Replace("[1382", "[13C0").Replace("=0x1302\n", "=0x1340\n").Replace("=0x1382\n", "=0x13C0\n");
+        var file = CanOpenDeviceDescription.ParseDcf(text);
+        file.Contains(0x1340, 0x01).Should().BeTrue();
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: 64);
+        master.BindPeerDeviceDescription(Device, file);
+        var result = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, new PeerSafetyConfiguration()).WithTimeoutAsync(ShortTimeout);
+        lock (fake.Requests) fake.Requests.Should().Contain(((ushort)0x1340, (byte)0x01), "every SRDO up to the count is verified");
+        result.Mismatches.Should().ContainSingle(m => m.Index == 0x13FE, "the fake holds no A5h; every record reads 0, as a deleted SRDO should");
+    }
+
     [Fact]
     public async Task A_Missing_Srdo_Count_Is_An_Error_Not_Zero_Srdos()
     {
@@ -527,11 +568,12 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         private readonly byte _nodeId;
         private readonly (ushort, byte) _lieAt;
         public readonly Dictionary<(ushort, byte), byte[]> Written = new();
-        public FakeExpeditedServer(string session, int channel, byte nodeId, (ushort, byte) lieAt, bool emptyCount = false)
+        public readonly List<(ushort Index, byte Subindex)> Requests = new();
+        public FakeExpeditedServer(string session, int channel, byte nodeId, (ushort, byte) lieAt, bool emptyCount = false, byte srdoCount = 2)
         {
             _nodeId = nodeId;
             _lieAt = lieAt;
-            Written[(0x13FF, 0)] = emptyCount ? Array.Empty<byte>() : new byte[] { 2 };
+            Written[(0x13FF, 0)] = emptyCount ? Array.Empty<byte>() : new byte[] { srdoCount };
             _bus = Open(session, channel);
             _bus.FrameObserved += (_, e) =>
             {
@@ -540,6 +582,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
                 var d = f.Data.ToArray();
                 ushort index = (ushort)(d[1] | (d[2] << 8));
                 byte sub = d[3];
+                if ((d[0] & 0xE0) is 0x20 or 0x40) lock (Requests) Requests.Add((index, sub));
                 byte[] reply;
                 if ((d[0] & 0xE0) == 0x20)
                 {

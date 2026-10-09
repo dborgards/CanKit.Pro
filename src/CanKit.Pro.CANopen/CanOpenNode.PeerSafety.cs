@@ -83,7 +83,12 @@ internal sealed partial class CanOpenNode
     {
         var count = await SdoUploadAsync(peerNodeId, SrdoRecords.Checksum, 0x00, cancellationToken).ConfigureAwait(false);
         if (count.Length < 1) throw new InvalidOperationException("The peer returned no SRDO count from 13FFh:00.");
-        return Math.Min((int)count[0], SrdoRecords.MaxSrdoCount);
+        // Not clamped: SRDOs the peer claims beyond 64 could never be configured or verified,
+        // and a configuration acknowledged over 1..64 would leave them unchecked.
+        if (count[0] > SrdoRecords.MaxSrdoCount)
+            throw new InvalidOperationException(
+                $"The peer reports {count[0]} SRDOs in 13FFh:00; CiA DSP 304 §8.4.2.2 allows at most {SrdoRecords.MaxSrdoCount}.");
+        return count[0];
     }
 
     /// <summary>A record above the peer's count does not exist on the peer: writing the others and
