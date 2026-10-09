@@ -273,7 +273,9 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             device.ObjectDictionary.AddU8((ushort)(0x2010 + i), 0x00, 0);
             mapping.Add((ushort)(0x2010 + i), 0x00, 8);
         }
-        master.BindPeerDeviceDescription(Device, PeerFile());
+        // The peer's file declares the eight objects, rw and mappable, as the device has them:
+        // the tool checks the mapping against it before the first frame.
+        master.BindPeerDeviceDescription(Device, PeerFileWith(Enumerable.Range(0x2010, 8).Select(i => ((ushort)i, "0x0005", "rw", true)).ToArray()));
         var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
             .Add(1, new SrdoCommunicationParameter(SrdoDirection.Receive, TimeSpan.FromMilliseconds(50), TimeSpan.FromMilliseconds(35), 0x109, 0x10A), mapping);
         var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
@@ -588,6 +590,68 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var ensure = typeof(CanOpenNode).GetMethod("EnsurePeerSdoAccess", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var ex = Record.Exception(() => ensure.Invoke(master, new object[] { Device, (ushort)0x1301, (byte)0x01 }));
         ex.Should().BeOfType<System.Reflection.TargetInvocationException>().Which.InnerException.Should().BeOfType<PeerSdoAccessException>();
+    }
+
+    /// <summary>The fixture with further application objects declared: index, data type, access type, PDOMapping.</summary>
+    private static CanOpenDeviceDescription PeerFileWith(params (ushort Index, string DataType, string Access, bool Mappable)[] objects)
+    {
+        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n");
+        var list = new System.Text.StringBuilder("[ManufacturerObjects]\nSupportedObjects=" + (2 + objects.Length) + "\n1=0x2000\n2=0x2001\n");
+        var sections = new System.Text.StringBuilder();
+        for (int i = 0; i < objects.Length; i++)
+        {
+            var o = objects[i];
+            list.Append(i + 3).Append("=0x").Append(o.Index.ToString("X4", System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
+            sections.Append($"\n[{o.Index:X4}]\nParameterName=Object {o.Index:X4}\nObjectType=0x7\nDataType={o.DataType}\nAccessType={o.Access}\nDefaultValue=0\nPDOMapping={(o.Mappable ? 1 : 0)}\n");
+        }
+        text = text.Replace("[ManufacturerObjects]\nSupportedObjects=2\n1=0x2000\n2=0x2001\n", list.ToString());
+        text.Should().Contain("SupportedObjects=" + (2 + objects.Length));
+        return CanOpenDeviceDescription.ParseDcf(text.TrimEnd('\n') + "\n" + sections);
+    }
+
+    /// <summary>§9.2 deletes every SRDO of the peer first, so a mapping the peer will refuse
+    /// would destroy its configuration. What the bound file shows is checked before the first
+    /// frame: the object is declared, flagged mappable (PDOMapping), of the width the entry
+    /// claims, and accessible in the SRDO's direction. What only the peer can judge stays the
+    /// peer's.</summary>
+    [Theory]
+    [InlineData("not mappable")]     // 1300h:00, declared with PDOMapping=0
+    [InlineData("not declared")]     // 2005h:00
+    [InlineData("sub not declared")] // 2001h:01; 2001h is a VAR
+    [InlineData("wrong width")]      // 2000h:00 is UNSIGNED16
+    [InlineData("not writable")]     // a consumer on 2001h:00, which is ro
+    [InlineData("not readable")]     // a producer on 2007h:00, which is wo
+    [InlineData("flag absent")]      // 2006h:00 declared without PDOMapping
+    public async Task Configure_Refuses_A_Mapping_The_Bound_File_Rules_Out_Before_Any_Frame(string what)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true));
+        if (what == "flag absent")
+        {
+            var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n")
+                .Replace("[ManufacturerObjects]\nSupportedObjects=2\n1=0x2000\n2=0x2001\n", "[ManufacturerObjects]\nSupportedObjects=3\n1=0x2000\n2=0x2001\n3=0x2006\n");
+            file = CanOpenDeviceDescription.ParseDcf(text.TrimEnd('\n') + "\n\n[2006]\nParameterName=No flag\nObjectType=0x7\nDataType=0x0005\nAccessType=rw\nDefaultValue=0\n");
+            file.Contains(0x2006, 0x00).Should().BeTrue();
+        }
+        master.BindPeerDeviceDescription(Device, file);
+        var (direction, mapping) = what switch
+        {
+            "not mappable" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x1300, 0x00, 8)),
+            "not declared" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2005, 0x00, 8)),
+            "sub not declared" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2001, 0x01, 8)),
+            "wrong width" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2000, 0x00, 8)),
+            "not writable" => (SrdoDirection.Receive, new SrdoMapping().Add(0x2001, 0x00, 8)),
+            "not readable" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2007, 0x00, 8)),
+            _ => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2006, 0x00, 8)),
+        };
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(direction, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A), mapping);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("SRDO 1").And.Contain($"{mapping.Entries[0].Index:X4}h");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent, not even the count read");
     }
 
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads

@@ -22,6 +22,9 @@ internal sealed partial class CanOpenNode
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(configuration); // before the first frame
+        // Without a bound description the peer gate refuses the first transfer anyway.
+        if (_peerDescriptions.TryGetValue(peerNodeId, out var description))
+            EnsureMappingsFitDescription(configuration, description); // before the first frame
         var gate = _peerSafetyGate.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -89,6 +92,45 @@ internal sealed partial class CanOpenNode
             throw new InvalidOperationException(
                 $"The peer reports {count[0]} SRDOs in 13FFh:00; CiA DSP 304 §8.4.2.2 allows at most {SrdoRecords.MaxSrdoCount}.");
         return count[0];
+    }
+
+    /// <summary>§9.2 deletes every SRDO of the peer before any mapping is written, so a mapping
+    /// the peer refuses leaves it without its previous configuration. What the peer's bound
+    /// EDS/DCF shows (CiA 306) is therefore checked before the first frame: each mapped object is
+    /// declared, flagged mappable (<c>PDOMapping</c>; absent means not mappable), as wide as its
+    /// declared data type when that type has a fixed width, and accessible in the SRDO's direction
+    /// (a producer reads it, a consumer writes it — the file's <c>AccessType</c>). What the file
+    /// does not show — a rule of the peer's own — stays the peer's to refuse.</summary>
+    private static void EnsureMappingsFitDescription(PeerSafetyConfiguration configuration, CanOpenDeviceDescription description)
+    {
+        foreach (var srdo in configuration.Srdos)
+        {
+            foreach (var entry in srdo.Value.Mapping.Entries)
+            {
+                if (MappingEntryRefusal(description, entry, srdo.Value.Parameter.Direction) is { } reason)
+                    throw new ArgumentException(
+                        $"SRDO {srdo.Key}: the mapping entry {entry.Index:X4}h:{entry.Subindex:X2}h ({entry.BitLength} bits) {reason} in the peer's bound description; nothing was sent (CiA DSP 304 §9.2 deletes every SRDO first).",
+                        "configuration");
+            }
+        }
+    }
+
+    private static string? MappingEntryRefusal(CanOpenDeviceDescription description, Pdo.PdoMappingEntry entry, SrdoDirection direction)
+    {
+        if (!TryDescribedObject(description, entry.Index, out var obj)) return "is not declared";
+        DescribedEntry? found = null;
+        foreach (var candidate in EntriesOf(obj))
+        {
+            if (candidate.Subindex == entry.Subindex) { found = candidate; break; }
+        }
+        if (found is not { } described) return "is not declared";
+        if (!described.PdoMappable) return "is not flagged mappable (PDOMapping)";
+        if (MapType(described.DataType) is { } type && OdEntryLayout.FixedSize(type) is var size && size > 0 && entry.ByteLength != size)
+            return $"is not as wide as its declared {type} ({size * 8} bits)";
+        var access = MapAccess(described.Access);
+        if (direction == SrdoDirection.Transmit && (access & OdAccess.ReadOnly) == 0) return "is not readable, which a producer needs";
+        if (direction == SrdoDirection.Receive && (access & OdAccess.WriteOnly) == 0) return "is not writable, which a consumer needs";
+        return null;
     }
 
     /// <summary>A record above the peer's count does not exist on the peer: writing the others and

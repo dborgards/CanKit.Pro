@@ -720,7 +720,14 @@ above it (`ArgumentException`) before writing anything; a peer that returns no c
 above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
 further frame and for a verification alike: SRDOs claimed beyond 64 could never be configured or
 verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
-direction, because the checksum covers it) are refused before the first frame. Then it writes
+direction, because the checksum covers it) are refused before the first frame. So is a mapping
+the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
+refusal at the mapping would leave it without its configuration: each mapped object must be
+declared there, flagged mappable (`PDOMapping`; absent means not mappable, as CiA 306 has it),
+as wide as its declared data type, and readable for a producer or writable for a consumer
+(`AccessType`). What the bound file lets the tool see is refused locally; what only the peer can
+judge — a rule of its own beyond its file — is the peer's (`ArgumentException`, nothing sent).
+Then it writes
 sub-index `01h` = 0 for every SRDO of the peer — so that two SRDOs can exchange their COB-IDs —
 then per SRDO the record in delete-first order (an SRDO the configuration does not name stays
 deleted), then `1300h`, then every checksum. The mapping is its count and the slots its objects

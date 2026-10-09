@@ -65,14 +65,20 @@ public interface ICanOpenSafety
 
     /// <summary>§9.2 Figure 9: downloads 1300h, every record (deleted first, created last), the
     /// checksums 13FFh:n, reads everything back and compares byte for byte, and only then writes
-    /// 13FEh = A5h and reads it back. Every transfer passes the peer-SDO gate. One operation per
+    /// 13FEh = A5h and reads it back. Before the first frame, every mapping entry is checked against
+    /// the peer's bound EDS/DCF (declared, mappable, width, access in the SRDO's direction), since
+    /// the deletion comes first. Every transfer passes the peer-SDO gate. One operation per
     /// peer at a time. An SDO abort, a timeout or a gate refusal propagates as from
     /// SdoDownloadAsync. The peer's 13FEh is 0 once at least one parameter write has been
     /// accepted, because every such write clears it; an abort before that — for example
     /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
     /// <exception cref="InvalidOperationException">The peer returned no count from 13FFh:00, or a
     /// count above 64 (§8.4.2.2) — refused before any further frame.</exception>
-    /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count.</exception>
+    /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
+    /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
+    /// with another width, or does not make accessible in the SRDO's direction — checked before
+    /// the first frame, because §9.2 deletes every SRDO of the peer first. What only the peer can
+    /// judge stays the peer's.</exception>
     Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration, CancellationToken cancellationToken = default);
 
     /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n of every expected SRDO (must
