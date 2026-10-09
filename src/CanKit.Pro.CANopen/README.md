@@ -723,7 +723,7 @@ verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and
 direction, because the checksum covers it) are refused before the first frame. So is a mapping
 the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
 refusal at the mapping would leave it without its configuration: each mapped object must be
-declared there, flagged mappable (`PDOMapping`; absent means not mappable, as CiA 306 has it),
+declared there, flagged mappable (`PDOMapping`; an absent key reads as not mappable),
 as wide as its declared data type, and readable for a producer or writable for a consumer
 (`AccessType`). What the bound file lets the tool see is refused locally; what only the peer can
 judge — a rule of its own beyond its file — is the peer's (`ArgumentException`, nothing sent).
