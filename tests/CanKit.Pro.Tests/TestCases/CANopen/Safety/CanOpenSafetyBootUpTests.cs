@@ -225,6 +225,43 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         log.Should().NotContain(f => IsNmt(f, NmtCommand.Start, 0), "no Start to node 0 while a safety slave is assigned");
     }
 
+    /// <summary>A slave whose DCF leaves SRDO 2 out (SRDOs 1 and 3, checksums valid): the device
+    /// holds 1302h deleted, and step D with the master bound to the same file reaches it and
+    /// verifies the slave, which is then started. The device is opened without
+    /// WritableCommunicationParameters: step D only reads.</summary>
+    [Fact]
+    public async Task A_Slave_Whose_File_Leaves_An_Srdo_Number_Out_Is_Verified_And_Started()
+    {
+        var text = CanOpenSafetyDeviceDescriptionTests.GappedSafetyDcfText();
+        var expected = PeerSafetyConfiguration.FromDeviceDescription(CanOpenDeviceDescription.ParseDcf(text), Slave);
+        expected.Srdos.Keys.Should().BeEquivalentTo(new[] { 1, 3 });
+        text = text.Replace("ParameterValue=0x0000", $"ParameterValue=0x{SrdoCrc.Compute(expected.Srdos[1].Parameter, expected.Srdos[1].Mapping):X4}");
+        int sub3 = text.IndexOf("[13FFsub3]", StringComparison.Ordinal);
+        int value = text.IndexOf("DefaultValue=0", sub3, StringComparison.Ordinal);
+        text = text[..value] + $"DefaultValue=0x{SrdoCrc.Compute(expected.Srdos[3].Parameter, expected.Srdos[3].Mapping):X4}" + text[(value + "DefaultValue=0".Length)..];
+        var dcf = CanOpenDeviceDescription.ParseDcf(text);
+
+        using var rig = OpenMaster();
+        using var slave = CanOpen.OpenNode(rig.Peer, dcf);
+        SrdoRecords.IsConfigurationValid(slave.ObjectDictionary, 3).Should().BeTrue("the file's checksums match its records");
+        slave.ObjectDictionary.ReadUnsigned(0x1302, 1).Should().Be(0u);
+        rig.Node.BindPeerDeviceDescription(Slave, dcf);
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        var signals = Record(rig.Node);
+        var failures = new List<Exception>();
+        rig.Node.BackgroundExceptionOccurred += (_, e) => { lock (failures) failures.Add(e); };
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational || Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid),
+            2000, "step D decided");
+        lock (failures) failures.Should().BeEmpty();
+        signals.Should().NotContain(s => s.Signal == FlyingMasterSignal.SlaveSafetyConfigurationInvalid);
+        slave.State.Should().Be(NmtState.Operational);
+        rig.Log.Snapshot().Should().Contain(f => f.Id == 0x600u + Slave && f.Data[1] == 0x02 && f.Data[2] == 0x13, "step D read the undeclared 1302h");
+    }
+
     [Fact]
     public async Task A_Slave_Without_Srdo_Records_Is_Booted_As_Before()
     {

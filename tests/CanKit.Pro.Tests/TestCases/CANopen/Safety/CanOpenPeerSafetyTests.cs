@@ -451,6 +451,73 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         created.Mismatches.Should().ContainSingle(m => m.Index == 0x1302 && m.Subindex == 0x01);
     }
 
+    /// <summary>A DCF that declares SRDOs 1 and 3 but not 2: the device holds 1302h deleted and
+    /// 13FFh:00 = 3, and a master configures and verifies it with the expectation from the same
+    /// file — every record up to the count is reached.</summary>
+    [Fact]
+    public async Task A_Device_Whose_File_Leaves_An_Srdo_Number_Out_Is_Configured_And_Verified()
+    {
+        var dcf = CanOpenDeviceDescription.ParseDcf(CanOpenSafetyDeviceDescriptionTests.GappedSafetyDcfText());
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, dcf, new CanOpenNodeOptions { WritableCommunicationParameters = true });
+        device.ObjectDictionary.ReadUnsigned(0x13FF, 0).Should().Be(3u);
+        device.ObjectDictionary.ReadUnsigned(0x1302, 1).Should().Be(0u);
+        master.BindPeerDeviceDescription(Device, dcf);
+        var expected = PeerSafetyConfiguration.FromDeviceDescription(dcf, Device);
+        expected.Srdos.Keys.Should().BeEquivalentTo(new[] { 1, 3 });
+        var configured = await master.Safety().ConfigurePeerSafetyAsync(Device, expected).WithTimeoutAsync(ShortTimeout);
+        configured.Succeeded.Should().BeTrue(string.Join("\n", configured.Mismatches));
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, expected).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 3).Should().BeTrue();
+    }
+
+    /// <summary>The peer-SDO gate implies what 13FFh:00 = N makes exist (§8.4.2.2): for a file
+    /// whose highest SRDO record is N, the sub-indices the device provides for 1301h–(1300h + N)
+    /// and 1381h–(1380h + N), declared or not. Nothing beyond: not above N, not past sub-index 6
+    /// or 16, and nothing else the file leaves out (FR-CO-029).</summary>
+    [Theory]
+    [InlineData((ushort)0x1302, (byte)0x01, true)]   // the undeclared SRDO 2
+    [InlineData((ushort)0x1302, (byte)0x06, true)]
+    [InlineData((ushort)0x1302, (byte)0x00, true)]
+    [InlineData((ushort)0x1382, (byte)0x10, true)]
+    [InlineData((ushort)0x1382, (byte)0x00, true)]
+    [InlineData((ushort)0x1302, (byte)0x07, false)]  // no such sub-index
+    [InlineData((ushort)0x1382, (byte)0x11, false)]
+    [InlineData((ushort)0x1304, (byte)0x01, false)]  // above the highest declared SRDO
+    [InlineData((ushort)0x1384, (byte)0x01, false)]
+    [InlineData((ushort)0x1003, (byte)0x00, false)]  // anything else the file leaves out
+    public void The_Gate_Implies_The_Srdo_Records_Up_To_The_Highest_Declared_One(ushort index, byte subindex, bool allowed)
+    {
+        var dcf = CanOpenDeviceDescription.ParseDcf(CanOpenSafetyDeviceDescriptionTests.GappedSafetyDcfText());
+        dcf.Contains(index, subindex).Should().BeFalse("the file does not declare it");
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        master.BindPeerDeviceDescription(Device, dcf);
+        var ensure = typeof(CanOpenNode).GetMethod("EnsurePeerSdoAccess", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var ex = Record.Exception(() => ensure.Invoke(master, new object[] { Device, index, subindex }));
+        if (allowed) ex.Should().BeNull();
+        else ex.Should().BeOfType<System.Reflection.TargetInvocationException>().Which.InnerException.Should().BeOfType<PeerSdoAccessException>();
+    }
+
+    [Fact]
+    public void Without_An_Srdo_Record_In_The_File_The_Gate_Implies_None()
+    {
+        var plain = CanOpenDeviceDescription.Load(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "device.dcf"));
+        plain.Contains(0x1301, 0x01).Should().BeFalse();
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        master.BindPeerDeviceDescription(Device, plain);
+        var ensure = typeof(CanOpenNode).GetMethod("EnsurePeerSdoAccess", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var ex = Record.Exception(() => ensure.Invoke(master, new object[] { Device, (ushort)0x1301, (byte)0x01 }));
+        ex.Should().BeOfType<System.Reflection.TargetInvocationException>().Which.InnerException.Should().BeOfType<PeerSdoAccessException>();
+    }
+
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
     /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
     /// plus one so the readback differs.</summary>

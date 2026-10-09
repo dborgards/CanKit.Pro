@@ -41,13 +41,8 @@ internal sealed partial class CanOpenNode
             ForeignPdoMappingOrigin origin;
             var read = await TryReadLiveMappingCoreAsync(peerNodeId, SrdoRecords.MapIndex(n), 2, SrdoRecords.MappingSubindices, cancellationToken)
                 .ConfigureAwait(false);
-            // Unlike a PDO (FR-CO-030), a live mapping the gate only partly lets through is not
-            // replaced by the file: the live mapping is known to exist and to differ from what the
-            // bound description declares, and splitting safety data by a mapping the device does
-            // not use would hand the caller wrong values with a clean "decoded".
-            if (read.GateRefusedAfterCount)
-                return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, null, 0,
-                    $"the live mapping declares {read.DeclaredEntries} entries but the bound description declares fewer; the file's mapping is not used for safety data"), null);
+            // The gate never refuses part of a live SRDO mapping: whenever it lets the count through,
+            // it lets all 16 slots through (the implied SRDO records, CanOpenNode.PeerSdo.cs).
             if (read.Entries is { } liveEntries) { mapping = liveEntries; origin = ForeignPdoMappingOrigin.LiveMapping; }
             else if (TryDescribedSrdoMapping(peerDescription, n, peerNodeId, out mapping, out var why)) origin = ForeignPdoMappingOrigin.DeviceDescription;
             else return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, null, 0,

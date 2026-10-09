@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
@@ -207,7 +208,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task A_Live_Mapping_The_Gate_Only_Partly_Allows_Is_Not_Taken_From_The_File()
+    public async Task A_Live_Mapping_Beyond_The_Slots_The_File_Declares_Is_Read_In_Full()
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
@@ -218,15 +219,20 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         device.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8).Add(0x2002, 0x00, 8),
             TimeSpan.FromMilliseconds(25), 0x111, 0x112);
         device.Safety().CommitSafetyConfiguration();
-        // The master's bound description knows 1381h only up to 1381h:04: two objects, the device has three.
-        master.BindPeerDeviceDescription(Device, PeerFileWithShortSrdoMapping());
+        // The master's bound description knows 1381h only up to 1381h:04: two objects, the device
+        // has three. The gate implies the SRDO record's slots all the same (§8.4.2.2), so the live
+        // mapping is read in full and the safety data is split by what the device uses.
+        var shortFile = PeerFileWithShortSrdoMapping();
+        shortFile.Contains(0x1381, 0x05).Should().BeFalse();
+        master.BindPeerDeviceDescription(Device, shortFile);
         var sink = new ListSink();
         var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x111,
             new byte[] { 1, 2, 3, 4 }, new byte[] { 0xFE, 0xFD, 0xFC, 0xFB }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
         result.Observation.Should().NotBeNull(result.Reason);
-        result.Observation!.Decoded.Should().BeFalse();
-        result.Observation.Reason.Should().Contain("live mapping declares 3 entries").And.Contain("not used for safety data");
-        sink.Signals.Should().BeEmpty();
+        result.Observation!.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001, (ushort)0x2002);
+        sink.Signals[2].Value.Should().Equal(4);
     }
 
     [Fact]

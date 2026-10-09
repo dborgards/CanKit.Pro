@@ -81,10 +81,9 @@ public interface ICanOpenSafety
     /// 1381h–13C0h (odd sub-indices) or from the file. Signals carry
     /// <see cref="ForeignPdoKind.Srdo"/> and the SRDO number. SRVT and SCT are the caller's to
     /// judge: it holds the timestamps. Nothing is written to this node's dictionary.
-    /// Unlike a PDO, a live mapping that the peer-SDO gate refuses part of (the count was read, a
-    /// slot was not) is not replaced by the file's: the result is not decoded, because the file is
-    /// known to differ from what the device uses. A record whose COB-ID 1 word has a bit above
-    /// bit 10 set, or a mapping with a dummy entry, is not decoded either.</summary>
+    /// The live mapping is read in full whenever its count is: the peer-SDO gate lets through
+    /// every slot of an SRDO record the bound file implies, declared or not. A record whose
+    /// COB-ID 1 word has a bit above bit 10 set, or a mapping with a dummy entry, is not decoded.</summary>
     Task<ForeignSrdoObserveResult> ObserveForeignSrdoAsync(byte peerNodeId, uint cobId1, ReadOnlyMemory<byte> frame1,
         ReadOnlyMemory<byte> frame2, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
         CancellationToken cancellationToken = default);

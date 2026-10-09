@@ -69,7 +69,7 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-026 | Whatever the node cannot take as written is degraded, corrected in the dictionary and reported per entry in `DeviceDescription` (omitted / corrected / PDO disabled / not implemented / default supplied, with the SDO abort code that decided) |
 | FR-CO-027 | The file's access rights govern the bus: `rw` PDO records are writable without `WritableCommunicationParameters`, `ro` stays `ro`; its `PDOMapping` attribute is the object's mappability |
 | FR-CO-028 | The described values are the power-on values: "load" and Reset Communication return `1000h`–`1FFFh` to them (or to the last "save"), Reset Node the application objects too |
-| FR-CO-029 | The SDO client transfers only what a peer EDS/DCF bound for the server declares; without one, only `1000h:00`, `1001h:00` and `1018h:00`–`04h` ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)) |
+| FR-CO-029 | The SDO client transfers only what a peer EDS/DCF bound for the server declares, plus the SRDO records up to the file's highest one (CiA DSP 304 §8.4.2.2); without one, only `1000h:00`, `1001h:00` and `1018h:00`–`04h` ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)) |
 | FR-CO-030 | `ObserveForeignPdoAsync` splits a peer's PDO with its live COB-ID and mapping, falling back to the peer file ([Observing a peer PDO](#observing-a-peer-pdo)) |
 | FR-CO-031 | NMT flying master election, CiA 302-2 v4.1.0 ([Flying master](#flying-master)) |
 | FR-CO-032 | Boot-up of the slaves in `1F81h` by the active master, `1F80h`, `1F82h`, `1F89h` ([Boot-up](#boot-up)) |
@@ -277,6 +277,14 @@ has no commissioned node-id and may be bound to any server.
 `CanOpenDeviceDescription.Contains` is that check. A pair the file does not declare throws
 `PeerSdoAccessException` (`PeerDescriptionLoaded` is true), including `1000h`, `1001h` and
 `1018h` when the file leaves them out. `UnbindPeerDeviceDescription` drops the binding.
+
+One exception follows from CiA DSP 304 §8.4.2.2: `13FFh:00` is the number of SRDOs, so a file
+whose highest SRDO record is N implies the records of SRDOs 1..N, and a device that loads it
+provides one the file leaves out at its defaults, deleted. The gate lets through what the device
+provides there — sub-indices `00h`–`06h` of `1301h`–(`1300h` + N) and `00h`–`10h` of
+`1381h`–(`1380h` + N) — so that a peer's safety configuration can be written and verified
+([Configuring a peer](#configuring-a-peer)). Nothing else the file leaves out passes, and a file
+without an SRDO record implies none.
 
 With **no** description bound for the server, only the three CiA 301 mandatory base objects are
 transferred:
@@ -529,7 +537,8 @@ loaded like the PDO records: through the validated write path, the mapping befor
 created, the file's access type honoured, every value the node refuses reported as a finding with
 its abort code. A record below the highest one that the file omits exists all the same —
 `13FFh:00` is the number of SRDOs (§8.4.2.2), so records 1..n exist and a master reaches every
-one — at its defaults with the SRDO deleted, and is reported as `SuppliedDefault`. A mapping
+one — at its defaults, deleted, with the node's default access (read-only on the bus without
+`WritableCommunicationParameters`), and is reported as `SuppliedDefault`. A mapping
 record without its communication record is applied with that SRDO deleted, and a mapping the
 node refuses leaves that SRDO deleted. `13FEh` is applied last, so a file whose checksums match its records loads as a
 valid configuration; a file whose checksum does not match loads without a finding and is simply
@@ -757,11 +766,11 @@ fails) is 0 is skipped, because a deleted record keeps its COB-IDs and another S
 them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The two
 frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from the
 odd sub-indices of `1381h`–`13C0h`, or from the file when that read fails. Unlike for a PDO
-(FR-CO-030), a live mapping of which the peer-SDO gate refuses part — the count was read, a slot
-was not — is not replaced by the file's: the device is known to use a mapping the file does not
-describe, and splitting safety data by the wrong one would hand the caller wrong values marked
-decoded. Such a pair, a mapping with a dummy entry and a frame shorter than the mapping are
-reported not decoded. Signals carry `ForeignPdoKind.Srdo` and the SRDO number. SRVT and SCT are
+(FR-CO-030), a live mapping is read in full whenever its count is, even beyond the slots the file
+declares: the peer-SDO gate lets through every slot of an SRDO record the bound file implies
+([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)), so
+safety data is never split by a file's mapping while the device's own is readable. A mapping
+with a dummy entry and a frame shorter than the mapping are reported not decoded. Signals carry `ForeignPdoKind.Srdo` and the SRDO number. SRVT and SCT are
 not judged: the caller holds the timestamps.
 
 ### What this is not
