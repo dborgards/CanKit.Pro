@@ -183,6 +183,26 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         node.DeviceDescription.Findings.Should().Contain(f => f.Index == 0x1301 && f.Subindex == 1);
     }
 
+    /// <summary>A mapping count above 16 is a finding, as for a PDO, and is not cut to a byte:
+    /// 0x100 would become an empty mapping and 0x104 the file's four sub-indices.</summary>
+    [Theory]
+    [InlineData("0x100")]
+    [InlineData("0x104")]
+    public void A_Mapping_Count_Above_Sixteen_Is_A_Finding_And_The_Srdo_Stays_Deleted(string count)
+    {
+        var text = Patch(SafetyDcfText(), "[1381sub0]", "ParameterValue=4", "ParameterValue=" + count);
+        var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, CanOpenDeviceDescription.ParseDcf(text));
+        var od = node.ObjectDictionary;
+        var finding = node.DeviceDescription!.Findings.Single(f => f.Index == 0x1381 && f.Subindex == 0);
+        finding.Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        finding.Reason.Should().Contain("16");
+        od.ReadUnsigned(0x1381, 0).Should().Be(0u, "the mapping stays disabled");
+        od.ReadUnsigned(0x1301, 1).Should().Be(0u, "an SRDO is not created over a mapping that failed");
+        node.DeviceDescription.Findings.Should().Contain(f => f.Index == 0x1301 && f.Subindex == 1 && f.Outcome == DeviceDescriptionOutcome.Corrected);
+    }
+
     [Fact]
     public void A_Communication_Record_Without_A_Mapping_Record_Is_Not_Created_As_An_Srdo()
     {

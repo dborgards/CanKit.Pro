@@ -680,6 +680,14 @@ internal sealed partial class CanOpenNode
             if (!_od.TryWriteRaw(index, s, ObjectDictionary.EncodeU32(value.Value), out var abort))
             { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry was rejected; the slot stays empty and the mapping stays disabled", raw, abort)); failed = true; }
         }
+        // The count is read as UNSIGNED32 and stored as UNSIGNED8: above 16 it is refused here,
+        // before the cast could turn 0x104 into 4 (§8.4.2.3: at most 16 sub-indices).
+        if (count > SrdoRecords.MappingSubindices)
+        {
+            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
+                $"an SRDO mapping has at most {SrdoRecords.MappingSubindices} sub-indices (CiA DSP 304 §8.4.2.3); the mapping stays disabled", sub0.Value));
+            failed = true;
+        }
         if (!failed && count > 0 && !_od.TryWriteRaw(index, 0x00, new[] { (byte)count }, out var countAbort))
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected, "the mapping count was rejected; the mapping stays disabled", sub0.Value, countAbort));
