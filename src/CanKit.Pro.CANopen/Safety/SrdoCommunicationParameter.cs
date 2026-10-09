@@ -8,7 +8,8 @@ namespace CanKit.Pro.CANopen.Safety;
 /// the constant 254 and is not part of this record.</summary>
 /// <param name="Direction">Sub-index 1.</param>
 /// <param name="RefreshOrSafeguardCycleTime">Sub-index 2, whole milliseconds 1..65535.</param>
-/// <param name="ValidationTime">Sub-index 3, whole milliseconds 1..255; ignored for a producer.</param>
+/// <param name="ValidationTime">Sub-index 3, whole milliseconds 1..255. Written and part of the checksum
+/// for every direction; a producer does not act on it (§8.4.2.2 "tx: not used").</param>
 /// <param name="CobId1">Sub-index 5, the odd CAN-ID of the plain-data frame (257, 259..383).</param>
 /// <param name="CobId2">Sub-index 6, the even CAN-ID of the inverted frame (258, 260..384).</param>
 public readonly record struct SrdoCommunicationParameter(

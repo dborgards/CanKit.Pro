@@ -37,7 +37,9 @@ public sealed class PeerSafetyConfiguration
 
     /// <summary>Reads 1300h, 1301h–1340h and 1381h–13C0h from the file's ParameterValue (DefaultValue
     /// when absent, $NODEID resolved with <paramref name="nodeId"/>). Records the file does not
-    /// declare, or declares with direction 0, are absent. Malformed values make the record absent too.</summary>
+    /// declare, or declares with direction 0, are absent. Malformed values make the record absent too.
+    /// A record without a sub-index 3, or with 0 there, gets the default of 20 ms (§8.4.2.2): the
+    /// device stores that value and recomputes its checksum from it.</summary>
     public static PeerSafetyConfiguration FromDeviceDescription(CanOpenDeviceDescription description, byte nodeId)
     {
         if (description is null) throw new ArgumentNullException(nameof(description));
@@ -68,11 +70,14 @@ public sealed class PeerSafetyConfiguration
                 if (!ok) continue;
             }
             configuration.Add(n, new SrdoCommunicationParameter((SrdoDirection)direction,
-                TimeSpan.FromMilliseconds(cycle.Value), TimeSpan.FromMilliseconds(srvt ?? 0),
+                TimeSpan.FromMilliseconds(cycle.Value), TimeSpan.FromMilliseconds(srvt is null or 0 ? DefaultValidationTimeMilliseconds : srvt.Value),
                 cob1.Value & CanOpenCobId.CanIdMask, cob2.Value & CanOpenCobId.CanIdMask), mapping);
         }
         return configuration;
     }
+
+    /// <summary>The default of sub-index 3 (§8.4.2.2), in milliseconds.</summary>
+    private const uint DefaultValidationTimeMilliseconds = 20;
 
     private static uint? Value(CanOpenObject obj, byte subindex, byte nodeId)
     {

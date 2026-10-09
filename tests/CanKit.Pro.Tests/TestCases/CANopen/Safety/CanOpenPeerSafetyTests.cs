@@ -197,6 +197,34 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_Description_Without_A_Validation_Time_Yields_The_Default_And_Configures_The_Peer(bool removeSub3)
+    {
+        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf"));
+        int start = text.IndexOf("[1301sub3]", StringComparison.Ordinal);
+        int end = text.IndexOf("[1301sub4]", StringComparison.Ordinal);
+        start.Should().BeGreaterThan(-1);
+        end.Should().BeGreaterThan(start);
+        if (removeSub3)
+            text = (text[..start] + text[end..]).Replace("SRDO communication parameter 1\nSubNumber=7", "SRDO communication parameter 1\nSubNumber=6");
+        else
+            text = text[..start] + text[start..end].Replace("DefaultValue=20", "DefaultValue=0") + text[end..]; // declared as 0
+        var configuration = PeerSafetyConfiguration.FromDeviceDescription(CanOpenDeviceDescription.ParseDcf(text), Device);
+        configuration.Srdos[1].Parameter.ValidationTime.Should().Be(TimeSpan.FromMilliseconds(20));
+
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 1).Should().BeTrue();
+    }
+
     [Fact]
     public async Task A_Consumer_With_A_Full_Mapping_Is_Configured_And_Verified()
     {
