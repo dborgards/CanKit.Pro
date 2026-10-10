@@ -169,7 +169,7 @@ internal sealed partial class CanOpenNode
     /// the deletion, the mapping (disabled, slots, count), the times, the ids, the creation (SRDOs
     /// the configuration does not name stay deleted); then 1300h; then every checksum. The same
     /// list is what the readback compares. The mapping is sub-index 0 and the 2k slots of its k
-    /// objects: a slot above the count is no part of the SRDO (§8.4.2.3) — the device neither
+    /// objects: a slot above the count is no part of the SRDO (§8.4.2.2) — the device neither
     /// uses nor checksums it (§8.4.2.2 field g) — and a peer may not implement it at all.</summary>
     private static IEnumerable<(ushort Index, byte Subindex, byte[] Value)> SafetyWrites(PeerSafetyConfiguration configuration, int peerSrdoCount)
     {

@@ -746,7 +746,7 @@ afterwards, with the records it holds. A value the file leaves out, does not par
 refuses keeps the device's default (25 ms refresh time or SCT, 20 ms SRVT, the pre-defined
 COB-IDs of SRDO 1 for a node-id 1..64, §8.3.3); an SRDO whose creation the device refuses —
 COB-IDs that are not a consecutive pair or that another existing SRDO holds, no mapping record,
-a mapping that does not apply (§8.4.2.3) — is left out, as the device leaves it deleted.
+a mapping that does not apply (§8.4.2.2) — is left out, as the device leaves it deleted.
 
 The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
 above it (`ArgumentException`) before writing anything; a peer that returns no count, or a count

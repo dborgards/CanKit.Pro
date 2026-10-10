@@ -171,7 +171,7 @@ internal sealed partial class CanOpenNode
     /// written by the loader's own steps in the loader's order — the §8.4.2.2 defaults, the
     /// application objects a mapping can name, 1300h, the communication records with the SRDO
     /// deleted, the mapping records, the deferred creates — through the node's own write
-    /// validator (CiA DSP 304 §8.4.2.2, §8.4.2.3), as in Pre-Operational. Findings are not
+    /// validator (CiA DSP 304 §8.4.2.2), as in Pre-Operational. Findings are not
     /// kept; the node reports them when it loads the file. What
     /// <see cref="Safety.PeerSafetyConfiguration.FromDeviceDescription"/> reads, so that step D
     /// against a slave's own DCF expects what the slave holds.
@@ -702,7 +702,8 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>1381h–13C0h: the entries go in with the SRDO deleted and the count at 0, then the
-    /// count (CiA DSP 304 §8.4.2.3: plain and inverted object alternate, so at most 16 sub-indices).</summary>
+    /// count (CiA DSP 304 §8.4.2.2: plain and inverted object alternate; at most 16 sub-indices here,
+    /// byte-aligned entries in 8 bytes, where the specification allows 2, 4–128).</summary>
     private static int ApplySrdoMappingRecord(ObjectDictionary od, byte nodeId, ushort index, List<DescribedEntry> entries,
         List<DeviceDescriptionFinding> findings, HashSet<ushort> failedMappings)
     {
@@ -741,11 +742,12 @@ internal sealed partial class CanOpenNode
             { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry was rejected; the slot stays empty and the mapping stays disabled", raw, abort)); failed = true; }
         }
         // The count is read as UNSIGNED32 and stored as UNSIGNED8: above 16 it is refused here,
-        // before the cast could turn 0x104 into 4 (§8.4.2.3: at most 16 sub-indices).
+        // before the cast could turn 0x104 into 4 (at most 16 sub-indices here: byte-aligned entries in
+        // 8 bytes; §8.4.2.2 allows 2, 4–128).
         if (count > SrdoRecords.MappingSubindices)
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
-                $"an SRDO mapping has at most {SrdoRecords.MappingSubindices} sub-indices (CiA DSP 304 §8.4.2.3); the mapping stays disabled", sub0.Value));
+                $"an SRDO mapping has at most {SrdoRecords.MappingSubindices} sub-indices (byte-aligned entries in 8 bytes; CiA DSP 304 §8.4.2.2 allows 2, 4–128); the mapping stays disabled", sub0.Value));
             failed = true;
         }
         if (!failed && count > 0 && !od.TryWriteRaw(index, 0x00, new[] { (byte)count }, out var countAbort))

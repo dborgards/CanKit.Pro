@@ -76,7 +76,7 @@ public sealed class PeerSafetyConfiguration
     /// with the records it then holds. It is built by the node's own loader — the same code, over
     /// a dictionary of its own — not by a second reading of the file: the §8.4.2.2 defaults for
     /// what the file leaves out or the device refuses (25 ms, 20 ms, the pre-defined COB-IDs of
-    /// SRDO 1 for a node-id 1..64, §8.3.3), the device's write rules (§8.4.2.2, §8.4.2.3:
+    /// SRDO 1 for a node-id 1..64, §8.3.3), the device's write rules (§8.4.2.2:
     /// consecutive COB-IDs, an inverted slot equal to its plain one, no COB-ID of another
     /// existing SRDO, mapped objects the file declares), and the SRDO left deleted where the
     /// loader leaves it deleted. So step D against a slave's own DCF expects what the slave

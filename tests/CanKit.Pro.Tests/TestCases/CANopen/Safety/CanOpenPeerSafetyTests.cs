@@ -439,7 +439,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>§9.2 writes the mapping the configuration has — the count and its 2k slots — and
-    /// nothing above it: a slot above the count is not part of the mapping (§8.4.2.3), and a peer
+    /// nothing above it: a slot above the count is not part of the mapping (§8.4.2.2), and a peer
     /// whose file declares only the used slots refuses the others at the gate.</summary>
     [Fact]
     public async Task Configure_Needs_Only_The_Mapping_Slots_It_Uses()
