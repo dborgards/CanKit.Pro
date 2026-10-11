@@ -244,19 +244,27 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// clause of DSP 304: safety process data has a fixed width, and the width is what the mapping
     /// entry and the checksum pin. A string or a domain is refused like a wrong width.</summary>
     private static SdoAbortCode? ValidateSrdoMappingEntry(ObjectDictionary od, uint raw, SrdoDirection direction)
+        => SrdoMappingEntryRefusal(od, raw, direction)?.Abort;
+
+    /// <summary>The rule of <see cref="ValidateSrdoMappingEntry"/> that refuses the entry, with its
+    /// abort code, or null. 0604 0041h covers several rules, so a device-description finding
+    /// names the reason as well.</summary>
+    private static (SdoAbortCode Abort, string Reason)? SrdoMappingEntryRefusal(ObjectDictionary od, uint raw, SrdoDirection direction)
     {
         var entryIndex = (ushort)((raw >> 16) & 0xFFFF);
         var entrySub = (byte)((raw >> 8) & 0xFF);
         var bitLength = (byte)(raw & 0xFF);
-        if (bitLength == 0 || bitLength > 64 || bitLength % 8 != 0) return SdoAbortCode.DataTypeLengthMismatch;
-        if (entryIndex is >= 0x1000 and <= 0x1FFF) return SdoAbortCode.ObjectCannotBeMapped;
-        if (entrySub == 0 && PdoMappingEntry.DummyBitLength(entryIndex) != 0) return SdoAbortCode.ObjectCannotBeMapped;
-        if (!od.TryGet(entryIndex, entrySub, out var target)) return SdoAbortCode.ObjectDoesNotExist;
-        if (!target.PdoMappable) return SdoAbortCode.ObjectCannotBeMapped;
-        if (direction == SrdoDirection.Transmit && (target.Access & OdAccess.ReadOnly) == 0) return SdoAbortCode.ObjectCannotBeMapped;
-        if (direction == SrdoDirection.Receive && (target.Access & OdAccess.WriteOnly) == 0) return SdoAbortCode.ObjectCannotBeMapped;
+        if (bitLength == 0 || bitLength > 64 || bitLength % 8 != 0) return (SdoAbortCode.DataTypeLengthMismatch, "the length is not a byte multiple of 8..64 bits");
+        if (entryIndex is >= 0x1000 and <= 0x1FFF) return (SdoAbortCode.ObjectCannotBeMapped, "it names an object of the communication profile area (1000h–1FFFh)");
+        if (entrySub == 0 && PdoMappingEntry.DummyBitLength(entryIndex) != 0) return (SdoAbortCode.ObjectCannotBeMapped, "it is a dummy entry, which safety data does not carry");
+        if (!od.TryGet(entryIndex, entrySub, out var target)) return (SdoAbortCode.ObjectDoesNotExist, "the object does not exist");
+        if (!target.PdoMappable) return (SdoAbortCode.ObjectCannotBeMapped, "the object is not mappable");
+        if (direction == SrdoDirection.Transmit && (target.Access & OdAccess.ReadOnly) == 0) return (SdoAbortCode.ObjectCannotBeMapped, "the object is not readable, which a producer needs");
+        if (direction == SrdoDirection.Receive && (target.Access & OdAccess.WriteOnly) == 0) return (SdoAbortCode.ObjectCannotBeMapped, "the object is not writable, which a consumer needs");
+        if (!OdEntryLayout.HasFixedSize(target.DataType))
+            return (SdoAbortCode.ObjectCannotBeMapped, $"the object is {target.DataType}, without a fixed width; an SRDO maps fixed-width objects only (this implementation's rule)");
         int fixedSize = OdEntryLayout.FixedSize(target.DataType);
-        if (fixedSize <= 0 || bitLength / 8 != fixedSize) return SdoAbortCode.ObjectCannotBeMapped;
+        if (bitLength / 8 != fixedSize) return (SdoAbortCode.ObjectCannotBeMapped, $"the object is {target.DataType} ({fixedSize * 8} bits), not {bitLength} bits");
         return null;
     }
 

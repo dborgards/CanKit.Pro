@@ -254,6 +254,7 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         var finding = node.DeviceDescription!.Findings.Single(f => f.Index == 0x1381 && f.Subindex == 3);
         finding.Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
         finding.AbortCode.Should().Be(SdoAbortCode.ObjectCannotBeMapped);
+        finding.Reason.Should().Contain("fixed width", "0604 0041h covers several rules; the finding names the one that refused");
         od.ReadUnsigned(0x1381, 0).Should().Be(0u, "the mapping stays disabled");
         od.ReadUnsigned(0x1301, 1).Should().Be(0u, "an SRDO is not created over a mapping that failed");
         node.DeviceDescription.Findings.Should().Contain(f => f.Index == 0x1301 && f.Subindex == 1 && f.Outcome == DeviceDescriptionOutcome.Corrected);

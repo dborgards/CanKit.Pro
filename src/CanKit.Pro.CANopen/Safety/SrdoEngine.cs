@@ -243,12 +243,12 @@ internal sealed partial class SrdoEngine : IDisposable
                 return null;
             }
             var raw = od.GetRawValue();
-            int fixedSize = OdEntryLayout.FixedSize(od.DataType);
-            if (fixedSize <= 0)
+            if (!OdEntryLayout.HasFixedSize(od.DataType))
             {
                 ReportUnavailable(rt, entry, $"is {od.DataType}, which has no fixed width");
                 return null;
             }
+            int fixedSize = OdEntryLayout.FixedSize(od.DataType);
             if (fixedSize != entry.ByteLength)
             {
                 ReportUnavailable(rt, entry, $"is {od.DataType} ({fixedSize} byte(s)), not the {entry.ByteLength} byte(s) mapped");

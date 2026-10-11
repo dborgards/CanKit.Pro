@@ -739,7 +739,12 @@ internal sealed partial class CanOpenNode
             var value = ParseUnsigned(nodeId, entry, out var raw);
             if (value is null) { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry could not be read as UNSIGNED32; the slot stays empty and the mapping stays disabled", raw)); failed = true; continue; }
             if (!od.TryWriteRaw(index, s, ObjectDictionary.EncodeU32(value.Value), out var abort))
-            { findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, "the mapping entry was rejected; the slot stays empty and the mapping stays disabled", raw, abort)); failed = true; }
+            {
+                // 0604 0041h covers several rules: the finding names the one the validator applied.
+                string why = SrdoMappingEntryRefusal(od, value.Value, SrdoDirection.None) is { } refusal ? $" ({refusal.Reason})" : "";
+                findings.Add(new DeviceDescriptionFinding(index, s, DeviceDescriptionOutcome.Corrected, $"the mapping entry was rejected{why}; the slot stays empty and the mapping stays disabled", raw, abort));
+                failed = true;
+            }
         }
         // The count is read as UNSIGNED32 and stored as UNSIGNED8: above 16 it is refused here,
         // before the cast could turn 0x104 into 4 (at most 16 sub-indices here: byte-aligned entries in

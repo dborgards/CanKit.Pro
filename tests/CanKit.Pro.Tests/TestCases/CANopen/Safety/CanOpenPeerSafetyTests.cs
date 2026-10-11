@@ -602,7 +602,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         {
             var o = objects[i];
             list.Append(i + 3).Append("=0x").Append(o.Index.ToString("X4", System.Globalization.CultureInfo.InvariantCulture)).Append('\n');
-            sections.Append($"\n[{o.Index:X4}]\nParameterName=Object {o.Index:X4}\nObjectType=0x7\nDataType={o.DataType}\nAccessType={o.Access}\nDefaultValue=0\nPDOMapping={(o.Mappable ? 1 : 0)}\n");
+            var dataType = o.DataType.Length == 0 ? "" : $"DataType={o.DataType}\n";   // "" leaves the key out
+            sections.Append($"\n[{o.Index:X4}]\nParameterName=Object {o.Index:X4}\nObjectType=0x7\n{dataType}AccessType={o.Access}\nDefaultValue=0\nPDOMapping={(o.Mappable ? 1 : 0)}\n");
         }
         text = text.Replace("[ManufacturerObjects]\nSupportedObjects=2\n1=0x2000\n2=0x2001\n", list.ToString());
         text.Should().Contain("SupportedObjects=" + (2 + objects.Length));
@@ -624,6 +625,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("flag absent")]      // 2006h:00 declared without PDOMapping
     [InlineData("visible string")]   // 2008h:00, VISIBLE_STRING: no fixed width
     [InlineData("domain")]           // 2009h:00, DOMAIN: no fixed width
+    [InlineData("no data type")]     // 200Ah:00 declared without DataType: width unknown
+    [InlineData("unknown type")]     // 200Bh:00, DataType 0x0010 (INTEGER24), a code this implementation does not map
     public async Task Configure_Refuses_A_Mapping_The_Bound_File_Rules_Out_Before_Any_Frame(string what)
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
@@ -631,7 +634,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var master = CanOpen.OpenNode(busA, Master);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true),
-            ((ushort)0x2008, "0x0009", "rw", true), ((ushort)0x2009, "0x000F", "rw", true));
+            ((ushort)0x2008, "0x0009", "rw", true), ((ushort)0x2009, "0x000F", "rw", true),
+            ((ushort)0x200A, "", "rw", true), ((ushort)0x200B, "0x0010", "rw", true));
         if (what == "flag absent")
         {
             var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n")
@@ -650,13 +654,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             "not readable" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2007, 0x00, 8)),
             "visible string" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2008, 0x00, 16)),
             "domain" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2009, 0x00, 16)),
+            "no data type" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x200A, 0x00, 8)),
+            "unknown type" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x200B, 0x00, 24)),
             _ => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2006, 0x00, 8)),
         };
         var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
             .Add(1, new SrdoCommunicationParameter(direction, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A), mapping);
         var ex = await Assert.ThrowsAsync<ArgumentException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain("SRDO 1").And.Contain($"{mapping.Entries[0].Index:X4}h");
-        if (what is "visible string" or "domain") ex.Message.Should().Contain("fixed width");
+        if (what is "visible string" or "domain" or "no data type" or "unknown type") ex.Message.Should().Contain("fixed width");
         lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent, not even the count read");
     }
 

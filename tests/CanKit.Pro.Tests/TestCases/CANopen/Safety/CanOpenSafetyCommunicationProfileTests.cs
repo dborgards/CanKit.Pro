@@ -344,6 +344,25 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.ReadUnsigned(0x1301, 1).Should().Be(0u);
     }
 
+    /// <summary>The count write checks every slot it enables (the rule is applied there, not only
+    /// at the slot write): a slot written while its object had a fixed width, whose object was then
+    /// re-declared as a domain — allowed, the SRDO is deleted — is refused when the count would
+    /// enable it.</summary>
+    [Fact]
+    public void The_Count_Write_Refuses_A_Slot_Whose_Object_Lost_Its_Fixed_Width()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.AddU16(0x2004, 0x00, 0);
+        od.WriteUnsigned(0x1381, 1, 0x2004_0010);
+        od.WriteUnsigned(0x1381, 2, 0x2004_0010);
+        od.AddDomain(0x2004, 0x00, new byte[2]);
+        Rejected(() => od.WriteUnsigned(0x1381, 0, 2)).Should().Be(SdoAbortCode.ObjectCannotBeMapped);
+        od.ReadUnsigned(0x1381, 0).Should().Be(0u);
+    }
+
     [Fact]
     public void Mapping_Rules()
     {

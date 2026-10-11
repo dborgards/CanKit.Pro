@@ -91,7 +91,9 @@ public interface ICanOpenSafety
     /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
     /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
     /// with another width or with a type without a fixed width (a string, a domain: an SRDO maps
-    /// fixed-width objects only, this implementation's rule), or does not make accessible in the
+    /// fixed-width objects only, this implementation's rule) or without a type this implementation
+    /// knows (no <c>DataType</c>, or an unknown code: its width cannot be known), or does not make
+    /// accessible in the
     /// SRDO's direction — checked before
     /// the first frame, because §9.2 deletes every SRDO of the peer first. What only the peer can
     /// judge stays the peer's.</exception>

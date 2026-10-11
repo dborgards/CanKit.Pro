@@ -548,7 +548,8 @@ A device description raises the count to the highest SRDO record it declares
 (`1301h`–`1340h`, `1381h`–`13C0h`); the option is a floor. The safety objects of the file are
 loaded like the PDO records: through the validated write path, the mapping before the SRDO is
 created, the file's access type honoured, every value the node refuses reported as a finding with
-its abort code. A record below the highest one that the file omits exists all the same —
+its abort code — a refused mapping entry also with the rule it broke, since `0604 0041h` stands for
+several (not mappable, not accessible, another width, no fixed width). A record below the highest one that the file omits exists all the same —
 `13FFh:00` is the number of SRDOs (§8.4.2.2), so records 1..n exist and a master reaches every
 one — at its defaults, deleted, with the node's default access (read-only on the bus without
 `WritableCommunicationParameters`), and is reported as `SuppliedDefault`. A mapping
@@ -591,7 +592,7 @@ DSP 304 §8.4.2.2 Table 6, created at these defaults:
 | | `04h` transmission type | 254 | Constant; every write `0609 0030h`. |
 | | `05h` COB-ID 1 | FFh + 2 × node-id for SRDO 1 of a node-id 1..64, else 0 | 0 or an odd CAN-ID 101h..17Fh, bits 11..31 clear; not changeable while the SRDO exists; not one of another existing SRDO (`0609 0030h`). |
 | | `06h` COB-ID 2 | 100h + 2 × node-id, likewise | 0 or COB-ID 1 + 1 (102h..180h), same rules. |
-| `1381h`–`13C0h` mapping of SRDO n | `00h` | 0 | 0 or an even count 2..16 (`0609 0030h`); every slot up to it filled (`0602 0000h`), each even slot equal to the odd one before it — plain, then inverted (`0604 0041h`), at most 8 bytes in total (`0604 0042h`). |
+| `1381h`–`13C0h` mapping of SRDO n | `00h` | 0 | 0 or an even count 2..16 (`0609 0030h`); every slot up to it filled (`0602 0000h`), each odd slot passing the slot rules below again (its object may have been re-declared since the slot was written), each even slot equal to the odd one before it — plain, then inverted (`0604 0041h`), at most 8 bytes in total (`0604 0042h`). |
 | | `01h`–`10h` | 0 | Byte-aligned 8..64 bits, an existing mappable object outside `1000h`–`1FFFh` of a fixed width equal to that width — no string or domain, this implementation's rule — no dummy (`0607 0010h`, `0602 0000h`, `0604 0041h`). Mapping writes while the SRDO exists, and slot writes while the count is not 0, `0601 0000h`. |
 | `13FEh` configuration valid | `00h` | 0 | Any value; only `A5h` means valid. |
 | `13FFh` safety configuration checksum | `00h` | `SrdoCount` | Constant (`0601 0002h`). |
@@ -767,8 +768,9 @@ direction, because the checksum covers it) are refused before the first frame. S
 the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
 refusal at the mapping would leave it without its configuration: each mapped object must be
 declared there, flagged mappable (`PDOMapping`; an absent key reads as not mappable),
-of a data type with a fixed width (no string or domain, as locally) and as wide as it, and
-readable for a producer or writable for a consumer
+of a data type with a fixed width (no string or domain, as locally; an entry without
+`DataType`, or with a type code this implementation does not know, is refused too, since its
+width cannot be known) and as wide as it, and readable for a producer or writable for a consumer
 (`AccessType`). What the bound file lets the tool see is refused locally; what only the peer can
 judge — a rule of its own beyond its file — is the peer's (`ArgumentException`, nothing sent).
 Then it writes

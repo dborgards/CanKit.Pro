@@ -107,8 +107,10 @@ internal sealed partial class CanOpenNode
     /// <summary>§9.2 deletes every SRDO of the peer before any mapping is written, so a mapping
     /// the peer refuses leaves it without its previous configuration. What the peer's bound
     /// EDS/DCF shows (CiA 306) is therefore checked before the first frame: each mapped object is
-    /// declared, flagged mappable (<c>PDOMapping</c>; absent means not mappable), as wide as its
-    /// declared data type when that type has a fixed width, and accessible in the SRDO's direction
+    /// declared, flagged mappable (<c>PDOMapping</c>; absent means not mappable), of a declared
+    /// data type with a fixed width — a string, a domain, a missing <c>DataType</c> or a type code
+    /// this implementation does not know is refused — and as wide as that type, and accessible in
+    /// the SRDO's direction
     /// (a producer reads it, a consumer writes it — the file's <c>AccessType</c>). What the file
     /// does not show — a rule of the peer's own — stays the peer's to refuse.</summary>
     private static void EnsureMappingsFitDescription(PeerSafetyConfiguration configuration, CanOpenDeviceDescription description)
@@ -137,10 +139,9 @@ internal sealed partial class CanOpenNode
         if (!described.PdoMappable) return "is not flagged mappable (PDOMapping)";
         // An SRDO maps objects of fixed width only (this implementation's rule, as in the
         // dictionary's validator): a string, a domain or a type the file does not name is refused.
-        var type = MapType(described.DataType);
-        int size = type is { } known ? OdEntryLayout.FixedSize(known) : -1;
-        if (size <= 0)
-            return $"has no fixed width (declared {(type is { } t ? t.ToString() : "with no data type this implementation knows")}), and an SRDO maps fixed-width objects only";
+        if (MapType(described.DataType) is not { } type || !OdEntryLayout.HasFixedSize(type))
+            return $"has no fixed width (declared {(MapType(described.DataType) is { } t ? t.ToString() : "with no data type this implementation knows")}), and an SRDO maps fixed-width objects only";
+        int size = OdEntryLayout.FixedSize(type);
         if (entry.ByteLength != size)
             return $"is not as wide as its declared {type} ({size * 8} bits)";
         var access = MapAccess(described.Access);
