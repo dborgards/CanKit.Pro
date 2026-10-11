@@ -850,8 +850,9 @@ upload failed or returned no word — a word is exactly four bytes (UNSIGNED32),
 (sub-index `01h`) exactly one (UNSIGNED8); a value of another length counts as not read. A COB-ID
 word with a bit above bit 10 does not match. Only an
 existing record matches: one whose direction (sub-index `01h`, live, or the file's when that upload
-fails) is not 1 or 2 — 0, or a reserved value 3..255 — is skipped, because a deleted record keeps its COB-IDs and another SRDO may have taken
-them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The two
+fails) is not 1 or 2 — 0, or a reserved value 3..255 — is skipped, because a deleted record keeps
+its COB-IDs and another SRDO may have taken them over (the device refuses only the ids of an
+existing SRDO, §8.4.2.2); a direction neither source yields is not taken for a deletion. The two
 frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from
 `1381h`–`13C0h` — every slot up to the count, the inverted ones included, so a full mapping takes
 16 slot uploads rather than 8 — or from the file when that read fails: a slot that cannot be read,

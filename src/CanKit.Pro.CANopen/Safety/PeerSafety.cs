@@ -6,7 +6,9 @@ namespace CanKit.Pro.CANopen.Safety;
 
 /// <summary>What a safety node's configuration should be: 1300h and, per SRDO number, the
 /// communication parameter and the mapping. Built by hand or from a DCF's parameter values
-/// (CiA 306). A record whose direction is 0 is not part of it — it is deleted on the peer.</summary>
+/// (CiA 306). A record whose direction is 0 is not part of it — it is deleted on the peer.
+/// Not thread-safe: fill it on one thread, then hand it over. A transaction takes its own copy
+/// when it starts; a concurrent <see cref="Add"/> while that copy is being made is not supported.</summary>
 public sealed class PeerSafetyConfiguration
 {
     private readonly Dictionary<int, (SrdoCommunicationParameter Parameter, SrdoMapping Mapping)> _srdos = new();
