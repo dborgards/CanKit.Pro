@@ -951,6 +951,44 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         master.PeerSdoChannelIsFreeForTests(Device).Should().BeTrue("the refusal released the channel");
     }
 
+    /// <summary>The transaction works from the configuration as it was when it started — when it
+    /// owns the peer's channel, before its first frame: an SRDO added to the caller's instance
+    /// while the count upload is held is neither checked, written nor compared, for Configure and
+    /// Verify alike.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_Srdo_Added_During_A_Safety_Transaction_Is_Not_Part_Of_It(bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x13FF, 0x00) };
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var configuration = Configuration();
+        var transaction = verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, configuration);
+        await fake.Holding.WithTimeoutAsync(ShortTimeout); // the count upload is held
+
+        configuration.Add(2, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x10B, 0x10C),
+            new SrdoMapping().Add(0x2001, 0x00, 8));
+        fake.ReleaseHeld();
+        var result = await transaction.WithTimeoutAsync(ShortTimeout);
+        if (!verify) result.Succeeded.Should().BeTrue();
+        lock (fake.Requests)
+        {
+            fake.Requests.Should().NotContain(((ushort)0x1302, (byte)0x05), "SRDO 2 was added after the transaction started");
+            fake.Requests.Should().NotContain(r => r.Index == 0x1382, "nor its mapping");
+        }
+        if (!verify)
+            lock (fake.Written)
+            {
+                fake.Written[(0x1302, 0x01)].Should().Equal(new byte[] { 0 }, "SRDO 2 stays deleted, as the configuration was at the start");
+                fake.Written[(0x13FF, 0x02)].Should().Equal(new byte[] { 0, 0 });
+            }
+    }
+
     /// <summary>The transaction's own token cancels its wait for the channel; nothing of it is sent.</summary>
     [Fact]
     public async Task A_Safety_Transaction_Waiting_For_The_Channel_Is_Cancelled_By_Its_Token()

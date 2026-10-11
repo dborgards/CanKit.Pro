@@ -53,6 +53,17 @@ public sealed class PeerSafetyConfiguration
         return this;
     }
 
+    /// <summary>A copy no caller holds, mappings included (a mapping of <see cref="Srdos"/> can
+    /// still be changed through <see cref="SrdoMapping.Add(ushort, byte, byte)"/>): the configuration
+    /// a peer-safety transaction works from, taken when it starts.</summary>
+    internal PeerSafetyConfiguration Snapshot()
+    {
+        var copy = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = GlobalFailsafeCommandEnabled };
+        foreach (var pair in _srdos)
+            copy._srdos[pair.Key] = (pair.Value.Parameter, SrdoMapping.FromEntries(pair.Value.Mapping.ToArray()));
+        return copy;
+    }
+
     /// <summary>Sub-index 2 is 1..65535 ms and sub-index 3 1..255 ms (§8.4.2.2), checked after
     /// rounding to whole milliseconds. Sub-index 3 is bounded for a producer too: the checksum
     /// covers it whatever the direction (§8.4.2.2 field c).</summary>

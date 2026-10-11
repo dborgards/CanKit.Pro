@@ -23,6 +23,7 @@ internal sealed partial class CanOpenNode
     {
         ThrowIfDisposed();
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
+        var requested = configuration;
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(configuration); // before the first frame
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
@@ -36,6 +37,9 @@ internal sealed partial class CanOpenNode
             // the one bound now, which the pre-check uses and every transfer's gate check below. A
             // rebind or an edit meanwhile takes effect for the next call. Without a bound description
             // the peer gate refuses the first transfer anyway. A refusal here releases the channel.
+            // The configuration likewise: a copy taken now is what is checked, written and compared,
+            // so a change to the caller's instance meanwhile is not part of this transaction.
+            configuration = requested.Snapshot();
             var binding = CapturePeerDescription(peerNodeId, configuration);
             if (binding.IsBound)
                 EnsureMappingsFitDescription(configuration, binding); // before the first frame
@@ -68,6 +72,7 @@ internal sealed partial class CanOpenNode
     {
         ThrowIfDisposed();
         if (expected is null) throw new ArgumentNullException(nameof(expected));
+        var requested = expected;
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(expected); // before the first frame
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
@@ -77,6 +82,7 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            expected = requested.Snapshot(); // the expectation as it was when the transaction started
             var binding = CapturePeerDescription(peerNodeId); // one description from the moment it owns the channel
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount);

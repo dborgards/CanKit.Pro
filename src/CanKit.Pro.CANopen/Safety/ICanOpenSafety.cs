@@ -82,10 +82,11 @@ public interface ICanOpenSafety
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
-    /// The transaction works from the description as it was when it started — when it owns the
-    /// peer's channel, after any call it waited for: its pre-check and the gate of every transfer
-    /// read a snapshot taken then, not the bound instance. A rebind, an unbind or an edit in place
-    /// of the bound description before that moment is seen; one after it takes effect for the next
+    /// The transaction works from the description and the configuration as they were when it
+    /// started — when it owns the peer's channel, after any call it waited for: its pre-check, the
+    /// gate of every transfer, the writes and the readback use copies taken then, not the bound
+    /// description or the caller's <paramref name="configuration"/>. A rebind, an unbind or an
+    /// edit in place of either before that moment is seen; one after it takes effect for the next
     /// call, not half-way through this one.
     /// An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync.
     /// The peer's 13FEh is 0 once at least one parameter write has been
@@ -111,9 +112,10 @@ public interface ICanOpenSafety
     /// the device checks only those of existing SRDOs (§9.5). Nothing is written. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
-    /// The transaction works from the description as it was when it started — when it owns the
-    /// peer's channel (the gate of every transfer reads a snapshot taken then): a rebind, an unbind
-    /// or an edit in place of the bound description after that takes effect for the next call.</summary>
+    /// The transaction works from the description and the expectation as they were when it
+    /// started — when it owns the peer's channel (the gate of every transfer and the comparison use
+    /// copies taken then): a rebind, an unbind or an edit in place of the bound description, or a
+    /// change to <paramref name="expected"/>, after that takes effect for the next call.</summary>
     /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
     /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
     /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
