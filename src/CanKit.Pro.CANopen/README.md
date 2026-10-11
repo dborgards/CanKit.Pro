@@ -549,7 +549,9 @@ A device description raises the count to the highest SRDO record it declares
 loaded like the PDO records: through the validated write path, the mapping before the SRDO is
 created, the file's access type honoured, every value the node refuses reported as a finding with
 its abort code — a refused mapping entry also with the rule it broke, since `0604 0041h` stands for
-several (not mappable, not accessible, another width, no fixed width). A record below the highest one that the file omits exists all the same —
+several (not mappable, not accessible, another width, no fixed width); an inverted slot that does
+not repeat its plain slot and a mapping beyond 8 bytes keep the generic text with their own abort
+code. A record below the highest one that the file omits exists all the same —
 `13FFh:00` is the number of SRDOs (§8.4.2.2), so records 1..n exist and a master reaches every
 one — at its defaults, deleted, with the node's default access (read-only on the bus without
 `WritableCommunicationParameters`), and is reported as `SuppliedDefault`. A mapping
