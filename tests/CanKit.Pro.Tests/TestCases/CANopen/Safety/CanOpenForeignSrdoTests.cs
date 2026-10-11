@@ -72,6 +72,52 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         return CanOpenDeviceDescription.ParseDcf(text[..at] + (next < 0 ? "" : text[(next + 1)..]));
     }
 
+    /// <summary>Every node of these tests runs on a virtual clock: an SDO client deadline runs on
+    /// the node's time source, which only the test moves, so a transfer is not ended by a host
+    /// stall (fix report, round 15 addendum; #92).</summary>
+    private static CanOpenNode OpenOnVirtualClock(ICanBus bus, byte nodeId, CanOpenNodeOptions options, CanOpenDeviceDescription? description = null)
+        => new(new CanKit.Pro.RawCan.CanBusService(bus), nodeId, options, ownsService: true, new ManualTimeSource(), description);
+
+    /// <summary>A master on a virtual clock for the tests in which the peer does not answer: every
+    /// SDO request it sends to <see cref="Device"/> is seen on a third channel, and the clock is
+    /// then moved past the SDO timeout, so that request's deadline fires. The deadline is armed on
+    /// the actor before the request is handed to the bus, so the move always finds it; nothing is
+    /// waited for on the wall clock.</summary>
+    private sealed class UnansweredPeerRig : IDisposable
+    {
+        private static readonly TimeSpan SdoTimeout = TimeSpan.FromMilliseconds(100);
+        private readonly ManualTimeSource _clock = new();
+        private readonly ICanBus _observer;
+
+        public UnansweredPeerRig(string session, ICanBus masterBus)
+        {
+            Master = new CanOpenNode(new CanKit.Pro.RawCan.CanBusService(masterBus), CanOpenForeignSrdoTests.Master,
+                new CanOpenNodeOptions { SdoTimeout = SdoTimeout }, ownsService: true, _clock);
+            _observer = Open(session, 3);
+            _observer.FrameObserved += (_, e) =>
+            {
+                var f = e.CanFrame;
+                if (f.IsExtendedFrame || f.IsRemoteFrame || (uint)f.ID != CanOpenCobId.SdoRx(Device) || f.Data.Length < 1) return;
+                if (f.Data.Span[0] == 0x80) return; // the client's own abort after a timeout
+                _ = Task.Run(async () =>
+                {
+                    // Settle, move, settle: the actor sees the moved clock on its next turn.
+                    await Master.PostToActorAsync(() => { }).ConfigureAwait(false);
+                    _clock.Advance(SdoTimeout + TimeSpan.FromMilliseconds(1));
+                    await Master.PostToActorAsync(() => { }).ConfigureAwait(false);
+                });
+            };
+        }
+
+        public CanOpenNode Master { get; }
+
+        public void Dispose()
+        {
+            _observer.Dispose();
+            Master.Dispose();
+        }
+    }
+
     private sealed class ListSink : IForeignPdoSink
     {
         public readonly List<ForeignPdoSignal> Signals = new();
@@ -82,7 +128,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     /// different mapping than the file — live must win.</summary>
     private static ICanOpenNode OpenDeviceDivergingFromFile(ICanBus bus)
     {
-        var device = CanOpen.OpenNode(bus, PeerFile(), new CanOpenNodeOptions { WritableCommunicationParameters = true });
+        var file = PeerFile();
+        var device = OpenOnVirtualClock(bus, file.NodeId!.Value, new CanOpenNodeOptions { WritableCommunicationParameters = true }, file);
         device.ObjectDictionary.AddU32(0x2002, 0x00, 0, OdAccess.ReadOnly);
         device.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2002, 0x00, 32), TimeSpan.FromMilliseconds(25), 0x111, 0x112);
         device.Safety().CommitSafetyConfiguration();
@@ -95,7 +142,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         using var device = OpenDeviceDivergingFromFile(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var sink = new ListSink();
@@ -125,7 +172,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         using var device = OpenDeviceDivergingFromFile(busB);
         device.ObjectDictionary.WriteRawUnchecked(0x1381, 0x02, ObjectDictionary.EncodeU32(0x2000_0010));
         master.BindPeerDeviceDescription(Device, PeerFile());
@@ -148,7 +195,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         using var device = OpenDeviceDivergingFromFile(busB);
         device.ObjectDictionary.Remove(0x1381, 0x02).Should().BeTrue();
         master.BindPeerDeviceDescription(Device, PeerFile());
@@ -175,7 +222,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         using var device = OpenDeviceDivergingFromFile(busB);
         var od = device.ObjectDictionary;
         switch (fault)
@@ -199,7 +246,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
         master.BindPeerDeviceDescription(Device, PeerFile());
         var sink = new ListSink();
         var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
@@ -222,8 +270,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
-        using var device = CanOpen.OpenNode(busB, Device, new CanOpenNodeOptions { SrdoCount = 2, WritableCommunicationParameters = true });
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        using var device = OpenOnVirtualClock(busB, Device, new CanOpenNodeOptions { SrdoCount = 2, WritableCommunicationParameters = true });
         device.ObjectDictionary.AddU16(0x2000, 0x00, 0x1234);
         device.ObjectDictionary.AddU8(0x2001, 0x00, 0x5A);
         var safety = device.Safety();
@@ -250,7 +298,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
         var file = PeerFilePatched("[1301sub1]", "ParameterValue=1", "ParameterValue=0");
         master.BindPeerDeviceDescription(Device, file);
         var sink = new ListSink();
@@ -267,7 +316,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         using var device = OpenDeviceDivergingFromFile(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var sink = new ListSink();
@@ -289,7 +338,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         using var device = OpenDeviceDivergingFromFile(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var sink = new ListSink();
@@ -307,8 +356,9 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
-        using var device = CanOpen.OpenNode(busB, PeerFile(), new CanOpenNodeOptions { WritableCommunicationParameters = true });
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        var deviceFile = PeerFile();
+        using var device = OpenOnVirtualClock(busB, deviceFile.NodeId!.Value, new CanOpenNodeOptions { WritableCommunicationParameters = true }, deviceFile);
         device.ObjectDictionary.AddU8(0x2002, 0x00, 0, OdAccess.ReadOnly);
         device.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8).Add(0x2002, 0x00, 8),
             TimeSpan.FromMilliseconds(25), 0x111, 0x112);
@@ -341,7 +391,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
         var file = fault == "missing"
             ? PeerFileWithout("[1381sub4]")
             : PeerFilePatched("[1381sub4]", "0x20010008", "0x20020008");
@@ -361,7 +412,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
         var file = CanOpenDeviceDescription.ParseDcf(PatchedText(PatchedText(PeerFileText(),
             "[1381sub1]", "0x20000010", "0x00050010"), "[1381sub2]", "0x20000010", "0x00050010"));
         master.BindPeerDeviceDescription(Device, file);
@@ -378,7 +430,8 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) });
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
         var file = PeerFilePatched("[1301sub5]", "ParameterValue=0x109", "ParameterValue=0x80000109");
         master.BindPeerDeviceDescription(Device, file);
         var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
@@ -392,7 +445,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
         var nine = new byte[9];
         var ex1 = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => master.Safety().ObserveForeignSrdoAsync(Device, 0x109, nine, new byte[8], PeerFile(), new ListSink()));
         ex1.ParamName.Should().Be("frame1");

@@ -36,14 +36,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         => CanOpenDeviceDescription.ParseDcf(System.IO.File.ReadAllText(
             System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")));
 
-    /// <summary>A master on a virtual clock: its SDO client deadline (the node's time source) never
-    /// fires unless the test moves the clock, so the transfer waits for the fake's reply however
-    /// long the host stalls. With the real clock, a stall of more than SdoTimeout (1 s) ends the
-    /// transfer with 0504 0000h instead — measured: starving the thread pool for 1.5 s produced
-    /// exactly that for a one-byte and a zero-byte count alike, and 300 unstalled runs of each
-    /// produced none.</summary>
-    private static CanOpenNode OpenMasterOnVirtualClock(ICanBus bus)
-        => new(new CanKit.Pro.RawCan.CanBusService(bus), Master, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
+    /// <summary>The master on a virtual clock: its SDO client deadline runs on the node's time
+    /// source, which only the test moves, so a transfer waits for the peer's reply however long the
+    /// host stalls instead of ending with 0504 0000h. Why that matters is measured in the fix report
+    /// (round 15 addendum) and tracked in #92.</summary>
+    private static CanOpenNode OpenMasterOnVirtualClock(ICanBus bus) => OpenOnVirtualClock(bus, Master, new CanOpenNodeOptions());
+
+    /// <summary>Any node of these tests on a virtual clock (see <see cref="OpenMasterOnVirtualClock"/>).</summary>
+    private static CanOpenNode OpenOnVirtualClock(ICanBus bus, byte nodeId, CanOpenNodeOptions options, CanOpenDeviceDescription? description = null)
+        => new(new CanKit.Pro.RawCan.CanBusService(bus), nodeId, options, ownsService: true, new ManualTimeSource(), description);
 
     private static PeerSafetyConfiguration Configuration() => new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
         .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
@@ -51,7 +52,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 
     private static ICanOpenNode OpenDevice(ICanBus bus)
     {
-        var device = CanOpen.OpenNode(bus, Device, new CanOpenNodeOptions { SrdoCount = 2, WritableCommunicationParameters = true });
+        var device = OpenOnVirtualClock(bus, Device, new CanOpenNodeOptions { SrdoCount = 2, WritableCommunicationParameters = true });
         device.ObjectDictionary.AddU16(0x2000, 0x00, 0x1234);
         device.ObjectDictionary.AddU8(0x2001, 0x00, 0x5A);
         return device;
@@ -63,7 +64,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
@@ -86,7 +87,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
@@ -98,13 +99,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         device.ObjectDictionary.WriteUnsigned(0x13FE, 0, 0xA5);
+        var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.NmtCommandReceived += (_, e) => { if (e.Command == NmtCommand.Start) started.TrySetResult(true); }; // raised after the node acted on it
         await master.SendNmtCommandAsync(NmtCommand.Start, Device);
-        var deadline = DateTime.UtcNow + ShortTimeout;
-        while (device.State != NmtState.Operational && DateTime.UtcNow < deadline) await Task.Delay(5);
+        await started.Task.WithTimeoutAsync(ShortTimeout);
+        device.State.Should().Be(NmtState.Operational);
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         ex.AbortCode.Should().Be((uint)SdoAbortCode.DataCannotBeTransferredDeviceState);
         device.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u,
@@ -117,7 +120,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
@@ -139,7 +142,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
@@ -157,7 +160,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0x1301, 0x02));
         master.BindPeerDeviceDescription(Device, PeerFile());
         var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
@@ -228,7 +231,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
@@ -261,7 +264,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
@@ -275,7 +278,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         var mapping = new SrdoMapping();
         for (byte i = 0; i < 8; i++)
@@ -307,7 +310,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
@@ -329,7 +332,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         static PeerSafetyConfiguration Two(uint first, uint second) => new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
@@ -356,7 +359,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB); // SrdoCount = 2
         master.BindPeerDeviceDescription(Device, PeerFile());
         var tooMany = Configuration()
@@ -382,7 +385,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: count);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => verify
@@ -403,7 +406,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         file.Contains(0x1340, 0x01).Should().BeTrue();
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: 64);
         master.BindPeerDeviceDescription(Device, file);
         var result = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, new PeerSafetyConfiguration()).WithTimeoutAsync(ShortTimeout);
@@ -465,7 +468,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
         var configure = await HeldConfigurationAsync(master, fake);
         if (rebind) master.BindPeerDeviceDescription(Device, PeerFileWithout1300());
@@ -490,7 +493,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
         var configure = await HeldConfigurationAsync(master, fake);
         var bound = master.GetPeerDeviceDescription(Device)!;
@@ -557,7 +560,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFileDeclaringOnlyTheUsedMappingSlots());
         var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
@@ -573,7 +576,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
@@ -590,7 +593,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
@@ -616,7 +619,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
         master.BindPeerDeviceDescription(Device, PeerFile());
         (await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
@@ -645,8 +648,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var busB = Open(session, 2);
-        using var master = CanOpen.OpenNode(busA, Master);
-        using var device = CanOpen.OpenNode(busB, dcf, new CanOpenNodeOptions { WritableCommunicationParameters = true });
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenOnVirtualClock(busB, dcf.NodeId!.Value, new CanOpenNodeOptions { WritableCommunicationParameters = true }, dcf);
         device.ObjectDictionary.ReadUnsigned(0x13FF, 0).Should().Be(3u);
         device.ObjectDictionary.ReadUnsigned(0x1302, 1).Should().Be(0u);
         master.BindPeerDeviceDescription(Device, dcf);
@@ -680,7 +683,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         dcf.Contains(index, subindex).Should().BeFalse("the file does not declare it");
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         master.BindPeerDeviceDescription(Device, dcf);
         var ensure = typeof(CanOpenNode).GetMethod("EnsurePeerSdoAccess", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var ex = Record.Exception(() => ensure.Invoke(master, new object[] { Device, index, subindex }));
@@ -695,7 +698,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         plain.Contains(0x1301, 0x01).Should().BeFalse();
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         master.BindPeerDeviceDescription(Device, plain);
         var ensure = typeof(CanOpenNode).GetMethod("EnsurePeerSdoAccess", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
         var ex = Record.Exception(() => ensure.Invoke(master, new object[] { Device, (ushort)0x1301, (byte)0x01 }));
@@ -741,7 +744,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true),
             ((ushort)0x2008, "0x0009", "rw", true), ((ushort)0x2009, "0x000F", "rw", true),
@@ -776,23 +779,13 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent, not even the count read");
     }
 
-    private static async Task UntilAsync(Func<bool> condition, string what)
-    {
-        var deadline = DateTime.UtcNow + ShortTimeout;
-        while (!condition())
-        {
-            if (DateTime.UtcNow > deadline) throw new TimeoutException(what);
-            await Task.Delay(5);
-        }
-    }
-
     /// <summary>A configuration held at its first write (1301h:01), the transaction's SDO channel
     /// to the peer reserved.</summary>
     private static async Task<Task<PeerSafetyResult>> HeldConfigurationAsync(ICanOpenNode master, FakeExpeditedServer fake)
     {
         master.BindPeerDeviceDescription(Device, PeerFile());
         var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration());
-        await UntilAsync(() => fake.IsHolding, "the transaction is held at 1301h:01");
+        await fake.Holding.WithTimeoutAsync(ShortTimeout); // the transaction is held at 1301h:01
         return configure;
     }
 
@@ -805,7 +798,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         master.BindPeerDeviceDescription(Device, PeerFile());
         var node = (CanOpenNode)master;
@@ -850,7 +843,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
         using var other = new FakeExpeditedServer(session, 3, 0x06, lieAt: (0, 0));
         var configure = await HeldConfigurationAsync(master, fake);
@@ -870,7 +863,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
         var configure = await HeldConfigurationAsync(master, fake);
 
@@ -892,7 +885,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         master.BindPeerDeviceDescription(Device, PeerFile());
         var paused = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -916,11 +909,11 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1000, 0x00) };
         master.BindPeerDeviceDescription(Device, PeerFile());
         var upload = master.SdoUploadAsync(Device, 0x1000, 0x00);
-        await UntilAsync(() => fake.IsHolding, "the public upload is held");
+        await fake.Holding.WithTimeoutAsync(ShortTimeout); // the public upload is held
 
         var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration());
         fake.ReleaseHeld();
@@ -939,11 +932,11 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1000, 0x00) };
         master.BindPeerDeviceDescription(Device, PeerFile());
         var upload = master.SdoUploadAsync(Device, 0x1000, 0x00);
-        await UntilAsync(() => fake.IsHolding, "the public upload is held");
+        await fake.Holding.WithTimeoutAsync(ShortTimeout); // the public upload is held
 
         using var cts = new System.Threading.CancellationTokenSource();
         var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration(), cts.Token);
@@ -962,7 +955,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
         var configure = await HeldConfigurationAsync(master, fake);
         int before;
@@ -978,15 +971,6 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         (await configure.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
     }
 
-    private sealed class ListSink : IForeignPdoSink
-    {
-        public readonly List<ForeignPdoSignal> Signals = new();
-        public void Write(ForeignPdoSignal signal) => Signals.Add(signal);
-    }
-
-    /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
-    /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
-    /// plus one so the readback differs.</summary>
     /// <summary>The client's side of a zero-byte upload, pinned: an expedited response cannot carry
     /// 0 bytes (s = 1 encodes 1..4, s = 0 means four), so the fake answers with CiA 301's segmented
     /// upload: an initiate with size indicated 0 (41h), then, on the client's one segment request,
@@ -1005,6 +989,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         fake.SegmentRequests.Should().Be(1);
     }
 
+    private sealed class ListSink : IForeignPdoSink
+    {
+        public readonly List<ForeignPdoSignal> Signals = new();
+        public void Write(ForeignPdoSignal signal) => Signals.Add(signal);
+    }
+
+    /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
+    /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
+    /// plus one so the readback differs.</summary>
     private sealed class FakeExpeditedServer : IDisposable
     {
         private readonly ICanBus _bus;
@@ -1017,6 +1010,9 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         private Action? _heldReply;
         private bool _held;
         public bool IsHolding { get { lock (Requests) return _heldReply is not null; } }
+        private readonly TaskCompletionSource<bool> _holding = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        /// <summary>Completes when the first request to <see cref="HoldAt"/> is being held.</summary>
+        public Task Holding => _holding.Task;
         private int _segmentRequests;
         /// <summary>Upload segment requests seen (ccs 3).</summary>
         public int SegmentRequests => Volatile.Read(ref _segmentRequests);
@@ -1076,6 +1072,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
                     {
                         _held = true;
                         _heldReply = () => _bus.Transmit(CanFrame.Classic(0x580 + _nodeId, reply, isExtendedFrame: false));
+                        _holding.TrySetResult(true);
                         return;
                     }
                 }
