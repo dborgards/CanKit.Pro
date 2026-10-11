@@ -566,12 +566,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     /// <summary>The upload itself, without taking the peer's SDO channel: for a caller that holds
     /// it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public call).
-    /// Still passes the peer gate.</summary>
+    /// Still passes the peer gate — against the live binding, or for a safety transaction against
+    /// the description it started with (<paramref name="transaction"/>).</summary>
     private Task<byte[]> SdoUploadCoreAsync(byte serverNodeId, ushort index, byte subindex,
-        SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null)
+        SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null, PeerDescriptionBinding? transaction = null)
     {
         ThrowIfDisposed();
-        EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        if (transaction is null) EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction.Description);
         var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
@@ -631,12 +633,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     /// <summary>The download itself, without taking the peer's SDO channel: for a caller that
     /// holds it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public
-    /// call). Still passes the peer gate. <paramref name="payload"/> is not empty.</summary>
+    /// call). Still passes the peer gate — against the live binding, or for a safety transaction
+    /// against the description it started with (<paramref name="transaction"/>).
+    /// <paramref name="payload"/> is not empty.</summary>
     private Task<byte[]> SdoDownloadCoreAsync(byte serverNodeId, ushort index, byte subindex,
-        byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null)
+        byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null, PeerDescriptionBinding? transaction = null)
     {
         ThrowIfDisposed();
-        EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        if (transaction is null) EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction.Description);
         var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
 

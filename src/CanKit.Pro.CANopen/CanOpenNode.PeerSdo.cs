@@ -138,8 +138,14 @@ internal sealed partial class CanOpenNode
     /// only <see cref="PeerSdoAccessException.IsAllowedWithoutPeerDescription"/> passes.
     /// </summary>
     private void EnsurePeerSdoAccess(byte serverNodeId, ushort index, byte subindex)
+        => EnsurePeerSdoAccess(serverNodeId, index, subindex,
+            _peerDescriptions.TryGetValue(serverNodeId, out var bound) ? bound : null);
+
+    /// <summary>The gate against <paramref name="description"/> rather than the live binding: a
+    /// safety transaction checks every transfer against the description bound at its start.</summary>
+    private static void EnsurePeerSdoAccess(byte serverNodeId, ushort index, byte subindex, CanOpenDeviceDescription? description)
     {
-        if (_peerDescriptions.TryGetValue(serverNodeId, out var description))
+        if (description is not null)
         {
             if (description.Contains(index, subindex) || IsImpliedSrdoRecordEntry(description, index, subindex)) return;
             throw PeerSdoAccessException.NotInDescription(serverNodeId, index, subindex);
@@ -148,6 +154,18 @@ internal sealed partial class CanOpenNode
         if (PeerSdoAccessException.IsAllowedWithoutPeerDescription(index, subindex)) return;
         throw PeerSdoAccessException.NoDescription(serverNodeId, index, subindex);
     }
+
+    /// <summary>The peer description a safety transaction was started with (null when none was
+    /// bound): captured once, and handed to its transfers, so that a rebind or an unbind on another
+    /// thread during the transaction takes effect for the next call, not half-way through this one.</summary>
+    private sealed class PeerDescriptionBinding
+    {
+        public PeerDescriptionBinding(CanOpenDeviceDescription? description) => Description = description;
+        public CanOpenDeviceDescription? Description { get; }
+    }
+
+    private PeerDescriptionBinding CapturePeerDescription(byte peerNodeId)
+        => new(_peerDescriptions.TryGetValue(peerNodeId, out var description) ? description : null);
 
     /// <summary>
     /// CiA DSP 304 §8.4.2.2: 13FFh:00 is the number of SRDOs, so a file whose highest SRDO record

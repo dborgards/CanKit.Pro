@@ -25,8 +25,11 @@ internal sealed partial class CanOpenNode
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(configuration); // before the first frame
+        // One description for the whole transaction: the one bound now, which the pre-check uses
+        // and every transfer's gate check below. A rebind meanwhile takes effect for the next call.
         // Without a bound description the peer gate refuses the first transfer anyway.
-        if (_peerDescriptions.TryGetValue(peerNodeId, out var description))
+        var binding = CapturePeerDescription(peerNodeId);
+        if (binding.Description is { } description)
             EnsureMappingsFitDescription(configuration, description); // before the first frame
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
@@ -35,20 +38,20 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, cancellationToken).ConfigureAwait(false);
+            int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(configuration, peerCount);
             var writes = SafetyWrites(configuration, peerCount).ToList();
             // "write all safety-relevant parameter incl. checksums"
             foreach (var (index, sub, value) in writes)
-                await SdoDownloadCoreAsync(peerNodeId, index, sub, value, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
+                await SdoDownloadCoreAsync(peerNodeId, index, sub, value, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
             // "read all safety-relevant parameter incl. checksums back" — "compared"
-            var mismatches = await CompareAsync(peerNodeId, writes, cancellationToken).ConfigureAwait(false);
+            var mismatches = await CompareAsync(peerNodeId, writes, binding, cancellationToken).ConfigureAwait(false);
             if (mismatches.Count > 0) return new PeerSafetyResult(false, mismatches);
             if (AfterSafetyReadbackForTests is { } pause) await pause().ConfigureAwait(false);
             // "configuration acknowledged"
             var valid = new[] { SrdoRecords.ConfigurationValidValue };
-            await SdoDownloadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, valid, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
-            var back = await SdoUploadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
+            await SdoDownloadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, valid, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
+            var back = await SdoUploadCoreAsync(peerNodeId, SrdoRecords.ConfigurationValid, 0x00, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
             if (!back.AsSpan().SequenceEqual(valid))
                 return new PeerSafetyResult(false, new[] { new PeerSafetyMismatch(SrdoRecords.ConfigurationValid, 0x00, valid, back) });
             return new PeerSafetyResult(true, Array.Empty<PeerSafetyMismatch>());
@@ -66,6 +69,7 @@ internal sealed partial class CanOpenNode
         if (expected is null) throw new ArgumentNullException(nameof(expected));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(expected); // before the first frame
+        var binding = CapturePeerDescription(peerNodeId); // one description for the whole transaction
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
         // transaction ends. Every transfer below is a ...CoreAsync one.
@@ -73,7 +77,7 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, cancellationToken).ConfigureAwait(false);
+            int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount);
             // 1300h is not part of step D's list (§8.3.1 D). A deleted SRDO's checksum is not
             // checked by the device (§9.5, last rule: the checksums of the SRDOs that exist), so a
@@ -83,7 +87,7 @@ internal sealed partial class CanOpenNode
                 .Where(w => w.Index != SrdoRecords.Checksum || expected.Srdos.ContainsKey(w.Subindex))
                 .Append((SrdoRecords.ConfigurationValid, (byte)0x00, new[] { SrdoRecords.ConfigurationValidValue }))
                 .ToList();
-            var mismatches = await CompareAsync(peerNodeId, expectedValues, cancellationToken).ConfigureAwait(false);
+            var mismatches = await CompareAsync(peerNodeId, expectedValues, binding, cancellationToken).ConfigureAwait(false);
             return new PeerSafetyResult(mismatches.Count == 0, mismatches);
         }
         finally
@@ -92,10 +96,13 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    private async Task<int> ReadPeerSrdoCountAsync(byte peerNodeId, CancellationToken cancellationToken)
+    private async Task<int> ReadPeerSrdoCountAsync(byte peerNodeId, PeerDescriptionBinding binding, CancellationToken cancellationToken)
     {
-        var count = await SdoUploadCoreAsync(peerNodeId, SrdoRecords.Checksum, 0x00, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
-        if (count.Length < 1) throw new InvalidOperationException("The peer returned no SRDO count from 13FFh:00.");
+        var count = await SdoUploadCoreAsync(peerNodeId, SrdoRecords.Checksum, 0x00, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
+        // UNSIGNED8 (§8.4.2.2): exactly one byte. A longer response is not cut to its low byte.
+        if (count.Length != 1)
+            throw new InvalidOperationException(
+                $"The peer returned {count.Length} byte(s) for the SRDO count 13FFh:00, which is UNSIGNED8 — one byte (CiA DSP 304 §8.4.2.2); nothing further was sent.");
         // Not clamped: SRDOs the peer claims beyond 64 could never be configured or verified,
         // and a configuration acknowledged over 1..64 would leave them unchecked.
         if (count[0] > SrdoRecords.MaxSrdoCount)
@@ -224,7 +231,7 @@ internal sealed partial class CanOpenNode
     /// <summary>Uploads each pair once (the last value written to a pair is the expectation) and
     /// lists every difference.</summary>
     private async Task<List<PeerSafetyMismatch>> CompareAsync(byte peerNodeId,
-        IReadOnlyList<(ushort Index, byte Subindex, byte[] Value)> expected, CancellationToken cancellationToken)
+        IReadOnlyList<(ushort Index, byte Subindex, byte[] Value)> expected, PeerDescriptionBinding binding, CancellationToken cancellationToken)
     {
         var final = new Dictionary<(ushort, byte), byte[]>();
         var order = new List<(ushort, byte)>();
@@ -236,7 +243,7 @@ internal sealed partial class CanOpenNode
         var mismatches = new List<PeerSafetyMismatch>();
         foreach (var (index, sub) in order)
         {
-            var actual = await SdoUploadCoreAsync(peerNodeId, index, sub, SdoTransferMode.Auto, cancellationToken).ConfigureAwait(false);
+            var actual = await SdoUploadCoreAsync(peerNodeId, index, sub, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
             if (!actual.AsSpan().SequenceEqual(final[(index, sub)]))
                 mismatches.Add(new PeerSafetyMismatch(index, sub, final[(index, sub)], actual));
         }

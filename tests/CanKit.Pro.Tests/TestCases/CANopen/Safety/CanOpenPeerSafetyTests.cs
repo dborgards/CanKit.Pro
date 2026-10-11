@@ -414,6 +414,76 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         fake.Written.Keys.Should().OnlyContain(k => k.Item1 == 0x13FF, "nothing was written");
     }
 
+    /// <summary>13FFh:00 is UNSIGNED8 (§8.4.2.2): a response of any other length — none, two or
+    /// four bytes — is refused with InvalidOperationException naming the length, before any
+    /// further frame, by Configure and Verify alike; its low byte is not taken as the count.</summary>
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(2, false)]
+    [InlineData(4, false)]
+    [InlineData(0, true)]
+    [InlineData(2, true)]
+    [InlineData(4, true)]
+    public async Task A_Srdo_Count_That_Is_Not_One_Byte_Is_Refused_Before_Any_Further_Frame(int length, bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), emptyCount: length == 0);
+        if (length > 0)
+        {
+            var count = new byte[length];
+            count[0] = 2;
+            lock (fake.Written) fake.Written[(0x13FF, 0)] = count;
+        }
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("13FFh:00").And.Contain($"{length} byte");
+        lock (fake.Requests) fake.Requests.Should().Equal(new[] { ((ushort)0x13FF, (byte)0x00) }, "nothing after the count");
+    }
+
+    /// <summary>A safety transaction uses one description for its whole length: the one bound at
+    /// its start, which its pre-check used. Unbinding the peer, or rebinding it to a file that
+    /// declares less (here: no 1300h), while the transaction is held changes nothing for it — it
+    /// writes and reads back everything it started with — and takes effect for the next call.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Rebind_During_A_Safety_Transaction_Takes_Effect_For_The_Next_Call(bool rebind)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
+        var configure = await HeldConfigurationAsync(master, fake);
+        if (rebind) master.BindPeerDeviceDescription(Device, PeerFileWithout1300());
+        else master.UnbindPeerDeviceDescription(Device);
+        fake.ReleaseHeld();
+        var result = await configure.WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue("the transaction keeps the description it started with");
+        lock (fake.Requests)
+        {
+            fake.Requests.Should().Contain(((ushort)0x1300, (byte)0x00), "1300h was written although the new binding does not allow it");
+            fake.Requests.Last().Should().Be(((ushort)0x13FE, (byte)0x00), "the transaction ran to its acknowledgement");
+        }
+        await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.SdoUploadAsync(Device, 0x1300, 0x00).WithTimeoutAsync(ShortTimeout));
+    }
+
+    /// <summary>The fixture without object 1300h (section and optional-object entry).</summary>
+    private static CanOpenDeviceDescription PeerFileWithout1300()
+    {
+        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n");
+        int at = text.IndexOf("\n[1300]\n", StringComparison.Ordinal);
+        at.Should().BeGreaterThan(-1);
+        int next = text.IndexOf("\n[", at + 1, StringComparison.Ordinal);
+        text = text[..at] + text[next..];
+        var file = CanOpenDeviceDescription.ParseDcf(text);
+        file.Contains(0x1300, 0x00).Should().BeFalse();
+        return file;
+    }
+
     /// <summary>The fixture with mapping record 1381h declaring only sub-indices 0..4 — the two
     /// objects of <see cref="Configuration"/>, plain and inverted — as a conforming DCF may: the
     /// peer gate then refuses every slot above them.</summary>

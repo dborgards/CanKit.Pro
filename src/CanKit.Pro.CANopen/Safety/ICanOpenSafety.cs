@@ -82,12 +82,16 @@ public interface ICanOpenSafety
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
+    /// The transaction uses the description bound at its start for its pre-check and for the gate
+    /// of every transfer: a rebind or an unbind of the peer meanwhile takes effect for the next
+    /// call, not half-way through this one.
     /// An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync.
     /// The peer's 13FEh is 0 once at least one parameter write has been
     /// accepted, because every such write clears it; an abort before that — for example
     /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
-    /// <exception cref="InvalidOperationException">The peer returned no count from 13FFh:00, or a
-    /// count above 64 (§8.4.2.2) — refused before any further frame.</exception>
+    /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
+    /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
+    /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
     /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
     /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
     /// with another width or with a type without a fixed width (a string, a domain: an SRDO maps
@@ -104,9 +108,12 @@ public interface ICanOpenSafety
     /// SRDO the expectation does not name must be deleted; its checksum is not compared, because
     /// the device checks only those of existing SRDOs (§9.5). Nothing is written. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
-    /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.</summary>
-    /// <exception cref="InvalidOperationException">The peer returned no count from 13FFh:00, or a
-    /// count above 64 (§8.4.2.2) — refused before any further frame.</exception>
+    /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
+    /// The transaction uses the description bound at its start for the gate of every transfer: a
+    /// rebind or an unbind of the peer meanwhile takes effect for the next call.</summary>
+    /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
+    /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
+    /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
     /// <exception cref="ArgumentException">The expectation names an SRDO above the peer's count.</exception>
     Task<PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, PeerSafetyConfiguration expected, CancellationToken cancellationToken = default);
 
@@ -115,10 +122,11 @@ public interface ICanOpenSafety
     /// equals <paramref name="cobId1"/> (the file is the fallback when the upload fails; a record
     /// whose direction is 0, live or in the file, does not match: it may have kept the ids another SRDO now uses), the
     /// pair checked for equal length and bitwise inversion, the mapping read live from
-    /// 1381h–13C0h (odd sub-indices) or from the file — the file's only when each even sub-index
-    /// up to the count is declared and repeats the odd one before it, the rule the device's own
-    /// loader applies (CiA DSP 304 §8.4.2.2, 1381h–13C0h); otherwise the pair is not decoded and
-    /// the reason names the slot. Signals carry
+    /// 1381h–13C0h or from the file — either only when each even sub-index up to the count
+    /// repeats the odd one before it, the rule the device's own validator and loader apply (CiA
+    /// DSP 304 §8.4.2.2, 1381h–13C0h); otherwise the pair is not decoded and the reason names the
+    /// slot. A live record that was read and breaks that rule — an even slot that differs or cannot
+    /// be read — is not decoded, with no fallback to the file: live wins. Signals carry
     /// <see cref="ForeignPdoKind.Srdo"/> and the SRDO number. SRVT and SCT are the caller's to
     /// judge: it holds the timestamps. Nothing is written to this node's dictionary.
     /// The live mapping is read in full whenever its count is: the peer-SDO gate lets through

@@ -43,6 +43,11 @@ internal sealed partial class CanOpenNode
                 .ConfigureAwait(false);
             // The gate never refuses part of a live SRDO mapping: whenever it lets the count through,
             // it lets all 16 slots through (the implied SRDO records, CanOpenNode.PeerSdo.cs).
+            // A live record that was read and breaks the pairing rule is not decoded: live wins, so
+            // the file is no fallback for it.
+            if (read.Refusal is { } refusal)
+                return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, ForeignPdoMappingOrigin.LiveMapping, 0,
+                    "the peer's live mapping " + refusal), null);
             if (read.Entries is { } liveEntries) { mapping = liveEntries; origin = ForeignPdoMappingOrigin.LiveMapping; }
             else if (TryDescribedSrdoMapping(peerDescription, n, peerNodeId, out mapping, out var why)) origin = ForeignPdoMappingOrigin.DeviceDescription;
             else return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, false, null, 0,

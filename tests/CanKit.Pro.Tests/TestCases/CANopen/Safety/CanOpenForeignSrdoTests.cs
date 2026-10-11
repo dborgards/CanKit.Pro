@@ -113,6 +113,38 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         master.ObjectDictionary.ContainsIndex(0x2002).Should().BeFalse("nothing is written here");
     }
 
+    /// <summary>The live path applies the rule the file path applies (§8.4.2.2, 1381h–13C0h: the
+    /// even sub-index carries the inverted object of the odd one before it): every slot up to the
+    /// count is read, and a live even slot that differs from its odd slot, or cannot be read, makes
+    /// the pair not decoded, with a reason naming the slot. A live record that was read wins: the
+    /// file is no fallback for it. The device's own validator would refuse such a record, so the
+    /// test writes it past the validator (WriteRawUnchecked) or removes the slot.</summary>
+    [Theory]
+    [InlineData("different")]
+    [InlineData("absent")]
+    public async Task A_Live_Mapping_Whose_Inverted_Slot_Does_Not_Repeat_Its_Plain_Slot_Is_Not_Decoded(string fault)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDeviceDivergingFromFile(busB);
+        if (fault == "different")
+            device.ObjectDictionary.WriteRawUnchecked(0x1381, 0x02, ObjectDictionary.EncodeU32(0x2000_0010));
+        else
+            device.ObjectDictionary.Remove(0x1381, 0x02).Should().BeTrue();
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x111,
+            new byte[] { 0x78, 0x56, 0x34, 0x12 }, new byte[] { 0x87, 0xA9, 0xCB, 0xED }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation.Should().NotBeNull(result.Reason);
+        result.Observation!.Decoded.Should().BeFalse();
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping, "the live record was read; the file is no fallback for it");
+        result.Observation.Reason.Should().Contain("entry 2");
+        result.Observation.Reason.Should().Contain(fault == "different" ? "does not repeat entry 1" : "missing or unreadable");
+        sink.Signals.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer()
     {

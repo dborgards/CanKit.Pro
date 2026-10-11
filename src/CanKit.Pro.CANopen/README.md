@@ -762,8 +762,9 @@ COB-IDs that are not a consecutive pair or that another existing SRDO holds, no 
 a mapping that does not apply (§8.4.2.2) — is left out, as the device leaves it deleted.
 
 The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
-above it (`ArgumentException`) before writing anything; a peer that returns no count, or a count
-above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
+above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` is not exactly one
+byte — it is UNSIGNED8, so none, two or four bytes are refused rather than read by their low byte —
+or a count above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
 further frame and for a verification alike: SRDOs claimed beyond 64 could never be configured or
 verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
 direction, because the checksum covers it) are refused before the first frame. So is a mapping
@@ -791,7 +792,7 @@ result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates
 every such write clears it; an abort before that — for example `0800 0022h` from an Operational
 peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
-One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges).
+One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also uses one peer description for its whole length: the one bound at its start, which its pre-check used and against which the gate checks each of its transfers. Rebinding or unbinding the peer during it takes effect for the next call.
 
 ### Verifying, and the boot-up
 
@@ -843,12 +844,13 @@ upload failed or returned no word. A COB-ID word with a bit above bit 10 does no
 existing record matches: one whose direction (sub-index `01h`, live, or the file's when that upload
 fails) is 0 is skipped, because a deleted record keeps its COB-IDs and another SRDO may have taken
 them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The two
-frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from the
-odd sub-indices of `1381h`–`13C0h`, or from the file when that read fails. The file's mapping is
-used only when it is one the device's own loader takes: each even sub-index up to the count is
-declared and repeats the odd one before it (§8.4.2.2, `1381h`–`13C0h`: the inverted object), the
-same rule the dictionary's mapping validator applies; otherwise the pair is not decoded and the
-reason names the slot. Unlike for a PDO
+frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from
+`1381h`–`13C0h`, every slot up to the count, or from the file when that read fails. Either is used
+only when it is one the device's own loader takes: each even sub-index up to the count is declared
+and repeats the odd one before it (§8.4.2.2, `1381h`–`13C0h`: the inverted object), the same rule
+the dictionary's mapping validator applies; otherwise the pair is not decoded and the reason names
+the slot. A live record that was read and breaks the rule — an even slot that differs or cannot be
+read — is not decoded either, and the file is no fallback for it: live wins. Unlike for a PDO
 (FR-CO-030), a live mapping is read in full whenever its count is, even beyond the slots the file
 declares: the peer-SDO gate lets through every slot of an SRDO record the bound file implies
 ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)), so
