@@ -801,7 +801,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         master.BindPeerDeviceDescription(Device, PeerFile());
-        var node = (CanOpenNode)master;
+        var node = master;
         for (int i = 0; i < 50; i++)
         {
             await master.SdoUploadAsync(Device, 0x1000, 0x00).WithTimeoutAsync(ShortTimeout);
@@ -890,7 +890,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         master.BindPeerDeviceDescription(Device, PeerFile());
         var paused = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var resume = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        ((CanOpenNode)master).AfterSafetyReadbackForTests = () => { paused.TrySetResult(true); return resume.Task; };
+        master.AfterSafetyReadbackForTests = () => { paused.TrySetResult(true); return resume.Task; };
         var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration());
         await paused.Task.WithTimeoutAsync(ShortTimeout);
 
@@ -948,7 +948,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         var ex = await Assert.ThrowsAsync<ArgumentException>(() => configure.WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain("2000h").And.Contain("PDOMapping");
         lock (fake.Requests) fake.Requests.Should().Equal(new (ushort, byte)[] { (0x1000, 0x00) }, "the refused transaction sent nothing");
-        ((CanOpenNode)master).PeerSdoChannelIsFreeForTests(Device).Should().BeTrue("the refusal released the channel");
+        master.PeerSdoChannelIsFreeForTests(Device).Should().BeTrue("the refusal released the channel");
     }
 
     /// <summary>The transaction's own token cancels its wait for the channel; nothing of it is sent.</summary>
