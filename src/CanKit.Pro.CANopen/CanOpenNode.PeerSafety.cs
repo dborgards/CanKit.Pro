@@ -25,12 +25,6 @@ internal sealed partial class CanOpenNode
         if (configuration is null) throw new ArgumentNullException(nameof(configuration));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(configuration); // before the first frame
-        // One description for the whole transaction: the one bound now, which the pre-check uses
-        // and every transfer's gate check below. A rebind meanwhile takes effect for the next call.
-        // Without a bound description the peer gate refuses the first transfer anyway.
-        var binding = CapturePeerDescription(peerNodeId, configuration);
-        if (binding.IsBound)
-            EnsureMappingsFitDescription(configuration, binding); // before the first frame
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
         // transaction ends. Every transfer below is a ...CoreAsync one.
@@ -38,6 +32,13 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            // The transaction starts when it owns the channel: one description for its whole length,
+            // the one bound now, which the pre-check uses and every transfer's gate check below. A
+            // rebind or an edit meanwhile takes effect for the next call. Without a bound description
+            // the peer gate refuses the first transfer anyway. A refusal here releases the channel.
+            var binding = CapturePeerDescription(peerNodeId, configuration);
+            if (binding.IsBound)
+                EnsureMappingsFitDescription(configuration, binding); // before the first frame
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(configuration, peerCount);
             var writes = SafetyWrites(configuration, peerCount).ToList();
@@ -69,7 +70,6 @@ internal sealed partial class CanOpenNode
         if (expected is null) throw new ArgumentNullException(nameof(expected));
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(expected); // before the first frame
-        var binding = CapturePeerDescription(peerNodeId); // one description for the whole transaction
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
         // transaction ends. Every transfer below is a ...CoreAsync one.
@@ -77,6 +77,7 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var binding = CapturePeerDescription(peerNodeId); // one description from the moment it owns the channel
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount);
             // 1300h is not part of step D's list (§8.3.1 D). A deleted SRDO's checksum is not

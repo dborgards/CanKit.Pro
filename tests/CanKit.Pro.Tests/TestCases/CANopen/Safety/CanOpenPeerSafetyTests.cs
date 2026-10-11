@@ -926,6 +926,31 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    /// <summary>A transaction starts when it owns the peer's channel: the snapshot of the
+    /// description, and the pre-check against it, are taken then, not when the call was made. An
+    /// edit landing while it waits for a call in flight is therefore seen — here the PDOMapping flag
+    /// of a mapped object cleared, which the pre-check refuses — and nothing of it is sent.</summary>
+    [Fact]
+    public async Task An_Edit_While_The_Transaction_Waits_For_The_Channel_Is_Seen_By_It()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1000, 0x00) };
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var upload = master.SdoUploadAsync(Device, 0x1000, 0x00);
+        await fake.Holding.WithTimeoutAsync(ShortTimeout); // the public upload holds the channel
+
+        var configure = master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()); // waits for the channel
+        master.GetPeerDeviceDescription(Device)!.Objects.Objects[0x2000].PdoMapping = false;
+        fake.ReleaseHeld();
+        await upload.WithTimeoutAsync(ShortTimeout);
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => configure.WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("2000h").And.Contain("PDOMapping");
+        lock (fake.Requests) fake.Requests.Should().Equal(new (ushort, byte)[] { (0x1000, 0x00) }, "the refused transaction sent nothing");
+        ((CanOpenNode)master).PeerSdoChannelIsFreeForTests(Device).Should().BeTrue("the refusal released the channel");
+    }
+
     /// <summary>The transaction's own token cancels its wait for the channel; nothing of it is sent.</summary>
     [Fact]
     public async Task A_Safety_Transaction_Waiting_For_The_Channel_Is_Cancelled_By_Its_Token()
