@@ -280,9 +280,11 @@ internal sealed partial class CanOpenNode
     /// description lists them (a PDO record has stride 1; an SRDO record has stride 2 — its even
     /// slots are the inverted copies). The count must be at most <paramref name="maxCount"/> and,
     /// for stride 2, even. Each slot must be non-zero and byte-aligned and the total at most 8 bytes.
-    /// For stride 2 every even slot is uploaded too, right after its odd slot, and must repeat it
-    /// (<see cref="Safety.SrdoRecords.IsInvertedSlotOf"/>, the rule the file path and the device's own
-    /// validator apply): one that cannot be read or differs is a <see cref="LiveMappingRead.Refusal"/>.
+    /// For stride 2 every even slot is uploaded too, right after its odd slot. One that cannot be
+    /// read counts as an unreadable odd slot does (the live mapping is not read; the caller falls
+    /// back to the file); one that was read must repeat its odd slot
+    /// (<see cref="Safety.SrdoRecords.IsInvertedSlotOf"/>, the rule the file path and the device's
+    /// own validator apply), else it is a <see cref="LiveMappingRead.Refusal"/>.
     /// </summary>
     private async Task<LiveMappingRead> TryReadLiveMappingCoreAsync(byte peerNodeId, ushort mapIndex, int stride,
         int maxCount, CancellationToken cancellationToken)
@@ -339,11 +341,12 @@ internal sealed partial class CanOpenNode
                 }
                 catch (Exception ex) when (IsLiveReadUnavailable(ex))
                 {
-                    return new LiveMappingRead(null, declared, false, $"entry {inv} (the inverted object) is missing or unreadable: {ex.Message}");
+                    // As for an odd slot: the live mapping is not read, the file decides.
+                    return new LiveMappingRead(null, declared, ex is PeerSdoAccessException);
                 }
-                uint inverted = invRaw.Length >= 4 ? (uint)(invRaw[0] | (invRaw[1] << 8) | (invRaw[2] << 16) | (invRaw[3] << 24)) : 0;
-                if (inverted == 0)
-                    return new LiveMappingRead(null, declared, false, $"entry {inv} (the inverted object) is missing or unreadable");
+                if (invRaw.Length < 4) return default;
+                uint inverted = (uint)(invRaw[0] | (invRaw[1] << 8) | (invRaw[2] << 16) | (invRaw[3] << 24));
+                if (inverted == 0) return default;
                 if (!Safety.SrdoRecords.IsInvertedSlotOf(word, inverted))
                     return new LiveMappingRead(null, declared, false, $"entry {inv} does not repeat entry {s} (CiA DSP 304 §8.4.2.2: the inverted object of the one before it)");
             }

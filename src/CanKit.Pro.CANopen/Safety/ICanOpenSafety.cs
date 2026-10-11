@@ -125,8 +125,9 @@ public interface ICanOpenSafety
     /// 1381h–13C0h or from the file — either only when each even sub-index up to the count
     /// repeats the odd one before it, the rule the device's own validator and loader apply (CiA
     /// DSP 304 §8.4.2.2, 1381h–13C0h); otherwise the pair is not decoded and the reason names the
-    /// slot. A live record that was read and breaks that rule — an even slot that differs or cannot
-    /// be read — is not decoded, with no fallback to the file: live wins. Signals carry
+    /// slot. A live even slot that was read and differs from its odd slot makes the pair not
+    /// decoded, with no fallback to the file: live wins. A live slot that cannot be read, even or
+    /// odd, means the live mapping is not read, and the file decides. Signals carry
     /// <see cref="ForeignPdoKind.Srdo"/> and the SRDO number. SRVT and SCT are the caller's to
     /// judge: it holds the timestamps. Nothing is written to this node's dictionary.
     /// The live mapping is read in full whenever its count is: the peer-SDO gate lets through
