@@ -83,7 +83,7 @@ internal sealed partial class CanOpenNode
     /// <summary>The existing record n with live 1300h+n:05 == cobId1; the file's value when that
     /// upload fails. A deleted record keeps its COB-IDs and another SRDO may take them over — the
     /// device refuses only the ids of an existing SRDO (§8.4.2.2) — so a record whose direction
-    /// (live, or the file's when the upload fails) is 0 does not match.</summary>
+    /// (live, or the file's when the upload fails) is not 1 or 2 does not match.</summary>
     private async Task<int?> MatchSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, uint cobId1, CancellationToken cancellationToken)
     {
         int count = 0;
@@ -107,25 +107,31 @@ internal sealed partial class CanOpenNode
             else if (!(TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x05, out var text)
                 && ParseDescribedUnsigned(text, peerNodeId) is { } word && SrdoCobId1(word) == cobId1))
                 continue;
-            if (await IsDeletedSrdoAsync(description, peerNodeId, comm, cancellationToken).ConfigureAwait(false)) continue;
+            if (!await IsExistingSrdoAsync(description, peerNodeId, comm, cancellationToken).ConfigureAwait(false)) continue;
             return n;
         }
         return null;
     }
 
-    /// <summary>Whether sub-index 1 of the record is 0: live, or the file's value when the upload
-    /// fails. A direction neither yields is not taken for a deletion.</summary>
-    private async Task<bool> IsDeletedSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, ushort comm, CancellationToken cancellationToken)
+    /// <summary>Whether the record exists for the match: its direction (sub-index 1, live, or the
+    /// file's value when the upload fails) is 1 (tx) or 2 (rx), the values the device's validator
+    /// accepts (CiA DSP 304 §8.4.2.2). 0 (deleted) and every reserved value 3..255 are no existing
+    /// record. A direction neither yields is not taken for a deletion.</summary>
+    private async Task<bool> IsExistingSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, ushort comm, CancellationToken cancellationToken)
     {
         try
         {
             var raw = await SdoUploadAsync(peerNodeId, comm, 0x01, cancellationToken).ConfigureAwait(false);
-            if (raw.Length == 1) return raw[0] == 0; // UNSIGNED8, exactly: another length is not read
+            if (raw.Length == 1) return IsSrdoDirection(raw[0]); // UNSIGNED8, exactly: another length is not read
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
-        return TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x01, out var text)
-            && ParseDescribedUnsigned(text, peerNodeId) is 0;
+        if (TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x01, out var text)
+            && ParseDescribedUnsigned(text, peerNodeId) is { } described)
+            return IsSrdoDirection(described);
+        return true;
     }
+
+    private static bool IsSrdoDirection(uint direction) => direction is 1 or 2;
 
     /// <summary>The COB-ID 1 of a 1301h–1340h:05 word: its bits 0–10, and null when any bit above
     /// them is set (bit 31 included) — DSP 304 defines no flags for it. Not

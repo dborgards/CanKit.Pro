@@ -125,7 +125,7 @@ public interface ICanOpenSafety
     /// <summary>Splits an SRDO pair of another node into <paramref name="sink"/>, like
     /// <see cref="ICanOpenNode.ObserveForeignPdoAsync"/>: the existing record whose live 1301h–1340h:05
     /// equals <paramref name="cobId1"/> (the file is the fallback when the upload fails; a record
-    /// whose direction is 0, live or in the file, does not match: it may have kept the ids another SRDO now uses), the
+    /// whose direction is not 1 or 2, live or in the file, does not match: a deleted one may have kept the ids another SRDO now uses), the
     /// pair checked for equal length and bitwise inversion, the mapping read live from
     /// 1381h–13C0h or from the file — either only when each even sub-index up to the count
     /// repeats the odd one before it, the rule the device's own validator and loader apply (CiA

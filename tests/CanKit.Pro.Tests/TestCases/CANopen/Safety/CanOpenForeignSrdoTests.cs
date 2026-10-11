@@ -281,6 +281,45 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         result.Observation.Decoded.Should().BeTrue(result.Observation.Reason);
     }
 
+    /// <summary>A record exists only with direction 1 (tx) or 2 (rx), the values the device's
+    /// validator accepts (§8.4.2.2, sub-index 1): a live reserved direction 3..255 is no existing
+    /// record, and the pair on its COB-ID 1 is not matched. The device's validator would refuse
+    /// such a value, so the test writes it past the validator.</summary>
+    [Theory]
+    [InlineData((byte)3)]
+    [InlineData((byte)255)]
+    public async Task A_Live_Reserved_Direction_Is_No_Existing_Record(byte direction)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        using var device = OpenDeviceDivergingFromFile(busB);
+        device.ObjectDictionary.WriteRawUnchecked(0x1301, 0x01, new[] { direction });
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x111,
+            new byte[] { 0x78, 0x56, 0x34, 0x12 }, new byte[] { 0x87, 0xA9, 0xCB, 0xED }, PeerFile(), new ListSink()).WithTimeoutAsync(ShortTimeout);
+        result.Observation.Should().BeNull(result.Observation?.Reason);
+        result.Reason.Should().Contain("no SRDO");
+    }
+
+    /// <summary>The file's direction decides likewise when the peer does not answer: a reserved
+    /// value is no existing record.</summary>
+    [Fact]
+    public async Task A_Reserved_Direction_In_The_File_Is_No_Existing_Record_When_The_Peer_Does_Not_Answer()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var rig = new UnansweredPeerRig(session, busA);
+        var master = rig.Master;
+        var file = PeerFilePatched("[1301sub1]", "ParameterValue=1", "ParameterValue=3");
+        master.BindPeerDeviceDescription(Device, file);
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 0x34, 0x12, 0x5A }, new byte[] { 0xCB, 0xED, 0xA5 }, file, new ListSink()).WithTimeoutAsync(TimeSpan.FromSeconds(30));
+        result.Observation.Should().BeNull(result.Observation?.Reason);
+        result.Reason.Should().Contain("no SRDO");
+    }
+
     [Fact]
     public async Task Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer()
     {
