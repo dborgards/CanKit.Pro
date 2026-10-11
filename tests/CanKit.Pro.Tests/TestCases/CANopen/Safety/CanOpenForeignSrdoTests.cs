@@ -217,6 +217,7 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("2-byte count")]
     [InlineData("5-byte slot")]
     [InlineData("3-byte slot")]
+    [InlineData("5-byte inverted slot")]
     public async Task A_Live_Mapping_Value_Of_Another_Length_Falls_Back_To_The_File(string fault)
     {
         var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
@@ -229,7 +230,9 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         {
             case "2-byte count": od.Declare(0x1381, 0x00, OdDataType.Unsigned16, OdAccess.ReadWrite, new byte[] { 0x02, 0x00 }, pdoMappable: false); break;
             case "5-byte slot": od.Declare(0x1381, 0x01, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x20, 0x00, 0x02, 0x20, 0x00 }, pdoMappable: false); break;
-            default: od.Declare(0x1381, 0x01, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x20, 0x00, 0x02 }, pdoMappable: false); break;
+            case "3-byte slot": od.Declare(0x1381, 0x01, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x20, 0x00, 0x02 }, pdoMappable: false); break;
+            // Its low four bytes repeat 1381h:01 (20020020h) exactly; only the width is wrong.
+            default: od.Declare(0x1381, 0x02, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x20, 0x00, 0x02, 0x20, 0x00 }, pdoMappable: false); break;
         }
         master.BindPeerDeviceDescription(Device, PeerFile());
         var sink = new ListSink();
