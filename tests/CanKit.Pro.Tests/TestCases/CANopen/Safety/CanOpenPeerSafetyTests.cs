@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
@@ -34,6 +35,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     private static CanOpenDeviceDescription PeerFile()
         => CanOpenDeviceDescription.ParseDcf(System.IO.File.ReadAllText(
             System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")));
+
+    /// <summary>A master on a virtual clock: its SDO client deadline (the node's time source) never
+    /// fires unless the test moves the clock, so the transfer waits for the fake's reply however
+    /// long the host stalls. With the real clock, a stall of more than SdoTimeout (1 s) ends the
+    /// transfer with 0504 0000h instead — measured: starving the thread pool for 1.5 s produced
+    /// exactly that for a one-byte and a zero-byte count alike, and 300 unstalled runs of each
+    /// produced none.</summary>
+    private static CanOpenNode OpenMasterOnVirtualClock(ICanBus bus)
+        => new(new CanKit.Pro.RawCan.CanBusService(bus), Master, new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource());
 
     private static PeerSafetyConfiguration Configuration() => new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
         .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
@@ -406,7 +416,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), emptyCount: true);
         master.BindPeerDeviceDescription(Device, PeerFile());
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
@@ -428,7 +438,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
-        using var master = CanOpen.OpenNode(busA, Master);
+        using var master = OpenMasterOnVirtualClock(busA); // no SDO deadline on the wall clock (see the helper)
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), emptyCount: length == 0);
         if (length > 0)
         {
@@ -977,6 +987,24 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     /// <summary>An SDO server for expedited transfers only: stores downloads, answers uploads
     /// with what was stored (13FFh:00 reads 2, or nothing when asked to), and answers one upload with the stored value
     /// plus one so the readback differs.</summary>
+    /// <summary>The client's side of a zero-byte upload, pinned: an expedited response cannot carry
+    /// 0 bytes (s = 1 encodes 1..4, s = 0 means four), so the fake answers with CiA 301's segmented
+    /// upload: an initiate with size indicated 0 (41h), then, on the client's one segment request,
+    /// a last segment with no data (c = 1, n = 7). The client completes with an empty value
+    /// after exactly one segment request; on a virtual clock no deadline can end it first.</summary>
+    [Fact]
+    public async Task A_Zero_Byte_Upload_Completes_After_One_Empty_Last_Segment()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), emptyCount: true);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var value = await master.SdoUploadAsync(Device, 0x13FF, 0x00).WithTimeoutAsync(ShortTimeout);
+        value.Should().BeEmpty();
+        fake.SegmentRequests.Should().Be(1);
+    }
+
     private sealed class FakeExpeditedServer : IDisposable
     {
         private readonly ICanBus _bus;
@@ -989,6 +1017,9 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         private Action? _heldReply;
         private bool _held;
         public bool IsHolding { get { lock (Requests) return _heldReply is not null; } }
+        private int _segmentRequests;
+        /// <summary>Upload segment requests seen (ccs 3).</summary>
+        public int SegmentRequests => Volatile.Read(ref _segmentRequests);
         public void ReleaseHeld()
         {
             Action? reply;
@@ -1018,6 +1049,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
                 }
                 else if ((d[0] & 0xEF) == 0x60)
                 {
+                    Interlocked.Increment(ref _segmentRequests);
                     // Segment request for the one empty value: last segment, no data bytes (n = 7, c = 1).
                     reply = new byte[] { (byte)(0x0F | (d[0] & 0x10)), 0, 0, 0, 0, 0, 0, 0 };
                 }
