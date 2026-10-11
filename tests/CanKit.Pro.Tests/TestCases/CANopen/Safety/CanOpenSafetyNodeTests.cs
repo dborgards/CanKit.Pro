@@ -894,7 +894,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>A reconfiguration the dictionary would refuse part-way — a mapped object that
-    /// does not exist, is not mappable, has another size or is not readable for a producer, or
+    /// does not exist, is not mappable, has another size or none fixed (a string, a domain), or is
+    /// not readable for a producer, or
     /// COB-IDs another existing SRDO holds — changes nothing: the committed SRDO, its checksum and
     /// 13FEh stay byte for byte what they were (ObjectDictionary has no rollback, so the writes
     /// are checked before the first one).</summary>
@@ -904,6 +905,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("wrong size")]
     [InlineData("not readable")]
     [InlineData("cob-ids of srdo 2")]
+    [InlineData("visible string")]
+    [InlineData("domain")]
     public void A_Refused_Reconfiguration_Leaves_The_Committed_Srdo_As_It_Was(string what)
     {
         var session = NewSession();
@@ -913,6 +916,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         AddApplicationObjects(od);
         od.AddU32(0x2002, 0x00, 0, OdAccess.ReadWrite, pdoMappable: false);
         od.AddU8(0x2003, 0x00, 0, OdAccess.WriteOnly);
+        od.AddRaw(0x2004, 0x00, OdDataType.VisibleString, new byte[] { 0x41, 0x42 });
+        od.AddDomain(0x2005, 0x00, new byte[2]);
         var safety = node.Safety();
         safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
         safety.ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30), 0x141, 0x142);
@@ -926,6 +931,8 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
             "not mappable" => (new SrdoMapping().Add(0x2002, 0x00, 32), null),
             "wrong size" => (new SrdoMapping().Add(0x2000, 0x00, 8), null),
             "not readable" => (new SrdoMapping().Add(0x2003, 0x00, 8), null),
+            "visible string" => (new SrdoMapping().Add(0x2004, 0x00, 16), null),
+            "domain" => (new SrdoMapping().Add(0x2005, 0x00, 16), null),
             _ => (new SrdoMapping().Add(0x2001, 0x00, 8), (uint?)0x141),
         };
         var ex = Record.Exception(() => safety.ConfigureSrdoProducer(1, mapping, TimeSpan.FromMilliseconds(40), cobId1));

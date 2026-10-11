@@ -238,6 +238,27 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         node.DeviceDescription.Findings.Should().Contain(f => f.Index == 0x1301 && f.Subindex == 1 && f.Outcome == DeviceDescriptionOutcome.Corrected);
     }
 
+    /// <summary>An SRDO maps objects of fixed width only (this implementation's rule, see
+    /// <c>A_Variable_Size_Object_Cannot_Be_Mapped</c>): a file that maps a string or a domain gets
+    /// a finding for the slot, and the SRDO stays deleted.</summary>
+    [Theory]
+    [InlineData("0x0009")]   // VISIBLE_STRING
+    [InlineData("0x000F")]   // DOMAIN
+    public void A_Mapped_Object_Without_A_Fixed_Width_Is_A_Finding_And_The_Srdo_Stays_Deleted(string dataType)
+    {
+        var text = Patch(SafetyDcfText(), "[2001]", "DataType=0x0005", "DataType=" + dataType);
+        var session = VirtualAdapterFixture.NewSession("co-safety-dcf");
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, CanOpenDeviceDescription.ParseDcf(text));
+        var od = node.ObjectDictionary;
+        var finding = node.DeviceDescription!.Findings.Single(f => f.Index == 0x1381 && f.Subindex == 3);
+        finding.Outcome.Should().Be(DeviceDescriptionOutcome.Corrected);
+        finding.AbortCode.Should().Be(SdoAbortCode.ObjectCannotBeMapped);
+        od.ReadUnsigned(0x1381, 0).Should().Be(0u, "the mapping stays disabled");
+        od.ReadUnsigned(0x1301, 1).Should().Be(0u, "an SRDO is not created over a mapping that failed");
+        node.DeviceDescription.Findings.Should().Contain(f => f.Index == 0x1301 && f.Subindex == 1 && f.Outcome == DeviceDescriptionOutcome.Corrected);
+    }
+
     [Fact]
     public void A_Communication_Record_Without_A_Mapping_Record_Is_Not_Created_As_An_Srdo()
     {

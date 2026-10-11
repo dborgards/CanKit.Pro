@@ -31,7 +31,7 @@ public interface ICanOpenSafety
     /// changes nothing.</summary>
     /// <exception cref="InvalidOperationException">The node has no SRDOs, or is Operational (0800 0022h).</exception>
     /// <exception cref="ArgumentOutOfRangeException">The number is not 1..<see cref="SrdoCount"/>, or a time is out of range.</exception>
-    /// <exception cref="ArgumentException">A value the dictionary refuses (the abort code is in the message; nothing is written), or no COB-ID for a node-id above 64.</exception>
+    /// <exception cref="ArgumentException">A value the dictionary refuses (the abort code is in the message; nothing is written) — among them a mapped object without a fixed width (a string or a domain, 0604 0041h: an SRDO maps fixed-width objects only, this implementation's rule) — or no COB-ID for a node-id above 64.</exception>
     void ConfigureSrdoProducer(int srdoNumber, SrdoMapping mapping, TimeSpan refreshTime, uint? cobId1 = null, uint? cobId2 = null);
 
     /// <summary>Writes record <paramref name="srdoNumber"/> as a consumer: direction rx, SCT,
@@ -60,21 +60,25 @@ public interface ICanOpenSafety
 
     /// <summary>Sends the global failsafe command (§8.2: COB-ID 001h, DLC 0). Requires
     /// <c>1300h</c> = 1 and Operational. The returned task is the send itself, not the node's
-    /// actor turn that started it: it completes when the bus service has confirmed the frame or
-    /// reported its failure (on <c>BackgroundExceptionOccurred</c>, as for every frame), or when
-    /// the send was cancelled. The send carries
-    /// <paramref name="cancellationToken"/> linked with the token of the Operational period:
-    /// leaving Operational or disposing the node ends a send not yet started quietly, the caller's
-    /// cancellation ends it with <see cref="OperationCanceledException"/>. A send task already
-    /// running still hands its frame to the driver (#294).</summary>
+    /// actor turn that started it: it completes when the bus service confirmed the send — on its
+    /// echo path once the echo arrived, otherwise once the driver accepted the frame — or reported
+    /// its failure (on
+    /// <c>BackgroundExceptionOccurred</c>, as for every frame), or when the send was cancelled.
+    /// The send carries <paramref name="cancellationToken"/> linked with the token of the
+    /// Operational period: leaving Operational or disposing the node ends a send not yet started
+    /// quietly, the caller's cancellation ends it with <see cref="OperationCanceledException"/>.
+    /// A send task already running still hands its frame to the driver (#294).</summary>
     /// <exception cref="InvalidOperationException">1300h is 0 or the node is not Operational.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was cancelled before the frame was handed over.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
+    /// cancelled before the send was confirmed; or the bus service was disposed under the send,
+    /// which is also reported on <c>BackgroundExceptionOccurred</c> as a transport failure.</exception>
     Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default);
 
     /// <summary>§9.2 Figure 9: downloads 1300h, every record (deleted first, created last), the
     /// checksums 13FFh:n, reads everything back and compares byte for byte, and only then writes
     /// 13FEh = A5h and reads it back. Before the first frame, every mapping entry is checked against
-    /// the peer's bound EDS/DCF (declared, mappable, width, access in the SRDO's direction), since
+    /// the peer's bound EDS/DCF (declared, mappable, of a fixed width equal to the entry's, access
+    /// in the SRDO's direction), since
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
@@ -86,7 +90,9 @@ public interface ICanOpenSafety
     /// count above 64 (§8.4.2.2) — refused before any further frame.</exception>
     /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
     /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
-    /// with another width, or does not make accessible in the SRDO's direction — checked before
+    /// with another width or with a type without a fixed width (a string, a domain: an SRDO maps
+    /// fixed-width objects only, this implementation's rule), or does not make accessible in the
+    /// SRDO's direction — checked before
     /// the first frame, because §9.2 deletes every SRDO of the peer first. What only the peer can
     /// judge stays the peer's.</exception>
     Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration, CancellationToken cancellationToken = default);

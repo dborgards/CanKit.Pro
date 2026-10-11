@@ -204,6 +204,24 @@ public class SrdoEngineProducerTests : IDisposable
         _host.Exceptions.Should().ContainSingle("the cycle stopped with the first failure");
     }
 
+    /// <summary>An SRDO maps objects of fixed width only, so a mapped object re-declared as a
+    /// string — two bytes, as many as the entry — is not cut or padded into a pair either: the
+    /// producer stops (the width check is the defence behind the mapping rule).</summary>
+    [Fact]
+    public void A_Mapped_Object_Without_A_Fixed_Width_Stops_The_Producer()
+    {
+        var engine = Start();
+        Configure(_od, 1, SrdoDirection.Transmit, 25, 20, 0x123, 0x124);
+        OnActor(() => { engine.Rebuild(1); engine.EnterOperational(); });
+        Advance(TimeSpan.FromMilliseconds(NodeId));
+        _host.Sent.Should().HaveCount(2);
+        _od.AddRaw(0x2000, 0, OdDataType.VisibleString, new byte[] { 0x41, 0x42 });
+        Advance(TimeSpan.FromMilliseconds(25));
+        _host.Sent.Should().HaveCount(2);
+        engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.MappedObjectUnavailable);
+        _host.Exceptions.Should().ContainSingle().Which.Message.Should().Contain("fixed width");
+    }
+
     /// <summary>A mapped object that is gone stops the producer the same way.</summary>
     [Fact]
     public void A_Missing_Mapped_Object_Stops_The_Producer()

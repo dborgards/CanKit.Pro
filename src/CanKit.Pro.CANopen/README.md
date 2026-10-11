@@ -99,6 +99,11 @@ Deliberate omissions, each checked against the norm text:
   rejected with `0607 0010h`; `PdoMappingEntry` refuses it in its constructor.
 * **MPDO** (`sub0` = `FEh`/`FFh` of a mapping record) — rejected with `0609 0030h`, like every
   count above `40h`.
+* **SRDO mapping of objects without a fixed width** — a `VISIBLE_STRING`, `OCTET_STRING`,
+  `UNICODE_STRING` or `DOMAIN` cannot be mapped into an SRDO (`0604 0041h`; a finding for a
+  device description; refused before the first frame of a peer configuration). DSP 304 has no
+  such clause; it is this implementation's rule: safety process data has a fixed width, and the
+  width is what the mapping entry and the checksum pin. A PDO may still map them.
 * **Non-volatile storage behind `1010h`** — "save" takes the current communication parameters
   as the power-on values a reset restores, for the lifetime of the process. A device whose
   configuration must survive a restart persists it itself and replays it after `OpenNode`.
@@ -587,7 +592,7 @@ DSP 304 §8.4.2.2 Table 6, created at these defaults:
 | | `05h` COB-ID 1 | FFh + 2 × node-id for SRDO 1 of a node-id 1..64, else 0 | 0 or an odd CAN-ID 101h..17Fh, bits 11..31 clear; not changeable while the SRDO exists; not one of another existing SRDO (`0609 0030h`). |
 | | `06h` COB-ID 2 | 100h + 2 × node-id, likewise | 0 or COB-ID 1 + 1 (102h..180h), same rules. |
 | `1381h`–`13C0h` mapping of SRDO n | `00h` | 0 | 0 or an even count 2..16 (`0609 0030h`); every slot up to it filled (`0602 0000h`), each even slot equal to the odd one before it — plain, then inverted (`0604 0041h`), at most 8 bytes in total (`0604 0042h`). |
-| | `01h`–`10h` | 0 | Byte-aligned 8..64 bits, an existing mappable object outside `1000h`–`1FFFh` of that width, no dummy (`0607 0010h`, `0602 0000h`, `0604 0041h`). Mapping writes while the SRDO exists, and slot writes while the count is not 0, `0601 0000h`. |
+| | `01h`–`10h` | 0 | Byte-aligned 8..64 bits, an existing mappable object outside `1000h`–`1FFFh` of a fixed width equal to that width — no string or domain, this implementation's rule — no dummy (`0607 0010h`, `0602 0000h`, `0604 0041h`). Mapping writes while the SRDO exists, and slot writes while the count is not 0, `0601 0000h`. |
 | `13FEh` configuration valid | `00h` | 0 | Any value; only `A5h` means valid. |
 | `13FFh` safety configuration checksum | `00h` | `SrdoCount` | Constant (`0601 0002h`). |
 | | `01h`–n | 0 | UNSIGNED16, the checksum of SRDO n. |
@@ -671,8 +676,8 @@ which leaving Operational or disposing cancels; the token is honoured until the 
 starts. A send task already running still hands its frame to the driver, because the bus service
 does not check the token before the driver call (#294) — as the driver queue would on any
 controller. A send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
-SRDO stays valid. A mapped object that is gone, or a fixed-size one whose width no longer matches
-its mapping entry, stops the producer instead (§8.1.3.1): no pair padded or cut to fit goes out,
+SRDO stays valid. A mapped object that is gone, has no fixed width, or no longer has the width of
+its mapping entry stops the producer instead (§8.1.3.1): no pair padded or cut to fit goes out,
 the failure is reported on `BackgroundExceptionOccurred`, and the SRDO is
 `MappedObjectUnavailable` — no further cycle and no `TriggerSrdoAsync` transmission — until it is
 rebuilt (a record written, or Operational entered again). With the rule on re-declaring above this
@@ -693,13 +698,16 @@ Then (§8.1.1, §8.1.3.1, §9.5):
   (`Mismatch`);
 * a complete pair writes the mapped objects, raises `SrdoReceived` and restarts the SCT; when the
   SCT elapses without one the SRDO is `SafeguardCycleExpired`;
-* a mapped object that refuses its bytes — its write validator, or a declaration that no longer
+* a mapped object that refuses its bytes — a write validator, or a declaration that no longer
   takes them — ends the writing there: the objects before it keep this pair's bytes, the refused
   one and those after it keep their previous values, and the refusal is reported on
   `BackgroundExceptionOccurred`. The SRDO is `ActuationRefused`, and the pair counts as not
   received, as §8.1.3.1 leaves a pair too short for the mapping unprocessed: no `SrdoReceived`,
-  and the SCT runs on from the last pair taken, so its expiry turns the reason into
-  `SafeguardCycleExpired`;
+  and the SCT is not restarted. The reason is the most recent cause: an SCT still running keeps
+  running from the last pair taken and its expiry reports `SafeguardCycleExpired`; one that had
+  already expired stays expired. On a node this is a safeguard, like `MappedObjectUnavailable`:
+  no public path produces a refused mapped write today — the node installs no write validator on
+  application objects and offers no public one, and it refuses to re-declare a mapped object;
 * a pair shorter than the mapping is not processed and produces EMCY `8210h` (when EMCY is
   enabled) once, until a pair of the right length arrives or the SRDO is rebuilt — as for an
   RPDO; a longer one uses its first bytes.
@@ -716,15 +724,17 @@ every SRDO `NotOperational` and stops SCT and SRVT.
 
 The global failsafe command is COB-ID `001h` with no data (§8.2). `SendGlobalFailsafeCommandAsync`
 sends it at once — it does not wait behind SRDO pairs — and only with `1300h` = 1 in Operational;
-otherwise it throws `InvalidOperationException`. The returned task is the send itself: it
-completes when the frame was handed over — or the send failed, which is reported on
-`BackgroundExceptionOccurred` as for every frame, or was cancelled — not when the node's actor
-has merely started it. Like an SRDO frame it is handed to the bus service with the token of the
+otherwise it throws `InvalidOperationException`. The returned task is the send itself, not the
+node's actor turn that started it: it completes when the bus service confirmed the send — on its
+echo path once the echo arrived, otherwise once the driver accepted the frame — or reported its
+failure (on `BackgroundExceptionOccurred`, as for every frame), or when the send was cancelled.
+Like an SRDO frame it is handed to the bus service with the token of the
 Operational period, here linked with the caller's token, so leaving Operational, disposing the
 node or cancelling the caller's token cancels a send whose task has not started yet; a send task
 already running still hands the frame to the driver (#294). A send cancelled by the period ends
 quietly; one the caller cancelled — before the call ran or while the send waited — ends with
-`OperationCanceledException`. A GFC is reported by
+`OperationCanceledException`, and so does a send under which the bus service is disposed, which
+is also reported on `BackgroundExceptionOccurred` as a transport failure. A GFC is reported by
 `GlobalFailsafeCommandReceived` under the same two conditions, and only with DLC 0. On a bus that
 echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event is critical, and
 identical ones still waiting are folded into one.
@@ -757,7 +767,8 @@ direction, because the checksum covers it) are refused before the first frame. S
 the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
 refusal at the mapping would leave it without its configuration: each mapped object must be
 declared there, flagged mappable (`PDOMapping`; an absent key reads as not mappable),
-as wide as its declared data type, and readable for a producer or writable for a consumer
+of a data type with a fixed width (no string or domain, as locally) and as wide as it, and
+readable for a producer or writable for a consumer
 (`AccessType`). What the bound file lets the tool see is refused locally; what only the peer can
 judge — a rule of its own beyond its file — is the peer's (`ArgumentException`, nothing sent).
 Then it writes

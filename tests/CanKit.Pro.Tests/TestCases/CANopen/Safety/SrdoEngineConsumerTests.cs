@@ -222,10 +222,12 @@ public class SrdoEngineConsumerTests : IDisposable
         StartConsumer();
         Frame(0x123, Plain); Frame(0x124, Inverse);
         _engine.GetState(1).IsValid.Should().BeTrue();
+        int statesBefore = _host.States.Count;
         RefuseWritesTo(0x2001);
         Frame(0x123, 0x22, 0x11, 0x02); Frame(0x124, 0xDD, 0xEE, 0xFD);
         _engine.GetState(1).IsValid.Should().BeFalse("a pair the mapped objects refused is not received");
         _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ActuationRefused);
+        _host.States.Should().HaveCount(statesBefore + 1, "one valid-to-invalid transition for the refused pair");
         _host.States.Last().Should().Be((1, false, SrdoInvalidReason.ActuationRefused));
         _host.Received.Should().ContainSingle("only the first pair was received").Which.Payload.Should().Equal(Plain);
         _host.Exceptions.Should().ContainSingle().Which.Message.Should().Contain("0x2001:00");
@@ -235,6 +237,7 @@ public class SrdoEngineConsumerTests : IDisposable
         _od.WriteValidator = null;
         Frame(0x123, 0x22, 0x11, 0x03); Frame(0x124, 0xDD, 0xEE, 0xFC);
         _engine.GetState(1).IsValid.Should().BeTrue("a pair the objects take re-validates");
+        _host.States.Should().HaveCount(statesBefore + 2, "one invalid-to-valid transition for the accepted pair");
         _host.States.Last().Should().Be((1, true, (SrdoInvalidReason?)null));
         _host.Received.Should().HaveCount(2);
         _od.ReadUnsigned(0x2001, 0).Should().Be(0x03u);

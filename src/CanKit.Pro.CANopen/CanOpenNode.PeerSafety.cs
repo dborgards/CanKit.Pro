@@ -135,7 +135,13 @@ internal sealed partial class CanOpenNode
         }
         if (found is not { } described) return "is not declared";
         if (!described.PdoMappable) return "is not flagged mappable (PDOMapping)";
-        if (MapType(described.DataType) is { } type && OdEntryLayout.FixedSize(type) is var size && size > 0 && entry.ByteLength != size)
+        // An SRDO maps objects of fixed width only (this implementation's rule, as in the
+        // dictionary's validator): a string, a domain or a type the file does not name is refused.
+        var type = MapType(described.DataType);
+        int size = type is { } known ? OdEntryLayout.FixedSize(known) : -1;
+        if (size <= 0)
+            return $"has no fixed width (declared {(type is { } t ? t.ToString() : "with no data type this implementation knows")}), and an SRDO maps fixed-width objects only";
+        if (entry.ByteLength != size)
             return $"is not as wide as its declared {type} ({size * 8} bits)";
         var access = MapAccess(described.Access);
         if (direction == SrdoDirection.Transmit && (access & OdAccess.ReadOnly) == 0) return "is not readable, which a producer needs";

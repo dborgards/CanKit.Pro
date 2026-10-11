@@ -9,7 +9,11 @@ namespace CanKit.Pro.CANopen.Safety;
 /// The application objects an SRDO carries (CiA DSP 304 V1.0 §8.4.2.2, object 1381h–13C0h):
 /// up to <see cref="MaxEntries"/> byte-aligned entries whose widths sum to at most 8 bytes —
 /// the plain-data frame. The record in the dictionary holds each entry twice (odd sub-index
-/// plain, even sub-index inverted); this type names the objects once.
+/// plain, even sub-index inverted); this type names the objects once. Each entry must name an
+/// object of fixed width equal to the entry's: the dictionary, the device-description loader and
+/// the peer configuration refuse a string or a domain. That is this implementation's rule, not a
+/// clause of DSP 304 — safety process data has a fixed width, and the width is what the mapping
+/// entry and the checksum pin.
 /// </summary>
 public sealed class SrdoMapping
 {

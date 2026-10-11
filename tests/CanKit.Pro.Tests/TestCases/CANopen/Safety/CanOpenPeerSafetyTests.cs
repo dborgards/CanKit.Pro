@@ -611,8 +611,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>§9.2 deletes every SRDO of the peer first, so a mapping the peer will refuse
     /// would destroy its configuration. What the bound file shows is checked before the first
-    /// frame: the object is declared, flagged mappable (PDOMapping), of the width the entry
-    /// claims, and accessible in the SRDO's direction. What only the peer can judge stays the
+    /// frame: the object is declared, flagged mappable (PDOMapping), of a fixed width (no string,
+    /// no domain) equal to the one the entry claims, and accessible in the SRDO's direction. What only the peer can judge stays the
     /// peer's.</summary>
     [Theory]
     [InlineData("not mappable")]     // 1300h:00, declared with PDOMapping=0
@@ -622,13 +622,16 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("not writable")]     // a consumer on 2001h:00, which is ro
     [InlineData("not readable")]     // a producer on 2007h:00, which is wo
     [InlineData("flag absent")]      // 2006h:00 declared without PDOMapping
+    [InlineData("visible string")]   // 2008h:00, VISIBLE_STRING: no fixed width
+    [InlineData("domain")]           // 2009h:00, DOMAIN: no fixed width
     public async Task Configure_Refuses_A_Mapping_The_Bound_File_Rules_Out_Before_Any_Frame(string what)
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
         using var busA = Open(session, 1);
         using var master = CanOpen.OpenNode(busA, Master);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
-        var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true));
+        var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true),
+            ((ushort)0x2008, "0x0009", "rw", true), ((ushort)0x2009, "0x000F", "rw", true));
         if (what == "flag absent")
         {
             var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n")
@@ -645,12 +648,15 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             "wrong width" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2000, 0x00, 8)),
             "not writable" => (SrdoDirection.Receive, new SrdoMapping().Add(0x2001, 0x00, 8)),
             "not readable" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2007, 0x00, 8)),
+            "visible string" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2008, 0x00, 16)),
+            "domain" => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2009, 0x00, 16)),
             _ => (SrdoDirection.Transmit, new SrdoMapping().Add(0x2006, 0x00, 8)),
         };
         var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
             .Add(1, new SrdoCommunicationParameter(direction, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A), mapping);
         var ex = await Assert.ThrowsAsync<ArgumentException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain("SRDO 1").And.Contain($"{mapping.Entries[0].Index:X4}h");
+        if (what is "visible string" or "domain") ex.Message.Should().Contain("fixed width");
         lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent, not even the count read");
     }
 

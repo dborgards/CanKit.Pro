@@ -239,7 +239,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
 
     /// <summary>Like <see cref="ValidateMappingEntry"/> for PDOs, minus dummies (safety data is
     /// never padding) and with the access check deferred to the direction write when
-    /// <paramref name="direction"/> is None (the mapping is written while the SRDO is deleted).</summary>
+    /// <paramref name="direction"/> is None (the mapping is written while the SRDO is deleted).
+    /// Unlike a PDO, an SRDO maps objects of fixed width only — this implementation's rule, not a
+    /// clause of DSP 304: safety process data has a fixed width, and the width is what the mapping
+    /// entry and the checksum pin. A string or a domain is refused like a wrong width.</summary>
     private static SdoAbortCode? ValidateSrdoMappingEntry(ObjectDictionary od, uint raw, SrdoDirection direction)
     {
         var entryIndex = (ushort)((raw >> 16) & 0xFFFF);
@@ -253,7 +256,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         if (direction == SrdoDirection.Transmit && (target.Access & OdAccess.ReadOnly) == 0) return SdoAbortCode.ObjectCannotBeMapped;
         if (direction == SrdoDirection.Receive && (target.Access & OdAccess.WriteOnly) == 0) return SdoAbortCode.ObjectCannotBeMapped;
         int fixedSize = OdEntryLayout.FixedSize(target.DataType);
-        if (fixedSize > 0 && bitLength / 8 != fixedSize) return SdoAbortCode.ObjectCannotBeMapped;
+        if (fixedSize <= 0 || bitLength / 8 != fixedSize) return SdoAbortCode.ObjectCannotBeMapped;
         return null;
     }
 

@@ -226,10 +226,11 @@ internal sealed partial class SrdoEngine : IDisposable
     }
 
     /// <summary>The mapped objects at the lengths the mapping gives them (§8.1.3.1), or null —
-    /// reported — when one is missing or a fixed-size one no longer has that width: it was
-    /// re-declared after the configuration was committed, and neither the CRC nor the records
-    /// cover a declaration. A variable-size object (a string, a domain) is cut or zero-padded to
-    /// its entry, as before; its width was never fixed.</summary>
+    /// reported — when one is missing, has no fixed width or no longer has the width of its
+    /// entry: it was re-declared after the configuration was committed, and neither the CRC nor
+    /// the records cover a declaration. An SRDO maps fixed-width objects only (the dictionary's
+    /// validator refuses the others), so this is the defence behind that rule: nothing is ever
+    /// cut or padded to fit.</summary>
     private byte[]? BuildPayload(SrdoRuntime rt)
     {
         var payload = new byte[rt.TotalBytes];
@@ -243,12 +244,17 @@ internal sealed partial class SrdoEngine : IDisposable
             }
             var raw = od.GetRawValue();
             int fixedSize = OdEntryLayout.FixedSize(od.DataType);
-            if (fixedSize > 0 && fixedSize != entry.ByteLength)
+            if (fixedSize <= 0)
+            {
+                ReportUnavailable(rt, entry, $"is {od.DataType}, which has no fixed width");
+                return null;
+            }
+            if (fixedSize != entry.ByteLength)
             {
                 ReportUnavailable(rt, entry, $"is {od.DataType} ({fixedSize} byte(s)), not the {entry.ByteLength} byte(s) mapped");
                 return null;
             }
-            Buffer.BlockCopy(raw, 0, payload, offset, Math.Min(raw.Length, entry.ByteLength));
+            Buffer.BlockCopy(raw, 0, payload, offset, entry.ByteLength);
             offset += entry.ByteLength;
         }
         return payload;

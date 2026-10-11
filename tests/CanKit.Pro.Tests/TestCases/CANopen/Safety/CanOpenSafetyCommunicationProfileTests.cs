@@ -318,6 +318,32 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         Rejected(() => node.ObjectDictionary.WriteUnsigned(0x1005, 0, 0x124)).Should().Be(SdoAbortCode.ValueRangeExceeded);
     }
 
+    /// <summary>An SRDO maps objects of fixed width only — this implementation's rule: safety
+    /// process data has a fixed width, and the width is what the mapping entry and the checksum
+    /// pin. A string or a domain is refused with 0604 0041h at the slot write, and at the
+    /// creation of an SRDO whose mapped object was re-declared as one while it was deleted.</summary>
+    [Theory]
+    [InlineData(OdDataType.VisibleString)]
+    [InlineData(OdDataType.OctetString)]
+    [InlineData(OdDataType.Domain)]
+    public void A_Variable_Size_Object_Cannot_Be_Mapped(OdDataType type)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-safety-od");
+        using var bus = Open(session, 1);
+        using var node = OpenDevice(bus);
+        var od = node.ObjectDictionary;
+        od.AddRaw(0x2003, 0x00, type, new byte[] { 0x41, 0x42 });
+        Rejected(() => od.WriteUnsigned(0x1381, 1, 0x2003_0010)).Should().Be(SdoAbortCode.ObjectCannotBeMapped, "the slot write");
+
+        od.AddU16(0x2004, 0x00, 0);
+        od.WriteUnsigned(0x1381, 1, 0x2004_0010);
+        od.WriteUnsigned(0x1381, 2, 0x2004_0010);
+        od.WriteUnsigned(0x1381, 0, 2);
+        od.AddRaw(0x2004, 0x00, type, new byte[] { 0x41, 0x42 });   // the SRDO is deleted, so this is allowed
+        Rejected(() => od.WriteUnsigned(0x1301, 1, 1)).Should().Be(SdoAbortCode.ObjectCannotBeMapped, "the creation");
+        od.ReadUnsigned(0x1301, 1).Should().Be(0u);
+    }
+
     [Fact]
     public void Mapping_Rules()
     {
