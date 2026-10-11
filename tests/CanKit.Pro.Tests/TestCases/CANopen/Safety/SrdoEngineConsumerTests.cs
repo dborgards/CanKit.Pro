@@ -375,6 +375,19 @@ public class SrdoEngineConsumerTests : IDisposable
         _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u);
     }
 
+    /// <summary>The GFC is a classic CAN frame with DLC 0 (§8.2): a CAN FD frame on 001h, even
+    /// with no data, is not a GFC and raises nothing; the classic one does.</summary>
+    [Fact]
+    public void A_Can_Fd_Frame_On_001h_Is_No_Gfc()
+    {
+        StartConsumer();
+        _od.WriteUnsigned(SrdoRecords.GfcParameter, 0, 1);
+        FdFrame(CanOpenCobId.GlobalFailsafeCommand).Should().BeTrue("001h is a safety id even when ignored");
+        _host.Gfcs.Should().Be(0, "a CAN FD frame is no GFC");
+        Frame(CanOpenCobId.GlobalFailsafeCommand);
+        _host.Gfcs.Should().Be(1, "the classic frame with DLC 0 is");
+    }
+
     [Fact]
     public void Gfc_Is_Received_And_Sent_Only_While_1300h_Is_1_And_Operational()
     {

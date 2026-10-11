@@ -743,7 +743,8 @@ already running still hands the frame to the driver (#294). A send cancelled by 
 quietly; one the caller cancelled — before the call ran or while the send waited — ends with
 `OperationCanceledException`, and so does a send under which the bus service is disposed, which
 is also reported on `BackgroundExceptionOccurred` as a transport failure. A GFC is reported by
-`GlobalFailsafeCommandReceived` under the same two conditions, and only with DLC 0. On a bus that
+`GlobalFailsafeCommandReceived` under the same two conditions, and only as a classic CAN frame with
+DLC 0 — a CAN FD frame on `001h` is no GFC and is ignored. On a bus that
 echoes, the node's own GFC is reported too. Like `SrdoStateChanged` the event is critical, and
 identical ones still waiting are folded into one.
 

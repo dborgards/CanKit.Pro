@@ -9,7 +9,8 @@ internal sealed partial class SrdoEngine
     /// <summary>Routes a frame to the SRDO it belongs to. True when the id is one of this node's
     /// SRDO ids or 001h, whether or not anything happened: a remote frame (§8.1 "RTR is not
     /// possible"), an echo of our own producer frames (#95), a frame outside Operational.
-    /// <paramref name="isFd"/>: the frame arrived as a CAN FD frame.</summary>
+    /// <paramref name="isFd"/>: the frame arrived as a CAN FD frame, which is neither an SRDO frame
+    /// nor a GFC (§8.1, §8.2: classic CAN).</summary>
     public bool TryHandleFrame(uint cobId, byte[] data, bool isRtr, bool isFd = false)
     {
         if (_disposed) return false;
@@ -17,8 +18,9 @@ internal sealed partial class SrdoEngine
         // application's object, and 001h is not this engine's frame.
         if (cobId == CanOpenCobId.GlobalFailsafeCommand && SrdoCount > 0)
         {
-            // §8.2.3 Write GFC: L = 0. §8.4.2.2 1300h: "0: GFC is not valid".
-            if (!isRtr && data.Length == 0 && _operational && IsGfcEnabled()) _host.GlobalFailsafeCommandReceived();
+            // §8.2.3 Write GFC: L = 0, a classic CAN frame (§8.2) — a CAN FD frame is no GFC.
+            // §8.4.2.2 1300h: "0: GFC is not valid".
+            if (!isRtr && !isFd && data.Length == 0 && _operational && IsGfcEnabled()) _host.GlobalFailsafeCommandReceived();
             return true;
         }
         for (int n = 1; n <= SrdoCount; n++)
