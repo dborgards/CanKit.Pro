@@ -901,6 +901,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // the actor loop so HandleIncoming can distinguish an RTR poll from a genuine
                 // heartbeat / node-guarding data frame that happens to share the same COB-ID.
                 bool isRtr = frame.IsRemoteFrame;
+                // The SRDO engine refuses a CAN FD frame on an SRDO id (§8.1: classic CAN).
+                bool isFd = frame.FrameKind == CanFrameType.CanFd;
                 // The copy stays, and #103 asked for the reason rather than the reflex: this
                 // array is captured into a post that runs later on the actor loop, and the
                 // handlers below take byte[] and hold it -- an SDO segment lands in a transfer
@@ -912,7 +914,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // front of it: HandleIncoming's first act is to classify the COB-ID, and it needs
                 // the payload for almost every class it can land in.
                 var data = frame.Data.ToArray();
-                _actor.Post(() => HandleIncoming(id, data, isRtr));
+                _actor.Post(() => HandleIncomingFrame(id, data, isRtr, isFd));
             }
         }
         catch (OperationCanceledException) { /* Dispose */ }
@@ -1299,7 +1301,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     //   * 0x600 + id names the destination, so such a frame is ours to serve regardless of sender.
     //   * an RPDO's COB-ID is whatever the application configured, possibly on purpose our own
     //     TPDO; overriding that from here is the narrowing #93 had to take back out.
-    private void HandleIncoming(uint cobId, byte[] data, bool isRtr)
+    private void HandleIncoming(uint cobId, byte[] data, bool isRtr) => HandleIncomingFrame(cobId, data, isRtr, isFd: false);
+
+    /// <summary><see cref="HandleIncoming"/> with the frame kind: <paramref name="isFd"/> is a CAN FD
+    /// frame, which the SRDO engine refuses on an SRDO id (§8.1: classic CAN).</summary>
+    private void HandleIncomingFrame(uint cobId, byte[] data, bool isRtr, bool isFd)
     {
         try
         {
@@ -1319,7 +1325,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // CiA DSP 304: SRDO pairs on this node's configured ids, GFC on 001h. Before SYNC
             // and the RPDO table: an SRDO id can be nothing else on this node (the validators
             // keep 101h–180h and 001h out of every other object).
-            if (_srdo.TryHandleFrame(cobId, data, isRtr)) return;
+            if (_srdo.TryHandleFrame(cobId, data, isRtr, isFd)) return;
             // SYNC on the COB-ID configured in 1005h (0x080 unless a device description or a
             // master moved it).
             if (cobId == _syncCobId && !isRtr)

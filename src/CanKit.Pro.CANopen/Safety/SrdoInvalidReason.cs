@@ -15,7 +15,8 @@ public enum SrdoInvalidReason
     ValidationTimeExpired,
     /// <summary>Consumer: the inverted frame arrived without a preceding plain frame (§9.5).</summary>
     OutOfOrder,
-    /// <summary>Consumer: the second frame is not the bitwise inverse of the first (§8.1, §9.5).</summary>
+    /// <summary>Consumer: the second frame is not the bitwise inverse of the first (§8.1, §9.5), or
+    /// a frame on either id is not a classic CAN frame — a CAN FD frame, or more than 8 bytes.</summary>
     Mismatch,
     /// <summary>Consumer: a complete pair arrived, but a mapped object refused the bytes meant
     /// for it (a write validator, or a declaration that no longer takes them). Data the

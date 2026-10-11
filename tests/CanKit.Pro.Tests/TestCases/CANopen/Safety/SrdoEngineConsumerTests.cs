@@ -58,6 +58,72 @@ public class SrdoEngineConsumerTests : IDisposable
         return consumed;
     }
 
+    private bool FdFrame(uint cobId, params byte[] data)
+    {
+        bool consumed = false;
+        OnActor(() => consumed = _engine.TryHandleFrame(cobId, data, isRtr: false, isFd: true));
+        return consumed;
+    }
+
+    private static byte[] Padded(byte[] data, int length, byte fill)
+    {
+        var padded = new byte[length];
+        for (int i = 0; i < length; i++) padded[i] = i < data.Length ? data[i] : fill;
+        return padded;
+    }
+
+    /// <summary>An SRDO frame is a classic CAN frame (§8.1): a payload longer than 8 bytes, or a
+    /// CAN FD frame, on COB-ID 1 or 2 is not an SRDO frame. It is rejected as a wrong inverse is —
+    /// Mismatch, the pending first frame dropped, nothing actuated, no SrdoReceived, the SCT not
+    /// restarted, and no EMCY 8210h (that is for a short pair). §8.1.3.1's "only the first 'n'
+    /// bytes are used" applies within 8 bytes. A later correct pair makes the SRDO valid again.</summary>
+    [Theory]
+    [InlineData("9-byte first")]
+    [InlineData("9-byte second")]
+    [InlineData("9-byte pair")]
+    [InlineData("FD pair")]
+    public void A_Frame_That_Is_Not_Classic_Can_Is_No_Srdo_Frame(string fault)
+    {
+        StartConsumer();
+        Frame(0x123, Plain); Frame(0x124, Inverse);   // valid, SCT from here
+        Advance(TimeSpan.FromMilliseconds(40));
+        int received = _host.Received.Count;
+        byte[] plain2 = { 0x22, 0x11, 0x02 }, inverse2 = { 0xDD, 0xEE, 0xFD };
+        switch (fault)
+        {
+            case "9-byte first":
+                Frame(0x123, Padded(plain2, 9, 0x00)).Should().BeTrue();
+                break;
+            case "9-byte second":
+                Frame(0x123, plain2);
+                Frame(0x124, Padded(inverse2, 9, 0xFF)).Should().BeTrue();
+                break;
+            case "9-byte pair":
+                Frame(0x123, Padded(plain2, 9, 0x00)).Should().BeTrue();
+                Frame(0x124, Padded(inverse2, 9, 0xFF)).Should().BeTrue();
+                break;
+            default:
+                FdFrame(0x123, plain2).Should().BeTrue();
+                FdFrame(0x124, inverse2).Should().BeTrue();
+                break;
+        }
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _host.States.Should().Contain((1, false, SrdoInvalidReason.Mismatch));
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x5678u, "nothing of the rejected frames was actuated");
+        _od.ReadUnsigned(0x2001, 0).Should().Be(0x01u);
+        _host.Received.Should().HaveCount(received, "no SrdoReceived");
+        _host.Emcys.Should().BeEmpty("8210h is for a pair shorter than the mapping");
+
+        Frame(0x124, inverse2);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.OutOfOrder, "no first frame is pending");
+        Advance(TimeSpan.FromMilliseconds(10));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.SafeguardCycleExpired, "50 ms since the last pair taken: the SCT was not restarted");
+
+        Frame(0x123, plain2); Frame(0x124, inverse2);
+        _engine.GetState(1).IsValid.Should().BeTrue("a correct pair re-validates");
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1122u);
+    }
+
     private static readonly byte[] Plain = { 0x78, 0x56, 0x01 };
     private static readonly byte[] Inverse = { 0x87, 0xA9, 0xFE };
 

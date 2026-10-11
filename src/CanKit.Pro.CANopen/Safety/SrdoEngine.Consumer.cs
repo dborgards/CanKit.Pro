@@ -8,8 +8,9 @@ internal sealed partial class SrdoEngine
 {
     /// <summary>Routes a frame to the SRDO it belongs to. True when the id is one of this node's
     /// SRDO ids or 001h, whether or not anything happened: a remote frame (§8.1 "RTR is not
-    /// possible"), an echo of our own producer frames (#95), a frame outside Operational.</summary>
-    public bool TryHandleFrame(uint cobId, byte[] data, bool isRtr)
+    /// possible"), an echo of our own producer frames (#95), a frame outside Operational.
+    /// <paramref name="isFd"/>: the frame arrived as a CAN FD frame.</summary>
+    public bool TryHandleFrame(uint cobId, byte[] data, bool isRtr, bool isFd = false)
     {
         if (_disposed) return false;
         // A node without SRDOs is no safety node: an application-declared 1300h on it is the
@@ -25,6 +26,15 @@ internal sealed partial class SrdoEngine
             if (_runtimes[n] is not { Direction: not SrdoDirection.None } rt) continue;
             if (cobId != rt.CobId1 && cobId != rt.CobId2) continue;
             if (isRtr || rt.Direction == SrdoDirection.Transmit || !_operational || !rt.ConfigurationValid) return true;
+            // §8.1: an SRDO is a classic CAN frame. A CAN FD frame, or a payload over 8 bytes, on
+            // either id is no SRDO frame: rejected as a wrong inverse is — the pending first frame
+            // dropped, nothing actuated, the SCT left running, no EMCY (8210h is for a pair shorter
+            // than the mapping). "Only the first 'n' bytes are used" (§8.1.3.1) applies within 8.
+            if (isFd || data.Length > 8)
+            {
+                Invalidate(rt, SrdoInvalidReason.Mismatch);
+                return true;
+            }
             if (cobId == rt.CobId1) OnFirstFrame(rt, data);
             else OnSecondFrame(rt, data);
             return true;
@@ -135,7 +145,8 @@ internal sealed partial class SrdoEngine
         SetInvalid(rt, reason);
     }
 
-    /// <summary>"If L exceeds the number 'n' … only the first 'n' bytes are used" (§8.1.3.1).
+    /// <summary>"If L exceeds the number 'n' … only the first 'n' bytes are used" (§8.1.3.1) —
+    /// within the 8 bytes of a classic CAN frame; a longer payload never gets here.
     /// Writes under the OD lock, like the RPDO path. A rejected write is reported, not swallowed,
     /// and ends the pair there: false, with the objects before it written and the rest untouched.</summary>
     private bool Actuate(SrdoRuntime rt, byte[] payload)

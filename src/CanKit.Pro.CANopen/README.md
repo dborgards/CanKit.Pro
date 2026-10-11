@@ -701,6 +701,9 @@ Then (§8.1.1, §8.1.3.1, §9.5):
 * the inverted frame must follow within the SRVT (`ValidationTimeExpired` otherwise), must have
   a plain frame before it (`OutOfOrder`), and must be its bitwise inverse with the same length
   (`Mismatch`);
+* both frames are classic CAN frames (§8.1): a CAN FD frame, or a payload over 8 bytes, on either
+  id is no SRDO frame and is rejected as a wrong inverse is — `Mismatch`, a pending plain frame
+  dropped, nothing written, no `SrdoReceived`, the SCT not restarted, no EMCY;
 * a complete pair writes the mapped objects, raises `SrdoReceived` and restarts the SCT; when the
   SCT elapses without one the SRDO is `SafeguardCycleExpired`;
 * a mapped object that refuses its bytes — a write validator, or a declaration that no longer
@@ -715,7 +718,7 @@ Then (§8.1.1, §8.1.3.1, §9.5):
   application objects and offers no public one, and it refuses to re-declare a mapped object;
 * a pair shorter than the mapping is not processed and produces EMCY `8210h` (when EMCY is
   enabled) once, until a pair of the right length arrives or the SRDO is rebuilt — as for an
-  RPDO; a longer one uses its first bytes.
+  RPDO; a longer one, within the 8 bytes of a classic frame, uses its first bytes (§8.1.3.1).
 
 The next valid pair makes an invalid SRDO valid again — there is nothing to reset — except
 `ConfigurationInvalid`, which needs a new commit and a transition to Operational.
