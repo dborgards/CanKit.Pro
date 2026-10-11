@@ -842,7 +842,9 @@ Only the boot-up is gated: an NMT Start to node 0 the application requests itsel
 SRDO pair into the sink, as `ObserveForeignPdoAsync` does for a PDO, and writes nothing to this
 node's dictionary. The record is the one whose live `1301h`–`1340h:05` equals `cobId1`; a word
 that was read decides, matching or not, and the file's value is used only for a record whose
-upload failed or returned no word. A COB-ID word with a bit above bit 10 does not match. Only an
+upload failed or returned no word — a word is exactly four bytes (UNSIGNED32), and a direction
+(sub-index `01h`) exactly one (UNSIGNED8); a value of another length counts as not read. A COB-ID
+word with a bit above bit 10 does not match. Only an
 existing record matches: one whose direction (sub-index `01h`, live, or the file's when that upload
 fails) is 0 is skipped, because a deleted record keeps its COB-IDs and another SRDO may have taken
 them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The two

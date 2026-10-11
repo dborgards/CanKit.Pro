@@ -96,7 +96,7 @@ internal sealed partial class CanOpenNode
             try
             {
                 var raw = await SdoUploadAsync(peerNodeId, comm, 0x05, cancellationToken).ConfigureAwait(false);
-                if (raw.Length >= 4) liveWord = ObjectDictionary.DecodeU32(raw);
+                if (raw.Length == 4) liveWord = ObjectDictionary.DecodeU32(raw); // UNSIGNED32, exactly: another length is not read
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
             // A live word that was read decides, whether it matches or not: the file is only for a record that could not be read.
@@ -120,7 +120,7 @@ internal sealed partial class CanOpenNode
         try
         {
             var raw = await SdoUploadAsync(peerNodeId, comm, 0x01, cancellationToken).ConfigureAwait(false);
-            if (raw.Length >= 1) return raw[0] == 0;
+            if (raw.Length == 1) return raw[0] == 0; // UNSIGNED8, exactly: another length is not read
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
         return TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x01, out var text)

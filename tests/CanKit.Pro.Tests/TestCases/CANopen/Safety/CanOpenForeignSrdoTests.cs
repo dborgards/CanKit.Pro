@@ -244,6 +244,43 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001);
     }
 
+    /// <summary>The communication record is read at its exact widths too: sub-index 05h exactly
+    /// four bytes (UNSIGNED32), sub-index 01h exactly one (UNSIGNED8). A value of another length
+    /// counts as not read — the file decides — instead of being read by its low bytes. The
+    /// device's live COB-ID 1 is 111h and the file's 109h, so which one decided is visible.</summary>
+    [Theory]
+    [InlineData("5-byte COB-ID 1")]
+    [InlineData("2-byte direction")]
+    public async Task A_Live_Communication_Value_Of_Another_Length_Is_Not_Read(string fault)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        using var device = OpenDeviceDivergingFromFile(busB);
+        var od = device.ObjectDictionary;
+        uint cobId1;
+        if (fault == "5-byte COB-ID 1")
+        {
+            // Read by its low four bytes this would be 111h, the live id; not read, the file's 109h decides.
+            od.Declare(0x1301, 0x05, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x11, 0x01, 0x00, 0x00, 0x00 }, pdoMappable: false);
+            cobId1 = 0x109;
+        }
+        else
+        {
+            // Read by its low byte this would be 0, a deleted record; not read, the file's 1 decides.
+            od.Declare(0x1301, 0x01, OdDataType.Unsigned16, OdAccess.ReadWrite, new byte[] { 0x00, 0x00 }, pdoMappable: false);
+            cobId1 = 0x111;
+        }
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, cobId1,
+            new byte[] { 0x78, 0x56, 0x34, 0x12 }, new byte[] { 0x87, 0xA9, 0xCB, 0xED }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation.Should().NotBeNull(result.Reason);
+        result.Observation!.PdoNumber.Should().Be(1);
+        result.Observation.Decoded.Should().BeTrue(result.Observation.Reason);
+    }
+
     [Fact]
     public async Task Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer()
     {
