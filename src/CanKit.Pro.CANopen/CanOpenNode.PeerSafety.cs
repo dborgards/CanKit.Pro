@@ -28,9 +28,9 @@ internal sealed partial class CanOpenNode
         // One description for the whole transaction: the one bound now, which the pre-check uses
         // and every transfer's gate check below. A rebind meanwhile takes effect for the next call.
         // Without a bound description the peer gate refuses the first transfer anyway.
-        var binding = CapturePeerDescription(peerNodeId);
-        if (binding.Description is { } description)
-            EnsureMappingsFitDescription(configuration, description); // before the first frame
+        var binding = CapturePeerDescription(peerNodeId, configuration);
+        if (binding.IsBound)
+            EnsureMappingsFitDescription(configuration, binding); // before the first frame
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
         // transaction ends. Every transfer below is a ...CoreAsync one.
@@ -120,7 +120,7 @@ internal sealed partial class CanOpenNode
     /// the SRDO's direction
     /// (a producer reads it, a consumer writes it — the file's <c>AccessType</c>). What the file
     /// does not show — a rule of the peer's own — stays the peer's to refuse.</summary>
-    private static void EnsureMappingsFitDescription(PeerSafetyConfiguration configuration, CanOpenDeviceDescription description)
+    private static void EnsureMappingsFitDescription(PeerSafetyConfiguration configuration, PeerDescriptionBinding description)
     {
         foreach (var srdo in configuration.Srdos)
         {
@@ -134,15 +134,9 @@ internal sealed partial class CanOpenNode
         }
     }
 
-    private static string? MappingEntryRefusal(CanOpenDeviceDescription description, Pdo.PdoMappingEntry entry, SrdoDirection direction)
+    private static string? MappingEntryRefusal(PeerDescriptionBinding description, Pdo.PdoMappingEntry entry, SrdoDirection direction)
     {
-        if (!TryDescribedObject(description, entry.Index, out var obj)) return "is not declared";
-        DescribedEntry? found = null;
-        foreach (var candidate in EntriesOf(obj))
-        {
-            if (candidate.Subindex == entry.Subindex) { found = candidate; break; }
-        }
-        if (found is not { } described) return "is not declared";
+        if (!description.TryGetMappedEntry(entry.Index, entry.Subindex, out var described)) return "is not declared";
         if (!described.PdoMappable) return "is not flagged mappable (PDOMapping)";
         // An SRDO maps objects of fixed width only (this implementation's rule, as in the
         // dictionary's validator): a string, a domain or a type the file does not name is refused.

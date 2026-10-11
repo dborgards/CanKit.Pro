@@ -471,6 +471,36 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.SdoUploadAsync(Device, 0x1300, 0x00).WithTimeoutAsync(ShortTimeout));
     }
 
+    /// <summary>The transaction works from the description as it was when it started, not from
+    /// the bound instance, which is publicly mutable: editing it in place while the transaction is
+    /// held — 1300h removed, the PDOMapping flag of a mapped object cleared, the SRDO records
+    /// removed — changes nothing for it, and takes effect for the next call.</summary>
+    [Fact]
+    public async Task An_In_Place_Edit_Of_The_Bound_Description_During_A_Safety_Transaction_Takes_Effect_For_The_Next_Call()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)) { HoldAt = (0x1301, 0x01) };
+        var configure = await HeldConfigurationAsync(master, fake);
+        var bound = master.GetPeerDeviceDescription(Device)!;
+        bound.Objects.Objects.Remove(0x1300).Should().BeTrue();
+        bound.Objects.Objects[0x2000].PdoMapping = false;
+        foreach (ushort index in bound.Objects.Objects.Keys.Where(i => i is > 0x1300 and < 0x13FE).ToList())
+            bound.Objects.Objects.Remove(index);
+        fake.ReleaseHeld();
+        var result = await configure.WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue("the transaction keeps the description as it was when it started");
+        lock (fake.Requests)
+        {
+            fake.Requests.Should().Contain(((ushort)0x1300, (byte)0x00));
+            fake.Requests.Should().Contain(((ushort)0x1381, (byte)0x01));
+            fake.Requests.Last().Should().Be(((ushort)0x13FE, (byte)0x00), "the transaction ran to its acknowledgement");
+        }
+        await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.SdoUploadAsync(Device, 0x1300, 0x00).WithTimeoutAsync(ShortTimeout));
+        await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.SdoUploadAsync(Device, 0x1381, 0x01).WithTimeoutAsync(ShortTimeout));
+    }
+
     /// <summary>The fixture without object 1300h (section and optional-object entry).</summary>
     private static CanOpenDeviceDescription PeerFileWithout1300()
     {

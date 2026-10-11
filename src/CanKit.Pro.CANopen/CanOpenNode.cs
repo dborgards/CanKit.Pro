@@ -573,7 +573,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         ThrowIfDisposed();
         if (transaction is null) EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction.Description);
+        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction);
         var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
@@ -641,7 +641,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         ThrowIfDisposed();
         if (transaction is null) EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction.Description);
+        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction);
         var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
 

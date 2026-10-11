@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Safety;
@@ -138,16 +140,10 @@ internal sealed partial class CanOpenNode
     /// only <see cref="PeerSdoAccessException.IsAllowedWithoutPeerDescription"/> passes.
     /// </summary>
     private void EnsurePeerSdoAccess(byte serverNodeId, ushort index, byte subindex)
-        => EnsurePeerSdoAccess(serverNodeId, index, subindex,
-            _peerDescriptions.TryGetValue(serverNodeId, out var bound) ? bound : null);
-
-    /// <summary>The gate against <paramref name="description"/> rather than the live binding: a
-    /// safety transaction checks every transfer against the description bound at its start.</summary>
-    private static void EnsurePeerSdoAccess(byte serverNodeId, ushort index, byte subindex, CanOpenDeviceDescription? description)
     {
-        if (description is not null)
+        if (_peerDescriptions.TryGetValue(serverNodeId, out var description))
         {
-            if (description.Contains(index, subindex) || IsImpliedSrdoRecordEntry(description, index, subindex)) return;
+            if (description.Contains(index, subindex) || IsImpliedSrdoRecordEntry(DescribedSrdoCount(description), index, subindex)) return;
             throw PeerSdoAccessException.NotInDescription(serverNodeId, index, subindex);
         }
 
@@ -155,17 +151,70 @@ internal sealed partial class CanOpenNode
         throw PeerSdoAccessException.NoDescription(serverNodeId, index, subindex);
     }
 
-    /// <summary>The peer description a safety transaction was started with (null when none was
-    /// bound): captured once, and handed to its transfers, so that a rebind or an unbind on another
-    /// thread during the transaction takes effect for the next call, not half-way through this one.</summary>
-    private sealed class PeerDescriptionBinding
+    /// <summary>The gate against <paramref name="binding"/> rather than the live binding: a
+    /// safety transaction checks every transfer against the description as it was at its start.</summary>
+    private static void EnsurePeerSdoAccess(byte serverNodeId, ushort index, byte subindex, PeerDescriptionBinding binding)
     {
-        public PeerDescriptionBinding(CanOpenDeviceDescription? description) => Description = description;
-        public CanOpenDeviceDescription? Description { get; }
+        if (binding.IsBound)
+        {
+            if (binding.Declares(index, subindex) || IsImpliedSrdoRecordEntry(binding.DescribedSrdoCount, index, subindex)) return;
+            throw PeerSdoAccessException.NotInDescription(serverNodeId, index, subindex);
+        }
+
+        if (PeerSdoAccessException.IsAllowedWithoutPeerDescription(index, subindex)) return;
+        throw PeerSdoAccessException.NoDescription(serverNodeId, index, subindex);
     }
 
-    private PeerDescriptionBinding CapturePeerDescription(byte peerNodeId)
-        => new(_peerDescriptions.TryGetValue(peerNodeId, out var description) ? description : null);
+    /// <summary>
+    /// What a safety transaction reads from the peer's description, taken once at its start: the
+    /// bound instance is publicly mutable (<see cref="CanOpenDeviceDescription.Objects"/>), and a
+    /// rebind, an unbind or an edit in place during the transaction takes effect for the next
+    /// call, not half-way through this one. Only what the transaction reads is kept, not a clone of
+    /// the description: the declared pairs of the safety area 1300h–13FFh (the only objects its
+    /// transfers touch), the highest SRDO record the file declares (the implied records), and the
+    /// described entries the pre-check reads (the mapped objects of a configuration).
+    /// </summary>
+    private sealed class PeerDescriptionBinding
+    {
+        private readonly HashSet<(ushort, byte)> _safetyPairs = new();
+        private readonly Dictionary<(ushort, byte), DescribedEntry> _mapped = new();
+
+        public PeerDescriptionBinding(CanOpenDeviceDescription? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects)
+        {
+            IsBound = description is not null;
+            if (description is null) return;
+            foreach (var pair in description.Objects.Objects)
+            {
+                if (pair.Key is < SrdoRecords.GfcParameter or > SrdoRecords.Checksum) continue;
+                if (pair.Value.SubObjects.Count == 0) _safetyPairs.Add((pair.Key, 0));
+                else foreach (var sub in pair.Value.SubObjects.Keys) _safetyPairs.Add((pair.Key, sub));
+            }
+            DescribedSrdoCount = CanOpenNode.DescribedSrdoCount(description);
+            foreach (var (index, subindex) in mappedObjects)
+            {
+                if (!TryDescribedObject(description, index, out var obj)) continue;
+                foreach (var entry in EntriesOf(obj))
+                    if (entry.Subindex == subindex) { _mapped[(index, subindex)] = entry; break; }
+            }
+        }
+
+        /// <summary>Whether a description was bound at the start.</summary>
+        public bool IsBound { get; }
+
+        public int DescribedSrdoCount { get; }
+
+        /// <summary>The pair as declared at the start; a transaction transfers safety objects only.</summary>
+        public bool Declares(ushort index, byte subindex) => _safetyPairs.Contains((index, subindex));
+
+        /// <summary>A mapped object's entry as described at the start, for the pre-check.</summary>
+        public bool TryGetMappedEntry(ushort index, byte subindex, out DescribedEntry entry) => _mapped.TryGetValue((index, subindex), out entry);
+    }
+
+    private PeerDescriptionBinding CapturePeerDescription(byte peerNodeId, PeerSafetyConfiguration? configuration = null)
+        => new(_peerDescriptions.TryGetValue(peerNodeId, out var description) ? description : null,
+            configuration is null
+                ? Array.Empty<(ushort, byte)>()
+                : configuration.Srdos.Values.SelectMany(s => s.Mapping.Entries).Select(e => (e.Index, e.Subindex)));
 
     /// <summary>
     /// CiA DSP 304 §8.4.2.2: 13FFh:00 is the number of SRDOs, so a file whose highest SRDO record
@@ -175,9 +224,9 @@ internal sealed partial class CanOpenNode
     /// 1381h–(1380h + N). Nothing else the file leaves out, and nothing for a file without an
     /// SRDO record (FR-CO-029).
     /// </summary>
-    private static bool IsImpliedSrdoRecordEntry(CanOpenDeviceDescription description, ushort index, byte subindex)
+    private static bool IsImpliedSrdoRecordEntry(int describedSrdoCount, ushort index, byte subindex)
     {
-        if (SrdoRecords.SrdoNumberOf(index) is not { } n || n > DescribedSrdoCount(description)) return false;
+        if (SrdoRecords.SrdoNumberOf(index) is not { } n || n > describedSrdoCount) return false;
         return SrdoRecords.IsCommunicationRecord(index) ? subindex <= 0x06 : subindex <= SrdoRecords.MappingSubindices;
     }
 }

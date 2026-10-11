@@ -82,8 +82,9 @@ public interface ICanOpenSafety
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
-    /// The transaction uses the description bound at its start for its pre-check and for the gate
-    /// of every transfer: a rebind or an unbind of the peer meanwhile takes effect for the next
+    /// The transaction works from the description as it was when it started — its pre-check and
+    /// the gate of every transfer read a snapshot taken then, not the bound instance: a rebind, an
+    /// unbind or an edit in place of the bound description meanwhile takes effect for the next
     /// call, not half-way through this one.
     /// An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync.
     /// The peer's 13FEh is 0 once at least one parameter write has been
@@ -109,8 +110,9 @@ public interface ICanOpenSafety
     /// the device checks only those of existing SRDOs (§9.5). Nothing is written. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
-    /// The transaction uses the description bound at its start for the gate of every transfer: a
-    /// rebind or an unbind of the peer meanwhile takes effect for the next call.</summary>
+    /// The transaction works from the description as it was when it started (the gate of every
+    /// transfer reads a snapshot taken then): a rebind, an unbind or an edit in place of the bound
+    /// description meanwhile takes effect for the next call.</summary>
     /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
     /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
     /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
