@@ -279,7 +279,9 @@ internal sealed partial class CanOpenNode
     /// Uploads sub-index 0 and then the slots 1, 1+stride, … up to the count, whether or not the
     /// description lists them (a PDO record has stride 1; an SRDO record has stride 2 — its even
     /// slots are the inverted copies). The count must be at most <paramref name="maxCount"/> and,
-    /// for stride 2, even. Each slot must be non-zero and byte-aligned and the total at most 8 bytes.
+    /// for stride 2, even. Sub-index 00h must be exactly one byte (UNSIGNED8) and each slot exactly
+    /// four (UNSIGNED32), non-zero and byte-aligned, the total at most 8 bytes; a value of another
+    /// length is not cut, the live mapping counts as not read.
     /// For stride 2 every even slot is uploaded too, right after its odd slot. One that cannot be
     /// read counts as an unreadable odd slot does (the live mapping is not read; the caller falls
     /// back to the file); one that was read must repeat its odd slot
@@ -298,7 +300,9 @@ internal sealed partial class CanOpenNode
         {
             return default;
         }
-        if (countBytes.Length < 1) return default;
+        // Exact widths: sub-index 00h is UNSIGNED8, a slot UNSIGNED32. A value of another length
+        // is not cut to its low bytes; the live mapping counts as not read.
+        if (countBytes.Length != 1) return default;
         int count = countBytes[0];
         if (count > maxCount || (stride == 2 && (count & 1) != 0)) return default;
 
@@ -316,7 +320,7 @@ internal sealed partial class CanOpenNode
             {
                 return new LiveMappingRead(null, declared, ex is PeerSdoAccessException);
             }
-            if (raw.Length < 4) return default;
+            if (raw.Length != 4) return default;
             uint word = (uint)(raw[0] | (raw[1] << 8) | (raw[2] << 16) | (raw[3] << 24));
             if (word == 0) return default;
             PdoMappingEntry entry;
@@ -344,7 +348,7 @@ internal sealed partial class CanOpenNode
                     // As for an odd slot: the live mapping is not read, the file decides.
                     return new LiveMappingRead(null, declared, ex is PeerSdoAccessException);
                 }
-                if (invRaw.Length < 4) return default;
+                if (invRaw.Length != 4) return default;
                 uint inverted = (uint)(invRaw[0] | (invRaw[1] << 8) | (invRaw[2] << 16) | (invRaw[3] << 24));
                 if (inverted == 0) return default;
                 if (!Safety.SrdoRecords.IsInvertedSlotOf(word, inverted))

@@ -161,6 +161,39 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001);
     }
 
+    /// <summary>The live mapping must have the widths of its types: sub-index 00h exactly one byte
+    /// (UNSIGNED8), every slot exactly four (UNSIGNED32). A response of another length is not cut
+    /// or read by its low bytes: the live mapping counts as not read, and the file decides. The
+    /// device's records are re-declared past the node's guard (ObjectDictionary.Declare) so that
+    /// its SDO server answers with those lengths.</summary>
+    [Theory]
+    [InlineData("2-byte count")]
+    [InlineData("5-byte slot")]
+    [InlineData("3-byte slot")]
+    public async Task A_Live_Mapping_Value_Of_Another_Length_Falls_Back_To_The_File(string fault)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = OpenDeviceDivergingFromFile(busB);
+        var od = device.ObjectDictionary;
+        switch (fault)
+        {
+            case "2-byte count": od.Declare(0x1381, 0x00, OdDataType.Unsigned16, OdAccess.ReadWrite, new byte[] { 0x02, 0x00 }, pdoMappable: false); break;
+            case "5-byte slot": od.Declare(0x1381, 0x01, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x20, 0x00, 0x02, 0x20, 0x00 }, pdoMappable: false); break;
+            default: od.Declare(0x1381, 0x01, OdDataType.Domain, OdAccess.ReadWrite, new byte[] { 0x20, 0x00, 0x02 }, pdoMappable: false); break;
+        }
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x111,
+            new byte[] { 0x78, 0x56, 0x34, 0x12 }, new byte[] { 0x87, 0xA9, 0xCB, 0xED }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation.Should().NotBeNull(result.Reason);
+        result.Observation!.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription, "a live value of another length is not read");
+        sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001);
+    }
+
     [Fact]
     public async Task Falls_Back_To_The_File_When_The_Peer_Does_Not_Answer()
     {

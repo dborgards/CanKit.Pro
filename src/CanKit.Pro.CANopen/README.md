@@ -339,7 +339,9 @@ safety transaction, with that peer — the observer does not wait for it), or do
 The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
 the peer description bound for that node applies. A read that aborts, times out, is refused by
 that gate, or is not a mapping of at most eight byte-aligned entries uses the mapping in the
-file passed to the call. Observations of one peer run one after another. A CAN-ID CiA 301
+file passed to the call — and so does a value of another width than its type: sub-index `00h` must
+be exactly one byte (UNSIGNED8) and each entry exactly four (UNSIGNED32); a longer one is not cut
+to its low bytes. The SRDO observer reads its live mapping the same way. Observations of one peer run one after another. A CAN-ID CiA 301
 restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
 A payload shorter than the mapping writes nothing; a dummy entry `0002h`–`0007h` consumes its
 bytes and writes no signal.
@@ -847,7 +849,8 @@ them over (the device refuses only the ids of an existing SRDO, §8.4.2.2). The 
 frames must have the same length and be bitwise inverse (§8.1). The mapping is read live from
 `1381h`–`13C0h` — every slot up to the count, the inverted ones included, so a full mapping takes
 16 slot uploads rather than 8 — or from the file when that read fails: a slot that cannot be read,
-even or odd, means the live mapping is not read. Either is used only when it is one the device's
+even or odd, or a value of another width than its type (sub-index `00h` exactly one byte, a slot
+exactly four), means the live mapping is not read. Either is used only when it is one the device's
 own loader takes: each even sub-index up to the count is declared and repeats the odd one before it
 (§8.4.2.2, `1381h`–`13C0h`: the inverted object), the same rule the dictionary's mapping validator
 applies; otherwise the pair is not decoded and the reason names the slot. A live even slot that was
