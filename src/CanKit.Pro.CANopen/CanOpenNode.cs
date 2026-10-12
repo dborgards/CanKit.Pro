@@ -98,7 +98,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // -----------------------------------------------------------------------------------------
     // State touched only on the actor loop.
     // -----------------------------------------------------------------------------------------
-    private NmtState _state = NmtState.Initializing;
+    private volatile NmtState _state = NmtState.Initializing;
 
     // SDO server: at most one outstanding segmented transfer against our own OD at a time (a
     // second Initiate from the same peer supersedes any previous open transfer per CiA 301
@@ -208,6 +208,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             timeSource, shutdownTimeout: null);
         _actor.BackgroundExceptionOccurred += (_, ex) => RaiseBackgroundException(ex);
         _deadlines = new DeadlineScheduler(_actor);
+        // The SRDO engine (CiA DSP 304) needs its count before the communication profile is
+        // populated: a record write there already reaches the engine through the CoS filter.
+        _srdoCount = Math.Max(_options.SrdoCount, DescribedSrdoCount(description));
+        _srdoInFlight = new bool[_srdoCount + 1];
+        _srdoPending = new SrdoPair?[_srdoCount + 1];
+        _srdo = new Safety.SrdoEngine(_actor, _actor.TimeSource, _deadlines, _od, _nodeId, _srdoCount, this);
         _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0,
             () => { _ = EmitHeartbeat((byte)_state); });
         _heartbeatConsumer = new HeartbeatConsumer(_deadlines);
@@ -265,8 +271,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
                 // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
-                // reserves and this subscription otherwise skips.
+                // reserves and this subscription otherwise skips. 0x001 is the CiA DSP 304 global
+                // failsafe command, heard only by a node that has SRDOs.
                 return id == CanOpenCobId.NmtCommand
+                    || (id == CanOpenCobId.GlobalFailsafeCommand && _srdoCount > 0)
                     || id is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
                         or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce
                     || (id >= 0x080 && id <= 0x77F);
@@ -552,7 +560,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         CanOpenCobId.ValidateNodeId(serverNodeId);
         ValidateTransferMode(mode, nameof(mode));
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
-        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        return InPeerSdoChannelAsync(serverNodeId, PeerSdoChannel(serverNodeId),
+            release => SdoUploadCoreAsync(serverNodeId, index, subindex, mode, cancellationToken, release));
+    }
+
+    /// <summary>The upload itself, without taking the peer's SDO channel: for a caller that holds
+    /// it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public call).
+    /// Still passes the peer gate — against the live binding, or for a safety transaction against
+    /// the description it started with (<paramref name="transaction"/>).</summary>
+    private Task<byte[]> SdoUploadCoreAsync(byte serverNodeId, ushort index, byte subindex,
+        SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null, PeerDescriptionBinding? transaction = null)
+    {
+        ThrowIfDisposed();
+        if (transaction is null) EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction);
+        var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
         if (mode == SdoTransferMode.Block)
         {
@@ -569,7 +591,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // auto-switch is applied on the *download* path where we know the payload length.
             _actor.Post(() => BeginSdoUpload(serverNodeId, index, subindex, tcs));
         }
-        return tcs.Task;
+        return handedOut;
     }
 
     /// <inheritdoc />
@@ -605,7 +627,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }
         EnsurePeerSdoAccess(serverNodeId, index, subindex);
         var payload = data.ToArray();
-        var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        return InPeerSdoChannelAsync(serverNodeId, PeerSdoChannel(serverNodeId),
+            release => SdoDownloadCoreAsync(serverNodeId, index, subindex, payload, mode, cancellationToken, release));
+    }
+
+    /// <summary>The download itself, without taking the peer's SDO channel: for a caller that
+    /// holds it (a safety transaction), or with <paramref name="onEnded"/> releasing it (a public
+    /// call). Still passes the peer gate — against the live binding, or for a safety transaction
+    /// against the description it started with (<paramref name="transaction"/>).
+    /// <paramref name="payload"/> is not empty.</summary>
+    private Task<byte[]> SdoDownloadCoreAsync(byte serverNodeId, ushort index, byte subindex,
+        byte[] payload, SdoTransferMode mode, CancellationToken cancellationToken, Action? onEnded = null, PeerDescriptionBinding? transaction = null)
+    {
+        ThrowIfDisposed();
+        if (transaction is null) EnsurePeerSdoAccess(serverNodeId, index, subindex);
+        else EnsurePeerSdoAccess(serverNodeId, index, subindex, transaction);
+        var tcs = NewSdoTransfer(onEnded, out var handedOut);
         RegisterSdoCancellation(tcs, cancellationToken, serverNodeId);
 
         // Auto-select rules (FR-CO-004):
@@ -624,7 +661,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             _actor.Post(() => BeginSdoDownload(serverNodeId, index, subindex, payload, tcs));
         }
-        return tcs.Task;
+        return handedOut;
     }
 
     /// <inheritdoc />
@@ -792,6 +829,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _syncProducerHandle?.Dispose();
         _syncProducerHandle = null;
         DisposePdoRuntime();
+        _srdo.Dispose();
+        EndSrdoSendPeriod(); // a disposed node sends no pair still on the chain
         _lifeGuardingDeadline?.Dispose();
         _lifeGuardingDeadline = null;
         CancelFlyingMasterDeadline();
@@ -862,6 +901,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // the actor loop so HandleIncoming can distinguish an RTR poll from a genuine
                 // heartbeat / node-guarding data frame that happens to share the same COB-ID.
                 bool isRtr = frame.IsRemoteFrame;
+                // The SRDO engine refuses a CAN FD frame on an SRDO id (§8.1: classic CAN).
+                bool isFd = frame.FrameKind == CanFrameType.CanFd;
                 // The copy stays, and #103 asked for the reason rather than the reflex: this
                 // array is captured into a post that runs later on the actor loop, and the
                 // handlers below take byte[] and hold it -- an SDO segment lands in a transfer
@@ -873,7 +914,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // front of it: HandleIncoming's first act is to classify the COB-ID, and it needs
                 // the payload for almost every class it can land in.
                 var data = frame.Data.ToArray();
-                _actor.Post(() => HandleIncoming(id, data, isRtr));
+                _actor.Post(() => HandleIncomingFrame(id, data, isRtr, isFd));
             }
         }
         catch (OperationCanceledException) { /* Dispose */ }
@@ -1222,6 +1263,22 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
         public static EventKey NodeGuardingTimeout(byte producer) => new(2, producer, 0);
 
+        // Producer slots of the CiA DSP 304 events, outside the node-id range 1..127 so that they
+        // never share a slot with a node's heartbeats, timeouts or EMCYs (ReconcileProducer and
+        // _lastForProducer read the slot as "who the event is about"): the GFC is slot 0, which
+        // no node has, and SRDO n (1..64) is slot 128 + n, i.e. 129..192. Every per-producer
+        // array is 256 long. The slot is passed to EnqueueEvent as its producer, so an identical
+        // event still waiting absorbs a new one unless a different event of the same slot was
+        // queued in between — a repeated GFC folds, an SRDO's alternating transitions do not.
+        public const int GfcProducerSlot = 0;
+
+        public static int SrdoProducerSlot(int srdo) => 128 + srdo;
+
+        public static EventKey SrdoState(int srdo, bool isValid, Safety.SrdoInvalidReason? reason)
+            => new(4, (byte)SrdoProducerSlot(srdo), isValid ? 0xFFUL : (ulong)(reason.HasValue ? (int)reason.Value : 0xFE));
+
+        public static EventKey GlobalFailsafeCommand() => new(5, GfcProducerSlot, 0);
+
         public static EventKey Emcy(EmcyMessage msg)
         {
             ulong payload = msg.ErrorCode | ((ulong)msg.ErrorRegister << 16);
@@ -1244,7 +1301,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     //   * 0x600 + id names the destination, so such a frame is ours to serve regardless of sender.
     //   * an RPDO's COB-ID is whatever the application configured, possibly on purpose our own
     //     TPDO; overriding that from here is the narrowing #93 had to take back out.
-    private void HandleIncoming(uint cobId, byte[] data, bool isRtr)
+    private void HandleIncoming(uint cobId, byte[] data, bool isRtr) => HandleIncomingFrame(cobId, data, isRtr, isFd: false);
+
+    /// <summary><see cref="HandleIncoming"/> with the frame kind: <paramref name="isFd"/> is a CAN FD
+    /// frame, which the SRDO engine refuses on an SRDO id (§8.1: classic CAN).</summary>
+    private void HandleIncomingFrame(uint cobId, byte[] data, bool isRtr, bool isFd)
     {
         try
         {
@@ -1261,6 +1322,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 if (!isRtr) HandleFlyingMasterFrame(cobId, data);
                 return;
             }
+            // CiA DSP 304: SRDO pairs on this node's configured ids, GFC on 001h. Before SYNC
+            // and the RPDO table: an SRDO id can be nothing else on this node (the validators
+            // keep 101h–180h and 001h out of every other object).
+            if (_srdo.TryHandleFrame(cobId, data, isRtr, isFd)) return;
             // SYNC on the COB-ID configured in 1005h (0x080 unless a device description or a
             // master moved it).
             if (cobId == _syncCobId && !isRtr)

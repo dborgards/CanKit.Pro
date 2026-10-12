@@ -692,6 +692,10 @@ PDOMapping=0
                     _ => U32(0x20010008),
                 },
                 "abort-entry" => sub == 0 ? new byte[] { 1 } : null,
+                // Exact widths: sub-index 00h is UNSIGNED8, a slot UNSIGNED32 — neither is cut.
+                "two-byte-count" => sub == 0 ? new byte[] { 1, 0 } : U32(0x20010008),
+                "five-byte-entry" => sub == 0 ? new byte[] { 1 } : new byte[] { 0x08, 0x00, 0x01, 0x20, 0x00 },
+                "three-byte-entry" => sub == 0 ? new byte[] { 1 } : new byte[] { 0x08, 0x00, 0x01 },
                 _ => null,
             };
         });
@@ -716,12 +720,13 @@ PDOMapping=0
         shortCob.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
         shortCob.Observations[0].Decoded.Should().BeTrue();
 
-        foreach (var mode in new[] { "short-count", "wide-count", "short-entry", "zero-entry", "odd-length", "too-long", "abort-entry" })
+        foreach (var mode in new[] { "short-count", "wide-count", "short-entry", "zero-entry", "odd-length", "too-long", "abort-entry",
+                     "two-byte-count", "five-byte-entry", "three-byte-entry" })
         {
             var result = await Observe(mode);
             result.Observations.Should().ContainSingle();
-            result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
-            result.Observations[0].Decoded.Should().BeTrue();
+            result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription, mode);
+            result.Observations[0].Decoded.Should().BeTrue(mode);
         }
 
         cob = U32(0x000);
@@ -1235,7 +1240,9 @@ PDOMapping=0
             if (data.Length < 1) return;
             if ((data[0] & ~SdoFrames.ToggleBit) == SdoFrames.CcsUploadSegmentBase)
             {
-                Reply(EmptySegment(data[0]));
+                var pending = _segmentData;
+                _segmentData = null;
+                Reply(pending is null ? EmptySegment(data[0]) : LastSegment(data[0], pending));
                 return;
             }
             if (data[0] != SdoFrames.CcsUploadInit || data.Length < 4) return;
@@ -1247,8 +1254,25 @@ PDOMapping=0
                 Reply(SdoFrames.BuildAbort(index, sub, (uint)SdoAbortCode.ObjectDoesNotExist));
             else if (payload.Length == 0)
                 Reply(SegmentedEmptyInit(index, sub));
+            else if (payload.Length > 4)
+            {
+                // Segmented, size indicated, one segment of up to seven bytes.
+                _segmentData = payload;
+                Reply(new byte[] { 0x41, (byte)index, (byte)(index >> 8), sub, (byte)payload.Length, 0, 0, 0 });
+            }
             else
                 Reply(Expedited(index, sub, payload));
+        }
+
+        private byte[]? _segmentData;
+
+        private static byte[] LastSegment(byte request, byte[] payload)
+        {
+            byte toggle = (byte)(request & SdoFrames.ToggleBit);
+            var buf = new byte[8];
+            buf[0] = (byte)(SdoFrames.ContinueBit | ((7 - payload.Length) << 1) | toggle);
+            payload.CopyTo(buf, 1);
+            return buf;
         }
 
         private void Reply(byte[] data)

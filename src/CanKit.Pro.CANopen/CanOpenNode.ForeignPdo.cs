@@ -250,36 +250,85 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private async Task<PdoMappingEntry[]?> TryReadLiveMappingAsync(byte peerNodeId, ushort mapIndex,
         CancellationToken cancellationToken)
+        => (await TryReadLiveMappingCoreAsync(mapIndex, 1, PdoMapping.MaxEntries,
+                (index, subindex, ct) => SdoUploadAsync(peerNodeId, index, subindex, ct), cancellationToken)
+            .ConfigureAwait(false)).Entries;
+
+    /// <summary>One upload of a live record: the public call (a PDO observer, which takes the
+    /// peer's SDO channel per upload) or the transfer in a channel the caller holds (the SRDO
+    /// observer, <see cref="ObserveForeignSrdoAsync"/>).</summary>
+    private delegate Task<byte[]> LiveUpload(ushort index, byte subindex, CancellationToken cancellationToken);
+
+    /// <summary>What <see cref="TryReadLiveMappingCoreAsync"/> found. <see cref="Entries"/> is null
+    /// when the live record is unavailable or malformed; <see cref="GateRefusedAfterCount"/> is
+    /// set when the count was read and a later slot was refused by the peer-SDO gate, so the
+    /// live mapping is known to exist and the caller has not seen all of it. <see cref="Refusal"/>
+    /// is set when a live SRDO record was read but breaks the pairing rule: the record exists, so
+    /// the file is no fallback for it.</summary>
+    private readonly struct LiveMappingRead
+    {
+        public LiveMappingRead(PdoMappingEntry[]? entries, int declaredEntries, bool gateRefusedAfterCount, string? refusal = null)
+        {
+            Entries = entries;
+            DeclaredEntries = declaredEntries;
+            GateRefusedAfterCount = gateRefusedAfterCount;
+            Refusal = refusal;
+        }
+
+        public PdoMappingEntry[]? Entries { get; }
+        public int DeclaredEntries { get; }
+        public bool GateRefusedAfterCount { get; }
+        public string? Refusal { get; }
+    }
+
+    /// <summary>
+    /// Uploads sub-index 0 and then the slots 1, 1+stride, … up to the count, whether or not the
+    /// description lists them (a PDO record has stride 1; an SRDO record has stride 2 — its even
+    /// slots are the inverted copies). The count must be at most <paramref name="maxCount"/> and,
+    /// for stride 2, even. Sub-index 00h must be exactly one byte (UNSIGNED8) and each slot exactly
+    /// four (UNSIGNED32), non-zero and byte-aligned, the total at most 8 bytes; a value of another
+    /// length is not cut, the live mapping counts as not read.
+    /// For stride 2 every even slot is uploaded too, right after its odd slot. One that cannot be
+    /// read counts as an unreadable odd slot does (the live mapping is not read; the caller falls
+    /// back to the file); one that was read must repeat its odd slot
+    /// (<see cref="Safety.SrdoRecords.IsInvertedSlotOf"/>, the rule the file path and the device's
+    /// own validator apply), else it is a <see cref="LiveMappingRead.Refusal"/>.
+    /// </summary>
+    private static async Task<LiveMappingRead> TryReadLiveMappingCoreAsync(ushort mapIndex, int stride,
+        int maxCount, LiveUpload upload, CancellationToken cancellationToken)
     {
         byte[] countBytes;
         try
         {
-            countBytes = await SdoUploadAsync(peerNodeId, mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
+            countBytes = await upload(mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
-            return null;
+            return default;
         }
-        if (countBytes.Length < 1) return null;
+        // Exact widths: sub-index 00h is UNSIGNED8, a slot UNSIGNED32. A value of another length
+        // is not cut to its low bytes; the live mapping counts as not read.
+        if (countBytes.Length != 1) return default;
         int count = countBytes[0];
-        if (count > PdoMapping.MaxEntries) return null;
+        if (count > maxCount || (stride == 2 && (count & 1) != 0)) return default;
 
-        var entries = new PdoMappingEntry[count];
+        int declared = (count + stride - 1) / stride;
+        var entries = new List<PdoMappingEntry>(declared);
         int total = 0;
-        for (byte s = 1; s <= count; s++)
+        for (int s = 1; s <= count; s += stride)
         {
             byte[] raw;
             try
             {
-                raw = await SdoUploadAsync(peerNodeId, mapIndex, s, cancellationToken).ConfigureAwait(false);
+                raw = await upload(mapIndex, (byte)s, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex))
             {
-                return null;
+                return new LiveMappingRead(null, declared, ex is PeerSdoAccessException);
             }
-            if (raw.Length < 4) return null;
+            if (raw.Length != 4) return default;
             uint word = (uint)(raw[0] | (raw[1] << 8) | (raw[2] << 16) | (raw[3] << 24));
-            if (word == 0) return null;
+            if (word == 0) return default;
             PdoMappingEntry entry;
             try
             {
@@ -287,13 +336,32 @@ internal sealed partial class CanOpenNode
             }
             catch (ArgumentOutOfRangeException)
             {
-                return null;
+                return default;
             }
             total += entry.ByteLength;
-            if (total > 8) return null;
-            entries[s - 1] = entry;
+            if (total > 8) return default;
+            entries.Add(entry);
+            if (stride == 2)
+            {
+                byte inv = (byte)(s + 1);
+                byte[] invRaw;
+                try
+                {
+                    invRaw = await upload(mapIndex, inv, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (IsLiveReadUnavailable(ex))
+                {
+                    // As for an odd slot: the live mapping is not read, the file decides.
+                    return new LiveMappingRead(null, declared, ex is PeerSdoAccessException);
+                }
+                if (invRaw.Length != 4) return default;
+                uint inverted = (uint)(invRaw[0] | (invRaw[1] << 8) | (invRaw[2] << 16) | (invRaw[3] << 24));
+                if (inverted == 0) return default;
+                if (!Safety.SrdoRecords.IsInvertedSlotOf(word, inverted))
+                    return new LiveMappingRead(null, declared, false, $"entry {inv} does not repeat entry {s} (CiA DSP 304 §8.4.2.2: the inverted object of the one before it)");
+            }
         }
-        return entries;
+        return new LiveMappingRead(entries.ToArray(), declared, false);
     }
 
     /// <summary>

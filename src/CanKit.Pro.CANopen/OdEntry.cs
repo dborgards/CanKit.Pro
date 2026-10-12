@@ -152,6 +152,10 @@ public sealed class OdEntry
 
 internal static class OdEntryLayout
 {
+    /// <summary>Whether <paramref name="type"/> has a fixed width (<see cref="FixedSize"/> &gt; 0);
+    /// the strings and <see cref="OdDataType.Domain"/> do not.</summary>
+    internal static bool HasFixedSize(OdDataType type) => FixedSize(type) > 0;
+
     internal static int FixedSize(OdDataType type) => type switch
     {
         OdDataType.Boolean => 1,

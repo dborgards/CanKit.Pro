@@ -11,6 +11,9 @@ public enum ForeignPdoKind
 
     /// <summary>The peer's RPDO. Its mapping record is <c>1600h</c> + <c>n</c> − 1.</summary>
     Rpdo = 1,
+
+    /// <summary>An SRDO (CiA DSP 304), decoded by ObserveForeignSrdoAsync; PdoNumber is the SRDO number.</summary>
+    Srdo = 2,
 }
 
 /// <summary>Where the mapping that split a foreign PDO came from.</summary>

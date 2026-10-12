@@ -343,7 +343,10 @@ public interface ICanOpenNode : IDisposable
     /// force block transfer (CiA 301 §7.2.4.3.15).
     /// (FR-CO-002 / FR-CO-003 / FR-CO-004). Refused locally with
     /// <see cref="PeerSdoAccessException"/> when the pair is not allowed for
-    /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.</summary>
+    /// <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.
+    /// One transfer per server is in flight at a time: with one in flight — a safety transaction
+    /// with that server counts as one for its whole length — the call fails with
+    /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
     Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex,
         SdoTransferMode mode = SdoTransferMode.Auto,
         CancellationToken cancellationToken = default);
@@ -365,7 +368,10 @@ public interface ICanOpenNode : IDisposable
     /// <see cref="SdoTransferMode.Block"/> to force block transfer below that threshold; the
     /// expedited/segmented split itself is dictated by CiA 301 and is not selectable.
     /// Refused locally with <see cref="PeerSdoAccessException"/> when the pair is not allowed
-    /// for <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.</summary>
+    /// for <paramref name="serverNodeId"/>; see <see cref="BindPeerDeviceDescription"/>.
+    /// One transfer per server is in flight at a time: with one in flight — a safety transaction
+    /// with that server counts as one for its whole length — the call fails with
+    /// <see cref="InvalidOperationException"/> before anything is sent.</summary>
     Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex,
         ReadOnlyMemory<byte> data,
         SdoTransferMode mode = SdoTransferMode.Auto,
