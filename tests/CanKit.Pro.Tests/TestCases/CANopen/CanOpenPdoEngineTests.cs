@@ -650,6 +650,53 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         payloads[2].Should().Equal(new byte[] { 0x07, 0x00 }, "the timer re-transmits the current value");
     }
 
+    // FR-CO-020, #292 — PdoMappingEntry is a struct, so default(PdoMappingEntry), or an entry
+    // built past the constructor, reaches PdoMapping.Add(entry) with a width the constructor
+    // refuses. The entry overload and the collection constructor apply the same rule, and the
+    // mapping is unchanged.
+    [Theory]
+    [InlineData((ushort)0x0000, (byte)0, (byte)0)]   // default(PdoMappingEntry)
+    [InlineData((ushort)0x2001, (byte)0, (byte)0)]
+    [InlineData((ushort)0x2001, (byte)0, (byte)12)]
+    [InlineData((ushort)0x2001, (byte)0, (byte)72)]
+    public void Mapping_Add_Refuses_An_Entry_Of_A_Width_The_Constructor_Would_Refuse(ushort index, byte subindex, byte bitLength)
+    {
+        var entry = index == 0 ? default : Safety.SafetyTypesTests.UncheckedEntry(index, subindex, bitLength);
+        entry.BitLength.Should().Be(bitLength);
+
+        var mapping = new PdoMapping().Add(0x2000, 0x00, 16);
+        var ex = Assert.Throws<ArgumentOutOfRangeException>(() => mapping.Add(entry));
+        ex.ParamName.Should().Be("entry");
+        mapping.Entries.Should().ContainSingle().Which.Index.Should().Be((ushort)0x2000, "nothing was added");
+        mapping.TotalBytes.Should().Be(2);
+
+        var fromCollection = Assert.Throws<ArgumentOutOfRangeException>(() => new PdoMapping(new[] { new PdoMappingEntry(0x2000, 0x00, 16), entry }));
+        fromCollection.ParamName.Should().Be("entries");
+    }
+
+    // FR-CO-020, #292 — the re-mapping procedure destroys the PDO first (§7.5.2.38 step 1), so a
+    // mapping that cannot be built must be refused before it, not by the record writes after it:
+    // the configured TPDO survives the attempt instead of being left destroyed.
+    [Fact]
+    public void A_Configured_Tpdo_Survives_An_Attempt_With_A_Zero_Width_Entry()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var device = CanOpen.OpenNode(busB, Device);
+        var od = device.ObjectDictionary;
+        od.AddU16(0x2000, 0x00, 0x1234);
+        od.AddU8(0x2001, 0x00, 0x5A);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2001, 0x00, 8));
+        (od.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.InvalidBit).Should().Be(0u);
+
+        var ex = Record.Exception(() => device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 16).Add(default(PdoMappingEntry))));
+
+        (od.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.InvalidBit).Should().Be(0u, "the TPDO still exists");
+        od.ReadUnsigned(0x1A00, 0x00).Should().Be(1u);
+        od.ReadUnsigned(0x1A00, 0x01).Should().Be(0x2001_0008u, "the mapping is the configured one");
+        ex.Should().BeOfType<ArgumentOutOfRangeException>();
+    }
+
     // FR-CO-016 — §7.5.2.37 sub-index 03h: "The value shall not be changed while the PDO exists
     // (bit 31 of sub-index 01h is set to 0b)". The event timer carries no such rule.
     [Fact]

@@ -96,7 +96,10 @@ Deliberate omissions, each checked against the norm text:
   item 10). A synchronous TPDO is transmitted at the SYNC and is never suppressed for a closed
   window, because there is no window.
 * **Bit-granular PDO mapping** — bit lengths must be multiples of 8. Over SDO another length is
-  rejected with `0607 0010h`; `PdoMappingEntry` refuses it in its constructor.
+  rejected with `0607 0010h`; `PdoMappingEntry` refuses it in its constructor, and
+  `PdoMapping.Add(entry)` and the collection constructor refuse an entry that never passed it —
+  `default(PdoMappingEntry)`, a struct with 0 bits — before anything reaches the node, so a
+  configured PDO is not destroyed by an attempt with such a mapping (#292).
 * **MPDO** (`sub0` = `FEh`/`FFh` of a mapping record) — rejected with `0609 0030h`, like every
   count above `40h`.
 * **SRDO mapping of objects without a fixed width** — a `VISIBLE_STRING`, `OCTET_STRING`,
