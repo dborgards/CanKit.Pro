@@ -291,6 +291,24 @@ has no commissioned node-id and may be bound to any server.
 `PeerSdoAccessException` (`PeerDescriptionLoaded` is true), including `1000h`, `1001h` and
 `1018h` when the file leaves them out. `UnbindPeerDeviceDescription` drops the binding.
 
+A bound description may be edited in place — `Objects` is the EdsDcfNet model, mutable — and
+the edit is seen from the next call that reads it. But nothing synchronizes those readers with
+the edit: the gate reads the description on every SDO call to that peer, the loader while a node
+is being opened from the same instance, `ObserveForeignPdoAsync` and `ObserveForeignSrdoAsync`
+for their file fallback, and a safety transaction for its one reading at the start. So edit a bound description
+only while no call that reads it is running — in practice, while this node is idle towards that
+peer. An edit during such a call is not supported, and what the call then sees is not specified:
+the EdsDcfNet dictionaries are not safe for a read concurrent with a write. A reader that
+enumerates — the loader, a safety transaction's reading — may fail with the dictionary's
+`InvalidOperationException`, reported as that call's own failure (a step-D verification not
+verified, with what that means for the boot — the slave is not started; a mandatory slave, or any
+under a simultaneous start, halts the boot, an optional one is skipped —
+[Verifying, and the boot-up](#verifying-and-the-boot-up)); a reader that looks objects up one at
+a time around its own awaits —
+the observers' file fallback, the gate's `Contains` — may answer from a description that is part
+old and part new, or report no match, with no error at all. None of this is detected (#296). An
+immutable description — edit, then bind again — is the planned shape for the next major (#299).
+
 One exception follows from CiA DSP 304 §8.4.2.2: `13FFh:00` is the number of SRDOs, so a file
 whose highest SRDO record is N implies the records of SRDOs 1..N, and a device that loads it
 provides one the file leaves out at its defaults, deleted. The gate lets through what the device
@@ -809,7 +827,7 @@ result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates
 every such write clears it; an abort before that — for example `0800 0022h` from an Operational
 peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
-One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also works from the peer description as it was when it started — the moment it owns the peer's channel, after any call it waited for: its pre-check and the gate of each of its transfers read a snapshot taken then — the declared pairs of the safety area 1300h–13FFh, the highest SRDO record, and the described entries of the mapped objects — not the bound instance, which is publicly mutable. Rebinding, unbinding or editing the bound description in place during it takes effect for the next call. The same holds for the configuration or expectation passed in: a copy taken at that moment is what is checked, written and compared, so an SRDO added to the caller's instance meanwhile is not part of the transaction.
+One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also works from the peer description as it was when it started — the moment it owns the peer's channel, after any call it waited for: its pre-check and the gate of each of its transfers read a snapshot taken then — the declared pairs of the safety area 1300h–13FFh, the highest SRDO record, and the described entries of the mapped objects — not the bound instance, which is publicly mutable. Rebinding, unbinding or editing the bound description in place during it takes effect for the next call — an edit landing while the snapshot is being taken is the one case the snapshot does not cover ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)). The same holds for the configuration or expectation passed in: a copy taken at that moment is what is checked, written and compared, so an SRDO added to the caller's instance meanwhile is not part of the transaction.
 
 ### Verifying, and the boot-up
 
