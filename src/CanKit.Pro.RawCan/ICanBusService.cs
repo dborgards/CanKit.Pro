@@ -183,6 +183,11 @@ namespace CanKit.Pro.RawCan
         /// <param name="cancellationToken">
         /// Caller-supplied cancellation; cancels the returned task per standard .NET convention,
         /// distinct from the domain-level <see cref="TxConfirmFailureReason.Timeout"/> outcome.
+        /// It is consulted immediately before the driver call — on the echo path inside the
+        /// send lock, after any wait for another send's driver call — so a token cancelled up to
+        /// that point abandons the send with <see cref="OperationCanceledException"/> and nothing
+        /// reaches the driver (#294). A frame the driver has been handed goes out; the CanKit
+        /// 0.5.6 adapters ignore the token inside their transmit.
         /// </param>
         Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
     }

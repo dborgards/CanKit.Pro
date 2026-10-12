@@ -367,6 +367,11 @@ namespace CanKit.Pro.RawCan
             // would bring back the hang this bound exists to remove (#202); the timed-out result
             // is what tells the caller the frame may or may not have gone out.
             using var transmitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // The caller's token, consulted immediately before the driver call (#294): a send
+            // cancelled up to here is abandoned and nothing reaches the driver. The v0.5.6
+            // adapters ignore the token inside TransmitAsync, so this is the last point at
+            // which a cancellation can still stop the frame.
+            cancellationToken.ThrowIfCancellationRequested();
             var transmit = _bus.TransmitAsync(detached, transmitCts.Token)
                 .ContinueWith(
                     static (completed, state) =>
@@ -472,6 +477,21 @@ namespace CanKit.Pro.RawCan
                     // The other end of the driver call, inside the lock: a caller's cutoff for
                     // what can still be a response to this frame (Codex on #147).
                     handoffStart = _hostTimestamp();
+                    // The caller's token, consulted inside the gate as the last step before the
+                    // driver call (#294): a send that waited for the gate behind another send's
+                    // Transmit and was cancelled meanwhile is abandoned here, and nothing reaches
+                    // the driver. Nothing of ours runs between this check and Transmit, so a
+                    // cancellation that still gets a frame out is one that landed during the
+                    // driver call itself. The entry is unlinked here, still inside the gate: the
+                    // catch below would do it only after the lock is released, and a
+                    // byte-identical send waiting for the gate could meanwhile register behind
+                    // this entry, transmit, and have its echo matched to the abandoned entry --
+                    // whose Tcs nobody completes -- instead of its own (Cursor on #301).
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        RemovePending(pending);
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
                     accepted = _bus.Transmit(in frame);
 
                     // Taken here, inside the lock and immediately after the driver call returns:

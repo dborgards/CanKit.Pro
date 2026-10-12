@@ -117,6 +117,13 @@ Concurrent, byte-identical sends are matched to their own confirmation in FIFO o
 cross-matched (FR-RAW-031). The per-call timeout is configurable (FR-RAW-034); disposing the
 service cancels any outstanding `SendConfirmedAsync` calls rather than leaving them to time out.
 
+The caller's cancellation token is consulted immediately before the driver call — on the echo
+path inside the send lock, so after any wait behind another send's driver call — and a token
+cancelled up to that point abandons the send with `OperationCanceledException`: nothing reaches
+the driver (#294). A frame the driver has been handed goes out; the CanKit 0.5.6 adapters ignore
+the token inside their transmit, so the driver call is where a cancellation stops being able to
+hold a frame back.
+
 A confirmation carries two host-monotonic readings that bracket the driver call, taken inside
 the service's send lock: `HostHandoffTimestamp` immediately before it and `HostTransmitTimestamp`
 immediately after. A response deadline starts at the second; whether a received frame can be a
