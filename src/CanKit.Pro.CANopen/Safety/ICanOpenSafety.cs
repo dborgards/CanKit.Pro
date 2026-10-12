@@ -137,7 +137,14 @@ public interface ICanOpenSafety
     /// judge: it holds the timestamps. Nothing is written to this node's dictionary.
     /// The live mapping is read in full whenever its count is: the peer-SDO gate lets through
     /// every slot of an SRDO record the bound file implies, declared or not. A record whose
-    /// COB-ID 1 word has a bit above bit 10 set, or a mapping with a dummy entry, is not decoded.</summary>
+    /// COB-ID 1 word has a bit above bit 10 set, or a mapping with a dummy entry, is not decoded.
+    /// The records searched are those <paramref name="peerDescription"/> implies: up to its
+    /// highest declared communication or mapping record, as the loader and the gate read it.
+    /// The live reads of one observation are one snapshot of the peer: the peer's SDO channel is
+    /// taken without waiting and held to the end, so a safety transaction that starts meanwhile
+    /// waits for it and another SDO call of this node to that peer is refused as in flight; a
+    /// channel busy at the start makes every live read of that observation "already in flight",
+    /// and the whole snapshot is the file's.</summary>
     Task<ForeignSrdoObserveResult> ObserveForeignSrdoAsync(byte peerNodeId, uint cobId1, ReadOnlyMemory<byte> frame1,
         ReadOnlyMemory<byte> frame2, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
         CancellationToken cancellationToken = default);

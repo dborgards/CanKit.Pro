@@ -4,13 +4,20 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Safety;
+using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
 /// <summary>Splitting a peer's SRDO pair (CiA DSP 304 V1.0 §8.1) with the rules of
-/// <see cref="ObserveForeignPdoAsync"/>: live record before file, nothing written here.</summary>
+/// <see cref="ObserveForeignPdoAsync"/>: live record before file, nothing written here. Unlike
+/// the PDO observer, the live reads of one observation run in the peer's SDO channel, held for
+/// the whole snapshot.</summary>
 internal sealed partial class CanOpenNode
 {
+    /// <summary>Test seam: awaited between the observer's COB-ID match and its direction and
+    /// mapping reads — the gap in which another caller to the peer could otherwise come in.</summary>
+    internal Func<Task>? AfterSrdoMatchForTests { get; set; }
+
     public async Task<ForeignSrdoObserveResult> ObserveForeignSrdoAsync(byte peerNodeId, uint cobId1, ReadOnlyMemory<byte> frame1,
         ReadOnlyMemory<byte> frame2, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
         CancellationToken cancellationToken = default)
@@ -29,17 +36,29 @@ internal sealed partial class CanOpenNode
         var second = frame2.ToArray();
         var gate = _foreignPdoObserve.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // The live snapshot — COB-ID, direction, mapping — is one state of the peer: the peer's
+        // SDO channel is taken here, without waiting, and held to the end, so a safety transaction
+        // that starts meanwhile waits (as it waits for any call in flight) instead of taking the
+        // channel between two of these uploads and turning the rest of the snapshot into file
+        // values. A channel busy at the start — a transaction, a call in flight — is the "already
+        // in flight" refusal every upload below meets, so the whole snapshot is the file's.
+        var channel = PeerSdoChannel(peerNodeId);
+        bool held = channel.Wait(0);
+        LiveUpload upload = held
+            ? (index, subindex, ct) => SdoUploadCoreAsync(peerNodeId, index, subindex, SdoTransferMode.Auto, ct)
+            : (_, _, _) => Task.FromException<byte[]>(InFlightRefusal(peerNodeId));
         try
         {
-            int? number = await MatchSrdoAsync(peerDescription, peerNodeId, cobId1, cancellationToken).ConfigureAwait(false);
+            int? number = await MatchSrdoAsync(peerDescription, peerNodeId, cobId1, upload, cancellationToken).ConfigureAwait(false);
             if (number is not { } n)
                 return new ForeignSrdoObserveResult(cobId1, null, "no SRDO communication record of the peer uses this COB-ID 1");
+            if (AfterSrdoMatchForTests is { } pause) await pause().ConfigureAwait(false);
             if (!SrdoFrames.IsInversePair(first, second))
                 return new ForeignSrdoObserveResult(cobId1, new ForeignPdoObservation(ForeignPdoKind.Srdo, n, decoded: false, origin: null, signalsWritten: 0,
                     "the second frame is not the bitwise inverse of the first with the same length (§8.1)"), null);
             PdoMappingEntry[] mapping;
             ForeignPdoMappingOrigin origin;
-            var read = await TryReadLiveMappingCoreAsync(peerNodeId, SrdoRecords.MapIndex(n), 2, SrdoRecords.MappingSubindices, cancellationToken)
+            var read = await TryReadLiveMappingCoreAsync(SrdoRecords.MapIndex(n), 2, SrdoRecords.MappingSubindices, upload, cancellationToken)
                 .ConfigureAwait(false);
             // The gate never refuses part of a live SRDO mapping: whenever it lets the count through,
             // it lets all 16 slots through (the implied SRDO records, CanOpenNode.PeerSdo.cs).
@@ -76,6 +95,7 @@ internal sealed partial class CanOpenNode
         }
         finally
         {
+            if (held) channel.Release();
             gate.Release();
         }
     }
@@ -86,7 +106,8 @@ internal sealed partial class CanOpenNode
     /// (live, or the file's when the upload fails) is not 1 or 2 does not match. The records
     /// searched are those the description implies (<see cref="DescribedSrdoCount"/>): a mapping
     /// record declares its communication record too, as the loader and the peer gate read it.</summary>
-    private async Task<int?> MatchSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, uint cobId1, CancellationToken cancellationToken)
+    private async Task<int?> MatchSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, uint cobId1, LiveUpload upload,
+        CancellationToken cancellationToken)
     {
         int count = DescribedSrdoCount(description);
         for (int n = 1; n <= count; n++)
@@ -95,7 +116,7 @@ internal sealed partial class CanOpenNode
             uint? liveWord = null;
             try
             {
-                var raw = await SdoUploadAsync(peerNodeId, comm, 0x05, cancellationToken).ConfigureAwait(false);
+                var raw = await upload(comm, 0x05, cancellationToken).ConfigureAwait(false);
                 if (raw.Length == 4) liveWord = ObjectDictionary.DecodeU32(raw); // UNSIGNED32, exactly: another length is not read
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }
@@ -107,7 +128,7 @@ internal sealed partial class CanOpenNode
             else if (!(TryDescribedObject(description, comm, out var record) && TryDescribedValue(record, 0x05, out var text)
                 && ParseDescribedUnsigned(text, peerNodeId) is { } word && SrdoCobId1(word) == cobId1))
                 continue;
-            if (!await IsExistingSrdoAsync(description, peerNodeId, comm, cancellationToken).ConfigureAwait(false)) continue;
+            if (!await IsExistingSrdoAsync(description, peerNodeId, comm, upload, cancellationToken).ConfigureAwait(false)) continue;
             return n;
         }
         return null;
@@ -117,11 +138,12 @@ internal sealed partial class CanOpenNode
     /// file's value when the upload fails) is 1 (tx) or 2 (rx), the values the device's validator
     /// accepts (CiA DSP 304 §8.4.2.2). 0 (deleted) and every reserved value 3..255 are no existing
     /// record. A direction neither yields is not taken for a deletion.</summary>
-    private async Task<bool> IsExistingSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, ushort comm, CancellationToken cancellationToken)
+    private static async Task<bool> IsExistingSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, ushort comm, LiveUpload upload,
+        CancellationToken cancellationToken)
     {
         try
         {
-            var raw = await SdoUploadAsync(peerNodeId, comm, 0x01, cancellationToken).ConfigureAwait(false);
+            var raw = await upload(comm, 0x01, cancellationToken).ConfigureAwait(false);
             if (raw.Length == 1) return IsSrdoDirection(raw[0]); // UNSIGNED8, exactly: another length is not read
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex)) { }

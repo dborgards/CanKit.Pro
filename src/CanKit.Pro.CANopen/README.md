@@ -268,7 +268,9 @@ is not built.
 One transfer per server is in flight at a time: a call to a server with a transfer in flight
 fails with `InvalidOperationException` ("already in flight") before anything is sent. A safety
 transaction with that server (`ConfigurePeerSafetyAsync`, `VerifyPeerSafetyConfigurationAsync`)
-counts as a transfer in flight for its whole length. Calls to different servers are independent.
+counts as a transfer in flight for its whole length, and so does the live snapshot of
+`ObserveForeignSrdoAsync` ([Observing a peer SRDO](#observing-a-peer-srdo)). Calls to different
+servers are independent.
 
 `SdoUploadAsync` and `SdoDownloadAsync` do not accept an arbitrary index. Before any frame is
 sent they check a peer EDS or DCF bound for that server:
@@ -869,6 +871,14 @@ declares: the peer-SDO gate lets through every slot of an SRDO record the bound 
 safety data is never split by a file's mapping while the device's own is readable. A mapping
 with a dummy entry and a frame shorter than the mapping are reported not decoded. Signals carry `ForeignPdoKind.Srdo` and the SRDO number. SRVT and SCT are
 not judged: the caller holds the timestamps.
+
+The live reads of one observation — COB-ID, direction, mapping — are one snapshot of the peer:
+the observer takes the peer's SDO channel, without waiting, and holds it to the end, so a safety
+transaction that starts meanwhile waits for it (as it waits for any call in flight) and another
+SDO call of this node to that peer is refused as in flight. A channel busy at the start — a
+transaction, a call in flight — makes every live read of that observation "already in flight",
+so the whole snapshot is the file's; the live COB-ID of one configuration is never combined with
+the file's mapping of another.
 
 ### What this is not
 

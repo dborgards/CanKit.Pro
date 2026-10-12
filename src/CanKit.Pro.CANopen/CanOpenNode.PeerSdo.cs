@@ -34,13 +34,13 @@ internal sealed partial class CanOpenNode
     /// for its next one.</summary>
     private static Task<T> InPeerSdoChannelAsync<T>(byte serverNodeId, SemaphoreSlim channel, Func<Action, Task<T>> transfer)
     {
-        if (!channel.Wait(0))
-        {
-            return Task.FromException<T>(new InvalidOperationException(
-                $"An SDO transfer with server 0x{serverNodeId:X2} is already in flight."));
-        }
+        if (!channel.Wait(0)) return Task.FromException<T>(InFlightRefusal(serverNodeId));
         return StartHoldingChannel(channel, transfer);
     }
+
+    /// <summary>The refusal of a call that found the peer's SDO channel busy.</summary>
+    private static InvalidOperationException InFlightRefusal(byte serverNodeId)
+        => new($"An SDO transfer with server 0x{serverNodeId:X2} is already in flight.");
 
     /// <summary>Starts <paramref name="transfer"/> with the channel held; the release it is given
     /// runs once, whether the transfer ends or fails to start.</summary>

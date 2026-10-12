@@ -250,8 +250,14 @@ internal sealed partial class CanOpenNode
     /// </summary>
     private async Task<PdoMappingEntry[]?> TryReadLiveMappingAsync(byte peerNodeId, ushort mapIndex,
         CancellationToken cancellationToken)
-        => (await TryReadLiveMappingCoreAsync(peerNodeId, mapIndex, 1, PdoMapping.MaxEntries, cancellationToken)
+        => (await TryReadLiveMappingCoreAsync(mapIndex, 1, PdoMapping.MaxEntries,
+                (index, subindex, ct) => SdoUploadAsync(peerNodeId, index, subindex, ct), cancellationToken)
             .ConfigureAwait(false)).Entries;
+
+    /// <summary>One upload of a live record: the public call (a PDO observer, which takes the
+    /// peer's SDO channel per upload) or the transfer in a channel the caller holds (the SRDO
+    /// observer, <see cref="ObserveForeignSrdoAsync"/>).</summary>
+    private delegate Task<byte[]> LiveUpload(ushort index, byte subindex, CancellationToken cancellationToken);
 
     /// <summary>What <see cref="TryReadLiveMappingCoreAsync"/> found. <see cref="Entries"/> is null
     /// when the live record is unavailable or malformed; <see cref="GateRefusedAfterCount"/> is
@@ -288,13 +294,13 @@ internal sealed partial class CanOpenNode
     /// (<see cref="Safety.SrdoRecords.IsInvertedSlotOf"/>, the rule the file path and the device's
     /// own validator apply), else it is a <see cref="LiveMappingRead.Refusal"/>.
     /// </summary>
-    private async Task<LiveMappingRead> TryReadLiveMappingCoreAsync(byte peerNodeId, ushort mapIndex, int stride,
-        int maxCount, CancellationToken cancellationToken)
+    private static async Task<LiveMappingRead> TryReadLiveMappingCoreAsync(ushort mapIndex, int stride,
+        int maxCount, LiveUpload upload, CancellationToken cancellationToken)
     {
         byte[] countBytes;
         try
         {
-            countBytes = await SdoUploadAsync(peerNodeId, mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
+            countBytes = await upload(mapIndex, 0x00, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
@@ -314,7 +320,7 @@ internal sealed partial class CanOpenNode
             byte[] raw;
             try
             {
-                raw = await SdoUploadAsync(peerNodeId, mapIndex, (byte)s, cancellationToken).ConfigureAwait(false);
+                raw = await upload(mapIndex, (byte)s, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (IsLiveReadUnavailable(ex))
             {
@@ -341,7 +347,7 @@ internal sealed partial class CanOpenNode
                 byte[] invRaw;
                 try
                 {
-                    invRaw = await SdoUploadAsync(peerNodeId, mapIndex, inv, cancellationToken).ConfigureAwait(false);
+                    invRaw = await upload(mapIndex, inv, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (IsLiveReadUnavailable(ex))
                 {

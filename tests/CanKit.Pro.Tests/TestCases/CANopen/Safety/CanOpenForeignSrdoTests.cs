@@ -507,6 +507,44 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001);
     }
 
+    /// <summary>The live snapshot is one state of the peer: the observer holds the peer's SDO
+    /// channel from the COB-ID read to the last mapping slot, so a safety transaction that starts
+    /// in between waits for it (as it waits for any call in flight) instead of taking the channel
+    /// and turning the rest of the snapshot into file values — the live COB-ID of one
+    /// configuration combined with the file's mapping of another. The device's live mapping
+    /// (2002h) differs from the file's (2000h, 2001h), so which one decoded is visible.</summary>
+    [Fact]
+    public async Task A_Safety_Transaction_Starting_Mid_Snapshot_Waits_For_The_Observer()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        using var device = OpenDeviceDivergingFromFile(busB);
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        Task<PeerSafetyResult>? configure = null;
+        master.AfterSrdoMatchForTests = () =>
+        {
+            // Between the observer's COB-ID read and its direction and mapping reads.
+            configure = master.Safety().ConfigurePeerSafetyAsync(Device, configuration);
+            configure.IsCompleted.Should().BeFalse();
+            return Task.CompletedTask;
+        };
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x111,
+            new byte[] { 0x78, 0x56, 0x34, 0x12 }, new byte[] { 0x87, 0xA9, 0xCB, 0xED }, PeerFile(), sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation.Should().NotBeNull(result.Reason);
+        result.Observation!.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping, "the transaction waited; the snapshot stayed live");
+        sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2002);
+        configure.Should().NotBeNull();
+        (await configure!.WithTimeoutAsync(ShortTimeout)).Succeeded.Should().BeTrue();
+        device.ObjectDictionary.ReadUnsigned(0x1301, 5).Should().Be(0x109u, "the transaction ran after the observer released the channel");
+    }
+
     /// <summary>The file fallback applies the rule the device's own loader applies (§8.4.2.2,
     /// 1381h–13C0h: the even sub-index carries the inverted object of the odd one before it):
     /// a slot that is missing, or that does not repeat its plain slot, is no mapping to decode
