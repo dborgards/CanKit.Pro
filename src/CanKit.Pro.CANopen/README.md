@@ -269,6 +269,7 @@ One transfer per server is in flight at a time: a call to a server with a transf
 fails with `InvalidOperationException` ("already in flight") before anything is sent. A safety
 transaction with that server (`ConfigurePeerSafetyAsync`, `VerifyPeerSafetyConfigurationAsync`)
 counts as a transfer in flight for its whole length, and so does the live snapshot of
+`ObserveForeignPdoAsync` ([Observing a peer PDO](#observing-a-peer-pdo)) and of
 `ObserveForeignSrdoAsync` ([Observing a peer SRDO](#observing-a-peer-srdo)). Calls to different
 servers are independent.
 
@@ -335,8 +336,7 @@ is still not applied when it arrives.
 The COB-ID is read live from `1400h:01` / `1800h:01`. A word that comes back is used ahead of the
 peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID the file does
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
-by the peer-SDO gate, finds the peer's SDO channel busy (another SDO call of this node, or a
-safety transaction, with that peer — the observer does not wait for it), or does not return a word.
+by the peer-SDO gate, or does not return a word.
 
 The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
 the peer description bound for that node applies. A read that aborts, times out, is refused by
@@ -347,6 +347,15 @@ to its low bytes. The SRDO observer reads its live mapping the same way. Observa
 restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
 A payload shorter than the mapping writes nothing; a dummy entry `0002h`–`0007h` consumes its
 bytes and writes no signal.
+
+The live reads of one observation — COB-IDs, mapping — are one snapshot of the peer: the observer
+takes the peer's SDO channel, without waiting, and holds it to the end, so a safety transaction
+that starts meanwhile waits for it (as it waits for any call in flight) and another SDO call of
+this node to that peer is refused as in flight ([SDO client and a peer's device
+description](#sdo-client-and-a-peers-device-description)). A channel busy at the start — a call
+in flight, a transaction — makes every live read of that observation "already in flight", so the
+whole snapshot is the file's; a live COB-ID is never combined with the file's mapping because a
+caller came in between (#295).
 
 ## Discovery
 

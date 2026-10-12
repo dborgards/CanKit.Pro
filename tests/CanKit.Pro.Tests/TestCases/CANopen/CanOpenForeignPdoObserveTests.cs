@@ -920,6 +920,50 @@ PDOMapping=0
         await wait.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    /// <summary>#295: the live reads of one observation are one snapshot of the peer. A public
+    /// SDO call of this node to the peer that cuts in between the COB-ID match and the mapping
+    /// read is refused as in flight — the observer holds the peer's SDO channel for the whole
+    /// snapshot — instead of taking the channel and turning the mapping into the file's, which
+    /// would combine a live COB-ID with the file's mapping.</summary>
+    [Fact]
+    public async Task A_call_cutting_in_mid_snapshot_is_refused_and_the_snapshot_stays_live()
+    {
+        var session = NewSession();
+        using var responder = Open(session, 0);
+        using var toolBus = Open(session, 1);
+        using var tool = CanOpen.OpenNode(toolBus, Tool, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(2) });
+        var file = PeerFile();
+        tool.BindPeerDeviceDescription(Peer, file);
+        using var server = new ScriptedUploadServer(responder, Peer, (index, sub) =>
+        {
+            if (index is >= 0x1400 and <= 0x1403 or >= 0x1800 and <= 0x1803)
+                return index == 0x1800 && sub == 1 ? U32(Tpdo1) : null;
+            if (index != 0x1A00) return null;
+            return sub == 0 ? new byte[] { 1 } : U32(0x20010008);
+        }, suppress: (index, _) => index == 0x1000); // a call that gets through would stay in flight
+
+        Task<byte[]>? cutIn = null;
+        ((CanOpenNode)tool).AfterPdoMatchForTests = () =>
+        {
+            // Between the observer's COB-ID reads and its mapping reads.
+            cutIn = tool.SdoUploadAsync(Peer, 0x1000, 0x00);
+            return Task.CompletedTask;
+        };
+        var sink = new ListSink();
+        var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, sink)
+            .WithTimeoutAsync(ShortTimeout);
+
+        result.Observations.Should().ContainSingle();
+        result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping,
+            "the observer held the channel; the call cutting in did not take it");
+        sink.Signals.Should().ContainSingle();
+        sink.Signals[0].Index.Should().Be(0x2001);
+        cutIn.Should().NotBeNull();
+        var refused = await Assert.ThrowsAsync<InvalidOperationException>(() => cutIn!.WithTimeoutAsync(ShortTimeout));
+        refused.Message.Should().Contain("already in flight");
+        ((CanOpenNode)tool).PeerSdoChannelIsFreeForTests(Peer).Should().BeTrue("the observer released the channel");
+    }
+
     [Fact]
     public async Task Observe_rejects_a_missing_file_a_missing_sink_and_a_payload_that_is_not_a_PDO()
     {

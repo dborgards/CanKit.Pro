@@ -20,10 +20,13 @@ namespace CanKit.Pro.CANopen;
 /// <remarks>
 /// The COB-ID is read live from <c>1400h:01</c> / <c>1800h:01</c>. The mapping is read live from
 /// <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c>. A live value is used ahead of the file.
-/// The file is used when that upload aborts, times out, is refused by the peer-SDO gate, finds
-/// another SDO already in flight for the server, or does not come back as a usable value.
-/// Observations of one peer run one at a time, so two of them do not trip that in-flight limit
-/// on each other. A CAN-ID CiA 301 §7.3.5 restricts is not a match.
+/// The file is used when that upload aborts, times out, is refused by the peer-SDO gate, or does
+/// not come back as a usable value. The live reads of one observation are one snapshot of the
+/// peer: the observer takes the peer's SDO channel without waiting and holds it to the end, so a
+/// busy channel at the start — a call in flight, a safety transaction — makes the whole snapshot
+/// the file's, and a caller arriving meanwhile is refused as in flight (a safety transaction
+/// waits). Observations of one peer run one at a time, so two of them do not trip that in-flight
+/// limit on each other. A CAN-ID CiA 301 §7.3.5 restricts is not a match.
 /// </remarks>
 internal sealed partial class CanOpenNode
 {
@@ -31,6 +34,10 @@ internal sealed partial class CanOpenNode
     /// server; queueing here lets a second <see cref="ObserveForeignPdoAsync"/> wait instead of
     /// failing with <see cref="InvalidOperationException"/>.</summary>
     private readonly ConcurrentDictionary<byte, SemaphoreSlim> _foreignPdoObserve = new();
+
+    /// <summary>Test seam: awaited between the observer's COB-ID match and its mapping reads —
+    /// the gap in which another caller to the peer could otherwise come in.</summary>
+    internal Func<Task>? AfterPdoMatchForTests { get; set; }
 
     /// <inheritdoc />
     public async Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId,
@@ -56,33 +63,46 @@ internal sealed partial class CanOpenNode
 
         var gate = _foreignPdoObserve.GetOrAdd(peerNodeId, static _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // The live snapshot — COB-IDs, mapping — is one state of the peer: the peer's SDO channel
+        // is taken here, without waiting, and held to the end, so a caller that arrives meanwhile
+        // is refused as in flight (a safety transaction waits, as for any call in flight) instead
+        // of taking the channel between two of these uploads and turning the rest of the snapshot
+        // into file values. A channel busy at the start is the "already in flight" refusal every
+        // upload below meets, so the whole snapshot is the file's (#295).
+        var channel = PeerSdoChannel(peerNodeId);
+        bool held = channel.Wait(0);
+        LiveUpload upload = held
+            ? (index, subindex, ct) => SdoUploadCoreAsync(peerNodeId, index, subindex, SdoTransferMode.Auto, ct)
+            : (_, _, _) => Task.FromException<byte[]>(InFlightRefusal(peerNodeId));
         try
         {
-            return await ObserveForeignPdoCoreAsync(peerNodeId, cobId, payloadCopy, peerDescription, sink, cancellationToken)
+            return await ObserveForeignPdoCoreAsync(peerNodeId, cobId, payloadCopy, peerDescription, sink, upload, cancellationToken)
                 .ConfigureAwait(false);
         }
         finally
         {
+            if (held) channel.Release();
             gate.Release();
         }
     }
 
     private async Task<ForeignPdoObserveResult> ObserveForeignPdoCoreAsync(byte peerNodeId, uint cobId,
         ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,
-        CancellationToken cancellationToken)
+        LiveUpload upload, CancellationToken cancellationToken)
     {
-        var matches = await MatchPdosAsync(peerDescription, peerNodeId, cobId, cancellationToken)
+        var matches = await MatchPdosAsync(peerDescription, peerNodeId, cobId, upload, cancellationToken)
             .ConfigureAwait(false);
         if (matches.Count == 0)
         {
             return new ForeignPdoObserveResult(cobId, Array.Empty<ForeignPdoObservation>(),
                 "no PDO communication record uses this COB-ID");
         }
+        if (AfterPdoMatchForTests is { } pause) await pause().ConfigureAwait(false);
 
         var observations = new ForeignPdoObservation[matches.Count];
         for (int i = 0; i < matches.Count; i++)
         {
-            observations[i] = await DecodeOneAsync(peerNodeId, cobId, payload, peerDescription, matches[i], sink, cancellationToken)
+            observations[i] = await DecodeOneAsync(peerNodeId, cobId, payload, peerDescription, matches[i], sink, upload, cancellationToken)
                 .ConfigureAwait(false);
         }
         return new ForeignPdoObserveResult(cobId, observations, reason: null);
@@ -105,20 +125,20 @@ internal sealed partial class CanOpenNode
     /// <summary>TPDO 1..4, then RPDO 1..4, whose COB-ID equals <paramref name="cobId"/>. Each
     /// <c>1800h:01</c> / <c>1400h:01</c> is read from the device first. The file is used for a
     /// record only when that upload does not yield a value.</summary>
-    private async Task<List<DescribedPdo>> MatchPdosAsync(CanOpenDeviceDescription description, byte peerNodeId,
-        uint cobId, CancellationToken cancellationToken)
+    private static async Task<List<DescribedPdo>> MatchPdosAsync(CanOpenDeviceDescription description, byte peerNodeId,
+        uint cobId, LiveUpload upload, CancellationToken cancellationToken)
     {
         var matches = new List<DescribedPdo>(2);
         for (int n = 1; n <= Co.PdoCount; n++)
         {
             var comm = (ushort)(Co.TpdoComm + n - 1);
-            if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, cancellationToken).ConfigureAwait(false))
+            if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, upload, cancellationToken).ConfigureAwait(false))
                 matches.Add(new DescribedPdo(ForeignPdoKind.Tpdo, n, (ushort)(Co.TpdoMap + n - 1)));
         }
         for (int n = 1; n <= Co.PdoCount; n++)
         {
             var comm = (ushort)(Co.RpdoComm + n - 1);
-            if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, cancellationToken).ConfigureAwait(false))
+            if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, upload, cancellationToken).ConfigureAwait(false))
                 matches.Add(new DescribedPdo(ForeignPdoKind.Rpdo, n, (ushort)(Co.RpdoMap + n - 1)));
         }
         return matches;
@@ -127,10 +147,10 @@ internal sealed partial class CanOpenNode
     /// <summary>True when this communication record's COB-ID is <paramref name="cobId"/>. A live
     /// word that was read decides, including a PDO marked invalid. The file is asked only when
     /// the upload itself fails.</summary>
-    private async Task<bool> CommRecordMatchesAsync(CanOpenDeviceDescription description, byte peerNodeId,
-        ushort commIndex, uint cobId, CancellationToken cancellationToken)
+    private static async Task<bool> CommRecordMatchesAsync(CanOpenDeviceDescription description, byte peerNodeId,
+        ushort commIndex, uint cobId, LiveUpload upload, CancellationToken cancellationToken)
     {
-        var live = await TryReadLiveCobIdAsync(peerNodeId, commIndex, cancellationToken).ConfigureAwait(false);
+        var live = await TryReadLiveCobIdAsync(commIndex, upload, cancellationToken).ConfigureAwait(false);
         if (live.Read) return live.CanId == cobId;
         return DescribedCobId(description, peerNodeId, commIndex) == cobId;
     }
@@ -154,12 +174,12 @@ internal sealed partial class CanOpenNode
         public static LiveCobId FromWord(uint word) => new(true, UsableCanId(word));
     }
 
-    private async Task<LiveCobId> TryReadLiveCobIdAsync(byte peerNodeId, ushort commIndex, CancellationToken cancellationToken)
+    private static async Task<LiveCobId> TryReadLiveCobIdAsync(ushort commIndex, LiveUpload upload, CancellationToken cancellationToken)
     {
         byte[] raw;
         try
         {
-            raw = await SdoUploadAsync(peerNodeId, commIndex, 0x01, cancellationToken).ConfigureAwait(false);
+            raw = await upload(commIndex, 0x01, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsLiveReadUnavailable(ex))
         {
@@ -194,11 +214,11 @@ internal sealed partial class CanOpenNode
         return canId;
     }
 
-    private async Task<ForeignPdoObservation> DecodeOneAsync(byte peerNodeId, uint cobId,
+    private static async Task<ForeignPdoObservation> DecodeOneAsync(byte peerNodeId, uint cobId,
         ReadOnlyMemory<byte> payload, CanOpenDeviceDescription description, DescribedPdo pdo,
-        IForeignPdoSink sink, CancellationToken cancellationToken)
+        IForeignPdoSink sink, LiveUpload upload, CancellationToken cancellationToken)
     {
-        var live = await TryReadLiveMappingAsync(peerNodeId, pdo.MapIndex, cancellationToken).ConfigureAwait(false);
+        var live = await TryReadLiveMappingAsync(pdo.MapIndex, upload, cancellationToken).ConfigureAwait(false);
         PdoMappingEntry[] mapping;
         ForeignPdoMappingOrigin origin;
         if (live is { } liveEntries)
@@ -248,15 +268,14 @@ internal sealed partial class CanOpenNode
     /// byte-aligned mapping of at most 8 entries. An empty array is a live count of 0, which is a
     /// mapping and is not a reason to fall back.
     /// </summary>
-    private async Task<PdoMappingEntry[]?> TryReadLiveMappingAsync(byte peerNodeId, ushort mapIndex,
+    private static async Task<PdoMappingEntry[]?> TryReadLiveMappingAsync(ushort mapIndex, LiveUpload upload,
         CancellationToken cancellationToken)
-        => (await TryReadLiveMappingCoreAsync(mapIndex, 1, PdoMapping.MaxEntries,
-                (index, subindex, ct) => SdoUploadAsync(peerNodeId, index, subindex, ct), cancellationToken)
+        => (await TryReadLiveMappingCoreAsync(mapIndex, 1, PdoMapping.MaxEntries, upload, cancellationToken)
             .ConfigureAwait(false)).Entries;
 
-    /// <summary>One upload of a live record: the public call (a PDO observer, which takes the
-    /// peer's SDO channel per upload) or the transfer in a channel the caller holds (the SRDO
-    /// observer, <see cref="ObserveForeignSrdoAsync"/>).</summary>
+    /// <summary>One upload of a live record, in the peer's SDO channel the observer holds for its
+    /// whole snapshot (<see cref="ObserveForeignPdoAsync"/>, <see cref="ObserveForeignSrdoAsync"/>),
+    /// or the in-flight refusal when the channel was busy at the start.</summary>
     private delegate Task<byte[]> LiveUpload(ushort index, byte subindex, CancellationToken cancellationToken);
 
     /// <summary>What <see cref="TryReadLiveMappingCoreAsync"/> found. <see cref="Entries"/> is null
