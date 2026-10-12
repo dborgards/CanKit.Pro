@@ -299,7 +299,10 @@ public interface ICanOpenNode : IDisposable
     /// Binds the EDS or DCF of remote node <paramref name="nodeId"/>. Client SDO transfers to
     /// that node then proceed only for (index, sub-index) pairs the description declares
     /// (<see cref="CanOpenDeviceDescription.Contains"/>). Replaces a description already bound
-    /// for the same node-id. The description is read at the start of each transfer.
+    /// for the same node-id. The description is read at the start of each transfer, without
+    /// synchronization against an edit of the bound instance in place
+    /// (<see cref="CanOpenDeviceDescription.Objects"/>): edit it only while no call that reads
+    /// it is running, or bind another one.
     /// </summary>
     /// <exception cref="ArgumentException">
     /// <paramref name="description"/> is a DCF whose commissioned node-id is not

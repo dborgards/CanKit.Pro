@@ -45,7 +45,13 @@ public sealed class CanOpenDeviceDescription
     public DeviceConfigurationFile? Dcf { get; }
 
     /// <summary>The object dictionary the description declares (the EdsDcfNet model, not the
-    /// node's <see cref="CanKit.Pro.CANopen.ObjectDictionary"/>).</summary>
+    /// node's <see cref="CanKit.Pro.CANopen.ObjectDictionary"/>). Mutable: an edit in place is
+    /// seen from the next call that reads the description. Nothing synchronizes those readers —
+    /// the peer-SDO gate on every SDO call to the peer this description is bound for, the loader,
+    /// the foreign PDO and SRDO observers, a safety transaction's reading at its start — with an
+    /// edit, so edit only while no such call is running: a structural edit (an object or a
+    /// sub-object added or removed) during one fails that call with the dictionary's
+    /// <see cref="InvalidOperationException"/>, reported as that call's failure.</summary>
     public EdsDcfNet.Models.ObjectDictionary Objects => Eds?.ObjectDictionary ?? Dcf!.ObjectDictionary;
 
     /// <summary>The device information section of the description.</summary>
