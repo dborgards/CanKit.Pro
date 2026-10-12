@@ -482,10 +482,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // The Operational period a link on the chain belongs to, as a token: leaving Operational and
     // disposing cancel it (actor only). A link checks it before each of its two frames and hands
     // each frame over with it, so a link of an ended period starts no further send — including a
-    // frame whose thread had passed the check but whose send task had not started: the token is
-    // honoured until that task starts. A send task already running — waiting for the bus
-    // service's pending gate, say — still hands its frame to the driver, because the service does
-    // not check the token before the driver call (#294). §8.3.2.2 has no safety communication
+    // frame whose thread had passed the check but whose send had not reached the driver: the
+    // service consults the token immediately before its driver call, after any wait for its
+    // pending gate (#294). §8.3.2.2 has no safety communication
     // outside Operational. That covers the pairs queued behind a held one —
     // one per SRDO — and the inverted half of the held one: a consumer that times out on its SRVT
     // is safer than one that refreshes its SCT on a stale pair. Created with the period's first
@@ -500,8 +499,8 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // safety message); it goes out at once. It is sent only in Operational, so it is handed over
     // with the token of the Operational period, as an SRDO frame is, linked with the token of the
     // SendGlobalFailsafeCommandAsync call: leaving Operational, disposing or the caller cancels it,
-    // honoured until the send task starts. A send task already running still hands its frame to
-    // the driver (#294). The engine sends nothing else through Send: TrySendGfc, called only by
+    // honoured up to the service's driver call (#294). The engine sends nothing else through
+    // Send: TrySendGfc, called only by
     // SendGlobalFailsafeCommandAsync, is its one caller.
     void ISrdoEngineHost.Send(uint cobId, byte[] payload) => _gfcSend = SendGfcAsync(cobId, payload, CurrentSrdoSendPeriod(), _gfcCaller);
 

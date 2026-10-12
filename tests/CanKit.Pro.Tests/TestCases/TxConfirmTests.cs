@@ -245,6 +245,57 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
     }
 
+    // #294: the caller's token is consulted before the driver call. A token already cancelled
+    // when the call is made abandons the send on the approximated path: nothing is handed to the
+    // driver, and the call ends with OperationCanceledException rather than a confirmation.
+    [Fact]
+    public async Task A_Token_Cancelled_Before_The_Call_Abandons_The_Approximated_Send()
+    {
+        using var sender = ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        using var service = new CanBusService(sender);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x620, new byte[] { 1 }), ShortTimeout, cancelled.Token);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => send);
+        sender.TransmitCount.Should().Be(0, "a send cancelled before the driver call must not reach the driver");
+        sender.FirstAsyncTransmit.IsCompleted.Should().BeFalse("nor its asynchronous transmit");
+    }
+
+    // #294 on the echo path: the token is consulted inside the pending gate, immediately before
+    // Transmit, so a send that waited for the gate behind another send's driver call — and was
+    // cancelled meanwhile — is abandoned there instead of being transmitted after the wait.
+    [Fact]
+    public async Task A_Token_Cancelled_While_The_Echo_Path_Waits_On_The_Gate_Abandons_The_Send()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+
+        // One send parks inside Transmit, and so inside the pending gate.
+        using var stuckInTransmit = new ManualResetEventSlim(false);
+        using var reachedTransmit = new ManualResetEventSlim(false);
+        sender.OnTransmitting = f =>
+        {
+            if (f.ID != 0x630) return;
+            reachedTransmit.Set();
+            stuckInTransmit.Wait(TimeSpan.FromSeconds(10));
+        };
+        var holder = Task.Run(() => service.SendConfirmedAsync(CanFrame.Classic(0x630, new byte[] { 1 }), ShortTimeout));
+        reachedTransmit.Wait(ShortTimeout).Should().BeTrue("the first send must be parked in Transmit for this test to mean anything");
+
+        // The second send queues for the gate; its token is cancelled while it waits.
+        using var cancelSecond = new CancellationTokenSource();
+        var second = Task.Run(() => service.SendConfirmedAsync(CanFrame.Classic(0x631, new byte[] { 2 }), ShortTimeout, cancelSecond.Token));
+        await Task.Delay(50);
+        cancelSecond.Cancel();
+        stuckInTransmit.Set();
+
+        (await holder).Confirmed.Should().BeTrue();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second);
+        sender.TransmitCount.Should().Be(1, "the cancelled send must not reach the driver after its wait for the gate");
+    }
+
     // FR-RAW-031: the echo is matched on what identifies the frame, not on its ID alone. A
     // standard 0x100 and an extended 0x100 carrying the same payload are two different frames on
     // the wire; keyed on the ID alone they share one FIFO, so the extended frame's echo confirms

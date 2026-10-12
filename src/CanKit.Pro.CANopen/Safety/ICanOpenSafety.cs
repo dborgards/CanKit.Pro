@@ -65,9 +65,9 @@ public interface ICanOpenSafety
     /// its failure (on
     /// <c>BackgroundExceptionOccurred</c>, as for every frame), or when the send was cancelled.
     /// The send carries <paramref name="cancellationToken"/> linked with the token of the
-    /// Operational period: leaving Operational or disposing the node ends a send not yet started
-    /// quietly, the caller's cancellation ends it with <see cref="OperationCanceledException"/>.
-    /// A send task already running still hands its frame to the driver (#294).</summary>
+    /// Operational period: leaving Operational or disposing the node ends a send that has not
+    /// reached the bus service's driver call quietly, the caller's cancellation ends it with
+    /// <see cref="OperationCanceledException"/>; a frame the driver has been handed goes out (#294).</summary>
     /// <exception cref="InvalidOperationException">1300h is 0 or the node is not Operational.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
     /// cancelled before the send was confirmed; or the bus service was disposed under the send,

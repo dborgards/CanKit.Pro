@@ -706,10 +706,9 @@ drops the pending pair, and a pair already on the send chain starts no further s
 SRDO's pair queued behind the one in flight nor the inverted half of the one in flight (§8.3.2.2):
 a consumer that times out on its SRVT is safer than one that refreshes its SCT on a stale pair.
 Each frame is handed to the bus service with a cancellation token of its Operational period,
-which leaving Operational or disposing cancels; the token is honoured until the frame's send task
-starts. A send task already running still hands its frame to the driver, because the bus service
-does not check the token before the driver call (#294) — as the driver queue would on any
-controller. A send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
+which leaving Operational or disposing cancels; the token is honoured up to the bus service's
+driver call, including a send task already waiting there behind another send (#294). A frame the
+driver has been handed goes out — as the driver queue would on any controller. A send that fails or throws is reported on `BackgroundExceptionOccurred`; the cycle goes on and the
 SRDO stays valid. A mapped object that is gone, has no fixed width, or no longer has the width of
 its mapping entry stops the producer instead (§8.1.3.1): no pair padded or cut to fit goes out,
 the failure is reported on `BackgroundExceptionOccurred`, and the SRDO is

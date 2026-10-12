@@ -367,6 +367,11 @@ namespace CanKit.Pro.RawCan
             // would bring back the hang this bound exists to remove (#202); the timed-out result
             // is what tells the caller the frame may or may not have gone out.
             using var transmitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // The caller's token, consulted immediately before the driver call (#294): a send
+            // cancelled up to here is abandoned and nothing reaches the driver. The v0.5.6
+            // adapters ignore the token inside TransmitAsync, so this is the last point at
+            // which a cancellation can still stop the frame.
+            cancellationToken.ThrowIfCancellationRequested();
             var transmit = _bus.TransmitAsync(detached, transmitCts.Token)
                 .ContinueWith(
                     static (completed, state) =>
@@ -467,6 +472,12 @@ namespace CanKit.Pro.RawCan
                 {
                     if (_pendingDisposed)
                         throw new ObjectDisposedException(nameof(CanBusService));
+
+                    // The caller's token, consulted inside the gate and immediately before the
+                    // driver call (#294): a send that waited for the gate behind another send's
+                    // Transmit and was cancelled meanwhile is abandoned here, before it is
+                    // registered and before anything reaches the driver.
+                    cancellationToken.ThrowIfCancellationRequested();
 
                     RegisterPending(pending);
                     // The other end of the driver call, inside the lock: a caller's cutoff for
