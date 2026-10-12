@@ -816,8 +816,10 @@ least one SRDO is a safety slave; an EDS carries no parameter values and never m
 NMT Start the master verifies the slave against its DCF — the expectation is taken from the
 description bound at the moment the verification owns the slave's SDO channel, the moment its own
 snapshot is taken ([Configuring a peer](#configuring-a-peer)), so a rebind or an edit while it
-waits for a call in flight is compared, not a stale reading; no safety DCF bound at that moment
-means nothing to verify, and the slave is started as any other:
+waits for a call in flight is compared, not a stale reading; the expectation and the gate of the
+verification's transfers come from one reading of that description. No safety DCF bound at that
+moment means nothing to verify — no verification is recorded, and the boot looks again: a DCF
+bound since is verified, none means the slave is started as any other:
 
 * verified — the slave is started as any other;
 * not verified (a difference, or an upload that failed; an exception is also reported on

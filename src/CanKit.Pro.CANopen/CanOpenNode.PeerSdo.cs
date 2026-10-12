@@ -169,31 +169,31 @@ internal sealed partial class CanOpenNode
     /// What a safety transaction reads from the peer's description, taken once at its start: the
     /// bound instance is publicly mutable (<see cref="CanOpenDeviceDescription.Objects"/>), and a
     /// rebind, an unbind or an edit in place during the transaction takes effect for the next
-    /// call, not half-way through this one. Only what the transaction reads is kept, not a clone of
-    /// the description: the declared pairs of the safety area 1300h–13FFh (the only objects its
-    /// transfers touch), the highest SRDO record the file declares (the implied records), and the
-    /// described entries the pre-check reads (the mapped objects of a configuration).
+    /// call, not half-way through this one. Built from one reading of the description
+    /// (<see cref="DescribedObjects"/>, the same one an expectation derived from the description
+    /// is built from); only what the transaction reads is kept: the declared pairs of the safety
+    /// area 1300h–13FFh (the only objects its transfers touch), the highest SRDO record the file
+    /// declares (the implied records), and the described entries the pre-check reads (the mapped
+    /// objects of a configuration).
     /// </summary>
     private sealed class PeerDescriptionBinding
     {
         private readonly HashSet<(ushort, byte)> _safetyPairs = new();
         private readonly Dictionary<(ushort, byte), DescribedEntry> _mapped = new();
 
-        public PeerDescriptionBinding(CanOpenDeviceDescription? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects)
+        public PeerDescriptionBinding(DescribedObjects? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects)
         {
             IsBound = description is not null;
             if (description is null) return;
-            foreach (var pair in description.Objects.Objects)
+            foreach (var (index, entries) in description.Ordered(static i => i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum))
             {
-                if (pair.Key is < SrdoRecords.GfcParameter or > SrdoRecords.Checksum) continue;
-                if (pair.Value.SubObjects.Count == 0) _safetyPairs.Add((pair.Key, 0));
-                else foreach (var sub in pair.Value.SubObjects.Keys) _safetyPairs.Add((pair.Key, sub));
+                foreach (var entry in entries) _safetyPairs.Add((index, entry.Subindex));
             }
-            DescribedSrdoCount = CanOpenNode.DescribedSrdoCount(description);
+            DescribedSrdoCount = description.SrdoCount;
             foreach (var (index, subindex) in mappedObjects)
             {
-                if (!TryDescribedObject(description, index, out var obj)) continue;
-                foreach (var entry in EntriesOf(obj))
+                if (!description.TryGet(index, out var entries)) continue;
+                foreach (var entry in entries)
                     if (entry.Subindex == subindex) { _mapped[(index, subindex)] = entry; break; }
             }
         }
@@ -214,8 +214,12 @@ internal sealed partial class CanOpenNode
     private CanOpenDeviceDescription? BoundPeerDescription(byte peerNodeId)
         => _peerDescriptions.TryGetValue(peerNodeId, out var description) ? description : null;
 
+    /// <summary>One reading of the description bound for the peer at this moment, or null.</summary>
+    private DescribedObjects? CaptureBoundPeerDescription(byte peerNodeId)
+        => BoundPeerDescription(peerNodeId) is { } description ? DescribedObjects.Capture(description) : null;
+
     private PeerDescriptionBinding CapturePeerDescription(byte peerNodeId, PeerSafetyConfiguration? configuration = null)
-        => new(BoundPeerDescription(peerNodeId),
+        => new(CaptureBoundPeerDescription(peerNodeId),
             configuration is null
                 ? Array.Empty<(ushort, byte)>()
                 : configuration.Srdos.Values.SelectMany(s => s.Mapping.Entries).Select(e => (e.Index, e.Subindex)));

@@ -50,7 +50,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     private void PopulateSafetyObjects() => PopulateSafetyObjects(_od, _nodeId, _srdoCount, _options.WritableCommunicationParameters);
 
     /// <summary>Static, as every rule of this file down to the mapping entry, so that
-    /// <see cref="LoadDescribedSafetyObjects"/> runs the same code over a dictionary of its own.</summary>
+    /// <see cref="LoadDescribedSafetyObjects(CanOpenDeviceDescription, byte)"/> runs the same code over a dictionary of its own.</summary>
     private static void PopulateSafetyObjects(ObjectDictionary od, byte nodeId, int srdoCount, bool writable)
     {
         var acc = writable ? OdAccess.ReadWrite : OdAccess.ReadOnly;

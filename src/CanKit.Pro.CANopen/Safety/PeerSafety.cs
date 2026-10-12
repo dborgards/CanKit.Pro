@@ -100,7 +100,13 @@ public sealed class PeerSafetyConfiguration
     public static PeerSafetyConfiguration FromDeviceDescription(CanOpenDeviceDescription description, byte nodeId)
     {
         if (description is null) throw new ArgumentNullException(nameof(description));
-        var od = CanOpenNode.LoadDescribedSafetyObjects(description, nodeId);
+        return FromSafetyObjects(CanOpenNode.LoadDescribedSafetyObjects(description, nodeId));
+    }
+
+    /// <summary>The expectation read off the safety objects the loader produced
+    /// (<c>CanOpenNode.LoadDescribedSafetyObjects</c>): 1300h and every SRDO that exists there.</summary>
+    internal static PeerSafetyConfiguration FromSafetyObjects(ObjectDictionary od)
+    {
         var configuration = new PeerSafetyConfiguration
         {
             GlobalFailsafeCommandEnabled = od.TryReadUnsigned(SrdoRecords.GfcParameter, 0x00, out var gfc) && gfc == 1,

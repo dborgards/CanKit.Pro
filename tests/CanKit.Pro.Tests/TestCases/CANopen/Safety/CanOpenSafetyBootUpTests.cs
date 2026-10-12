@@ -243,6 +243,50 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         slave.State.Should().Be(NmtState.Operational);
     }
 
+    /// <summary>A verification that finds no safety DCF when it owns the channel is no
+    /// verification: nothing is kept for the slave. Here it ends inside a held forced reset —
+    /// the DCF was unbound while the verification waited for the channel — and a DCF is bound
+    /// again during the hold; the resumed boot verifies the slave against it (step D's requests
+    /// on the wire) before the Start, instead of starting it on the skip.</summary>
+    [Fact]
+    public async Task A_Verification_That_Found_No_Dcf_Does_Not_Count_As_Verified_For_A_Dcf_Bound_Later()
+    {
+        var (rig, gate) = OpenGatedMaster();
+        using var _ = rig;
+        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true));
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        var signals = Record(rig.Node);
+        gate.PassResets = 1; // the cold boot's broadcast passes, the forced one is held
+        var channels = (System.Collections.Concurrent.ConcurrentDictionary<byte, SemaphoreSlim>)Field(rig.Node, "_peerSdoChannels");
+        var channel = channels.GetOrAdd(Slave, _ => new SemaphoreSlim(1, 1));
+        channel.Wait(); // a call to the slave in flight: the verification waits for the channel
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => SlaveFlag(rig.Node, "_slaveVerifying"), 2000, "the boot queued the verification");
+
+        rig.Peer.Transmit(CanFrame.Classic(unchecked((int)CanOpenCobId.FlyingMasterForce), Array.Empty<byte>(), isExtendedFrame: false));
+        await gate.ResetEntered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        rig.Node.UnbindPeerDeviceDescription(Slave);
+        channel.Release(); // the verification owns the channel now and finds no DCF
+        await SettleUntilAsync(rig, () => !SlaveFlag(rig.Node, "_slaveVerifying"), "the verification ended inside the hold");
+        await QuiesceAsync(rig.Witness, null);
+        SdoRequests(rig).Should().Be(0, "nothing to verify: no request was sent");
+        SlaveFlag(rig.Node, "_slaveVerified").Should().BeFalse("a skip is no verification");
+
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true)); // in the hold
+        gate.ReleaseReset(confirm: false); // the reset never left: the boot resumes
+        await SettleUntilAsync(rig, () => Logged(rig, NmtCommand.Start, Slave) || Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid), "the resumed boot decided");
+        var log = rig.Log.Snapshot();
+        int lastReply = log.FindLastIndex(f => f.Id == 0x580u + Slave);
+        lastReply.Should().BeGreaterThanOrEqualTo(0, "the resumed boot verified the slave against the DCF bound in the hold");
+        log.FindIndex(f => IsNmt(f, NmtCommand.Start, Slave)).Should().BeGreaterThan(lastReply, "step D before the Start");
+        Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid).Should().BeFalse();
+    }
+
     /// <summary>The simultaneous start keeps its moment — every mandatory slave seen, no
     /// verification running — but with a safety slave assigned it is one Start per slave: the
     /// non-safety slave that has been waiting is started at that moment, the safety slave only
@@ -460,7 +504,8 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         // last reply was handled before CancelBootUp ran, an actor-turn window the rig cannot place
         // a boot into. The post is therefore delivered here as the actor would have run it.
         var onSlaveVerified = typeof(CanOpenNode).GetMethod("OnSlaveVerified", BindingFlags.Instance | BindingFlags.NonPublic)!;
-        await rig.Node.PostToActorAsync(() => onSlaveVerified.Invoke(rig.Node, new object?[] { Slave, stale, true, null }));
+        var verified = Enum.Parse(typeof(CanOpenNode).GetNestedType("SlaveVerification", BindingFlags.NonPublic)!, "Verified");
+        await rig.Node.PostToActorAsync(() => onSlaveVerified.Invoke(rig.Node, new object?[] { Slave, stale, verified, null }));
         await QuiesceAsync(rig.Witness, null);
         rig.Log.Snapshot().Should().NotContain(f => IsNmt(f, NmtCommand.Start, Slave), "the old boot's result does not start the slave");
         SlaveFlag(rig.Node, "_slaveVerifying").Should().BeTrue("the newer verification is still the one that decides");

@@ -116,7 +116,7 @@ internal sealed partial class CanOpenNode
 
         // The same for every SRDO the description creates (direction not 0). Creating one is a
         // write to a checksummed record, so it clears 13FEh: that object is applied after it.
-        CreateDescribedSrdos(_od, description, pendingSrdoCreates, failedMappings, findings);
+        CreateDescribedSrdos(_od, description.Objects.Objects.ContainsKey, pendingSrdoCreates, failedMappings, findings);
         foreach (var obj in ordered.Where(o => PdoRecordRank(o.Index) >= ConfigurationValidRank))
         {
             loaded += ApplyDescribedObject(obj, description, findings, pendingPdoCreates, pendingSrdoCreates, failedMappings);
@@ -139,15 +139,14 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The deferred "create SRDO" step: the direction is written last, once the mapping
     /// is in, and only over a mapping record that exists and was applied as described.</summary>
-    private static void CreateDescribedSrdos(ObjectDictionary od, CanOpenDeviceDescription description,
+    private static void CreateDescribedSrdos(ObjectDictionary od, Func<ushort, bool> declares,
         List<(int Srdo, byte Direction, string Raw)> pendingSrdoCreates, HashSet<ushort> failedMappings, List<DeviceDescriptionFinding> findings)
     {
-        var objects = description.Objects.Objects;
         foreach (var (srdo, direction, raw) in pendingSrdoCreates)
         {
             var srdoComm = SrdoRecords.CommIndex(srdo);
             var srdoMap = SrdoRecords.MapIndex(srdo);
-            if (!objects.ContainsKey(srdoMap))
+            if (!declares(srdoMap))
             {
                 findings.Add(new DeviceDescriptionFinding(srdoComm, 0x01, DeviceDescriptionOutcome.Corrected,
                     $"the description declares no mapping record 0x{srdoMap:X4} for this SRDO; the SRDO stays deleted", raw));
@@ -179,9 +178,16 @@ internal sealed partial class CanOpenNode
     internal static ObjectDictionary LoadDescribedSafetyObjects(CanOpenDeviceDescription description, byte nodeId)
     {
         if (description is null) throw new ArgumentNullException(nameof(description));
+        return LoadDescribedSafetyObjects(DescribedObjects.Capture(description), nodeId);
+    }
+
+    /// <summary>The same over a snapshot taken once (<see cref="DescribedObjects.Capture"/>): what a
+    /// safety transaction derives its expectation from, next to its gate, from one reading.</summary>
+    private static ObjectDictionary LoadDescribedSafetyObjects(DescribedObjects objects, byte nodeId)
+    {
         CanOpenCobId.ValidateNodeId(nodeId);
         var od = new ObjectDictionary();
-        int srdoCount = DescribedSrdoCount(description);
+        int srdoCount = objects.SrdoCount;
         PopulateSafetyObjects(od, nodeId, srdoCount, writable: true);
         od.WriteValidator = (index, subindex, value) => IsManagedSafetyObject(srdoCount, index)
             ? ValidateSafetyWrite(od, srdoCount, operational: false, index, subindex, value)
@@ -189,25 +195,69 @@ internal sealed partial class CanOpenNode
         var findings = new List<DeviceDescriptionFinding>();
         var pendingSrdoCreates = new List<(int Srdo, byte Direction, string Raw)>();
         var failedMappings = new HashSet<ushort>();
-        var objects = description.Objects.Objects;
         // Rank 0 as in ApplyDeviceDescription: what a mapping names is data the loader declares
         // first (1000h–1FFFh cannot be mapped, so only the application area matters).
-        foreach (var obj in objects.Values.Where(o => o.Index >= 0x2000).OrderBy(o => o.Index))
+        foreach (var (index, entries) in objects.Ordered(i => i >= 0x2000))
         {
-            foreach (var entry in EntriesOf(obj)) DeclareDescribedEntry(od, nodeId, obj.Index, entry, findings);
+            foreach (var entry in entries) DeclareDescribedEntry(od, nodeId, index, entry, findings);
         }
         // 1300h is managed only on a node with SRDOs; without, it is data like any other object.
-        if (objects.TryGetValue(Co.GfcParameter, out var gfc))
+        if (objects.TryGet(Co.GfcParameter, out var gfc))
         {
-            if (srdoCount > 0) ApplyManagedVariable(od, nodeId, Co.GfcParameter, EntriesOf(gfc), findings);
-            else foreach (var entry in EntriesOf(gfc)) DeclareDescribedEntry(od, nodeId, Co.GfcParameter, entry, findings);
+            if (srdoCount > 0) ApplyManagedVariable(od, nodeId, Co.GfcParameter, gfc, findings);
+            else foreach (var entry in gfc) DeclareDescribedEntry(od, nodeId, Co.GfcParameter, entry, findings);
         }
-        foreach (var obj in objects.Values.Where(o => IsManagedSafetyObject(srdoCount, o.Index) && SrdoRecords.IsCommunicationRecord(o.Index)).OrderBy(o => o.Index))
-            ApplySrdoCommunicationRecord(od, nodeId, srdoCount, obj.Index, EntriesOf(obj), findings, pendingSrdoCreates);
-        foreach (var obj in objects.Values.Where(o => IsManagedSafetyObject(srdoCount, o.Index) && SrdoRecords.IsMappingRecord(o.Index)).OrderBy(o => o.Index))
-            ApplySrdoMappingRecord(od, nodeId, obj.Index, EntriesOf(obj), findings, failedMappings);
-        CreateDescribedSrdos(od, description, pendingSrdoCreates, failedMappings, findings);
+        foreach (var (index, entries) in objects.Ordered(i => IsManagedSafetyObject(srdoCount, i) && SrdoRecords.IsCommunicationRecord(i)))
+            ApplySrdoCommunicationRecord(od, nodeId, srdoCount, index, entries, findings, pendingSrdoCreates);
+        foreach (var (index, entries) in objects.Ordered(i => IsManagedSafetyObject(srdoCount, i) && SrdoRecords.IsMappingRecord(i)))
+            ApplySrdoMappingRecord(od, nodeId, index, entries, findings, failedMappings);
+        CreateDescribedSrdos(od, objects.Contains, pendingSrdoCreates, failedMappings, findings);
         return od;
+    }
+
+    /// <summary>A description's objects as read in one traversal, frozen: every index with its
+    /// entries (values, types, access, mappability). A safety transaction takes one at its start
+    /// and derives everything it reads from the description — the step-D expectation, the gate of
+    /// its transfers, the mapped objects of its pre-check — from it, so that an edit of the bound,
+    /// publicly mutable instance between two readings cannot give them different contents.</summary>
+    private sealed class DescribedObjects
+    {
+        private readonly Dictionary<ushort, List<DescribedEntry>> _objects;
+
+        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile)
+        {
+            _objects = objects;
+            IsConfigurationFile = isConfigurationFile;
+            int highest = 0;
+            foreach (var index in objects.Keys)
+            {
+                if (SrdoRecords.SrdoNumberOf(index) is { } n) highest = Math.Max(highest, n);
+            }
+            SrdoCount = highest;
+        }
+
+        public static DescribedObjects Capture(CanOpenDeviceDescription description)
+        {
+            var objects = new Dictionary<ushort, List<DescribedEntry>>();
+            foreach (var pair in description.Objects.Objects) objects[pair.Key] = EntriesOf(pair.Value);
+            return new DescribedObjects(objects, description.IsConfigurationFile);
+        }
+
+        /// <summary>Whether the description is a DCF (<see cref="CanOpenDeviceDescription.IsConfigurationFile"/>).</summary>
+        public bool IsConfigurationFile { get; }
+
+        /// <summary>The highest SRDO record declared (<see cref="DescribedSrdoCount"/>); 0 without one.</summary>
+        public int SrdoCount { get; }
+
+        public IEnumerable<ushort> Indices => _objects.Keys;
+
+        public bool Contains(ushort index) => _objects.ContainsKey(index);
+
+        public bool TryGet(ushort index, out List<DescribedEntry> entries) => _objects.TryGetValue(index, out entries!);
+
+        /// <summary>The objects whose index <paramref name="take"/> selects, in index order.</summary>
+        public IEnumerable<(ushort Index, List<DescribedEntry> Entries)> Ordered(Func<ushort, bool> take)
+            => _objects.Where(p => take(p.Key)).OrderBy(p => p.Key).Select(p => (p.Key, p.Value));
     }
 
     /// <summary>13FEh is applied after everything else: every validated write to a checksummed

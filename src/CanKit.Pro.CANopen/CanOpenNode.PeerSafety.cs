@@ -81,12 +81,13 @@ internal sealed partial class CanOpenNode
 
     /// <summary>The transaction of <see cref="VerifyPeerSafetyConfigurationAsync"/>, with the
     /// expectation taken from <paramref name="expectationOf"/> once the transaction owns the peer's
-    /// SDO channel — called with the description bound at that moment, the one the transaction's own
-    /// snapshot is taken from, so an expectation derived from the description (step D in the boot-up)
-    /// and the gate of every transfer read the same file. Null from <paramref name="expectationOf"/>
-    /// means there is nothing to verify, and the result is null: nothing was sent.</summary>
+    /// SDO channel — called with one reading of the description bound at that moment, the same
+    /// reading the gate of every transfer is built from, so an expectation derived from the
+    /// description (step D in the boot-up) and the gate cannot see different contents. Null from
+    /// <paramref name="expectationOf"/> means there is nothing to verify, and the result is null:
+    /// nothing was sent.</summary>
     private async Task<PeerSafetyResult?> VerifyPeerSafetyCoreAsync(byte peerNodeId,
-        Func<CanOpenDeviceDescription?, PeerSafetyConfiguration?> expectationOf, CancellationToken cancellationToken)
+        Func<DescribedObjects?, PeerSafetyConfiguration?> expectationOf, CancellationToken cancellationToken)
     {
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
@@ -95,7 +96,7 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var description = BoundPeerDescription(peerNodeId); // one description from the moment it owns the channel
+            var description = CaptureBoundPeerDescription(peerNodeId); // one reading, from the moment it owns the channel
             var expected = expectationOf(description);
             if (expected is null) return null;
             ValidateSafetyTimes(expected); // before the first frame

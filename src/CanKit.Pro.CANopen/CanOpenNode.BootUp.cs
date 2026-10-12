@@ -279,14 +279,20 @@ internal sealed partial class CanOpenNode
     /// whether a verification is queued; the verification itself takes its expectation again,
     /// from the description bound when it owns the peer's channel
     /// (<see cref="VerifyPeerSafetyCoreAsync"/>).</summary>
-    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId) => SafetyExpectationOf(BoundPeerDescription(nodeId), nodeId);
+    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId) => SafetyExpectationOf(CaptureBoundPeerDescription(nodeId), nodeId);
 
-    private static PeerSafetyConfiguration? SafetyExpectationOf(CanOpenDeviceDescription? description, byte nodeId)
+    private static PeerSafetyConfiguration? SafetyExpectationOf(DescribedObjects? description, byte nodeId)
     {
         if (description is null || !description.IsConfigurationFile) return null;
-        var expected = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
+        var expected = PeerSafetyConfiguration.FromSafetyObjects(LoadDescribedSafetyObjects(description, nodeId));
         return expected.DeclaresAnySrdo ? expected : null;
     }
+
+    /// <summary>What a slave's step D ended with. <see cref="NothingToVerify"/>: no safety DCF was
+    /// bound when the verification owned the slave's channel — neither verified nor failed, and
+    /// nothing is kept: <see cref="ConsiderStart"/> looks again, so a DCF bound since is verified
+    /// and none means a start as for a slave without SRDOs.</summary>
+    private enum SlaveVerification { Verified, Failed, NothingToVerify }
 
     /// <summary>Whether any assigned slave is a safety slave: then the master sends no Start to node 0.</summary>
     private bool HasAssignedSafetySlave()
@@ -312,26 +318,26 @@ internal sealed partial class CanOpenNode
         int generation = _bootGeneration;
         _ = Task.Run(async () =>
         {
-            bool verified = false;
+            var outcome = SlaveVerification.Failed;
             Exception? failure = null;
             try
             {
-                // The expectation is taken when the transaction owns the peer's channel, from the
-                // description bound then — the same file its transfers are gated against — not from
-                // the actor turn that queued this worker: a rebind or an edit in between would
-                // otherwise be compared against stale values. No safety DCF bound at that moment
-                // means nothing to verify: the slave is started as a slave without SRDOs is.
+                // The expectation is taken when the transaction owns the peer's channel, from one
+                // reading of the description bound then — the same reading its transfers are gated
+                // against — not from the actor turn that queued this worker: a rebind or an edit in
+                // between would otherwise be compared against stale values. No safety DCF bound at
+                // that moment means nothing to verify.
                 var result = await VerifyPeerSafetyCoreAsync(nodeId, description => SafetyExpectationOf(description, nodeId), token).ConfigureAwait(false);
-                verified = result is null || result.Succeeded;
+                outcome = result is null ? SlaveVerification.NothingToVerify : result.Succeeded ? SlaveVerification.Verified : SlaveVerification.Failed;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
             catch (Exception ex) { failure = ex; } // a cancellation of anything else is a failure
-            try { _actor.Post(() => OnSlaveVerified(nodeId, generation, verified, failure)); }
+            try { _actor.Post(() => OnSlaveVerified(nodeId, generation, outcome, failure)); }
             catch (ObjectDisposedException) { }
         });
     }
 
-    private void OnSlaveVerified(byte nodeId, int generation, bool verified, Exception? failure)
+    private void OnSlaveVerified(byte nodeId, int generation, SlaveVerification outcome, Exception? failure)
     {
         // Cancelled by a reset, a role change or dispose; or begun by a boot that has been
         // cancelled since, while a newer boot is verifying the same slave.
@@ -342,14 +348,19 @@ internal sealed partial class CanOpenNode
         {
             // A forced Reset Communication is held: nothing is started, reset or signalled in the
             // window, as for an announcement. A confirmed reset cancels this boot; an abandoned
-            // one resumes it, which starts a verified slave and verifies a failed one again.
-            if (verified) _slaveVerified[nodeId] = true;
+            // one resumes it, which starts a verified slave and verifies a failed one again — and
+            // looks again at one that had nothing to verify, so a DCF bound in the hold is verified.
+            if (outcome == SlaveVerification.Verified) _slaveVerified[nodeId] = true;
             return;
         }
         if (failure is not null) RaiseBackgroundException(failure);
-        if (verified)
+        if (outcome == SlaveVerification.Verified) _slaveVerified[nodeId] = true;
+        if (outcome != SlaveVerification.Failed)
         {
-            _slaveVerified[nodeId] = true;
+            // Verified, or nothing to verify: ConsiderStart starts a verified slave, and for one
+            // without a safety DCF at the verification looks again — a DCF bound since is
+            // verified now, none means a start as for a slave without SRDOs. Not latched: a skip
+            // is no verification.
             byte state = (byte)_od.ReadUnsigned(Co.RequestNmt, nodeId);
             ConsiderStart(nodeId, state);
             TryFinishBoot();
