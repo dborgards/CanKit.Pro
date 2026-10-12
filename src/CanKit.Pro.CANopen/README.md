@@ -297,12 +297,14 @@ the edit: the gate reads the description on every SDO call to that peer, the loa
 is being opened from the same instance, `ObserveForeignPdoAsync` and `ObserveForeignSrdoAsync`
 for their file fallback, and a safety transaction for its one reading at the start. So edit a bound description
 only while no call that reads it is running — in practice, while this node is idle towards that
-peer. A structural edit (an object or a sub-object added or removed) during such a call fails
-that call: the EdsDcfNet dictionary throws `InvalidOperationException` from its enumeration, and
-the call reports it as its own failure — an SDO call fails, a safety verification is not
-verified, a boot halts at that slave. A value edit at worst gives that call the old or the new
-value. The failure is loud, never a silent wrong reading that passes (#296). An immutable
-description — edit, then bind again — is the planned shape for the next major (#299).
+peer. An edit during such a call is not supported, and what the call then sees is not specified:
+the EdsDcfNet dictionaries are not safe for a read concurrent with a write. A reader that
+enumerates — the loader, a safety transaction's reading — may fail with the dictionary's
+`InvalidOperationException`, reported as that call's own failure (a verification not verified, a
+boot halted at that slave); a reader that looks objects up one at a time around its own awaits —
+the observers' file fallback, the gate's `Contains` — may answer from a description that is part
+old and part new, or report no match, with no error at all. None of this is detected (#296). An
+immutable description — edit, then bind again — is the planned shape for the next major (#299).
 
 One exception follows from CiA DSP 304 §8.4.2.2: `13FFh:00` is the number of SRDOs, so a file
 whose highest SRDO record is N implies the records of SRDOs 1..N, and a device that loads it

@@ -49,9 +49,12 @@ public sealed class CanOpenDeviceDescription
     /// seen from the next call that reads the description. Nothing synchronizes those readers —
     /// the peer-SDO gate on every SDO call to the peer this description is bound for, the loader,
     /// the foreign PDO and SRDO observers, a safety transaction's reading at its start — with an
-    /// edit, so edit only while no such call is running: a structural edit (an object or a
-    /// sub-object added or removed) during one fails that call with the dictionary's
-    /// <see cref="InvalidOperationException"/>, reported as that call's failure.</summary>
+    /// edit, so edit only while no such call is running. An edit during one is not supported
+    /// and what that call sees is not specified: the EdsDcfNet dictionaries are not safe for a
+    /// read concurrent with a write, so a reader that enumerates may fail with the dictionary's
+    /// <see cref="InvalidOperationException"/>, reported as that call's failure, and a reader
+    /// that looks objects up one at a time around its own awaits may answer from a description
+    /// that is part old and part new, or find no match, with no error.</summary>
     public EdsDcfNet.Models.ObjectDictionary Objects => Eds?.ObjectDictionary ?? Dcf!.ObjectDictionary;
 
     /// <summary>The device information section of the description.</summary>
