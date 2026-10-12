@@ -83,12 +83,12 @@ internal sealed partial class CanOpenNode
     /// <summary>The existing record n with live 1300h+n:05 == cobId1; the file's value when that
     /// upload fails. A deleted record keeps its COB-IDs and another SRDO may take them over — the
     /// device refuses only the ids of an existing SRDO (§8.4.2.2) — so a record whose direction
-    /// (live, or the file's when the upload fails) is not 1 or 2 does not match.</summary>
+    /// (live, or the file's when the upload fails) is not 1 or 2 does not match. The records
+    /// searched are those the description implies (<see cref="DescribedSrdoCount"/>): a mapping
+    /// record declares its communication record too, as the loader and the peer gate read it.</summary>
     private async Task<int?> MatchSrdoAsync(CanOpenDeviceDescription description, byte peerNodeId, uint cobId1, CancellationToken cancellationToken)
     {
-        int count = 0;
-        for (int n = 1; n <= SrdoRecords.MaxSrdoCount; n++)
-            if (description.Objects.Objects.ContainsKey(SrdoRecords.CommIndex(n))) count = n;
+        int count = DescribedSrdoCount(description);
         for (int n = 1; n <= count; n++)
         {
             var comm = SrdoRecords.CommIndex(n);

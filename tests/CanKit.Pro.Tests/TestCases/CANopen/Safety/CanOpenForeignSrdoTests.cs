@@ -72,6 +72,22 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         return CanOpenDeviceDescription.ParseDcf(text[..at] + (next < 0 ? "" : text[(next + 1)..]));
     }
 
+    /// <summary>The fixture without every section of the object <paramref name="index"/>: its
+    /// header and all its sub-index headers.</summary>
+    private static string TextWithoutObject(string text, string index)
+    {
+        foreach (var header in new[] { $"[{index}]", $"[{index}sub" })
+        {
+            int at;
+            while ((at = text.IndexOf(header, StringComparison.Ordinal)) >= 0)
+            {
+                int next = text.IndexOf("\n[", at + header.Length, StringComparison.Ordinal);
+                text = text[..at] + (next < 0 ? "" : text[(next + 1)..]);
+            }
+        }
+        return text;
+    }
+
     /// <summary>Every node of these tests runs on a virtual clock: an SDO client deadline runs on
     /// the node's time source, which only the test moves, so a transfer is not ended by a host
     /// stall (fix report, round 15 addendum; #92).</summary>
@@ -456,6 +472,39 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
         sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001, (ushort)0x2002);
         sink.Signals[2].Value.Should().Equal(4);
+    }
+
+    /// <summary>A description that declares the mapping records 1381h and 1382h but neither
+    /// communication record implies 1301h and 1302h all the same (FR-CO-029): the loader
+    /// provides them, and the peer gate lets a master configure them (§9.2). The match of a
+    /// pair searches the records the description implies, not only those it declares — else the
+    /// peer could be configured and its valid pair not observed (FR-CO-046).</summary>
+    [Fact]
+    public async Task A_Record_Implied_By_A_Mapping_Declaration_Is_Matched()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenOnVirtualClock(busA, Master, new CanOpenNodeOptions());
+        var file = CanOpenDeviceDescription.ParseDcf(TextWithoutObject(TextWithoutObject(PeerFileText(), "1301"), "1302"));
+        file.Contains(0x1301, 0x05).Should().BeFalse();
+        file.Contains(0x1381, 0x01).Should().BeTrue();
+        using var device = OpenOnVirtualClock(busB, file.NodeId!.Value, new CanOpenNodeOptions { WritableCommunicationParameters = true }, file);
+        master.BindPeerDeviceDescription(Device, file);
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var configured = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        configured.Succeeded.Should().BeTrue(string.Join("\n", configured.Mismatches));
+        device.ObjectDictionary.ReadUnsigned(0x1301, 5).Should().Be(0x109u);
+        var sink = new ListSink();
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 0x34, 0x12, 0x5A }, new byte[] { 0xCB, 0xED, 0xA5 }, file, sink).WithTimeoutAsync(ShortTimeout);
+        result.Observation.Should().NotBeNull(result.Reason);
+        result.Observation!.Decoded.Should().BeTrue(result.Observation.Reason);
+        result.Observation.PdoNumber.Should().Be(1);
+        result.Observation.Origin.Should().Be(ForeignPdoMappingOrigin.LiveMapping);
+        sink.Signals.Select(s => s.Index).Should().Equal((ushort)0x2000, (ushort)0x2001);
     }
 
     /// <summary>The file fallback applies the rule the device's own loader applies (§8.4.2.2,
