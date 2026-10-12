@@ -300,8 +300,11 @@ only while no call that reads it is running — in practice, while this node is 
 peer. An edit during such a call is not supported, and what the call then sees is not specified:
 the EdsDcfNet dictionaries are not safe for a read concurrent with a write. A reader that
 enumerates — the loader, a safety transaction's reading — may fail with the dictionary's
-`InvalidOperationException`, reported as that call's own failure (a verification not verified, a
-boot halted at that slave); a reader that looks objects up one at a time around its own awaits —
+`InvalidOperationException`, reported as that call's own failure (a step-D verification not
+verified, with what that means for the boot — the slave is not started; a mandatory slave, or any
+under a simultaneous start, halts the boot, an optional one is skipped —
+[Verifying, and the boot-up](#verifying-and-the-boot-up)); a reader that looks objects up one at
+a time around its own awaits —
 the observers' file fallback, the gate's `Contains` — may answer from a description that is part
 old and part new, or report no match, with no error at all. None of this is detected (#296). An
 immutable description — edit, then bind again — is the planned shape for the next major (#299).
