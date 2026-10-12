@@ -216,8 +216,24 @@ public sealed class PdoMapping
     public PdoMapping(IEnumerable<PdoMappingEntry> entries)
     {
         if (entries is null) throw new ArgumentNullException(nameof(entries));
-        _entries.AddRange(entries);
+        foreach (var entry in entries)
+        {
+            CheckWidth(entry, nameof(entries));
+            _entries.Add(entry);
+        }
         Validate();
+    }
+
+    /// <summary>The width rule of the <see cref="PdoMappingEntry"/> constructor, applied again
+    /// here: the entry is a struct, so <c>default(PdoMappingEntry)</c> — or one built past the
+    /// constructor — arrives with a width it would have refused. A 0-bit entry adds no bytes,
+    /// passes the total and the count, and only fails inside the node's re-mapping procedure,
+    /// after the PDO has been destroyed (#292).</summary>
+    private static void CheckWidth(PdoMappingEntry entry, string paramName)
+    {
+        if (entry.BitLength == 0 || entry.BitLength > 64 || entry.BitLength % 8 != 0)
+            throw new ArgumentOutOfRangeException(paramName, entry.BitLength,
+                "Mapping requires positive byte-aligned bit lengths (8/16/24/32/40/48/56/64).");
     }
 
     /// <summary>Total assembled payload size in bytes across every mapping entry.</summary>
@@ -237,8 +253,14 @@ public sealed class PdoMapping
     public IReadOnlyList<PdoMappingEntry> Entries => _view ??= _entries.AsReadOnly();
 
     /// <summary>Appends a new entry to the mapping.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="entry"/> has a width the
+    /// <see cref="PdoMappingEntry"/> constructor refuses — <c>default(PdoMappingEntry)</c>, or
+    /// an entry built past the constructor; the mapping is unchanged.</exception>
+    /// <exception cref="InvalidOperationException">The mapping would exceed 8 bytes or
+    /// <see cref="MaxEntries"/> entries; the mapping is unchanged.</exception>
     public PdoMapping Add(PdoMappingEntry entry)
     {
+        CheckWidth(entry, nameof(entry));
         _entries.Add(entry);
         Validate();
         return this;
