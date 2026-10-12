@@ -9,9 +9,8 @@ using CanKit.Pro.CANopen.Sdo;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>Splitting a peer's SRDO pair (CiA DSP 304 V1.0 §8.1) with the rules of
-/// <see cref="ObserveForeignPdoAsync"/>: live record before file, nothing written here. Unlike
-/// the PDO observer, the live reads of one observation run in the peer's SDO channel, held for
-/// the whole snapshot.</summary>
+/// <see cref="ObserveForeignPdoAsync"/>: live record before file, nothing written here, and the
+/// live reads of one observation run in the peer's SDO channel, held for the whole snapshot.</summary>
 internal sealed partial class CanOpenNode
 {
     /// <summary>Test seam: awaited between the observer's COB-ID match and its direction and
