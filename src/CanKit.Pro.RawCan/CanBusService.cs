@@ -473,16 +473,17 @@ namespace CanKit.Pro.RawCan
                     if (_pendingDisposed)
                         throw new ObjectDisposedException(nameof(CanBusService));
 
-                    // The caller's token, consulted inside the gate and immediately before the
-                    // driver call (#294): a send that waited for the gate behind another send's
-                    // Transmit and was cancelled meanwhile is abandoned here, before it is
-                    // registered and before anything reaches the driver.
-                    cancellationToken.ThrowIfCancellationRequested();
-
                     RegisterPending(pending);
                     // The other end of the driver call, inside the lock: a caller's cutoff for
                     // what can still be a response to this frame (Codex on #147).
                     handoffStart = _hostTimestamp();
+                    // The caller's token, consulted inside the gate as the last step before the
+                    // driver call (#294): a send that waited for the gate behind another send's
+                    // Transmit and was cancelled meanwhile is abandoned here, and nothing reaches
+                    // the driver; the catch below unregisters the entry. Nothing of ours runs
+                    // between this check and Transmit, so a cancellation that still gets a frame
+                    // out is one that landed during the driver call itself.
+                    cancellationToken.ThrowIfCancellationRequested();
                     accepted = _bus.Transmit(in frame);
 
                     // Taken here, inside the lock and immediately after the driver call returns:
