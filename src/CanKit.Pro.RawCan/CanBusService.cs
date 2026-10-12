@@ -480,10 +480,18 @@ namespace CanKit.Pro.RawCan
                     // The caller's token, consulted inside the gate as the last step before the
                     // driver call (#294): a send that waited for the gate behind another send's
                     // Transmit and was cancelled meanwhile is abandoned here, and nothing reaches
-                    // the driver; the catch below unregisters the entry. Nothing of ours runs
-                    // between this check and Transmit, so a cancellation that still gets a frame
-                    // out is one that landed during the driver call itself.
-                    cancellationToken.ThrowIfCancellationRequested();
+                    // the driver. Nothing of ours runs between this check and Transmit, so a
+                    // cancellation that still gets a frame out is one that landed during the
+                    // driver call itself. The entry is unlinked here, still inside the gate: the
+                    // catch below would do it only after the lock is released, and a
+                    // byte-identical send waiting for the gate could meanwhile register behind
+                    // this entry, transmit, and have its echo matched to the abandoned entry --
+                    // whose Tcs nobody completes -- instead of its own (Cursor on #301).
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        RemovePending(pending);
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
                     accepted = _bus.Transmit(in frame);
 
                     // Taken here, inside the lock and immediately after the driver call returns:
