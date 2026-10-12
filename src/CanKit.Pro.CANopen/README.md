@@ -813,7 +813,11 @@ because the device checks the checksums of existing SRDOs only (§9.5).
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
 least one SRDO is a safety slave; an EDS carries no parameter values and never makes one. Before
-NMT Start the master verifies the slave against its DCF:
+NMT Start the master verifies the slave against its DCF — the expectation is taken from the
+description bound at the moment the verification owns the slave's SDO channel, the moment its own
+snapshot is taken ([Configuring a peer](#configuring-a-peer)), so a rebind or an edit while it
+waits for a call in flight is compared, not a stale reading; no safety DCF bound at that moment
+means nothing to verify, and the slave is started as any other:
 
 * verified — the slave is started as any other;
 * not verified (a difference, or an upload that failed; an exception is also reported on

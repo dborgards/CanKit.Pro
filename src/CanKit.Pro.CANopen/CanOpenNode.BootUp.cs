@@ -163,9 +163,9 @@ internal sealed partial class CanOpenNode
         if (!_slaveVerified[nodeId])
         {
             if (_slaveVerifying[nodeId]) return;
-            if (SafetyExpectationOf(nodeId) is { } expected)
+            if (SafetyExpectationOf(nodeId) is not null)
             {
-                BeginSlaveVerification(nodeId, expected);
+                BeginSlaveVerification(nodeId);
                 return;
             }
         }
@@ -275,10 +275,15 @@ internal sealed partial class CanOpenNode
     /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
     /// declares at least one SRDO (spec decision 4). An EDS has no parameter values and never
     /// makes a safety slave. Built from the description on every call, not kept: a description
-    /// can be edited in place, and the peer-SDO gate reads it live too.</summary>
-    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId)
+    /// can be edited in place, and the peer-SDO gate reads it live too. On the actor this decides
+    /// whether a verification is queued; the verification itself takes its expectation again,
+    /// from the description bound when it owns the peer's channel
+    /// (<see cref="VerifyPeerSafetyCoreAsync"/>).</summary>
+    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId) => SafetyExpectationOf(BoundPeerDescription(nodeId), nodeId);
+
+    private static PeerSafetyConfiguration? SafetyExpectationOf(CanOpenDeviceDescription? description, byte nodeId)
     {
-        if (!_peerDescriptions.TryGetValue(nodeId, out var description) || !description.IsConfigurationFile) return null;
+        if (description is null || !description.IsConfigurationFile) return null;
         var expected = PeerSafetyConfiguration.FromDeviceDescription(description, nodeId);
         return expected.DeclaresAnySrdo ? expected : null;
     }
@@ -299,7 +304,7 @@ internal sealed partial class CanOpenNode
         return false;
     }
 
-    private void BeginSlaveVerification(byte nodeId, PeerSafetyConfiguration expected)
+    private void BeginSlaveVerification(byte nodeId)
     {
         _slaveVerifying[nodeId] = true;
         var cts = _slaveVerificationCts ??= new CancellationTokenSource();
@@ -311,7 +316,13 @@ internal sealed partial class CanOpenNode
             Exception? failure = null;
             try
             {
-                verified = (await VerifyPeerSafetyConfigurationAsync(nodeId, expected, token).ConfigureAwait(false)).Succeeded;
+                // The expectation is taken when the transaction owns the peer's channel, from the
+                // description bound then — the same file its transfers are gated against — not from
+                // the actor turn that queued this worker: a rebind or an edit in between would
+                // otherwise be compared against stale values. No safety DCF bound at that moment
+                // means nothing to verify: the slave is started as a slave without SRDOs is.
+                var result = await VerifyPeerSafetyCoreAsync(nodeId, description => SafetyExpectationOf(description, nodeId), token).ConfigureAwait(false);
+                verified = result is null || result.Succeeded;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
             catch (Exception ex) { failure = ex; } // a cancellation of anything else is a failure

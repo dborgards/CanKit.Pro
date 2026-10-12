@@ -75,6 +75,19 @@ internal sealed partial class CanOpenNode
         var requested = expected;
         CanOpenCobId.ValidateNodeId(peerNodeId);
         ValidateSafetyTimes(expected); // before the first frame
+        // The expectation as it was when the transaction started: a copy taken once it owns the channel.
+        return (await VerifyPeerSafetyCoreAsync(peerNodeId, _ => requested.Snapshot(), cancellationToken).ConfigureAwait(false))!;
+    }
+
+    /// <summary>The transaction of <see cref="VerifyPeerSafetyConfigurationAsync"/>, with the
+    /// expectation taken from <paramref name="expectationOf"/> once the transaction owns the peer's
+    /// SDO channel — called with the description bound at that moment, the one the transaction's own
+    /// snapshot is taken from, so an expectation derived from the description (step D in the boot-up)
+    /// and the gate of every transfer read the same file. Null from <paramref name="expectationOf"/>
+    /// means there is nothing to verify, and the result is null: nothing was sent.</summary>
+    private async Task<PeerSafetyResult?> VerifyPeerSafetyCoreAsync(byte peerNodeId,
+        Func<CanOpenDeviceDescription?, PeerSafetyConfiguration?> expectationOf, CancellationToken cancellationToken)
+    {
         // The peer's SDO channel, for the whole transaction: waited for (a call in flight ends first),
         // then held, so another SDO call of this node to the peer is refused as in flight until the
         // transaction ends. Every transfer below is a ...CoreAsync one.
@@ -82,8 +95,11 @@ internal sealed partial class CanOpenNode
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            expected = requested.Snapshot(); // the expectation as it was when the transaction started
-            var binding = CapturePeerDescription(peerNodeId); // one description from the moment it owns the channel
+            var description = BoundPeerDescription(peerNodeId); // one description from the moment it owns the channel
+            var expected = expectationOf(description);
+            if (expected is null) return null;
+            ValidateSafetyTimes(expected); // before the first frame
+            var binding = new PeerDescriptionBinding(description, Array.Empty<(ushort, byte)>());
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount);
             // 1300h is not part of step D's list (§8.3.1 D). A deleted SRDO's checksum is not

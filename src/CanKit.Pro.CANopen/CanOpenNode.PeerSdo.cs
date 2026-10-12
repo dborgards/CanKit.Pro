@@ -210,8 +210,12 @@ internal sealed partial class CanOpenNode
         public bool TryGetMappedEntry(ushort index, byte subindex, out DescribedEntry entry) => _mapped.TryGetValue((index, subindex), out entry);
     }
 
+    /// <summary>The description bound for the peer at this moment, or null.</summary>
+    private CanOpenDeviceDescription? BoundPeerDescription(byte peerNodeId)
+        => _peerDescriptions.TryGetValue(peerNodeId, out var description) ? description : null;
+
     private PeerDescriptionBinding CapturePeerDescription(byte peerNodeId, PeerSafetyConfiguration? configuration = null)
-        => new(_peerDescriptions.TryGetValue(peerNodeId, out var description) ? description : null,
+        => new(BoundPeerDescription(peerNodeId),
             configuration is null
                 ? Array.Empty<(ushort, byte)>()
                 : configuration.Srdos.Values.SelectMany(s => s.Mapping.Entries).Select(e => (e.Index, e.Subindex)));

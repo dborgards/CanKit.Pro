@@ -207,6 +207,42 @@ public class CanOpenSafetyBootUpTests : IClassFixture<VirtualAdapterFixture>
         signals.Should().Contain((FlyingMasterSignal.SlaveSafetyConfigurationInvalid, (byte?)Slave));
     }
 
+    /// <summary>Step D's expectation is taken when its transaction owns the peer's SDO channel,
+    /// from the description bound at that moment — the same moment the transaction's own
+    /// snapshot is taken (FR-CO-044) — not on the actor turn that queued the verification. The
+    /// channel is held while the boot queues the verification; the bound DCF (40 ms, which the
+    /// slave does not hold) is replaced by the slave's own file in that window; the verification
+    /// then compares with the file bound when it owned the channel, and the slave is started.</summary>
+    [Fact]
+    public async Task Step_D_Takes_Its_Expectation_When_It_Owns_The_Peer_Channel()
+    {
+        using var rig = OpenMaster();
+        using var slave = OpenSlave(rig.Peer, validChecksum: true);
+        var stale = SlaveDcf(validChecksum: true);
+        stale.Objects.Objects[0x1301].SubObjects[0x02].ParameterValue = "40";
+        rig.Node.BindPeerDeviceDescription(Slave, stale);
+        var od = rig.Node.ObjectDictionary;
+        od.WriteUnsigned(Startup, 0x00, SuppressSelfStart);
+        od.WriteUnsigned(0x1F81, Slave, Assigned | BootSlave);
+        Tighten(rig.Node);
+        var signals = Record(rig.Node);
+        var channels = (System.Collections.Concurrent.ConcurrentDictionary<byte, SemaphoreSlim>)Field(rig.Node, "_peerSdoChannels");
+        var channel = channels.GetOrAdd(Slave, _ => new SemaphoreSlim(1, 1));
+        channel.Wait(); // a call to the slave in flight: the verification waits for the channel
+        rig.Node.StartFlyingMaster(0, Heartbeat);
+        await UntilAsync(rig.Clock, rig.Witness, null, () => SlaveFlag(rig.Node, "_slaveVerifying"), 2000, "the boot queued the verification");
+        await QuiesceAsync(rig.Witness, null);
+        SdoRequests(rig).Should().Be(0, "the verification is waiting for the channel");
+
+        rig.Node.BindPeerDeviceDescription(Slave, SlaveDcf(validChecksum: true)); // what the slave holds
+        channel.Release();
+        await UntilAsync(rig.Clock, rig.Witness, null, () => slave.State == NmtState.Operational || Has(signals, FlyingMasterSignal.SlaveSafetyConfigurationInvalid),
+            2000, "step D decided");
+        signals.Should().NotContain(s => s.Signal == FlyingMasterSignal.SlaveSafetyConfigurationInvalid,
+            "the expectation is the file bound when the verification owned the channel");
+        slave.State.Should().Be(NmtState.Operational);
+    }
+
     /// <summary>The simultaneous start keeps its moment — every mandatory slave seen, no
     /// verification running — but with a safety slave assigned it is one Start per slave: the
     /// non-safety slave that has been waiting is started at that moment, the safety slave only
