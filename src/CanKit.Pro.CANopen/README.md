@@ -766,8 +766,9 @@ echo path once the echo arrived, otherwise once the driver accepted the frame �
 failure (on `BackgroundExceptionOccurred`, as for every frame), or when the send was cancelled.
 Like an SRDO frame it is handed to the bus service with the token of the
 Operational period, here linked with the caller's token, so leaving Operational, disposing the
-node or cancelling the caller's token cancels a send whose task has not started yet; a send task
-already running still hands the frame to the driver (#294). A send cancelled by the period ends
+node or cancelling the caller's token cancels a send that has not reached the bus service's
+driver call — including one already waiting there behind another send (#294); a frame the driver
+has been handed goes out. A send cancelled by the period ends
 quietly; one the caller cancelled — before the call ran or while the send waited — ends with
 `OperationCanceledException`, and so does a send under which the bus service is disposed, which
 is also reported on `BackgroundExceptionOccurred` as a transport failure. A GFC is reported by
