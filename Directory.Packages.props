@@ -35,7 +35,7 @@
   <ItemGroup Label="Test">
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
     <PackageVersion Include="xunit" Version="2.9.3" />
-    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.1" />
     <!--
       AwesomeAssertions, not FluentAssertions: from 8.0.0 onwards FluentAssertions ships under the
       Xceed commercial license, which does not fit this MIT-licensed project. AwesomeAssertions is
@@ -50,7 +50,7 @@
       (developmentDependency, no lib/), so it compiles in and never becomes a dependency of
       anything. It requires LangVersion 14; see the Language block in Directory.Build.props.
     -->
-    <PackageVersion Include="Polyfill" Version="11.4.3" />
+    <PackageVersion Include="Polyfill" Version="11.4.5" />
     <!--
       PublicApiGenerator renders the approved public-API surface (see PublicApiSurfaceTests). It is
       a test-only tool, never a dependency of a shipped package, so it carries PrivateAssets="all"
