@@ -143,8 +143,11 @@ Deliberate omissions, each checked against the norm text:
   does not search for a rate itself.
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
   periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
-  that callback between them. The adapter is not reconfigured. Most adapters cannot change rate
-  while the channel is open; reopen it in the callback or after the call returns.
+  that callback between them. The callback must retune the channel this master is already
+  reading; it must not dispose that bus. The second delay, and a waiting frame after a zero
+  delay, still go out on it. An adapter that cannot change rate while open is left alone:
+  omit `returnToWaiting`, dispose this master after the call returns, and send switch state
+  global from a new master on the new bus.
 
 What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
@@ -963,8 +966,8 @@ if (found.Succeeded)
     await master.SwitchStateGlobalAsync(LssState.Waiting);
 }
 
-// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here; BitRateSwitch, when
-// set, runs between them so this master's adapter can follow the slaves.
+// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here. BitRateSwitch, when
+// set, runs between them and retunes the channel this master is already reading.
 await master.SwitchStateGlobalAsync(LssState.Configuration);
 await master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, tableIndex: 2);
 await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100, bitsPerSecond: 500_000);

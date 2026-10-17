@@ -40,9 +40,11 @@ public sealed class LssMasterOptions
 
     /// <summary>
     /// Called from <see cref="ILssMaster.ActivateBitTimingAsync"/> after the first switch-delay
-    /// period, with the bit rate the caller named, so this master's own adapter can change rate
-    /// together with the slaves. Null does not touch the adapter: many adapters cannot change
-    /// rate while the channel is open, and the caller reopens the bus after the second period.
+    /// period, with the bit rate the caller named. The callback retunes the channel this master
+    /// is already reading. It must not dispose that bus: the second delay, and a waiting frame
+    /// sent after a zero delay, still use it. Null leaves the adapter alone. A caller whose
+    /// adapter cannot change rate while open omits <c>returnToWaiting</c>, disposes this master
+    /// after the call returns, and sends switch state global from a new master on the new bus.
     /// </summary>
     public Func<int, System.Threading.CancellationToken, System.Threading.Tasks.Task>? BitRateSwitch { get; init; }
 
