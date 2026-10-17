@@ -378,7 +378,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     {
         int switches = 0;
         using var bench = new Bench();
-        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        using var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, _) =>
             {
@@ -483,7 +483,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     public void A_Superseded_Switch_Delay_Does_Not_Start_Silence()
     {
         using var bench = new Bench();
-        var slave = (CanOpenNode)bench.Slave(1, 5);
+        using var slave = (CanOpenNode)bench.Slave(1, 5);
         slave.BeginLssSilence(generation: -1, TimeSpan.FromMilliseconds(10));
         slave.CompleteLssSilence(generation: -1);
         slave.LssState().Should().Be(LssState.Waiting);
