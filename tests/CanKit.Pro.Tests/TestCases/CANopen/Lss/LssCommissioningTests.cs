@@ -55,6 +55,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         listed.Slaves[0].Address.Should().Be(First);
         listed.Slaves[1].Address.Should().Be(Second);
         listed.Slaves[0].Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slaves.All(slave => slave.LssState() == LssState.Waiting));
         foreach (var slave in slaves)
         {
             slave.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
@@ -555,9 +556,8 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var first = bench.Unconfigured(First)[0];
         var tool = new LssCommissioning(bench.Master);
         using var cancel = new CancellationTokenSource();
-        var scan = tool.ScanUnconfiguredAsync(cancellationToken: cancel.Token);
-        // A full Fastscan is one probe per bit. On a loaded runner that outlasts the
-        // default three seconds before the slave enters configuration.
+        var scan = tool.ScanUnconfiguredAsync(
+            new LssUnconfiguredScan { Fastscan = KnownVendor() }, cancel.Token);
         await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
         bench.Master.Dispose();
         cancel.Cancel();
