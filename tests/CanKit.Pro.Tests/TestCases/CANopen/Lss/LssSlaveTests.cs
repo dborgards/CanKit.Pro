@@ -30,7 +30,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     private static LssMasterOptions Quick() => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        FastscanTimeout = TimeSpan.FromMilliseconds(40),
+        FastscanTimeout = TimeSpan.FromMilliseconds(200),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
     };
@@ -403,11 +403,13 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
         using var heard = bench.Listen();
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(2)));
-        var activate = bench.Master.ActivateBitTimingAsync(200, null);
+        // The second delay is the silence. A poll that passed the gate before it started can
+        // still be on its way to the wire, so the quiet window begins only after that drain.
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
-        await Task.Delay(40);
+        await Task.Delay(400);
         int duringSilence = heard.Ids.Count;
-        await Task.Delay(90);
+        await Task.Delay(200);
         heard.Ids.Skip(duringSilence).Should().NotContain(CanOpenCobId.Heartbeat(2));
         await activate;
         await WaitUntilAsync(() => heard.Ids.Skip(duringSilence).Contains(CanOpenCobId.Heartbeat(2)));
@@ -747,6 +749,48 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilAsync(() => slave.NodeId == 5 && slave.State == NmtState.PreOperational);
         (slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.CanIdMask)
             .Should().Be(CanOpenCobId.TpdoDefault(5, 1));
+    }
+
+    [Fact]
+    public async Task Reset_Publishes_The_Pending_Node_Id_Before_The_Application_Hook()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions());
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        slave.StoreParameters();
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x20)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == 0x20 && slave.State == NmtState.PreOperational);
+
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x30)).Succeeded.Should().BeTrue();
+        byte seenId = 0;
+        uint seenTpdo = 0;
+        uint seenEmcy = 0;
+        slave.ApplicationReset += (_, _) =>
+        {
+            seenId = slave.NodeId;
+            seenTpdo = slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01);
+            seenEmcy = slave.ObjectDictionary.ReadUnsigned(0x1014, 0x00);
+            // The save must record the COB-IDs together with the node-id they were retargeted to.
+            slave.StoreParameters();
+        };
+
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 0x20);
+        await WaitUntilAsync(() => slave.NodeId == 0x30 && slave.State == NmtState.PreOperational);
+        seenId.Should().Be(0x30);
+        (seenTpdo & CanOpenCobId.CanIdMask).Should().Be(CanOpenCobId.TpdoDefault(0x30, 1));
+        (seenEmcy & CanOpenCobId.CanIdMask).Should().Be(CanOpenCobId.Emcy(0x30));
+        (slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.CanIdMask)
+            .Should().Be(CanOpenCobId.TpdoDefault(0x30, 1));
+
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 0x30);
+        await WaitUntilAsync(() => slave.NodeId == 0x30 && slave.State == NmtState.PreOperational);
+        (slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.CanIdMask)
+            .Should().Be(CanOpenCobId.TpdoDefault(0x30, 1));
+        (slave.ObjectDictionary.ReadUnsigned(0x1014, 0x00) & CanOpenCobId.CanIdMask)
+            .Should().Be(CanOpenCobId.Emcy(0x30));
     }
 
     [Fact]

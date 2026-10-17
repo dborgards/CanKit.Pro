@@ -775,7 +775,32 @@ internal sealed partial class CanOpenNode
             _restoreDefaultsOnReset = false;
             if (_lssEnabled) _powerOnNodeId = _factoryNodeId;
         }
-        RestoreValues(_powerOnValues, communicationOnly);
+        // The restore and the pending LSS node-id share one hold of the write gate. A 1010h
+        // save otherwise snapshots the power-on COB-IDs against the node-id this reset is
+        // leaving, and the next reset skips the retarget. The handler then sees the node-id
+        // those COB-IDs already name. 1200h is not restored, so its baseline stays at the id
+        // the live record still names until ApplyActiveNodeId moves it.
+        if (_lssEnabled)
+        {
+            _od.Transaction(() =>
+            {
+                RestoreValues(_powerOnValues, communicationOnly);
+                _profileCobIdNodeId = _powerOnNodeId;
+                if (!CanOpenCobId.IsActiveNodeId(_pendingNodeId))
+                {
+                    _nodeId = CanOpenCobId.UnconfiguredNodeId;
+                    _srdo.SetNodeId(_nodeId);
+                    return;
+                }
+
+                ApplyActiveNodeId(_pendingNodeId);
+            });
+        }
+        else
+        {
+            RestoreValues(_powerOnValues, communicationOnly);
+        }
+
         // The application's turn, still in Initialisation: its objects are restored before the
         // node announces itself, so a master reacting to the boot-up never reads a value the
         // reset had not reached. With a description the node restored the described ones above;
@@ -785,25 +810,12 @@ internal sealed partial class CanOpenNode
         // A subscriber may have disposed the node; its timers are gone and nothing is announced.
         if (Volatile.Read(ref _disposed) != 0) return;
 
-        if (_lssEnabled)
-        {
-            // Restore put the power-on COB-IDs back. 1200h is not among them, so its baseline
-            // stays at the id the live record still names. An unconfigured pending node-id
-            // leaves the slave in reset-communication waiting.
-            _profileCobIdNodeId = _powerOnNodeId;
-            if (!CanOpenCobId.IsActiveNodeId(_pendingNodeId))
-            {
-                _nodeId = CanOpenCobId.UnconfiguredNodeId;
-                _srdo.SetNodeId(_nodeId);
-                // After the node-id is settled: an unconfigured slave has nothing to claim with.
-                ApplyFlyingMasterStartup();
-                return;
-            }
-            ApplyActiveNodeId(_pendingNodeId);
-        }
-        // After the active node-id and the retargeted 1F90h:06. Starting inside the restore
-        // would claim with the id the reset is leaving.
+        // After the handler. Starting inside the restore would claim with the id the reset is
+        // leaving, and the boot-up must not go out until the application has restored its objects.
+        // An unconfigured pending node-id stays in reset-communication waiting.
         ApplyFlyingMasterStartup();
+        if (_lssEnabled && !CanOpenCobId.IsActiveNodeId(_pendingNodeId))
+            return;
         EnterPreOperationalFromReset();
     }
 
