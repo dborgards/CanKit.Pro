@@ -48,14 +48,21 @@ public sealed class LssMasterOptions
 
     internal void Validate()
     {
-        if (ResponseTimeout <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(ResponseTimeout), ResponseTimeout, "Must be positive.");
-        if (FastscanTimeout <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(FastscanTimeout), FastscanTimeout, "Must be positive.");
-        if (FastscanCycleTime < TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(FastscanCycleTime), FastscanCycleTime, "Must not be negative.");
-        if (IdentificationTimeout <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(IdentificationTimeout), IdentificationTimeout,
-                "Must be positive.");
+        // CancelAfter rejects a delay above Int32.MaxValue milliseconds, and a longer span
+        // overflows the tick multiply that builds a receive deadline.
+        RequireBounded(ResponseTimeout, nameof(ResponseTimeout), allowZero: false);
+        RequireBounded(FastscanTimeout, nameof(FastscanTimeout), allowZero: false);
+        RequireBounded(FastscanCycleTime, nameof(FastscanCycleTime), allowZero: true);
+        RequireBounded(IdentificationTimeout, nameof(IdentificationTimeout), allowZero: false);
+    }
+
+    private static void RequireBounded(TimeSpan value, string name, bool allowZero)
+    {
+        var above = allowZero ? value < TimeSpan.Zero : value <= TimeSpan.Zero;
+        if (!above && value <= TimeSpan.FromMilliseconds(int.MaxValue)) return;
+        var message = allowZero
+            ? "Must not be negative and no longer than 2147483647 milliseconds."
+            : "Must be positive and no longer than 2147483647 milliseconds.";
+        throw new ArgumentOutOfRangeException(name, value, message);
     }
 }

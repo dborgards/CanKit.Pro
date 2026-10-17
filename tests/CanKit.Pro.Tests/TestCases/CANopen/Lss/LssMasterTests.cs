@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -61,6 +62,10 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         identify.Should().Throw<ArgumentOutOfRangeException>();
         var fastscan = () => CanOpenLss.OpenMaster(real, new LssMasterOptions { FastscanTimeout = TimeSpan.Zero });
         fastscan.Should().Throw<ArgumentOutOfRangeException>();
+        var huge = () => CanOpenLss.OpenMaster(real, new LssMasterOptions { ResponseTimeout = TimeSpan.MaxValue });
+        huge.Should().Throw<ArgumentOutOfRangeException>();
+        var hugeGap = () => CanOpenLss.OpenMaster(real, new LssMasterOptions { FastscanCycleTime = TimeSpan.MaxValue });
+        hugeGap.Should().Throw<ArgumentOutOfRangeException>();
 
         using var defaults = CanOpenLss.OpenMaster(real);
         defaults.Options.ResponseTimeout.Should().Be(TimeSpan.FromSeconds(1));
@@ -581,12 +586,13 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("lss-close");
         using var bus = VirtualAdapterFixture.Open(session, 0);
         using var service = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
         await using var master = CanOpenLss.OpenMaster(service, Quick());
         var inquire = master.InquireVendorIdAsync();
-        await Task.Delay(50);
+        await WaitUntilAsync(() => slave.Commands.Contains(LssCommand.InquireVendorId));
         service.Dispose();
         var act = async () => await inquire;
-        await act.Should().ThrowAsync<LssTimeoutException>();
+        await act.Should().ThrowAsync<CanOpenTransportException>();
     }
 
     [Fact]
@@ -596,7 +602,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfigurationAsync(rig);
         (await rig.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
         await rig.Master.ActivateBitTimingAsync(20, returnToWaiting: true);
-        rig.Slave.State.Should().Be(LssState.Waiting);
+        await WaitUntilAsync(() => rig.Slave.State == LssState.Waiting);
     }
 
     [Fact]
@@ -689,16 +695,47 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     {
         using var rig = Rig.Open(SlaveA, nodeId: 4);
         // The slave is in waiting, so inquire is ignored and the first call holds the gate
-        // until it times out. The second call is queued behind it.
-        var first = rig.Master.InquireVendorIdAsync();
-        var second = rig.Master.InquireProductCodeAsync();
-        await Task.Delay(30);
-        rig.Master.Dispose();
+        // for the whole response window. The second call is queued behind it.
+        var master = Rig.ReplaceOptions(rig, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromSeconds(30),
+            FastscanTimeout = TimeSpan.FromMilliseconds(40),
+            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        var first = master.InquireVendorIdAsync();
+        await WaitUntilAsync(() => rig.Slave.Commands.Contains(LssCommand.InquireVendorId));
+        var second = master.InquireProductCodeAsync();
+        master.Dispose();
 
         var firstAct = async () => await first;
         var secondAct = async () => await second;
         await firstAct.Should().ThrowAsync<ObjectDisposedException>();
         await secondAct.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Dispose_Cancels_An_Activate_That_Is_Still_Waiting()
+    {
+        using var rig = Rig.Open(SlaveA, nodeId: 5);
+        await EnterConfigurationAsync(rig);
+        var pending = rig.Master.ActivateBitTimingAsync(60_000);
+        await WaitUntilAsync(() => rig.Slave.Commands.Contains(LssCommand.ActivateBitTiming));
+        rig.Master.Dispose();
+        var act = async () => await pending;
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task A_Confirmation_Without_Timestamps_Still_Waits_For_The_Slave()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-stamp");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var service = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA, persistentNodeId: 5);
+        await using var master = CanOpenLss.OpenMaster(new UnstampedSendService(service), Quick());
+        await master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => slave.State == LssState.Configuration);
+        (await master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
     }
 
     [Fact]
@@ -791,6 +828,40 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
                 FailureReason = TxConfirmFailureReason.Rejected,
                 Timestamp = DateTime.UtcNow,
             });
+
+        public void Dispose() => _inner.Dispose();
+    }
+
+    private sealed class UnstampedSendService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+
+        public UnstampedSendService(ICanBusService inner) => _inner = inner;
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+            return confirmation with { HostHandoffTimestamp = 0, HostTransmitTimestamp = 0 };
+        }
 
         public void Dispose() => _inner.Dispose();
     }

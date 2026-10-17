@@ -19,10 +19,12 @@ public static class CanOpenLss
     public static ILssMaster OpenMaster(ICanBus bus, LssMasterOptions? options = null)
     {
         if (bus is null) throw new ArgumentNullException(nameof(bus));
+        var resolved = options ?? new LssMasterOptions();
+        resolved.Validate();
         var service = new CanBusService(bus);
         try
         {
-            return new LssMaster(service, options ?? new LssMasterOptions(), ownsService: true);
+            return new LssMaster(service, resolved, ownsService: true);
         }
         catch
         {
@@ -39,7 +41,18 @@ public static class CanOpenLss
     public static ILssMaster OpenMaster(ICanBusService service, LssMasterOptions? options = null, bool leaveOpen = true)
     {
         if (service is null) throw new ArgumentNullException(nameof(service));
-        return new LssMaster(service, options ?? new LssMasterOptions(), ownsService: !leaveOpen);
+        var resolved = options ?? new LssMasterOptions();
+        resolved.Validate();
+        try
+        {
+            return new LssMaster(service, resolved, ownsService: !leaveOpen);
+        }
+        catch
+        {
+            // Validation already ran, so this is a failure after the master took ownership.
+            if (!leaveOpen) service.Dispose();
+            throw;
+        }
     }
 }
 
@@ -52,10 +65,12 @@ internal sealed partial class LssMaster : ILssMaster
     private readonly CancellationTokenSource _readerCts = new();
     private readonly Task _readerTask;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly Channel<Inbound> _inbound = Channel.CreateUnbounded<Inbound>(new UnboundedChannelOptions
+    private readonly Channel<Inbound> _inbound = Channel.CreateBounded<Inbound>(new BoundedChannelOptions(
+        CanBusService.DefaultBufferCapacity)
     {
         SingleReader = true,
         SingleWriter = true,
+        FullMode = BoundedChannelFullMode.DropOldest,
     });
     private readonly CancellationTokenSource _lifetime = new();
 
@@ -67,12 +82,41 @@ internal sealed partial class LssMaster : ILssMaster
         Options = options;
         options.Validate();
         _ownsService = ownsService;
-        _subscription = service.Subscribe(frame =>
+        ISubscription? subscribed = null;
+        Task? reader = null;
+        try
         {
-            var can = frame.Frame;
-            return !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
-        });
-        _readerTask = Task.Run(ReadAsync);
+            subscribed = service.Subscribe(frame =>
+            {
+                var can = frame.Frame;
+                return !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
+            });
+            _subscription = subscribed;
+            reader = Task.Run(ReadAsync);
+            _readerTask = reader;
+        }
+        catch
+        {
+            _lifetime.Cancel();
+            _readerCts.Cancel();
+            subscribed?.Dispose();
+            _inbound.Writer.TryComplete();
+            if (reader is not null)
+            {
+                try
+                {
+                    reader.Wait(TimeSpan.FromSeconds(2));
+                }
+                catch (AggregateException)
+                {
+                    // The reader stops because construction was abandoned.
+                }
+            }
+            _readerCts.Dispose();
+            _lifetime.Dispose();
+            _gate.Dispose();
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -101,7 +145,7 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             var sent = await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber), ct)
                 .ConfigureAwait(false);
-            var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.SwitchSelectiveAcknowledge,
+            var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.SwitchSelectiveAcknowledge,
                 Options.ResponseTimeout, ct).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
@@ -201,7 +245,7 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             // The whole identification window is occupied, so a later slave is not left
             // queued for the next command.
-            var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifySlave,
+            var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
                 Options.IdentificationTimeout, ct, drain: true).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
@@ -212,7 +256,7 @@ internal sealed partial class LssMaster : ILssMaster
         {
             var sent = await SendAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote), ct)
                 .ConfigureAwait(false);
-            var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifyNonConfiguredSlave,
+            var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifyNonConfiguredSlave,
                 Options.IdentificationTimeout, ct, drain: true).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
@@ -225,7 +269,7 @@ internal sealed partial class LssMaster : ILssMaster
         return Execute(async ct =>
         {
             var sent = await SendAsync(payload, ct).ConfigureAwait(false);
-            return await ReceiveAsync(sent, d => d[0] == commandSpecifier, Options.ResponseTimeout, ct)
+            return await ReceiveAsync(sent, d => d.Span[0] == commandSpecifier, Options.ResponseTimeout, ct)
                 .ConfigureAwait(false);
         }, cancellationToken);
     }
@@ -233,32 +277,54 @@ internal sealed partial class LssMaster : ILssMaster
     /// <inheritdoc />
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _lifetime.Cancel();
-        _readerCts.Cancel();
-        _subscription.Dispose();
-        _inbound.Writer.TryComplete();
-        // The reader completes when it is cancelled and when the subscription ends.
-        _readerTask.Wait(TimeSpan.FromSeconds(2));
+        var reader = BeginDispose();
+        if (reader is null) return;
+        try
+        {
+            reader.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch (AggregateException)
+        {
+            // A faulted reader has already completed the inbound channel.
+        }
         if (_ownsService) _service.Dispose();
+        // A reader still parked after the wait must not see its token source disposed.
+        if (!reader.IsCompleted) return;
         _readerCts.Dispose();
         _lifetime.Dispose();
-        // The gate stays undisposed. SemaphoreSlim.Dispose does not release a waiter, and a
-        // command that already passed WaitAsync still has to Release it.
     }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        var reader = BeginDispose();
+        if (reader is null) return;
+        try
+        {
+            await reader.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A faulted reader has already completed the inbound channel.
+        }
+        if (_ownsService) _service.Dispose();
+        _readerCts.Dispose();
+        _lifetime.Dispose();
+    }
+
+    /// <summary>
+    /// Cancels the reader and completes the inbound channel. Returns null when disposal already
+    /// started. The gate stays undisposed: disposing a <see cref="SemaphoreSlim"/> does not release a
+    /// waiter, and a command that already passed <c>WaitAsync</c> still has to release it.
+    /// </summary>
+    private Task? BeginDispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return null;
         _lifetime.Cancel();
         _readerCts.Cancel();
         _subscription.Dispose();
         _inbound.Writer.TryComplete();
-        await _readerTask.ConfigureAwait(false);
-        if (_ownsService) _service.Dispose();
-        _readerCts.Dispose();
-        _lifetime.Dispose();
+        return _readerTask;
     }
 
     private Task<LssServiceResult> ConfirmedAsync(byte[] request, byte commandSpecifier, CancellationToken cancellationToken)
@@ -295,7 +361,12 @@ internal sealed partial class LssMaster : ILssMaster
         try
         {
             ThrowIfDisposed();
-            return await body(cancellationToken).ConfigureAwait(false);
+            return await body(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (Volatile.Read(ref _disposed) != 0
+                                                  && !cancellationToken.IsCancellationRequested)
+        {
+            throw new ObjectDisposedException(nameof(LssMaster));
         }
         finally
         {
@@ -321,14 +392,16 @@ internal sealed partial class LssMaster : ILssMaster
         return new Sent(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
     }
 
-    private async Task<byte[]?> ReceiveAsync(Sent sent, Func<byte[], bool> match, TimeSpan timeout,
+    private async Task<byte[]?> ReceiveAsync(Sent sent, Func<ReadOnlyMemory<byte>, bool> match, TimeSpan timeout,
         CancellationToken cancellationToken, bool drain = false)
     {
         // The deadline starts when the frame was handed to the driver, not when this wait
         // begins: a response already queued can still be late (TxConfirmation.HostTransmitTimestamp).
+        // A confirmation that carries no stamp is not an instant of zero: the wait starts now.
         // A drain keeps the first match and stays until the deadline, which is how Fastscan and
         // identify consume every slave that answered this request before the next one is sent.
-        long deadline = sent.Transmit + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        long start = sent.Transmit > 0 ? sent.Transmit : Stopwatch.GetTimestamp();
+        long deadline = start + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
         byte[]? first = null;
         while (true)
         {
@@ -340,14 +413,14 @@ internal sealed partial class LssMaster : ILssMaster
             if (left <= 0)
                 return first;
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutSource.CancelAfter(TimeSpan.FromSeconds((double)left / Stopwatch.Frequency));
+            var remaining = TimeSpan.FromSeconds((double)left / Stopwatch.Frequency);
+            if (remaining > TimeSpan.FromMilliseconds(int.MaxValue))
+                remaining = TimeSpan.FromMilliseconds(int.MaxValue);
+            timeoutSource.CancelAfter(remaining);
             try
             {
                 if (!await _inbound.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false))
-                {
-                    ThrowIfDisposed();
-                    return first;
-                }
+                    throw ReaderEnded();
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -357,24 +430,42 @@ internal sealed partial class LssMaster : ILssMaster
                 if (Stopwatch.GetTimestamp() >= deadline)
                     return first;
             }
+            catch (CanOpenTransportException)
+            {
+                ThrowIfDisposed();
+                throw;
+            }
         }
     }
 
-    private void TakeAvailable(Sent sent, long deadline, Func<byte[], bool> match, ref byte[]? first,
+    private static CanOpenTransportException ReaderEnded()
+    {
+        return new CanOpenTransportException("The LSS master reader ended before a slave answered.");
+    }
+
+    private void TakeAvailable(Sent sent, long deadline, Func<ReadOnlyMemory<byte>, bool> match, ref byte[]? first,
         bool stopAtFirst)
     {
         while (_inbound.Reader.TryRead(out var item))
         {
-            if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
+            if (!InWindow(sent, item.Arrival, deadline)) continue;
             if (!match(item.Data)) continue;
-            first ??= item.Data;
+            first ??= item.Data.ToArray();
             if (stopAtFirst) return;
         }
     }
 
+    private static bool InWindow(Sent sent, long arrival, long deadline)
+    {
+        if (arrival > deadline) return false;
+        // An unstamped frame has no lower bound. Zero is not "before this request".
+        if (arrival <= 0) return true;
+        return sent.Handoff <= 0 || arrival >= sent.Handoff;
+    }
+
     private async Task<byte[]> ReceiveRequiredAsync(Sent sent, byte commandSpecifier, CancellationToken cancellationToken)
     {
-        var response = await ReceiveAsync(sent, d => d[0] == commandSpecifier, Options.ResponseTimeout,
+        var response = await ReceiveAsync(sent, d => d.Span[0] == commandSpecifier, Options.ResponseTimeout,
             cancellationToken).ConfigureAwait(false);
         if (response is null)
         {
@@ -393,15 +484,20 @@ internal sealed partial class LssMaster : ILssMaster
             {
                 var data = frameEvent.Frame.Data;
                 if (data.Length != LssFrames.Length) continue;
-                var copy = data.ToArray();
-                // Disposal completes the channel. The frame is no longer a response; the
-                // subscription ending is what stops this loop.
-                _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, copy));
+                // The event owns its payload for as long as the event lives. Only a frame that
+                // matches a waiter is copied.
+                _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, data));
             }
         }
         catch (OperationCanceledException)
         {
             // Disposal cancels the reader. Completing this task is what lets Dispose finish.
+        }
+        catch (Exception ex)
+        {
+            _inbound.Writer.TryComplete(new CanOpenTransportException(
+                "The LSS master reader ended before a slave answered.", ex));
+            return;
         }
         finally
         {
@@ -429,13 +525,13 @@ internal sealed partial class LssMaster : ILssMaster
 
     private readonly struct Inbound
     {
-        public Inbound(long arrival, byte[] data)
+        public Inbound(long arrival, ReadOnlyMemory<byte> data)
         {
             Arrival = arrival;
             Data = data;
         }
 
         public long Arrival { get; }
-        public byte[] Data { get; }
+        public ReadOnlyMemory<byte> Data { get; }
     }
 }
