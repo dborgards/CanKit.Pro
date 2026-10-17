@@ -277,16 +277,9 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         rig.Slave.IsSilent.Should().BeTrue();
 
         using var poke = VirtualAdapterFixture.Open(rig.Session, 3);
-        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage),
+        using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage),
             LssFrames.Command(LssCommand.InquireVendorId), isExtendedFrame: false);
-        try
-        {
-            poke.Transmit(frame);
-        }
-        finally
-        {
-            frame.Dispose();
-        }
+        poke.Transmit(frame);
         await WaitUntilAsync(() => rig.Slave.SuppressedResponses > 0);
 
         await activating;
@@ -508,27 +501,17 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var master = CanOpenLss.OpenMaster(service, Quick(), leaveOpen: true);
         master.Dispose();
         master.Dispose();
-        var frame = CanFrame.Classic(0x100, new byte[] { 1 }, isExtendedFrame: false);
-        try
+        using (var frame = CanFrame.Classic(0x100, new byte[] { 1 }, isExtendedFrame: false))
         {
             (await service.SendConfirmedAsync(frame)).Confirmed.Should().BeTrue();
-        }
-        finally
-        {
-            frame.Dispose();
         }
 
         var owning = CanOpenLss.OpenMaster(service, Quick(), leaveOpen: false);
         owning.Dispose();
-        var again = CanFrame.Classic(0x100, new byte[] { 1 }, isExtendedFrame: false);
-        try
+        using (var again = CanFrame.Classic(0x100, new byte[] { 1 }, isExtendedFrame: false))
         {
             var act = async () => await service.SendConfirmedAsync(again);
             await act.Should().ThrowAsync<ObjectDisposedException>();
-        }
-        finally
-        {
-            again.Dispose();
         }
     }
 
@@ -541,6 +524,35 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var product = rig.Master.InquireProductCodeAsync();
         (await vendor).Should().Be(1);
         (await product).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Dispose_Completes_A_Command_Queued_On_The_Gate()
+    {
+        using var rig = Rig.Open(SlaveA, nodeId: 4);
+        // The slave is in waiting, so inquire is ignored and the first call holds the gate
+        // until it times out. The second call is queued behind it.
+        var first = rig.Master.InquireVendorIdAsync();
+        var second = rig.Master.InquireProductCodeAsync();
+        await Task.Delay(30);
+        rig.Master.Dispose();
+
+        var firstAct = async () => await first;
+        var secondAct = async () => await second;
+        await firstAct.Should().ThrowAsync<ObjectDisposedException>();
+        await secondAct.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Fastscan_Finds_An_Address_Whose_Every_Field_Has_Bit_Zero_Clear()
+    {
+        // BitCheck 0 and LSSNext 0 is the switch into configuration. The vendor-id's own bit 0
+        // must not be probed with that pair, including when every field really is zero.
+        using var rig = Rig.Open(new LssAddress(0, 0, 0, 0));
+        var found = await rig.Master.FastscanAsync();
+        found.Succeeded.Should().BeTrue();
+        found.Address.Should().Be(new LssAddress(0, 0, 0, 0));
+        rig.Slave.State.Should().Be(LssState.Configuration);
     }
 
     private static async Task EnterConfigurationAsync(Rig rig)
