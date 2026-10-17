@@ -515,8 +515,10 @@ internal sealed partial class CanOpenNode : ILssSlave
     private void RetargetDefaultSrdo(byte from, byte to)
     {
         if (_srdoCount < 1) return;
-        bool fromPredefined = from is >= CanOpenCobId.MinNodeId and <= 64;
-        bool toPredefined = to is >= CanOpenCobId.MinNodeId and <= 64;
+        // Node-ids are 1..127 or 255. Subtracting one folds the "below 1" check into the
+        // same comparison as "above 64", which is the only split this method can observe.
+        bool fromPredefined = (uint)(from - 1) <= 63;
+        bool toPredefined = (uint)(to - 1) <= 63;
         if (!fromPredefined && !toPredefined) return;
         var comm = Safety.SrdoRecords.CommIndex(1);
         uint from1 = fromPredefined ? CanOpenCobId.SrdoDefaultCobId1(from) : 0;
@@ -526,14 +528,32 @@ internal sealed partial class CanOpenNode : ILssSlave
         // A node-id outside 1..64 has no pre-defined pair (CiA DSP 304 §8.3.3). Populate wrote
         // 0 for it, and leaving the set puts a still-default pair back to 0. A pair the
         // application changed does not match and is left alone.
-        RetargetCobId(comm, 0x05, from1, to1);
-        RetargetCobId(comm, 0x06, from2, to2);
+        bool wasValid = _od.TryReadUnsigned(Safety.SrdoRecords.ConfigurationValid, 0, out var signature)
+            && signature == Safety.SrdoRecords.ConfigurationValidValue;
+        bool changed = RetargetCobId(comm, 0x05, from1, to1);
+        changed |= RetargetCobId(comm, 0x06, from2, to2);
+        if (!wasValid || !changed) return;
+        // Those writes clear 13FEh. A committed producer or consumer has to follow the new
+        // COB-IDs with a matching 13FFh, then A5h again, or the next operational period
+        // treats the SRDO as invalid and it neither produces nor consumes. COB-ID 0 is not
+        // a pair: the checksum is refreshed and the signature stays clear.
+        bool active = Safety.SrdoRecords.TryReadCommunication(_od, 1, out var parameter)
+            && parameter.Direction != Safety.SrdoDirection.None;
+        if (active)
+        {
+            ushort crc = Safety.SrdoCrc.Compute(parameter,
+                Safety.SrdoMapping.FromEntries(Safety.SrdoRecords.ReadMapping(_od, 1)));
+            _od.WriteRawUnchecked(Safety.SrdoRecords.Checksum, 1, new[] { (byte)crc, (byte)(crc >> 8) });
+            if (!toPredefined) return;
+        }
+        _od.WriteRawUnchecked(Safety.SrdoRecords.ConfigurationValid, 0,
+            new[] { Safety.SrdoRecords.ConfigurationValidValue });
     }
 
-    private void RetargetCobId(ushort index, byte subindex, uint fromCanId, uint toCanId)
+    private bool RetargetCobId(ushort index, byte subindex, uint fromCanId, uint toCanId)
     {
-        if (!_od.TryReadUnsigned(index, subindex, out var word)) return;
-        if ((word & CanOpenCobId.CanIdMask) != fromCanId) return;
+        if (!_od.TryReadUnsigned(index, subindex, out var word)) return false;
+        if ((word & CanOpenCobId.CanIdMask) != fromCanId) return false;
         uint updated = (word & ~CanOpenCobId.CanIdMask) | toCanId;
         _od.WriteRawUnchecked(index, subindex, new[]
         {
@@ -542,6 +562,7 @@ internal sealed partial class CanOpenNode : ILssSlave
             (byte)(updated >> 16),
             (byte)(updated >> 24),
         });
+        return true;
     }
 
     /// <summary>The node-id the power-on snapshot of the communication profile was taken at.</summary>

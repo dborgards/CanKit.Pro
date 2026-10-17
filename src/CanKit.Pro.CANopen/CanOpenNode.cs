@@ -2737,36 +2737,38 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     if (LssTransmitSuppressed())
                     {
                         onFrameConfirmed?.Invoke();
-                        continue;
                     }
-                    try
+                    else
                     {
-                        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-                        var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
-                        if (!conf.Confirmed)
+                        try
                         {
-                            var unconfirmed = new CanOpenTransportException(
-                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
-                            RaiseBackgroundException(unconfirmed);
-                            if (onSendCompleted is not null)
+                            var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+                            var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
+                            if (!conf.Confirmed)
                             {
-                                failure = unconfirmed;
-                                return;
+                                var unconfirmed = new CanOpenTransportException(
+                                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                                RaiseBackgroundException(unconfirmed);
+                                if (onSendCompleted is not null)
+                                {
+                                    failure = unconfirmed;
+                                    return;
+                                }
+                            }
+                            else
+                            {
+                                onFrameConfirmed?.Invoke();
                             }
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            onFrameConfirmed?.Invoke();
+                            // As in SendControlFrame: the event carries the transfer's failure.
+                            failure = ex as CanOpenTransportException
+                                ?? new CanOpenTransportException(
+                                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                            RaiseBackgroundException(failure);
+                            return;
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        // As in SendControlFrame: the event carries the transfer's failure.
-                        failure = ex as CanOpenTransportException
-                            ?? new CanOpenTransportException(
-                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
-                        RaiseBackgroundException(failure);
-                        return;
                     }
                 }
             }
