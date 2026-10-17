@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -46,6 +47,8 @@ internal sealed partial class CanOpenNode : ILssSlave
     private IDisposable? _lssActivation;
     private long _lssSilentUntil;
     private byte[]? _lssDeferredReply;
+    private readonly Queue<HeldTransmit> _lssHeldTx = new();
+    private readonly object _lssTxGate = new();
 
     /// <inheritdoc />
     LssState ILssSlave.State
@@ -128,13 +131,113 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     /// <summary>
     /// CiA 305 §6.5. Every transmit path asks this before it touches the driver: during the
-    /// second switch delay the frame is not sent, and the caller treats that as a confirmation.
+    /// second switch delay the frame is not sent. An in-flight SDO send is reported confirmed
+    /// so its timeout can still decide it. NMT and heartbeat are not dropped that way; they
+    /// are held until the delay ends.
     /// </summary>
     private bool LssTransmitSuppressed(Action<CanOpenTransportException?>? onSendCompleted = null)
     {
         if (!IsLssSilent()) return false;
         onSendCompleted?.Invoke(null);
         return true;
+    }
+
+    /// <summary>
+    /// NMT and the heartbeat COB-ID (boot-up, producer, state change, guarding reply) have to
+    /// leave once the slave may transmit again. Reporting them confirmed while they are still
+    /// held would apply a flying-master reset that never reached the bus.
+    /// </summary>
+    private static bool HoldsAcrossLssSilence(uint cobId)
+    {
+        if (cobId == CanOpenCobId.NmtCommand) return true;
+        uint nodeId = cobId - CanOpenCobId.HeartbeatBase;
+        return nodeId >= CanOpenCobId.MinNodeId && nodeId <= CanOpenCobId.MaxNodeId;
+    }
+
+    private bool TryHoldThroughSilence(uint cobId, byte[] payload, out Task<bool> held)
+    {
+        lock (_lssTxGate)
+        {
+            if (!IsLssSilent())
+            {
+                held = Task.FromResult(false);
+                return false;
+            }
+
+            var copy = new byte[payload.Length];
+            Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
+            var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal));
+            held = signal.Task;
+            return true;
+        }
+    }
+
+    private void ReleaseHeldTransmits()
+    {
+        HeldTransmit[] held;
+        lock (_lssTxGate)
+        {
+            if (_lssHeldTx.Count == 0) return;
+            held = _lssHeldTx.ToArray();
+            _lssHeldTx.Clear();
+        }
+
+        // Not on the actor: the sends complete later, and a reset they cause posts back here.
+        _ = SendHeldInOrder(held);
+    }
+
+    private async Task SendHeldInOrder(HeldTransmit[] held)
+    {
+        foreach (var item in held)
+        {
+            try
+            {
+                if (item.CobId == CanOpenCobId.NmtCommand)
+                    item.Signal.TrySetResult(await SendNmtPayload(item.Payload).ConfigureAwait(false));
+                else
+                {
+                    await SendControlFrame(item.CobId, item.Payload).ConfigureAwait(false);
+                    item.Signal.TrySetResult(true);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                item.Signal.TrySetCanceled();
+            }
+            catch (Exception ex)
+            {
+                item.Signal.TrySetException(ex);
+            }
+        }
+    }
+
+    private void DropHeldTransmits()
+    {
+        HeldTransmit[] held;
+        lock (_lssTxGate)
+        {
+            if (_lssHeldTx.Count == 0) return;
+            held = _lssHeldTx.ToArray();
+            _lssHeldTx.Clear();
+        }
+
+        foreach (var item in held)
+            item.Signal.TrySetResult(false);
+    }
+
+    private readonly struct HeldTransmit
+    {
+        public HeldTransmit(uint cobId, byte[] payload, TaskCompletionSource<bool> signal)
+        {
+            CobId = cobId;
+            Payload = payload;
+            Signal = signal;
+        }
+
+        public uint CobId { get; }
+        public byte[] Payload { get; }
+        public TaskCompletionSource<bool> Signal { get; }
     }
 
     private void CancelLssActivation()
@@ -144,6 +247,11 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivation = null;
         _lssDeferredReply = null;
         Volatile.Write(ref _lssSilentUntil, 0);
+        // The node may transmit again. Disposal must not put a frame on a bus that is going away.
+        if (Volatile.Read(ref _disposed) != 0)
+            DropHeldTransmits();
+        else
+            ReleaseHeldTransmits();
     }
 
     // Actor thread. Invalid or unsupported commands draw no response (§7.3), except store,
@@ -311,6 +419,7 @@ internal sealed partial class CanOpenNode : ILssSlave
                 if (generation != _lssActivationGeneration) return;
                 Volatile.Write(ref _lssSilentUntil, 0);
                 FlushDeferredLssReply();
+                ReleaseHeldTransmits();
             });
         });
     }
