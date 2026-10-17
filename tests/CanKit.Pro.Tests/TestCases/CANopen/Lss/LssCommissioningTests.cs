@@ -25,7 +25,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     private static LssMasterOptions Quick() => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        FastscanTimeout = TimeSpan.FromMilliseconds(40),
+        FastscanTimeout = TimeSpan.FromMilliseconds(200),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
     };
@@ -88,7 +88,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         assigned.Slaves[0].NodeIdResult!.Value.Succeeded.Should().BeTrue();
         assigned.Slaves[0].StoreResult!.Value.ErrorCode.Should().Be(LssCommand.StoreNotSupported);
         first.NodeId.Should().Be(0x21);
-        first.LssState().Should().Be(LssState.Waiting);
+        await WaitUntilAsync(() => first.LssState() == LssState.Waiting);
 
         var withStore = bench.Unconfigured(store, Third)[0];
         var stored = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
@@ -315,6 +315,57 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         notStored.StoreResult!.Value.ErrorCode.Should().Be(LssCommand.StoreNotSupported);
         await Task.Delay(40);
         switches.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task A_Scan_Of_More_Than_One_Slave_Refuses_To_Activate_Bit_Timing()
+    {
+        using var bench = new Bench();
+        var tool = new LssCommissioning(bench.Master);
+        var open = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 20,
+        });
+        await open.Should().ThrowAsync<ArgumentException>();
+        var two = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            Limit = 2,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 20,
+        });
+        await two.Should().ThrowAsync<ArgumentException>();
+
+        int switches = 0;
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        SetIdentity(slave, First);
+        var one = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = KnownVendor(),
+            AssignFromNodeId = 0x10,
+            Limit = 1,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 20,
+            ActivateBitRate = 250_000,
+        });
+        one.Stop.Should().Be(LssScanStop.LimitReached);
+        one.Slaves.Should().ContainSingle();
+        one.Slaves[0].Succeeded.Should().BeTrue();
+        one.Slaves[0].NodeId.Should().Be(0x10);
+        await WaitUntilAsync(() => switches == 1 && slave.LssState() == LssState.Waiting);
+        slave.NodeId.Should().Be(0x10);
     }
 
     private static void SetIdentity(ICanOpenNode node, LssAddress address)

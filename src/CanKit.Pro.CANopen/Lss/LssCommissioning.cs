@@ -68,7 +68,9 @@ public sealed class LssUnconfiguredScan
 
     /// <summary>
     /// Switch delay passed to activate bit timing, in milliseconds. Requires the table selector
-    /// and index. <see langword="null"/> (the default) configures the timing and does not activate it.
+    /// and index, and <see cref="Limit"/> 1. <see langword="null"/> (the default) configures the
+    /// timing and does not activate it. A scan that can select more than one slave must not
+    /// activate: that slave would switch rate while the next one is still found at the old rate.
     /// </summary>
     public ushort? ActivateDelayMilliseconds { get; init; }
 
@@ -197,7 +199,8 @@ public sealed class LssUnconfiguredScanResult
 /// A scan that only lists slaves leaves each one in configuration until the scan ends, so the
 /// next Fastscan cannot return it again, and then switches every slave to waiting. A scan that
 /// assigns node-ids switches back to waiting after each slave, before the next Fastscan, so
-/// configure node-id reaches only the slave just found. Switch state global also releases any
+/// configure node-id reaches only the slave just found. Activating bit timing in that scan is
+/// limited to one slave. Switch state global also releases any
 /// other slave that was already in configuration.
 /// </remarks>
 public sealed class LssCommissioning
@@ -217,7 +220,8 @@ public sealed class LssCommissioning
     /// <summary>
     /// Finds unconfigured slaves by Fastscan (§6.7). With <see cref="LssUnconfiguredScan.AssignFromNodeId"/>,
     /// each one is given the next node-id and, when asked, a bit timing and a store, then
-    /// released to waiting. Without it, slaves are parked in configuration for the duration of
+    /// released to waiting. Bit timing is activated only when <see cref="LssUnconfiguredScan.Limit"/>
+    /// is 1. Without an assignment, slaves are parked in configuration for the duration of
     /// the scan and released together at the end.
     /// </summary>
     public async Task<LssUnconfiguredScanResult> ScanUnconfiguredAsync(
@@ -278,9 +282,10 @@ public sealed class LssCommissioning
         }
         finally
         {
-            // Cancellation or a transport failure leaves the parked slaves in configuration,
-            // where the next Fastscan will not see them.
-            if (completed is null && slaves.Count > 0 && !assigning)
+            // Cancellation or a transport failure can leave a slave in configuration. Fastscan
+            // switches that slave before this method records it, so an empty list is not proof
+            // that nobody was parked, and the next Fastscan would not see it.
+            if (completed is null)
                 await ReleaseToWaitingAsync().ConfigureAwait(false);
         }
     }
@@ -523,6 +528,10 @@ public sealed class LssCommissioning
         if (scan.AssignFromNodeId is null && (scan.Store || scan.BitTimingSelector is not null || scan.BitTimingIndex is not null))
             throw new ArgumentException(
                 "Storing or changing bit timing during a scan needs AssignFromNodeId, so each service hits one slave.",
+                nameof(scan));
+        if (scan.ActivateDelayMilliseconds is not null && scan.Limit != 1)
+            throw new ArgumentException(
+                "Activating bit timing during a scan is only allowed when Limit is 1, so one slave does not switch rate before the next is found.",
                 nameof(scan));
         ValidateServices(
             scan.AssignFromNodeId,

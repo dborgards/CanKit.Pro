@@ -36,3 +36,5 @@ node-id and bit timing. The demo slaves keep that only in memory.
 `1018h:01`–`04` of those nodes through `--client-node`, which must be unused. `--probe-all`
 reads every node-id from 1 to 127 instead. `assign` selects one slave. `assign-unconfigured`
 gives each unconfigured slave the next node-id, starting at `--first-node-id`.
+`--activate-ms` is accepted only together with `--count 1`, so one slave does not change rate
+before the next is found.

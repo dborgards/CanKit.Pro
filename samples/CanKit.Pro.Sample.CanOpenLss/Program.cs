@@ -177,15 +177,24 @@ namespace CanKit.Sample.CanOpenLss
         private static async Task<int> AssignUnconfiguredAsync(
             LssCommissioning tool, string[] args, CancellationToken cancellationToken)
         {
+            ushort? activate = ReadOptionalUShort(args, "--activate-ms");
+            int? count = HasFlag(args, "--count") ? GetInt(args, "--count", 1, 1) : null;
+            if (activate is not null && count != 1)
+            {
+                Console.Error.WriteLine(
+                    "Activating bit timing while assigning unconfigured slaves needs --count 1.");
+                return 2;
+            }
+
             byte? first = ReadNodeId(args, "--first-node-id", required: true);
             var scan = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
             {
                 AssignFromNodeId = first,
-                Limit = HasFlag(args, "--count") ? GetInt(args, "--count", 1, 1) : null,
+                Limit = count,
                 Store = HasFlag(args, "--store"),
                 BitTimingSelector = ReadOptionalByte(args, "--selector"),
                 BitTimingIndex = ReadOptionalByte(args, "--index"),
-                ActivateDelayMilliseconds = ReadOptionalUShort(args, "--activate-ms"),
+                ActivateDelayMilliseconds = activate,
                 ActivateBitRate = ReadOptionalInt(args, "--bit-rate"),
             }, cancellationToken).ConfigureAwait(false);
             Console.WriteLine($"Stop: {scan.Stop}");
@@ -258,7 +267,8 @@ namespace CanKit.Sample.CanOpenLss
                 "  scan [--all] [--client-node 127] [--heartbeat-ms 400] [--probe-all] [--sdo-timeout-ms 200]");
             Console.WriteLine("  assign --vendor <n> --product <n> --revision <n> --serial <n> [--node-id <n>]");
             Console.WriteLine("         [--selector <n> --index <n>] [--activate-ms <n>] [--bit-rate <n>] [--store]");
-            Console.WriteLine("  assign-unconfigured --first-node-id <n> [--count <n>] [same bit timing and --store]");
+            Console.WriteLine("  assign-unconfigured --first-node-id <n> [--count <n>] [--selector <n> --index <n>] [--store]");
+            Console.WriteLine("         [--activate-ms <n> --bit-rate <n> only together with --count 1]");
             Console.WriteLine("  inquire --vendor <n> --product <n> --revision <n> --serial <n>");
             Console.WriteLine();
             Console.WriteLine(
