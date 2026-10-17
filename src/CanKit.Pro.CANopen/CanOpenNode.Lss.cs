@@ -447,7 +447,10 @@ internal sealed partial class CanOpenNode : ILssSlave
         _activeIndex = _pendingIndex;
         // Silence is the actor's second delay, not a wall-clock window: a late actor
         // keeps the slave quiet until that callback, which is the clock Schedule uses.
-        Volatile.Write(ref _lssSilent, 1);
+        // The flag is read under this gate by a transmit on another thread, and cleared
+        // under it, so the write that starts the silence takes the same gate.
+        lock (_lssTxGate)
+            Volatile.Write(ref _lssSilent, 1);
         InvokeBitRateSwitch(_activeSelector, _activeIndex);
         _lssActivation = _actor.Schedule(delay, () => CompleteLssSilence(generation));
     }
