@@ -10,6 +10,7 @@ using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Core;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Lss;
+using CanKit.Pro.CANopen.Sdo;
 using CanOpenLssApi = CanKit.Pro.CANopen.Lss.CanOpenLss;
 
 namespace CanKit.Sample.CanOpenLss
@@ -66,11 +67,32 @@ namespace CanKit.Sample.CanOpenLss
                 Console.WriteLine("Cancelled.");
                 return 130;
             }
-            catch (Exception exception)
+            catch (LssTimeoutException exception)
             {
-                Console.Error.WriteLine(exception.Message);
-                return 1;
+                return Fail(exception);
             }
+            catch (CanOpenTransportException exception)
+            {
+                return Fail(exception);
+            }
+            catch (SdoAbortException exception)
+            {
+                return Fail(exception);
+            }
+            catch (ArgumentException exception)
+            {
+                return Fail(exception);
+            }
+            catch (InvalidOperationException exception)
+            {
+                return Fail(exception);
+            }
+        }
+
+        private static int Fail(Exception exception)
+        {
+            Console.Error.WriteLine(exception.Message);
+            return 1;
         }
 
         private static async Task<int> RunAsync(

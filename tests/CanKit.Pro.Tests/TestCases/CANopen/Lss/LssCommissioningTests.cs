@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
@@ -109,12 +110,14 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     public async Task Configure_And_Inquire_One_Slave_By_Its_Address()
     {
         int rate = 0;
+        var store = new MemoryStore();
         using var bench = new Bench();
         var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
-            Store = new MemoryStore(),
+            Store = store,
             BitRateSwitch = (bitsPerSecond, _) =>
             {
+                store.Stored.Should().BeTrue();
                 rate = bitsPerSecond;
                 return Task.CompletedTask;
             },
@@ -175,6 +178,35 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         scan.Stop.Should().Be(LssScanStop.NoUnconfiguredSlave);
         scan.Slaves.Should().BeEmpty();
         slave.LssState().Should().Be(LssState.Configuration);
+
+        // Opened after the global switch, so it is the only slave still in waiting.
+        var unconfigured = bench.Unconfigured(First)[0];
+        var missed = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = new LssFastscanRequest
+            {
+                VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 99 },
+            },
+        });
+        missed.Stop.Should().Be(LssScanStop.NoMatch);
+        missed.Slaves.Should().BeEmpty();
+        slave.LssState().Should().Be(LssState.Configuration);
+        unconfigured.LssState().Should().Be(LssState.Waiting);
+    }
+
+    [Fact]
+    public async Task A_Cancelled_Listing_Scan_Releases_The_Slaves_It_Parked()
+    {
+        using var bench = new Bench();
+        var first = bench.Unconfigured(First, Second)[0];
+        var tool = new LssCommissioning(bench.Master);
+        using var cancel = new CancellationTokenSource();
+        var scan = tool.ScanUnconfiguredAsync(cancellationToken: cancel.Token);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration);
+        cancel.Cancel();
+        var act = async () => await scan;
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await WaitUntilAsync(() => first.LssState() == LssState.Waiting);
     }
 
     [Fact]
@@ -223,6 +255,8 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     {
         public byte NodeId { get; private set; }
 
+        public bool Stored { get; private set; }
+
         public bool TryLoad(out byte nodeId, out byte tableSelector, out byte tableIndex)
         {
             nodeId = 0;
@@ -234,6 +268,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         public bool TryStore(byte nodeId, byte tableSelector, byte tableIndex, out byte specError)
         {
             NodeId = nodeId;
+            Stored = true;
             specError = 0;
             return true;
         }

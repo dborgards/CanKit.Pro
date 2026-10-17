@@ -159,10 +159,16 @@ public sealed class LssCommissioningResult
     /// lists an address, with no service, is a success.
     /// </summary>
     public bool Succeeded
-        => Selected
-           && (NodeIdResult is null || NodeIdResult.Value.Succeeded)
-           && (BitTimingResult is null || BitTimingResult.Value.Succeeded)
-           && (StoreResult is null || StoreResult.Value.Succeeded);
+    {
+        get
+        {
+            if (!Selected) return false;
+            if (NodeIdResult is { Succeeded: false }) return false;
+            if (BitTimingResult is { Succeeded: false }) return false;
+            if (StoreResult is { Succeeded: false }) return false;
+            return true;
+        }
+    }
 }
 
 /// <summary>Outcome of a Fastscan over the unconfigured slaves.</summary>
@@ -223,40 +229,60 @@ public sealed class LssCommissioning
         bool assigning = scan.AssignFromNodeId.HasValue;
         int nextId = scan.AssignFromNodeId ?? 0;
         var slaves = new List<LssCommissioningResult>();
-        while (scan.Limit is null || slaves.Count < scan.Limit.Value)
+        LssUnconfiguredScanResult? completed = null;
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (assigning && nextId > CanOpenCobId.MaxNodeId)
-                return new LssUnconfiguredScanResult(slaves, LssScanStop.NodeIdsExhausted);
-
-            var found = await _master.FastscanAsync(scan.Fastscan, cancellationToken).ConfigureAwait(false);
-            if (found.Status == LssFastscanStatus.NoUnconfiguredSlave)
-                break;
-            if (found.Status == LssFastscanStatus.NoMatch)
+            while (scan.Limit is null || slaves.Count < scan.Limit.Value)
             {
-                return await Finish(slaves, LssScanStop.NoMatch, releaseParked: !assigning, cancellationToken)
-                    .ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (assigning && nextId > CanOpenCobId.MaxNodeId)
+                {
+                    completed = new LssUnconfiguredScanResult(slaves, LssScanStop.NodeIdsExhausted);
+                    return completed;
+                }
+
+                var found = await _master.FastscanAsync(scan.Fastscan, cancellationToken).ConfigureAwait(false);
+                if (found.Status == LssFastscanStatus.NoUnconfiguredSlave)
+                    break;
+                if (found.Status == LssFastscanStatus.NoMatch)
+                {
+                    // A miss that parked nobody must not switch other slaves out of configuration.
+                    completed = await Finish(slaves, LssScanStop.NoMatch, releaseParked: slaves.Count > 0 && !assigning)
+                        .ConfigureAwait(false);
+                    return completed;
+                }
+
+                if (!assigning)
+                {
+                    slaves.Add(new LssCommissioningResult(selected: true, found.Address));
+                    continue;
+                }
+
+                var result = await ConfigureFoundSlaveAsync(
+                    found.Address, (byte)nextId, scan, cancellationToken).ConfigureAwait(false);
+                slaves.Add(result);
+                if (!result.Succeeded)
+                {
+                    completed = new LssUnconfiguredScanResult(slaves, LssScanStop.SlaveRejected);
+                    return completed;
+                }
+                nextId++;
             }
 
-            if (!assigning)
-            {
-                slaves.Add(new LssCommissioningResult(selected: true, found.Address));
-                continue;
-            }
-
-            var result = await ConfigureFoundSlaveAsync(
-                found.Address, (byte)nextId, scan, cancellationToken).ConfigureAwait(false);
-            slaves.Add(result);
-            if (!result.Succeeded)
-                return new LssUnconfiguredScanResult(slaves, LssScanStop.SlaveRejected);
-            nextId++;
+            var stop = scan.Limit is not null && slaves.Count >= scan.Limit.Value
+                ? LssScanStop.LimitReached
+                : LssScanStop.NoUnconfiguredSlave;
+            completed = await Finish(slaves, stop, releaseParked: slaves.Count > 0 && !assigning)
+                .ConfigureAwait(false);
+            return completed;
         }
-
-        var stop = scan.Limit is not null && slaves.Count >= scan.Limit.Value
-            ? LssScanStop.LimitReached
-            : LssScanStop.NoUnconfiguredSlave;
-        return await Finish(slaves, stop, releaseParked: !assigning && slaves.Count > 0, cancellationToken)
-            .ConfigureAwait(false);
+        finally
+        {
+            // Cancellation or a transport failure leaves the parked slaves in configuration,
+            // where the next Fastscan will not see them.
+            if (completed is null && slaves.Count > 0 && !assigning)
+                await ReleaseToWaitingAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -296,7 +322,7 @@ public sealed class LssCommissioning
         finally
         {
             if (configuration.ReleaseToWaiting)
-                await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+                await ReleaseToWaitingAsync().ConfigureAwait(false);
         }
     }
 
@@ -320,7 +346,7 @@ public sealed class LssCommissioning
         }
         finally
         {
-            await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+            await ReleaseToWaitingAsync().ConfigureAwait(false);
         }
     }
 
@@ -373,7 +399,7 @@ public sealed class LssCommissioning
         }
         finally
         {
-            await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+            await ReleaseToWaitingAsync().ConfigureAwait(false);
         }
     }
 
@@ -401,16 +427,17 @@ public sealed class LssCommissioning
         {
             timingResult = await _master.ConfigureBitTimingAsync(table, tableIndex, cancellationToken)
                 .ConfigureAwait(false);
-            if (timingResult.Value.Succeeded && activateDelay is { } delay)
-            {
-                await _master.ActivateBitTimingAsync(delay, activateRate, cancellationToken).ConfigureAwait(false);
-            }
         }
 
+        // Store while both ends are still on the current bitrate. Activation is the last
+        // configuration service: after it, the slave transmits at the new rate (§6.5).
         bool servicesOk = (nodeIdResult is null || nodeIdResult.Value.Succeeded)
             && (timingResult is null || timingResult.Value.Succeeded);
         if (store && servicesOk)
             storeResult = await _master.StoreConfigurationAsync(cancellationToken).ConfigureAwait(false);
+
+        if (timingResult is { Succeeded: true } && activateDelay is { } delay)
+            await _master.ActivateBitTimingAsync(delay, activateRate, cancellationToken).ConfigureAwait(false);
 
         return new LssCommissioningResult(true, address, nodeId, nodeIdResult, timingResult, storeResult);
     }
@@ -418,12 +445,28 @@ public sealed class LssCommissioning
     private async Task<LssUnconfiguredScanResult> Finish(
         List<LssCommissioningResult> slaves,
         LssScanStop stop,
-        bool releaseParked,
-        CancellationToken cancellationToken)
+        bool releaseParked)
     {
         if (releaseParked)
-            await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+            await ReleaseToWaitingAsync().ConfigureAwait(false);
         return new LssUnconfiguredScanResult(slaves, stop);
+    }
+
+    /// <summary>
+    /// Returns every slave to waiting. Uses its own token: the caller's token is often already
+    /// cancelled when this runs from a <c>finally</c>, and the waiting frame would never be sent.
+    /// </summary>
+    private async Task ReleaseToWaitingAsync()
+    {
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await _master.SwitchStateGlobalAsync(LssState.Waiting, cleanup.Token).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The master went away with the scan.
+        }
     }
 
     private static async Task<LssAddress?> TryReadIdentityAsync(
