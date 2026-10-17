@@ -122,15 +122,18 @@ internal sealed partial class LssMaster : ILssMaster
         => Execute(async ct =>
         {
             await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
-            // Before either delay. Afterwards the slave transmits at the new rate and this
-            // channel, which is not reconfigured, would not reach it.
-            if (returnToWaiting)
-                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
+            // A positive delay leaves the slave on the current rate, so waiting still reaches it.
+            // A zero delay applies the new rate inside that activate frame. Waiting has to follow
+            // this master's switch, or it goes out at the rate the slave just left.
+            if (returnToWaiting && delay > TimeSpan.Zero)
+                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
                 await Task.Delay(delay, ct).ConfigureAwait(false);
             if (bitsPerSecond is int rate && Options.BitRateSwitch is { } switchRate)
                 await switchRate(rate, ct).ConfigureAwait(false);
+            if (returnToWaiting && delay == TimeSpan.Zero)
+                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
                 await Task.Delay(delay, ct).ConfigureAwait(false);
         }, cancellationToken);
