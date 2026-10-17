@@ -605,6 +605,7 @@ namespace CanKit.Pro.CANopen.Lss
         LimitReached = 2,
         NodeIdsExhausted = 3,
         SlaveRejected = 4,
+        TimedOut = 5,
     }
     public readonly struct LssServiceResult : System.IEquatable<CanKit.Pro.CANopen.Lss.LssServiceResult>
     {
