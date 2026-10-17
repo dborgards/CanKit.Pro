@@ -33,7 +33,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     private byte _profileCobIdNodeId;
     private byte _sdoCobIdNodeId;
     private byte _powerOnNodeId;
-    private byte _factoryNodeId;
+    private readonly byte _factoryNodeId;
 
     private int _fastscanPos;
     private int _selectiveStep;
@@ -257,6 +257,9 @@ internal sealed partial class CanOpenNode : ILssSlave
         if (!CanOpenCobId.IsActiveNodeId(_nodeId) && CanOpenCobId.IsActiveNodeId(nodeId))
         {
             ApplyActiveNodeId(nodeId);
+            // The node-id is active now, so a flying master configured while this slave was
+            // unconfigured can claim with it. Before this, startup had no node-id to use.
+            ApplyFlyingMasterStartup();
             EnterPreOperationalFromReset();
         }
         return LssFrames.Confirmed(LssCommand.ConfigureNodeId, LssCommand.NodeIdOk, 0);
@@ -323,17 +326,12 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         var hook = _options.Lss?.BitRateSwitch;
         if (hook is null || !TryResolveBitRate(selector, index, out var rate)) return;
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await hook(rate, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                RaiseBackgroundException(ex);
-            }
-        });
+        _ = Task.Run(() => hook(rate, CancellationToken.None)).ContinueWith(
+            static (task, state) => ((CanOpenNode)state!).RaiseBackgroundException(task.Exception!.GetBaseException()),
+            this,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private bool TryResolveBitRate(byte selector, byte index, out int bitsPerSecond)
@@ -508,10 +506,20 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private void RetargetDefaultSrdo(byte from, byte to)
     {
-        if (from > 64 || to > 64 || _srdoCount < 1) return;
+        if (_srdoCount < 1) return;
+        bool fromPredefined = from is >= CanOpenCobId.MinNodeId and <= 64;
+        bool toPredefined = to is >= CanOpenCobId.MinNodeId and <= 64;
+        if (!fromPredefined && !toPredefined) return;
         var comm = Safety.SrdoRecords.CommIndex(1);
-        RetargetCobId(comm, 0x05, CanOpenCobId.SrdoDefaultCobId1(from), CanOpenCobId.SrdoDefaultCobId1(to));
-        RetargetCobId(comm, 0x06, CanOpenCobId.SrdoDefaultCobId2(from), CanOpenCobId.SrdoDefaultCobId2(to));
+        uint from1 = fromPredefined ? CanOpenCobId.SrdoDefaultCobId1(from) : 0;
+        uint from2 = fromPredefined ? CanOpenCobId.SrdoDefaultCobId2(from) : 0;
+        uint to1 = toPredefined ? CanOpenCobId.SrdoDefaultCobId1(to) : 0;
+        uint to2 = toPredefined ? CanOpenCobId.SrdoDefaultCobId2(to) : 0;
+        // A node-id outside 1..64 has no pre-defined pair (CiA DSP 304 §8.3.3). Populate wrote
+        // 0 for it, and leaving the set puts a still-default pair back to 0. A pair the
+        // application changed does not match and is left alone.
+        RetargetCobId(comm, 0x05, from1, to1);
+        RetargetCobId(comm, 0x06, from2, to2);
     }
 
     private void RetargetCobId(ushort index, byte subindex, uint fromCanId, uint toCanId)

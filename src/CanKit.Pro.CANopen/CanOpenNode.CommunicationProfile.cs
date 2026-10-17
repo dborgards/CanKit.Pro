@@ -795,10 +795,15 @@ internal sealed partial class CanOpenNode
             {
                 _nodeId = CanOpenCobId.UnconfiguredNodeId;
                 _srdo.SetNodeId(_nodeId);
+                // After the node-id is settled: an unconfigured slave has nothing to claim with.
+                ApplyFlyingMasterStartup();
                 return;
             }
             ApplyActiveNodeId(_pendingNodeId);
         }
+        // After the active node-id and the retargeted 1F90h:06. Starting inside the restore
+        // would claim with the id the reset is leaving.
+        ApplyFlyingMasterStartup();
         EnterPreOperationalFromReset();
     }
 
@@ -907,7 +912,6 @@ internal sealed partial class CanOpenNode
         {
             _suppressFlyingMasterStartup = false;
         }
-        ApplyFlyingMasterStartup();
     }
 
     /// <inheritdoc />
