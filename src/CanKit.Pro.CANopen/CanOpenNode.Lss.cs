@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen.Lss;
 using EdsDcfNet.Models;
 
@@ -45,7 +45,7 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private int _lssActivationGeneration;
     private IDisposable? _lssActivation;
-    private long _lssSilentUntil;
+    private int _lssSilent;
     private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
     private readonly object _lssTxGate = new();
@@ -123,11 +123,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     private bool LayerSettingsBlockBoot()
         => _lssEnabled && !CanOpenCobId.IsActiveNodeId(_nodeId);
 
-    private bool IsLssSilent()
-    {
-        long until = Volatile.Read(ref _lssSilentUntil);
-        return until != 0 && Stopwatch.GetTimestamp() < until;
-    }
+    private bool IsLssSilent() => Volatile.Read(ref _lssSilent) != 0;
 
     /// <summary>
     /// CiA 305 §6.5. Every transmit path asks this before it touches the driver: during the
@@ -173,18 +169,26 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
     }
 
-    private void ReleaseHeldTransmits()
+    private void EndLssSilence()
     {
         HeldTransmit[] held;
         lock (_lssTxGate)
         {
-            if (_lssHeldTx.Count == 0) return;
-            held = _lssHeldTx.ToArray();
-            _lssHeldTx.Clear();
+            // The flag and the queue move together. A send that arrives as the delay ends
+            // either joins this flush or sees the flag clear and goes out on its own.
+            Volatile.Write(ref _lssSilent, 0);
+            if (_lssHeldTx.Count == 0)
+                held = Array.Empty<HeldTransmit>();
+            else
+            {
+                held = _lssHeldTx.ToArray();
+                _lssHeldTx.Clear();
+            }
         }
 
-        // Not on the actor: the sends complete later, and a reset they cause posts back here.
-        _ = SendHeldInOrder(held);
+        FlushDeferredLssReply();
+        if (held.Length != 0)
+            _ = SendHeldInOrder(held);
     }
 
     private async Task SendHeldInOrder(HeldTransmit[] held)
@@ -205,7 +209,15 @@ internal sealed partial class CanOpenNode : ILssSlave
             {
                 item.Signal.TrySetCanceled();
             }
-            catch (Exception ex)
+            catch (ObjectDisposedException ex)
+            {
+                item.Signal.TrySetException(ex);
+            }
+            catch (CanKitException ex)
+            {
+                item.Signal.TrySetException(ex);
+            }
+            catch (InvalidOperationException ex)
             {
                 item.Signal.TrySetException(ex);
             }
@@ -217,6 +229,7 @@ internal sealed partial class CanOpenNode : ILssSlave
         HeldTransmit[] held;
         lock (_lssTxGate)
         {
+            Volatile.Write(ref _lssSilent, 0);
             if (_lssHeldTx.Count == 0) return;
             held = _lssHeldTx.ToArray();
             _lssHeldTx.Clear();
@@ -246,12 +259,11 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivation?.Dispose();
         _lssActivation = null;
         _lssDeferredReply = null;
-        Volatile.Write(ref _lssSilentUntil, 0);
         // The node may transmit again. Disposal must not put a frame on a bus that is going away.
         if (Volatile.Read(ref _disposed) != 0)
             DropHeldTransmits();
         else
-            ReleaseHeldTransmits();
+            EndLssSilence();
     }
 
     // Actor thread. Invalid or unsupported commands draw no response (§7.3), except store,
@@ -410,16 +422,14 @@ internal sealed partial class CanOpenNode : ILssSlave
             if (generation != _lssActivationGeneration || Volatile.Read(ref _disposed) != 0) return;
             _activeSelector = _pendingSelector;
             _activeIndex = _pendingIndex;
-            // Silence starts before the rate callback, so a fast callback still observes it.
-            long ticks = delayMilliseconds * Stopwatch.Frequency / 1000;
-            Volatile.Write(ref _lssSilentUntil, Stopwatch.GetTimestamp() + Math.Max(ticks, 1));
+            // Silence is the actor's second delay, not a wall-clock window: a late actor
+            // keeps the slave quiet until that callback, which is the clock Schedule uses.
+            Volatile.Write(ref _lssSilent, 1);
             InvokeBitRateSwitch(_activeSelector, _activeIndex);
             _lssActivation = _actor.Schedule(delay, () =>
             {
                 if (generation != _lssActivationGeneration) return;
-                Volatile.Write(ref _lssSilentUntil, 0);
-                FlushDeferredLssReply();
-                ReleaseHeldTransmits();
+                EndLssSilence();
             });
         });
     }
