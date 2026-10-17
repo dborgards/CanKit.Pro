@@ -2543,18 +2543,29 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
         // NMT and heartbeat are sent when the delay ends. Anything else is dropped, and an
         // in-flight SDO send is reported confirmed so its timeout can still decide it.
-        if (HoldsAcrossLssSilence(cobId) && TryHoldThroughSilence(cobId, payload, out var held))
-            return held;
-        if (LssTransmitSuppressed(onSendCompleted))
-            return Task.CompletedTask;
-        // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmedAsync for
+        // The gate either finishes the frame (held or dropped) or reserves the send so silence
+        // cannot start until this frame has been handed to the driver.
+        if (GateTransmit(cobId, payload, onSendCompleted) is { } finished)
+            return finished;
+        CanFrame frame;
+        try
+        {
+            // Classic 11-bit CAN frame; no extended bit. Built after the reservation so a throw
+            // here still releases it: silence waits until this slot is gone.
+            frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+        }
+        catch (Exception)
+        {
+            ReleaseTransmit();
+            throw;
+        }
+        // We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via
         // BackgroundExceptionOccurred. An SDO client request also passes onSendCompleted, which
         // is told once how the send ended -- null when confirmed or cancelled, the failure
         // otherwise -- so the transfer can fail at once instead of by the SDO timeout (#197).
-        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-        return Task.Run(async () =>
+        var send = Task.Run(async () =>
         {
             CanOpenTransportException? failure = null;
             try
@@ -2599,6 +2610,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 onSendCompleted?.Invoke(failure);
             }
         }, cancellationToken);
+        // Also when the token cancels the task before the body runs: the reservation has to
+        // end or the switch delay never starts.
+        _ = send.ContinueWith(
+            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
+            this,
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+        return send;
     }
 
     /// <summary>
@@ -2745,11 +2765,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     if (shouldStop?.Invoke() == true) return;
                     // The same switch-delay rule as SendControlFrame. A confirmed non-send keeps
                     // the batch moving; the peer's timeout decides a transfer that lost its frames.
-                    if (LssTransmitSuppressed())
+                    // Reserved sends finish before a new silence can start.
+                    if (!TryReserveTransmit())
                     {
                         onFrameConfirmed?.Invoke();
+                        continue;
                     }
-                    else
+
+                    try
                     {
                         try
                         {
@@ -2780,6 +2803,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                             RaiseBackgroundException(failure);
                             return;
                         }
+                    }
+                    finally
+                    {
+                        ReleaseTransmit();
                     }
                 }
             }

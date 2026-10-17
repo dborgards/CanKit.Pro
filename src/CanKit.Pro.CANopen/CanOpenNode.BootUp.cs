@@ -546,15 +546,27 @@ internal sealed partial class CanOpenNode
     {
         // Flying-master NMT uses this path rather than SendControlFrame. The switch delay
         // holds the frame: completing with true here would apply the reset before it is sent.
-        if (TryHoldThroughSilence(CanOpenCobId.NmtCommand, payload, out var held))
-            return held;
+        // The same gate as every other transmit: a frame already reserved goes out before
+        // silence starts, and one that arrives during the delay is held.
+        if (GateTransmit(CanOpenCobId.NmtCommand, payload, null) is { } held)
+            return (Task<bool>)held;
         return SendNmtPayload(payload);
     }
 
     private Task<bool> SendNmtPayload(byte[] payload)
     {
-        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
-        return Task.Run(async () =>
+        CanFrame frame;
+        try
+        {
+            frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
+        }
+        catch (Exception)
+        {
+            ReleaseTransmit();
+            throw;
+        }
+
+        var send = Task.Run(async () =>
         {
             try
             {
@@ -569,5 +581,12 @@ internal sealed partial class CanOpenNode
                 throw;
             }
         });
+        _ = send.ContinueWith(
+            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
+            this,
+            CancellationToken.None,
+            TaskContinuationOptions.None,
+            TaskScheduler.Default);
+        return send;
     }
 }
