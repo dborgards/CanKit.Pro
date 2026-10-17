@@ -103,14 +103,17 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Asks every slave whose LSS address lies in <paramref name="range"/> to identify itself
-    /// (§6.6.2, §7.7.1). Returns <see langword="true"/> when at least one does, within
-    /// <see cref="LssMasterOptions.IdentificationTimeout"/>.
+    /// (§6.6.2, §7.7.1). Returns <see langword="true"/> when at least one does. The call waits
+    /// out <see cref="LssMasterOptions.IdentificationTimeout"/> before it returns, so a later
+    /// reply is not left for the next command.
     /// </summary>
     Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Asks every non-configured slave (pending node-id <see cref="CanOpenCobId.UnconfiguredNodeId"/>,
-    /// no active node-id, NMT initialization) to identify itself (§6.6.4, §7.7.3).
+    /// no active node-id, NMT initialization) to identify itself (§6.6.4, §7.7.3). The call waits
+    /// out <see cref="LssMasterOptions.IdentificationTimeout"/>, as
+    /// <see cref="IdentifyRemoteSlavesAsync"/> does.
     /// </summary>
     Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default);
 

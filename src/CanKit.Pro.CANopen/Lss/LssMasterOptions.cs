@@ -4,9 +4,9 @@ namespace CanKit.Pro.CANopen.Lss;
 
 /// <summary>
 /// Timeouts of an <see cref="ILssMaster"/>. CiA 305 leaves them to the implementation and asks
-/// that they be adjustable (annex A.2, A.3.3). A slave must answer inside the timeout: a response
-/// that arrives later is not a confirmation, and during Fastscan it can be read as the answer to
-/// the next step.
+/// that they be adjustable (annex A.2, A.3.3). A slave must answer inside the timeout. Fastscan
+/// and identify occupy that whole window from the request, so a late reply is consumed before
+/// the next master frame.
 /// </summary>
 public sealed class LssMasterOptions
 {
@@ -18,22 +18,23 @@ public sealed class LssMasterOptions
     public TimeSpan ResponseTimeout { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>
-    /// How long one Fastscan step waits for an identify-slave response (annex A.3.3, master
-    /// response timeout). A miss means "this bit is 1" or "no slave", so this should be only as
-    /// long as the slowest slave needs. Defaults to 50 ms.
+    /// How long one Fastscan step occupies, measured from the request (annex A.3.3, master
+    /// response timeout). The step waits out the whole window even after the first response,
+    /// so a later reply is not read as the next bit. A miss means "this bit is 1" or "no slave",
+    /// so this should be only as long as the slowest slave needs. Defaults to 50 ms.
     /// </summary>
     public TimeSpan FastscanTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
-    /// Minimum time from the end of one Fastscan wait to the next request (annex A.3.3, master
-    /// cycle time). Responses that arrive during this gap are not attributed to the next step.
-    /// Defaults to 1 ms. Zero disables the gap.
+    /// Extra gap after a Fastscan step's response window, before the next request (annex A.3.3,
+    /// master cycle time). The window itself is <see cref="FastscanTimeout"/>. Defaults to 1 ms.
+    /// Zero disables the extra gap.
     /// </summary>
     public TimeSpan FastscanCycleTime { get; init; } = TimeSpan.FromMilliseconds(1);
 
     /// <summary>
-    /// How long an identify service waits when no slave has answered yet. The call returns as
-    /// soon as one response arrives. Defaults to 100 ms.
+    /// How long an identify service waits, measured from the request. The call occupies the
+    /// whole window and returns <see langword="true"/> when any slave answered. Defaults to 100 ms.
     /// </summary>
     public TimeSpan IdentificationTimeout { get; init; } = TimeSpan.FromMilliseconds(100);
 

@@ -199,8 +199,10 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             var sent = await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh), ct)
                 .ConfigureAwait(false);
+            // The whole identification window is occupied, so a later slave is not left
+            // queued for the next command.
             var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifySlave,
-                Options.IdentificationTimeout, ct).ConfigureAwait(false);
+                Options.IdentificationTimeout, ct, drain: true).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
 
@@ -211,7 +213,7 @@ internal sealed partial class LssMaster : ILssMaster
             var sent = await SendAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote), ct)
                 .ConfigureAwait(false);
             var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifyNonConfiguredSlave,
-                Options.IdentificationTimeout, ct).ConfigureAwait(false);
+                Options.IdentificationTimeout, ct, drain: true).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
 
@@ -320,19 +322,23 @@ internal sealed partial class LssMaster : ILssMaster
     }
 
     private async Task<byte[]?> ReceiveAsync(Sent sent, Func<byte[], bool> match, TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, bool drain = false)
     {
         // The deadline starts when the frame was handed to the driver, not when this wait
         // begins: a response already queued can still be late (TxConfirmation.HostTransmitTimestamp).
+        // A drain keeps the first match and stays until the deadline, which is how Fastscan and
+        // identify consume every slave that answered this request before the next one is sent.
         long deadline = sent.Transmit + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        byte[]? first = null;
         while (true)
         {
-            if (TryTake(sent, deadline, match) is { } already)
-                return already;
+            TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
+            if (!drain && first is not null)
+                return first;
 
             long left = deadline - Stopwatch.GetTimestamp();
             if (left <= 0)
-                return null;
+                return first;
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutSource.CancelAfter(TimeSpan.FromSeconds((double)left / Stopwatch.Frequency));
             try
@@ -340,24 +346,30 @@ internal sealed partial class LssMaster : ILssMaster
                 if (!await _inbound.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false))
                 {
                     ThrowIfDisposed();
-                    return null;
+                    return first;
                 }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                return TryTake(sent, deadline, match);
+                TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
+                if (!drain && first is not null)
+                    return first;
+                if (Stopwatch.GetTimestamp() >= deadline)
+                    return first;
             }
         }
     }
 
-    private byte[]? TryTake(Sent sent, long deadline, Func<byte[], bool> match)
+    private void TakeAvailable(Sent sent, long deadline, Func<byte[], bool> match, ref byte[]? first,
+        bool stopAtFirst)
     {
         while (_inbound.Reader.TryRead(out var item))
         {
             if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
-            if (match(item.Data)) return item.Data;
+            if (!match(item.Data)) continue;
+            first ??= item.Data;
+            if (stopAtFirst) return;
         }
-        return null;
     }
 
     private async Task<byte[]> ReceiveRequiredAsync(Sent sent, byte commandSpecifier, CancellationToken cancellationToken)

@@ -981,7 +981,10 @@ the slave found is the numerically smallest address among the unconfigured slave
 part. A field can be scanned, matched (the number is already known) or skipped. The vendor-id
 cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
 `KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
-Give the slave a node-id in `1..127` before the next Fastscan, or the same slave is found again.
+Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
+extra gap after that window. Identify waits out `IdentificationTimeout` the same way, so a
+later slave is not left queued for the next command. Give the slave a node-id in `1..127`
+before the next Fastscan, or the same slave is found again.
 
 The LSS slave inside `ICanOpenNode`, and a commissioning tool on top of this master, are not
 part of FR-CO-047.

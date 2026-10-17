@@ -414,6 +414,41 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Fastscan_Waits_Out_The_Window_So_A_Late_Reply_Is_Not_The_Next_Bit()
+    {
+        // Both slaves have vendor-id 1, so bit 0 is 1 and the step must hear silence. The
+        // second slave answers after the cycle gap and inside the timeout. Without draining
+        // the window, that late 4Fh is taken as "bit 0 is 0" and the vendor comes back 0.
+        var session = VirtualAdapterFixture.NewSession("lss-drain");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var master = CanOpenLss.OpenMaster(bus, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            FastscanTimeout = TimeSpan.FromMilliseconds(100),
+            FastscanCycleTime = TimeSpan.FromMilliseconds(1),
+            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        using var first = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), new LssAddress(1, 0, 0, 0));
+        using var second = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 2), new LssAddress(1, 0, 0, 0))
+        {
+            ResponseDelay = TimeSpan.FromMilliseconds(40),
+        };
+
+        var found = await master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { KnownHighBitCount = 30, Value = 0 },
+            ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
+        });
+
+        found.Status.Should().Be(LssFastscanStatus.Found);
+        found.Address.VendorId.Should().Be(1u);
+        first.State.Should().Be(LssState.Configuration);
+        second.State.Should().Be(LssState.Configuration);
+    }
+
+    [Fact]
     public async Task Fastscan_Reports_No_Slave_And_No_Match()
     {
         var session = VirtualAdapterFixture.NewSession("lss-none");
