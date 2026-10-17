@@ -88,6 +88,13 @@ internal sealed class ScriptedLssSlave : IDisposable
 
     public Func<byte, byte[], byte[]?>? Manufacturer { get; set; }
 
+    /// <summary>
+    /// How long this slave waits before it puts a response on the bus. A second slave that
+    /// answers inside the master's window and after the first is what a Fastscan drain has to
+    /// consume before the next bit.
+    /// </summary>
+    public TimeSpan ResponseDelay { get; set; }
+
     public bool IsSilent { get; private set; }
 
     public int SuppressedResponses { get; private set; }
@@ -428,6 +435,8 @@ internal sealed class ScriptedLssSlave : IDisposable
 
     private async Task SendAsync(byte[] payload, int length)
     {
+        if (ResponseDelay > TimeSpan.Zero)
+            await Task.Delay(ResponseDelay).ConfigureAwait(false);
         if (length != payload.Length)
         {
             var sized = new byte[length];
