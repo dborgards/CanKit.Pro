@@ -142,8 +142,10 @@ internal sealed partial class LssMaster
     {
         var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken)
             .ConfigureAwait(false);
-        var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifySlave,
-            Options.FastscanTimeout, cancellationToken).ConfigureAwait(false);
+        // Annex A.3.3: the master cycle contains the whole response timeout. A second slave's
+        // 4Fh that arrives after the first must not be read as the next bit.
+        var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
+            Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
         if (Options.FastscanCycleTime > TimeSpan.Zero)
             await Task.Delay(Options.FastscanCycleTime, cancellationToken).ConfigureAwait(false);
         return response is not null;
