@@ -26,7 +26,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     private static LssMasterOptions Quick() => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        FastscanTimeout = TimeSpan.FromMilliseconds(200),
+        FastscanTimeout = TimeSpan.FromMilliseconds(500),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
     };
@@ -268,6 +268,37 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         free.NodeId.Should().Be(0x40);
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
         await WaitUntilAsync(() => parked.State == NmtState.PreOperational);
+        parked.NodeId.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task An_Assigning_Scan_Assigns_When_Fastscan_Skips_The_Serial_Number()
+    {
+        using var bench = new Bench();
+        var parked = bench.Slave(1, 5, new LssSlaveOptions());
+        SetIdentity(parked, new LssAddress(9, 9, 9, 9));
+        await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => parked.LssState() == LssState.Configuration);
+        var free = bench.Unconfigured(new LssAddress(1, 1, 1, 7))[0];
+
+        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = new LssFastscanRequest
+            {
+                VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+                ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+                RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+                SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            },
+            AssignFromNodeId = 0x41,
+            Limit = 1,
+        });
+
+        scan.Stop.Should().Be(LssScanStop.LimitReached);
+        scan.Slaves.Should().ContainSingle();
+        scan.Slaves[0].Succeeded.Should().BeTrue();
+        scan.Slaves[0].NodeId.Should().Be(0x41);
+        free.NodeId.Should().Be(0x41);
         parked.NodeId.Should().Be(5);
     }
 

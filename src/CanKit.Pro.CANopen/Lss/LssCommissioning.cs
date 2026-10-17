@@ -198,9 +198,12 @@ public sealed class LssUnconfiguredScanResult
 /// </summary>
 /// <remarks>
 /// A scan that only lists slaves leaves each one in configuration until the scan ends, so the
-/// next Fastscan cannot return it again, and then switches every slave to waiting. Configure,
-/// inquire, and an assigning scan switch every slave to waiting and then select only the
-/// addressed one, so a slave that was already in configuration does not take the same service.
+/// next Fastscan cannot return it again, and then switches every slave to waiting. Configure
+/// and inquire switch every slave to waiting and then select only the addressed one, so a slave
+/// that was already in configuration does not take the same service. An assigning scan switches
+/// every slave to waiting first. When Fastscan read the whole address, the found slave is
+/// selected again before it is configured. A skipped LSS number is not in that address, so the
+/// slave Fastscan left in configuration is configured there; selecting again would miss it.
 /// Activating bit timing in a scan is limited to one slave.
 /// </remarks>
 public sealed class LssCommissioning
@@ -236,6 +239,12 @@ public sealed class LssCommissioning
         LssUnconfiguredScanResult? completed = null;
         try
         {
+            // Fastscan switches only the slave it found. Clearing configuration first means an
+            // assigning scan can configure that slave even when a skipped number is not in the
+            // address and cannot be selected again.
+            if (assigning)
+                await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+
             while (scan.Limit is null || slaves.Count < scan.Limit.Value)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -389,13 +398,20 @@ public sealed class LssCommissioning
         LssUnconfiguredScan scan,
         CancellationToken cancellationToken)
     {
-        // Fastscan left this slave in configuration, and any slave that was already there
-        // would take the same services. Waiting, then selecting again, leaves only this one.
+        // Fastscan left this slave in configuration. When the address is complete, waiting
+        // and selecting again drops any other slave that entered configuration during the
+        // scan. A skipped number is stored as 0, so selecting that address would miss the
+        // slave whose real number is not 0; the scan already left only that slave in
+        // configuration.
         try
         {
-            await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
-            if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
-                return new LssCommissioningResult(selected: false, address);
+            if (FastscanAddressIsComplete(scan.Fastscan))
+            {
+                await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+                if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
+                    return new LssCommissioningResult(selected: false, address);
+            }
+
             return await ApplyAsync(
                 address,
                 nodeId,
@@ -411,6 +427,14 @@ public sealed class LssCommissioning
         {
             await ReleaseToWaitingAsync().ConfigureAwait(false);
         }
+    }
+
+    private static bool FastscanAddressIsComplete(LssFastscanRequest? request)
+    {
+        if (request is null) return true;
+        return request.ProductCode.Mode != LssFastscanFieldMode.Skip
+            && request.RevisionNumber.Mode != LssFastscanFieldMode.Skip
+            && request.SerialNumber.Mode != LssFastscanFieldMode.Skip;
     }
 
     private async Task<LssCommissioningResult> ApplyAsync(

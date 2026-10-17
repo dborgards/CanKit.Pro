@@ -1022,8 +1022,12 @@ using var node = CanOpen.OpenNode(bus, nodeId: 0xFF, new CanOpenNodeOptions
 
 `LssCommissioning` (FR-CO-049) runs the master as a commissioning sequence. A scan without a
 node-id parks each unconfigured slave in configuration so Fastscan does not return it twice,
-then switches every slave back to waiting. A scan that assigns node-ids switches back to
-waiting after each slave, so the next configure reaches only the slave just found. Bit timing
+then switches every slave back to waiting. A scan that assigns node-ids switches every slave
+to waiting first, then configures only the slave Fastscan left in configuration. When Fastscan
+read the whole address, that slave is selected again, so a slave that was already in
+configuration does not take the same node-id. A skipped LSS number is not part of the address,
+so that slave is configured where Fastscan left it. The scan switches back to waiting after
+each slave. Bit timing
 is activated during a scan only when `Limit` is 1. A scan that can select more than one slave
 configures the table and leaves the rate unchanged, so a slave that already has a node-id stays
 on the bitrate the next Fastscan still uses. A slave that rejects a service stops the batch;
