@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -9,6 +10,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Lss;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
@@ -464,8 +466,8 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfiguration(bench.Master, configured);
         (await bench.Master.ConfigureNodeIdAsync(70)).Succeeded.Should().BeTrue();
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
-        await WaitUntilAsync(() => configured.NodeId == 70);
-        configured.ObjectDictionary.ReadUnsigned(0x1301, 0x05).Should().Be(0);
+        await WaitUntilAsync(() => configured.NodeId == 70
+            && configured.ObjectDictionary.ReadUnsigned(0x1301, 0x05) == 0);
         configured.ObjectDictionary.ReadUnsigned(0x1301, 0x06).Should().Be(0);
     }
 
@@ -544,6 +546,306 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             Address.RevisionNumber, Address.RevisionNumber,
             Address.SerialNumber + 1, Address.SerialNumber + 2);
         (await bench.Master.IdentifyRemoteSlavesAsync(miss)).Should().BeFalse();
+    }
+
+    [Fact]
+    public void A_Stored_Node_Id_Outside_The_Layer_Setting_Range_Is_Rejected()
+    {
+        using var bench = new Bench();
+        var store = new MemoryStore { Has = true, NodeId = 0 };
+        var open = () => bench.Slave(1, 5, new LssSlaveOptions { Store = store });
+        open.Should().Throw<ArgumentOutOfRangeException>().WithParameterName("nodeId");
+    }
+
+    [Fact]
+    public async Task Rejected_Commands_And_A_Zero_Switch_Delay_Stay_Inside_The_Rules()
+    {
+        int rate = 0;
+        Exception? background = null;
+        using var bench = new Bench();
+        var rates = new Dictionary<(byte, byte), int>
+        {
+            [(0x80, 1)] = 125_000,
+            [(0x80, 3)] = 10_000,
+        };
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            ManufacturerRates = rates,
+            BitRateSwitch = (bitsPerSecond, _) =>
+            {
+                rate = bitsPerSecond;
+                if (bitsPerSecond == 10_000) throw new InvalidOperationException("rate hook");
+                return Task.CompletedTask;
+            },
+            Manufacturer = (cs, parameters) =>
+            {
+                if (parameters.Span[0] == 1) return new byte[] { cs, 0x11 };
+                if (parameters.Span[0] == 2)
+                {
+                    var longReply = new byte[12];
+                    longReply[0] = cs;
+                    return longReply;
+                }
+                return null;
+            },
+        });
+        slave.BackgroundExceptionOccurred += (_, ex) => background = ex;
+        SetIdentity(slave, Address);
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+        using var heard = bench.Listen();
+
+        Transmit(poke, LssFrames.SwitchGlobal(LssState.Waiting));
+        var ignored = new byte[LssFrames.Length];
+        ignored[0] = LssCommand.SwitchStateGlobal;
+        ignored[1] = 0x02;
+        Transmit(poke, ignored);
+        Transmit(poke, new byte[] { LssCommand.ConfigureNodeId, 0x11 });
+        Transmit(poke, LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, Address.SerialNumber));
+        Transmit(poke, LssFrames.ConfigureBitTiming(0, 2));
+        Transmit(poke, LssFrames.ActivateBitTiming(0));
+        poke.Transmit(CanFrame.Classic(
+            unchecked((int)CanOpenCobId.LssMasterMessage), ReadOnlyMemory<byte>.Empty, isRemoteFrame: true));
+        await Task.Delay(40);
+        slave.LssState().Should().Be(LssState.Waiting);
+        heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage);
+
+        await EnterConfiguration(bench.Master, slave);
+        Transmit(poke, LssFrames.WithU32(LssCommand.SwitchSelectiveVendor, Address.VendorId));
+        await Task.Delay(30);
+        slave.LssState().Should().Be(LssState.Configuration);
+        (await bench.Master.ConfigureBitTimingAsync(0x80, 1)).Succeeded.Should().BeTrue();
+        (await bench.Master.ConfigureBitTimingAsync(0x80, 2)).ErrorCode.Should().Be(LssCommand.BitTimingNotSupported);
+        (await bench.Master.ConfigureBitTimingAsync(0x81, 1)).ErrorCode.Should().Be(LssCommand.BitTimingNotSupported);
+        await bench.Master.ActivateBitTimingAsync(0, 125_000);
+        await WaitUntilAsync(() => rate == 125_000);
+
+        (await bench.Master.TransceiveManufacturerAsync(0x90, new byte[] { 1 }))![1].Should().Be(0x11);
+        var padded = await bench.Master.TransceiveManufacturerAsync(0x90, new byte[] { 2 });
+        padded.Should().NotBeNull();
+        padded!.Length.Should().Be(LssFrames.Length);
+
+        (await bench.Master.ConfigureBitTimingAsync(0x80, 3)).Succeeded.Should().BeTrue();
+        await bench.Master.ActivateBitTimingAsync(0, null);
+        await WaitUntilAsync(() => background is InvalidOperationException);
+    }
+
+    [Fact]
+    public async Task A_Slave_That_Does_Not_Support_The_Service_Stays_Silent()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 6, new LssSlaveOptions
+        {
+            NodeIdConfigurationSupported = false,
+            BitTimingSupported = false,
+        });
+        await EnterConfiguration(bench.Master, slave);
+        var nodeId = async () => await bench.Master.ConfigureNodeIdAsync(0x12);
+        await nodeId.Should().ThrowAsync<LssTimeoutException>();
+        var timing = async () => await bench.Master.ConfigureBitTimingAsync(0, 2);
+        await timing.Should().ThrowAsync<LssTimeoutException>();
+        await bench.Master.ActivateBitTimingAsync(0, null);
+        slave.NodeId.Should().Be(6);
+    }
+
+    [Fact]
+    public async Task Fastscan_Rejects_A_Bad_Position_And_Stays_Waiting_On_Vendor_LssNext_Zero()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        SetIdentity(slave, Address);
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+        using var heard = bench.Listen();
+        Transmit(poke, LssFrames.Fastscan(0, LssCommand.FastscanReset, 0, 0));
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
+        int afterReset = heard.Ids.Count;
+        Transmit(poke, LssFrames.Fastscan(Address.VendorId, 0, 0, 0));
+        await WaitUntilAsync(() => heard.Ids.Count > afterReset);
+        slave.LssState().Should().Be(LssState.Waiting);
+
+        int before = heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage);
+        Transmit(poke, LssFrames.Fastscan(0, 0, 4, 0));
+        Transmit(poke, LssFrames.Fastscan(0, 0, 0, 5));
+        await Task.Delay(40);
+        heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage).Should().Be(before);
+        slave.LssState().Should().Be(LssState.Waiting);
+    }
+
+    [Fact]
+    public async Task An_Unconfigured_Slave_Ignores_Selective_Nmt_And_Stays_Quiet()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        var seen = false;
+        slave.ApplicationReset += (_, _) => seen = slave.LssState() == LssState.Waiting;
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(50));
+        await peer.SendNmtCommandAsync(NmtCommand.Start, 0);
+        await peer.SendNmtCommandAsync(NmtCommand.Stop, 0);
+        await peer.SendNmtCommandAsync(NmtCommand.EnterPreOperational, 0);
+        await peer.SendNmtCommandAsync(NmtCommand.Start, 5);
+        await Task.Delay(80);
+        slave.State.Should().Be(NmtState.Initializing);
+        slave.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        heard.Ids.Should().NotContain(CanOpenCobId.Heartbeat(CanOpenCobId.UnconfiguredNodeId));
+        var emcy = async () => await slave.SendEmcyAsync(0x1000, 0x01);
+        await emcy.Should().NotThrowAsync();
+        heard.Ids.Should().NotContain(CanOpenCobId.Emcy(CanOpenCobId.UnconfiguredNodeId));
+
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 0);
+        await Task.Delay(30);
+        seen.Should().BeTrue();
+        slave.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+    }
+
+    [Fact]
+    public async Task A_Flying_Master_Stops_Claiming_When_Reset_Node_Clears_The_Node_Id()
+    {
+        using var bench = new Bench();
+        var store = new MemoryStore();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions { Store = store });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        slave.StartFlyingMaster(0, TimeSpan.FromMilliseconds(200));
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.FlyingMasterDetect));
+
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        (await bench.Master.StoreConfigurationAsync()).Succeeded.Should().BeTrue();
+        int before = heard.Ids.Count;
+        await peer.SendNmtCommandAsync(NmtCommand.ResetNode, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId
+            && slave.State == NmtState.Initializing);
+        await Task.Delay(80);
+        heard.Ids.Skip(before).Should().NotContain(CanOpenCobId.FlyingMasterDetect);
+    }
+
+    [Fact]
+    public async Task Store_And_Restore_Keep_One_Node_Id_On_Every_Predefined_Cob_Id()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions(), srdoCount: 1);
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        slave.ObjectDictionary.WriteUnsigned(0x1F90, 0x06, 1);
+        slave.StoreParameters();
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x20)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == 0x20);
+        slave.ObjectDictionary.ReadUnsigned(0x1F90, 0x06).Should().Be(1);
+        (slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.CanIdMask)
+            .Should().Be(CanOpenCobId.TpdoDefault(0x20, 1));
+        slave.StoreParameters();
+
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 0x20);
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational && slave.NodeId == 0x20);
+        (slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.CanIdMask)
+            .Should().Be(CanOpenCobId.TpdoDefault(0x20, 1));
+
+        slave.RestoreDefaultParameters();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetNode, 0x20);
+        await WaitUntilAsync(() => slave.NodeId == 5 && slave.State == NmtState.PreOperational);
+        (slave.ObjectDictionary.ReadUnsigned(0x1800, 0x01) & CanOpenCobId.CanIdMask)
+            .Should().Be(CanOpenCobId.TpdoDefault(5, 1));
+    }
+
+    [Fact]
+    public async Task The_Second_Delay_Drops_The_Flying_Master_Nmt_Frame()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) => Task.CompletedTask,
+        });
+        await EnterConfiguration(bench.Master, slave);
+        var activate = bench.Master.ActivateBitTimingAsync(200, 500_000);
+        await Task.Delay(40);
+        slave.StartFlyingMaster(0, TimeSpan.FromMilliseconds(200));
+        await activate;
+        slave.NodeId.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task Table_0_Follows_Each_Named_Baud_Flag()
+    {
+        var named = new (string Flag, byte Index)[]
+        {
+            ("BaudRate_1000", 0),
+            ("BaudRate_800", 1),
+            ("BaudRate_500", 2),
+            ("BaudRate_250", 3),
+            ("BaudRate_125", 4),
+            ("BaudRate_50", 6),
+            ("BaudRate_20", 7),
+            ("BaudRate_10", 8),
+        };
+        byte nodeId = 10;
+        foreach (var (flag, index) in named)
+        {
+            using var bench = new Bench();
+            var description = CanOpenDeviceDescription.ParseEds(EdsWithBauds(true, flag));
+            var slave = bench.Described(1, nodeId, description);
+            await EnterConfiguration(bench.Master, slave);
+            (await bench.Master.ConfigureBitTimingAsync(0, index)).Succeeded.Should().BeTrue();
+            byte other = index == 0 ? (byte)8 : (byte)0;
+            (await bench.Master.ConfigureBitTimingAsync(0, other)).ErrorCode
+                .Should().Be(LssCommand.BitTimingNotSupported);
+            nodeId++;
+        }
+
+        using var open = new Bench();
+        var any = CanOpenDeviceDescription.ParseEds(EdsWithBauds(true));
+        var wide = open.Described(1, 30, any);
+        await EnterConfiguration(open.Master, wide);
+        (await open.Master.ConfigureBitTimingAsync(0, 8)).Succeeded.Should().BeTrue();
+        (await open.Master.ConfigureBitTimingAsync(0, LssBitTiming.AutomaticIndex)).ErrorCode
+            .Should().Be(LssCommand.BitTimingNotSupported);
+    }
+
+    [Fact]
+    public void LssState_Rejects_A_Null_Node_And_Reads_Waiting_For_A_Foreign_One()
+    {
+        var act = () => CanOpenLssNodeExtensions.LssState(null!);
+        act.Should().Throw<ArgumentNullException>().WithParameterName("node");
+        new ForeignNode().LssState().Should().Be(LssState.Waiting);
+    }
+
+    private static string EdsWithBauds(bool lss, params string[] enabled)
+    {
+        var baud = new StringBuilder();
+        foreach (var name in enabled)
+            baud.Append(name).Append("=1\n");
+        return "[FileInfo]\n" +
+            "FileName=lss.eds\n" +
+            "FileVersion=1\n" +
+            "FileRevision=0\n" +
+            "EDSVersion=4.0\n" +
+            "Description=LSS slave\n" +
+            "CreationTime=10:00AM\n" +
+            "CreationDate=10-17-2026\n" +
+            "CreatedBy=CanKit.Pro tests\n" +
+            "[DeviceInfo]\n" +
+            "VendorName=CanKit.Pro\n" +
+            "VendorNumber=0\n" +
+            "ProductName=LSS\n" +
+            "ProductNumber=0\n" +
+            "RevisionNumber=0\n" +
+            baud +
+            "SimpleBootUpSlave=1\n" +
+            "Granularity=8\n" +
+            "NrOfRXPDO=0\n" +
+            "NrOfTXPDO=0\n" +
+            "LSS_Supported=" + (lss ? "1" : "0") + "\n" +
+            "[MandatoryObjects]\n" +
+            "SupportedObjects=1\n" +
+            "1=0x1000\n" +
+            "[1000]\n" +
+            "ParameterName=Device type\n" +
+            "ObjectType=0x7\n" +
+            "DataType=0x0007\n" +
+            "AccessType=ro\n" +
+            "DefaultValue=0\n" +
+            "PDOMapping=0\n";
     }
 
     private static string Eds(bool lss, bool baud250, bool baud500) =>
@@ -709,5 +1011,70 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
                 // The listener was closed.
             }
         }
+    }
+
+    /// <summary>An <see cref="ICanOpenNode"/> this library did not create.</summary>
+    private sealed class ForeignNode : ICanOpenNode
+    {
+        public byte NodeId => 1;
+        public CanOpenNodeOptions Options => throw new NotSupportedException();
+        public ObjectDictionary ObjectDictionary => throw new NotSupportedException();
+        public NmtState State => NmtState.PreOperational;
+        public DeviceDescriptionReport? DeviceDescription => null;
+        public FlyingMasterRole FlyingMasterRole => FlyingMasterRole.Inactive;
+        public byte? ActiveFlyingMasterNodeId => null;
+        public ushort? ActiveFlyingMasterPriority => null;
+        public CanOpenDeviceDescription? GetPeerDeviceDescription(byte nodeId) => null;
+        public void Dispose()
+        {
+        }
+
+        public event EventHandler<HeartbeatReceivedEventArgs>? HeartbeatReceived { add { } remove { } }
+        public event EventHandler<HeartbeatTimeoutEventArgs>? HeartbeatTimeout { add { } remove { } }
+        public event EventHandler<EmcyReceivedEventArgs>? EmcyReceived { add { } remove { } }
+        public event EventHandler<SyncReceivedEventArgs>? SyncReceived { add { } remove { } }
+        public event EventHandler<RpdoReceivedEventArgs>? RpdoReceived { add { } remove { } }
+        public event EventHandler<NmtCommandReceivedEventArgs>? NmtCommandReceived { add { } remove { } }
+        public event EventHandler<NmtResetEventArgs>? ApplicationReset { add { } remove { } }
+        public event EventHandler<NodeGuardingReceivedEventArgs>? NodeGuardingReceived { add { } remove { } }
+        public event EventHandler<NodeGuardingTimeoutEventArgs>? NodeGuardingTimeout { add { } remove { } }
+        public event EventHandler<LifeGuardingEventArgs>? LifeGuardingEvent { add { } remove { } }
+        public event EventHandler<Exception>? BackgroundExceptionOccurred { add { } remove { } }
+        public event EventHandler<FlyingMasterChangedEventArgs>? FlyingMasterChanged { add { } remove { } }
+
+        public Task SendNmtCommandAsync(NmtCommand command, byte targetNodeId, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public void StartFlyingMaster(ushort priorityLevel, TimeSpan activeMasterHeartbeatTimeout) => throw new NotSupportedException();
+        public void StopFlyingMaster() => throw new NotSupportedException();
+        public void StartHeartbeatProducer(TimeSpan interval) => throw new NotSupportedException();
+        public void StopHeartbeatProducer() => throw new NotSupportedException();
+        public void AddHeartbeatConsumer(byte producerNodeId, TimeSpan timeout) => throw new NotSupportedException();
+        public void RemoveHeartbeatConsumer(byte producerNodeId) => throw new NotSupportedException();
+        public void StartSyncProducer(TimeSpan interval) => throw new NotSupportedException();
+        public void StopSyncProducer() => throw new NotSupportedException();
+        public Task SendSyncAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task SendEmcyAsync(ushort errorCode, byte errorRegister, ReadOnlyMemory<byte> manufacturerSpecific = default, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public void BindPeerDeviceDescription(byte nodeId, CanOpenDeviceDescription description) => throw new NotSupportedException();
+        public void UnbindPeerDeviceDescription(byte nodeId) => throw new NotSupportedException();
+        public Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+        public Task<byte[]> SdoUploadAsync(byte serverNodeId, ushort index, byte subindex, SdoTransferMode mode = SdoTransferMode.Auto, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+            => throw new NotSupportedException();
+        public Task SdoDownloadAsync(byte serverNodeId, ushort index, byte subindex, ReadOnlyMemory<byte> data, SdoTransferMode mode = SdoTransferMode.Auto, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public void ConfigureTpdo(int pdoIndex, PdoMapping mapping, TpdoTransmission transmission = TpdoTransmission.EventDriven, uint? cobId = null, TimeSpan? eventTimerInterval = null, TimeSpan? inhibitTime = null)
+            => throw new NotSupportedException();
+        public void ConfigureRpdo(int pdoIndex, PdoMapping mapping, uint? cobId = null, RpdoTransmission transmission = RpdoTransmission.EventDriven)
+            => throw new NotSupportedException();
+        public Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId, ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public void StoreParameters() => throw new NotSupportedException();
+        public void RestoreDefaultParameters() => throw new NotSupportedException();
+        public void StartNodeGuardingConsumer(byte producerNodeId, TimeSpan guardTime, byte lifeTimeFactor) => throw new NotSupportedException();
+        public void StopNodeGuardingConsumer(byte producerNodeId) => throw new NotSupportedException();
     }
 }

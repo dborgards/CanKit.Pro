@@ -472,28 +472,36 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         byte profileFrom = _profileCobIdNodeId;
         byte sdoFrom = _sdoCobIdNodeId;
-        _nodeId = nodeId;
-        _srdo.SetNodeId(nodeId);
-        if (profileFrom != nodeId)
+        // One hold of the write gate, so a 1010h save cannot snapshot a mix of the old and new
+        // COB-IDs or record a baseline that does not name that snapshot. The active node-id is
+        // published last: a reader that observes it already sees every retargeted COB-ID.
+        _od.Transaction(() =>
         {
-            RetargetCobId(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(profileFrom), CanOpenCobId.Emcy(nodeId));
-            for (int n = 1; n <= Co.PdoCount; n++)
+            if (profileFrom != nodeId)
             {
-                RetargetCobId((ushort)(Co.RpdoComm + n - 1), 0x01,
-                    CanOpenCobId.RpdoDefault(profileFrom, n), CanOpenCobId.RpdoDefault(nodeId, n));
-                RetargetCobId((ushort)(Co.TpdoComm + n - 1), 0x01,
-                    CanOpenCobId.TpdoDefault(profileFrom, n), CanOpenCobId.TpdoDefault(nodeId, n));
+                RetargetCobId(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(profileFrom), CanOpenCobId.Emcy(nodeId));
+                for (int n = 1; n <= Co.PdoCount; n++)
+                {
+                    RetargetCobId((ushort)(Co.RpdoComm + n - 1), 0x01,
+                        CanOpenCobId.RpdoDefault(profileFrom, n), CanOpenCobId.RpdoDefault(nodeId, n));
+                    RetargetCobId((ushort)(Co.TpdoComm + n - 1), 0x01,
+                        CanOpenCobId.TpdoDefault(profileFrom, n), CanOpenCobId.TpdoDefault(nodeId, n));
+                }
+                RetargetFlyingMasterSlot(profileFrom, nodeId);
             }
-            RetargetFlyingMasterSlot(profileFrom, nodeId);
-            RetargetDefaultSrdo(profileFrom, nodeId);
-        }
-        if (sdoFrom != nodeId)
-        {
-            RetargetCobId(Co.SdoServer, 0x01, CanOpenCobId.SdoRx(sdoFrom), CanOpenCobId.SdoRx(nodeId));
-            RetargetCobId(Co.SdoServer, 0x02, CanOpenCobId.SdoTx(sdoFrom), CanOpenCobId.SdoTx(nodeId));
-        }
-        _profileCobIdNodeId = nodeId;
-        _sdoCobIdNodeId = nodeId;
+            // Before the SRDO records are rewritten, so a rebuild inside that write sees this id.
+            _srdo.SetNodeId(nodeId);
+            if (profileFrom != nodeId)
+                RetargetDefaultSrdo(profileFrom, nodeId);
+            if (sdoFrom != nodeId)
+            {
+                RetargetCobId(Co.SdoServer, 0x01, CanOpenCobId.SdoRx(sdoFrom), CanOpenCobId.SdoRx(nodeId));
+                RetargetCobId(Co.SdoServer, 0x02, CanOpenCobId.SdoTx(sdoFrom), CanOpenCobId.SdoTx(nodeId));
+            }
+            _profileCobIdNodeId = nodeId;
+            _sdoCobIdNodeId = nodeId;
+            _nodeId = nodeId;
+        });
     }
 
     private void RetargetFlyingMasterSlot(byte from, byte to)

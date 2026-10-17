@@ -84,6 +84,16 @@ public class LssCodecTests
         (wide == new LssIdentityRange(1, 2, 0, 10, 4, 4)).Should().BeTrue();
         (wide != range).Should().BeTrue();
         wide.Equals((object)range).Should().BeFalse();
+        wide.Equals((object?)null).Should().BeFalse();
+        wide.GetHashCode().Should().Be(new LssIdentityRange(1, 2, 0, 10, 4, 4).GetHashCode());
+        new LssIdentityRange(9, 2, 0, 10, 4, 4).Contains(address).Should().BeFalse();
+        new LssIdentityRange(1, 9, 0, 10, 4, 4).Contains(address).Should().BeFalse();
+        new LssIdentityRange(1, 2, 4, 10, 4, 4).Contains(address).Should().BeFalse();
+        new LssIdentityRange(1, 2, 0, 2, 4, 4).Contains(address).Should().BeFalse();
+        new LssIdentityRange(1, 2, 0, 10, 5, 6).Contains(address).Should().BeFalse();
+        address.Equals(new LssAddress(9, 2, 3, 4)).Should().BeFalse();
+        address.Equals(new LssAddress(1, 9, 3, 4)).Should().BeFalse();
+        address.Equals(new LssAddress(1, 2, 9, 4)).Should().BeFalse();
         var inverted = () => new LssIdentityRange(1, 2, 5, 4, 0, 0);
         inverted.Should().Throw<ArgumentException>();
         var invertedSerial = () => new LssIdentityRange(1, 2, 0, 0, 9, 1);
@@ -102,6 +112,8 @@ public class LssCodecTests
         (failed == new LssServiceResult(0xFF, 0x2A)).Should().BeTrue();
         (failed != LssServiceResult.Success).Should().BeTrue();
         failed.Equals((object)LssServiceResult.Success).Should().BeFalse();
+        failed.Equals((object?)null).Should().BeFalse();
+        failed.Equals("no").Should().BeFalse();
         failed.GetHashCode().Should().Be(new LssServiceResult(0xFF, 0x2A).GetHashCode());
 
         LssFastscanResult.Found(new LssAddress(1, 0, 0, 1)).Succeeded.Should().BeTrue();
