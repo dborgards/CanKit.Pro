@@ -64,9 +64,11 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <paramref name="bitsPerSecond"/> and <see cref="LssMasterOptions.BitRateSwitch"/> are both
     /// set, the switch runs after the first period, before slaves may transmit again.
     /// When <paramref name="returnToWaiting"/> is <see langword="true"/>, switch state global
-    /// (waiting) is sent immediately after the activate frame, before either delay: the slave
-    /// is still on the current bitrate then, and a waiting frame sent after the switch would
-    /// not be received.
+    /// (waiting) is sent while both ends still share a bitrate. A positive delay sends it
+    /// before either delay. A zero delay has already moved the slave, so the frame is sent
+    /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
+    /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
+    /// switch the master is still on the old rate and the slave will not hear the frame.
     /// </summary>
     Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
         CancellationToken cancellationToken = default, bool returnToWaiting = false);
