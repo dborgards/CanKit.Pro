@@ -299,14 +299,11 @@ internal sealed partial class LssMaster : ILssMaster
     {
         var reader = BeginDispose();
         if (reader is null) return;
-        try
-        {
-            await reader.ConfigureAwait(false);
-        }
-        catch (Exception)
-        {
-            // A faulted reader has already completed the inbound channel.
-        }
+        // WhenAny observes completion, including a fault. Reading Exception marks that fault
+        // observed; a catch here would hide which failure ended the reader.
+        await Task.WhenAny(reader).ConfigureAwait(false);
+        if (reader.IsFaulted)
+            _ = reader.Exception;
         if (_ownsService) _service.Dispose();
         _readerCts.Dispose();
         _lifetime.Dispose();
@@ -420,7 +417,13 @@ internal sealed partial class LssMaster : ILssMaster
             try
             {
                 if (!await _inbound.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false))
+                {
+                    // The window can already hold a match. Ending the reader must not drop it.
+                    if (first is not null)
+                        return first;
+                    ThrowIfDisposed();
                     throw ReaderEnded();
+                }
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -432,6 +435,8 @@ internal sealed partial class LssMaster : ILssMaster
             }
             catch (CanOpenTransportException)
             {
+                if (first is not null)
+                    return first;
                 ThrowIfDisposed();
                 throw;
             }
@@ -497,7 +502,7 @@ internal sealed partial class LssMaster : ILssMaster
         {
             _inbound.Writer.TryComplete(new CanOpenTransportException(
                 "The LSS master reader ended before a slave answered.", ex));
-            return;
+            throw;
         }
         finally
         {

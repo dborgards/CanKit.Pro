@@ -502,10 +502,16 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private Task EmitHeartbeat(byte payload)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
-        uint cobId = CanOpenCobId.Heartbeat(_nodeId);
         var frame = new[] { payload };
         var link = _heartbeatSendChain.ContinueWith(
-            _ => SendControlFrame(cobId, frame),
+            _ =>
+            {
+                // The id is the one active when this frame is reached, not the one active when
+                // it was queued behind an earlier heartbeat.
+                if (LayerSettingsBlockBoot() || !CanOpenCobId.IsActiveNodeId(_nodeId))
+                    return Task.CompletedTask;
+                return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame);
+            },
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _heartbeatSendChain = link;
         return link;
@@ -514,13 +520,14 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
-        uint cobId = _emcyCobId;
         var frame = msg.Encode();
         byte errorRegister = msg.ErrorRegister;
         var link = _emcySendChain.ContinueWith(
             _ =>
             {
                 if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+                uint cobId = _emcyCobId;
+                if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
                 _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
                 return SendControlFrame(cobId, frame, cancellationToken);
             },
