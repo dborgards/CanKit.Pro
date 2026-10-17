@@ -15,7 +15,7 @@ wenn das Verhalten gebaut ist, das sie prüfen.
 Nachgetragen (09.10.2026): umgesetzt als FR-CO-035..046 (SRS §4.3.2), ADR-12; PR #291.
 
 Nachgetragen (17.10.2026): CiA 305, im Zitat oben zusammen mit CiA 304 aus den ersten beiden
-Runden ausgeschlossen, ist ab FR-CO-047 im Lieferumfang; der LSS-Slave ist FR-CO-048.
+Runden ausgeschlossen, ist ab FR-CO-047 im Lieferumfang; der LSS-Slave ist FR-CO-048, die Inbetriebnahme FR-CO-049.
 Diese Runde selbst bleibt CiA 304.
 
 ## Woher die Belege kommen

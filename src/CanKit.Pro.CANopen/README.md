@@ -7,7 +7,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0, and LSS master and slave as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is also validated against a scripted slave in that suite, not against a third-party LSS slave.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0, and LSS master, slave and commissioning as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is also validated against a scripted slave in that suite, not against a third-party LSS slave.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
@@ -38,7 +38,8 @@ scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #1
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
 v3.0.0. FR-CO-048 is the LSS slave in the node, including the pending node-id and
-`LSS_Supported` in a device description. The SRS's "Quelle" column says for each of them whether a standard requires it, the
+`LSS_Supported` in a device description. FR-CO-049 is commissioning on the master: Fastscan,
+node-id assignment, bit timing, store and inquire. The SRS's "Quelle" column says for each of them whether a standard requires it, the
 architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
@@ -91,6 +92,7 @@ architecture does, or a maintainer decision does.
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
 | FR-CO-047 | LSS master (CiA 305): switch state global and selective, configure node-id and bit timing, activate with both switch delays, store, inquire identity and node-id, identify remote and non-configured slaves, Fastscan ([Layer setting services](#layer-setting-services-cia-305)) |
 | FR-CO-048 | LSS slave in the node: waiting and configuration, identity from `1018h`, pending node-id applied on NMT reset communication, unconfigured `FFh` does not boot, store through `ILssConfigurationStore`, `LSS_Supported` in an EDS/DCF ([Layer setting services](#layer-setting-services-cia-305)) |
+| FR-CO-049 | LSS commissioning on the master: Fastscan of unconfigured slaves, batch and single node-id assignment, bit timing, store, inquire, and `1018h` of configured nodes ([Layer setting services](#layer-setting-services-cia-305)) |
 
 ## Not built, and why
 
@@ -139,8 +141,6 @@ Deliberate omissions, each checked against the norm text:
 * **Bit-granular SRDO mapping, more than 8 objects per SRDO, 29-bit SRDO COB-IDs** — as for PDOs.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
-* **The LSS commissioning tool** — FR-CO-047 is the master and FR-CO-048 the slave. A tool that
-  scans and assigns node-ids on top of the master is not in this package yet.
 * **Automatic bit-rate detection** — table 0 index 9 (CiA 801). The master sends the index; it
   does not search for a rate itself.
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
@@ -1014,6 +1014,41 @@ using var node = CanOpen.OpenNode(bus, nodeId: 0xFF, new CanOpenNodeOptions
 });
 // node.State is Initializing and node.NodeId is 0xFF until a master configures 1..127.
 ```
+
+### Commissioning
+
+`LssCommissioning` (FR-CO-049) runs the master as a commissioning sequence. A scan without a
+node-id parks each unconfigured slave in configuration so Fastscan does not return it twice,
+then switches every slave back to waiting. A scan that assigns node-ids switches back to
+waiting after each slave, so the next configure reaches only the slave just found. Bit timing
+is activated during a scan only when `Limit` is 1. A scan that can select more than one slave
+configures the table and leaves the rate unchanged, so a slave that already has a node-id stays
+on the bitrate the next Fastscan still uses. A slave that rejects a service stops the batch;
+its result carries the code.
+
+Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
+from a node that has already booted.
+
+```csharp
+var tool = new LssCommissioning(master);
+var scan = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+{
+    AssignFromNodeId = 0x10,
+    Store = true,
+});
+// scan.Slaves lists each address and the node-id it was given. scan.Stop says why it ended.
+
+var one = await tool.ConfigureSlaveAsync(scan.Slaves[0].Address, new LssSlaveConfiguration
+{
+    BitTimingSelector = 0,
+    BitTimingIndex = 2,
+    ActivateDelayMilliseconds = 100,
+    ActivateBitRate = 500_000,
+});
+```
+
+The sample `samples/CanKit.Pro.Sample.CanOpenLss` is that sequence as a command-line tool.
+`--demo` needs no hardware. Activating bit timing still does not reconfigure the open channel.
 
 ## Flying master
 

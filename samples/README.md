@@ -22,6 +22,7 @@ New to CAN? Read the samples in this order; each builds on the one before.
 | 4 | [`J1939Quickstart`](CanKit.Pro.Sample.J1939Quickstart) | The protocol of trucks and engines: addresses, parameter groups, signals | first steps |
 | 5 | [`CanOpenQuickstart`](CanKit.Pro.Sample.CanOpenQuickstart) | Configuring a device over SDO and streaming its data as a PDO (CANopen) | first steps |
 | 6 | [`CanOpenBusScan`](CanKit.Pro.Sample.CanOpenBusScan) | A small command-line tool: which CANopen devices are on this bus? | tool, not a tutorial |
+| 7 | [`CanOpenLss`](CanKit.Pro.Sample.CanOpenLss) | Commission unconfigured CANopen devices: find them, give them a node-id, store it | tool, not a tutorial |
 
 The tutorials 1–5 share one shape: a comment block at the top says what the program does and
 defines the words it uses, then numbered steps print what they are doing, so the output reads as a
@@ -46,9 +47,13 @@ dotnet run --project samples/CanKit.Pro.Sample.UdsQuickstart -- --pro
 | `J1939Quickstart` | Periodic sending; requesting a parameter group; an address conflict and the fallback to an arbitrary address; composing and decomposing 29-bit IDs |
 | `CanOpenQuickstart` | Heartbeat producer/consumer and timeouts; emergency (EMCY) messages; SDO aborts |
 
-`CanOpenBusScan` has its own switches; `--help` lists them. `--demo` starts two simulated
-devices so the scan has something to find without hardware — run it plain, then again with
-`--active-scan`, and compare.
+`CanOpenBusScan` and `CanOpenLss` have their own switches; `--help` lists them. For the bus
+scan, `--demo` starts two simulated devices — run it plain, then again with `--active-scan`.
+For LSS, `--demo` starts three unconfigured slaves and one configured node:
+
+```bash
+dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- scan --demo
+```
 
 ## From loopback to real hardware
 
