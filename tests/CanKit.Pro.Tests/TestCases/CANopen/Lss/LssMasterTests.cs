@@ -596,6 +596,36 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Drained_Identify_Keeps_The_Match_When_The_Reader_Ends()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-drain");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var service = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
+        await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            FastscanTimeout = TimeSpan.FromMilliseconds(40),
+            IdentificationTimeout = TimeSpan.FromSeconds(5),
+        });
+        using var listenBus = VirtualAdapterFixture.Open(session, 2);
+        using var listen = new CanBusService(listenBus);
+        var answered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = listen.Subscribe(frame =>
+        {
+            if (!frame.Frame.IsExtendedFrame && (uint)frame.Frame.ID == CanOpenCobId.LssSlaveMessage)
+                answered.TrySetResult(true);
+            return false;
+        });
+
+        var identify = master.IdentifyNonConfiguredSlavesAsync();
+        await answered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        service.Dispose();
+
+        (await identify).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Activate_Can_Return_The_Slave_To_Waiting_Before_The_Switch()
     {
         using var rig = Rig.Open(SlaveA, nodeId: 5);
@@ -696,7 +726,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var rig = Rig.Open(SlaveA, nodeId: 4);
         // The slave is in waiting, so inquire is ignored and the first call holds the gate
         // for the whole response window. The second call is queued behind it.
-        var master = Rig.ReplaceOptions(rig, new LssMasterOptions
+        using var master = Rig.ReplaceOptions(rig, new LssMasterOptions
         {
             ResponseTimeout = TimeSpan.FromSeconds(30),
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
