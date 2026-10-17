@@ -507,8 +507,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             _ =>
             {
                 // The id is the one active when this frame is reached, not the one active when
-                // it was queued behind an earlier heartbeat.
-                if (LayerSettingsBlockBoot() || !CanOpenCobId.IsActiveNodeId(_nodeId))
+                // it was queued behind an earlier heartbeat. An unconfigured slave has nothing
+                // to announce on 0x700.
+                if (!CanOpenCobId.IsActiveNodeId(_nodeId))
                     return Task.CompletedTask;
                 return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame);
             },

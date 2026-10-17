@@ -1370,6 +1370,87 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Heartbeat_Queued_Before_The_Node_Becomes_Unconfigured_Is_Dropped()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus), heartbeats: true);
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => holding.Holding);
+        slave.StartHeartbeatProducer(TimeSpan.FromSeconds(30));
+        await peer.SendNmtCommandAsync(NmtCommand.Start, 5);
+        await WaitUntilAsync(() => slave.State == NmtState.Operational);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
+        holding.Release();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(5)));
+        await Task.Delay(50);
+        heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_Emcy_Queued_Before_The_Producer_Is_Disabled_Is_Not_Sent()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus));
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational);
+        var first = slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => holding.Holding);
+        var second = slave.SendEmcyAsync(0x2000, 0x02);
+        _ = slave.State;
+        slave.ObjectDictionary.WriteUnsigned(0x1014, 0x00, CanOpenCobId.InvalidBit | CanOpenCobId.Emcy(5));
+        _ = slave.State;
+        holding.Release();
+        await first;
+        await second;
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Emcy(5)));
+        await Task.Delay(50);
+        heard.Ids.Count(id => id == CanOpenCobId.Emcy(5)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_Emcy_Queued_Before_The_Producer_Is_Cleared_Is_Not_Sent()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus));
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational);
+        var first = slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => holding.Holding);
+        var second = slave.SendEmcyAsync(0x2000, 0x02);
+        _ = slave.State;
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
+        holding.Release();
+        await first;
+        await second;
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Emcy(5)));
+        await Task.Delay(50);
+        heard.Ids.Count(id => id == CanOpenCobId.Emcy(5)).Should().Be(1);
+    }
+
+    [Fact]
     public async Task Starting_The_Flying_Master_During_The_First_Switch_Delay_Keeps_The_Node_Id()
     {
         using var bench = new Bench();
@@ -1597,10 +1678,15 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     private sealed class HoldingService : ICanBusService
     {
         private readonly ICanBusService _inner;
+        private readonly bool _heartbeats;
         private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _held;
 
-        public HoldingService(ICanBusService inner) => _inner = inner;
+        public HoldingService(ICanBusService inner, bool heartbeats = false)
+        {
+            _inner = inner;
+            _heartbeats = heartbeats;
+        }
 
         public bool Holding => Volatile.Read(ref _held) != 0;
 
@@ -1628,7 +1714,8 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
             int id = frame.ID;
-            if (id is >= 0x081 and <= 0x0FF && Interlocked.Exchange(ref _held, 1) == 0)
+            bool hold = _heartbeats ? id is >= 0x701 and <= 0x77F : id is >= 0x081 and <= 0x0FF;
+            if (hold && Interlocked.Exchange(ref _held, 1) == 0)
                 return HoldAsync(frame, timeout, cancellationToken);
             return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
         }
