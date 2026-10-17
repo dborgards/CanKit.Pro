@@ -462,6 +462,43 @@ namespace CanKit.Pro.CANopen.Lss
         public static bool operator !=(CanKit.Pro.CANopen.Lss.LssAddress left, CanKit.Pro.CANopen.Lss.LssAddress right) { }
         public static bool operator ==(CanKit.Pro.CANopen.Lss.LssAddress left, CanKit.Pro.CANopen.Lss.LssAddress right) { }
     }
+    public static class LssBitRateDetection
+    {
+        public static System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssBitRateDetectionResult> DetectAsync(System.Func<int, CanKit.Abstractions.API.Can.ICanBus> openListenOnly, CanKit.Pro.CANopen.Lss.LssBitRateDetectionOptions? options = null, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class LssBitRateDetectionOptions
+    {
+        public LssBitRateDetectionOptions() { }
+        public System.Collections.Generic.IReadOnlyList<int> Candidates { get; init; }
+        public int ErrorFramesToReject { get; init; }
+        public System.TimeSpan ListenWindow { get; init; }
+        public int Passes { get; init; }
+        public bool RequireListenOnly { get; init; }
+        public static System.Collections.Generic.IReadOnlyList<int> DefaultCandidates { get; }
+        public static System.TimeSpan DefaultListenWindow { get; }
+    }
+    public sealed class LssBitRateDetectionResult
+    {
+        public LssBitRateDetectionResult(int? bitsPerSecond, System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssBitRateProbe> probes) { }
+        public int? BitsPerSecond { get; }
+        public bool Detected { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssBitRateProbe> Probes { get; }
+        public byte? TableIndex { get; }
+    }
+    public sealed class LssBitRateProbe
+    {
+        public LssBitRateProbe(int bitsPerSecond, CanKit.Pro.CANopen.Lss.LssBitRateProbeOutcome outcome, int errorFrames, CanKit.Abstractions.API.Common.Definitions.BusState busState) { }
+        public int BitsPerSecond { get; }
+        public CanKit.Abstractions.API.Common.Definitions.BusState BusState { get; }
+        public int ErrorFrames { get; }
+        public CanKit.Pro.CANopen.Lss.LssBitRateProbeOutcome Outcome { get; }
+    }
+    public enum LssBitRateProbeOutcome
+    {
+        Detected = 0,
+        Rejected = 1,
+        Inconclusive = 2,
+    }
     public static class LssBitTiming
     {
         public const byte AutomaticIndex = 9;

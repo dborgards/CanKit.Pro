@@ -38,3 +38,19 @@ reads every node-id from 1 to 127 instead. `assign` selects one slave. `assign-u
 gives each unconfigured slave the next node-id, starting at `--first-node-id`.
 `--activate-ms` is accepted only together with `--count 1`, so one slave does not change rate
 before the next is found.
+
+`detect` is CiA 801 automatic bit-rate detection. It opens each candidate bit rate in
+listen-only mode and reports the first that receives a frame, so it needs traffic on the bus
+(a heartbeat, SYNC, or SDO reads). It transmits nothing.
+
+```bash
+dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- detect --demo
+dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- detect \
+  --endpoint socketcan://can0 --candidates 500000,250000,125000 --window-ms 2000
+```
+
+`--candidates` is a comma-separated list in try order (default 500/250/125 kbit/s first, then
+the rest of the CiA 301 table). `--window-ms` is the listen time per candidate, `--error-frames`
+how many errors rule a rate out (default 2), `--passes` how many times to walk the list. On the
+demo bus the loopback ignores the configured rate, so the first candidate wins; on real hardware
+the reported rate is the one the bus actually runs. Reopen the adapter at that rate afterwards.

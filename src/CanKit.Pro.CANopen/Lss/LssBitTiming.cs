@@ -5,8 +5,9 @@ namespace CanKit.Pro.CANopen.Lss;
 
 /// <summary>
 /// Table selector 0, the CiA 301 bit timing table as CiA 305 Table 4 indexes it.
-/// Index 5 is reserved. Index 9 selects automatic bit rate detection, which this library does
-/// not perform (that procedure is CiA 801, outside this specification).
+/// Index 5 is reserved. Index 9 selects automatic bit rate detection: a configure-bit-timing
+/// command cannot make a slave perform it (the master only names the index), but the procedure
+/// itself is CiA 801 and is available as <see cref="LssBitRateDetection"/>.
 /// </summary>
 public static class LssBitTiming
 {
