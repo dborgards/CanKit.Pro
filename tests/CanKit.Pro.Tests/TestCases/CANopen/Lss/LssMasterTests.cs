@@ -106,7 +106,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var bus = VirtualAdapterFixture.Open(session, 0);
         using var raw = new CanBusService(bus);
         var service = new FaultingReadService(raw, faultImmediately: true);
-        var master = CanOpenLss.OpenMaster(service, Quick());
+        using var master = CanOpenLss.OpenMaster(service, Quick());
         await WaitUntilAsync(() => service.FramesOpened > 0);
         master.Dispose();
         await using var asyncMaster = CanOpenLss.OpenMaster(service, Quick());
