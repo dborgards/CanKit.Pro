@@ -556,7 +556,9 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var tool = new LssCommissioning(bench.Master);
         using var cancel = new CancellationTokenSource();
         var scan = tool.ScanUnconfiguredAsync(cancellationToken: cancel.Token);
-        await WaitUntilAsync(() => first.LssState() == LssState.Configuration);
+        // A full Fastscan is one probe per bit. On a loaded runner that outlasts the
+        // default three seconds before the slave enters configuration.
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
         bench.Master.Dispose();
         cancel.Cancel();
         var act = async () => await scan;
