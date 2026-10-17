@@ -198,11 +198,10 @@ public sealed class LssUnconfiguredScanResult
 /// </summary>
 /// <remarks>
 /// A scan that only lists slaves leaves each one in configuration until the scan ends, so the
-/// next Fastscan cannot return it again, and then switches every slave to waiting. A scan that
-/// assigns node-ids switches back to waiting after each slave, before the next Fastscan, so
-/// configure node-id reaches only the slave just found. Activating bit timing in that scan is
-/// limited to one slave. Switch state global also releases any
-/// other slave that was already in configuration.
+/// next Fastscan cannot return it again, and then switches every slave to waiting. Configure,
+/// inquire, and an assigning scan switch every slave to waiting and then select only the
+/// addressed one, so a slave that was already in configuration does not take the same service.
+/// Activating bit timing in a scan is limited to one slave.
 /// </remarks>
 public sealed class LssCommissioning
 {
@@ -310,7 +309,7 @@ public sealed class LssCommissioning
             configuration.ActivateBitRate,
             nameof(configuration));
 
-        if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
+        if (!await SelectOnlyAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
 
         try
@@ -342,7 +341,7 @@ public sealed class LssCommissioning
         LssAddress address,
         CancellationToken cancellationToken = default)
     {
-        if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
+        if (!await SelectOnlyAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
 
         try
@@ -390,10 +389,13 @@ public sealed class LssCommissioning
         LssUnconfiguredScan scan,
         CancellationToken cancellationToken)
     {
-        // Fastscan already left this slave in configuration. Release it before the next scan
-        // even when a service fails or throws, so a later attempt can find it again.
+        // Fastscan left this slave in configuration, and any slave that was already there
+        // would take the same services. Waiting, then selecting again, leaves only this one.
         try
         {
+            await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+            if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
+                return new LssCommissioningResult(selected: false, address);
             return await ApplyAsync(
                 address,
                 nodeId,
@@ -480,6 +482,19 @@ public sealed class LssCommissioning
             await ReleaseToWaitingAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Puts every slave in waiting, then selects <paramref name="address"/>. Selective switch
+    /// does not move a slave that is already in configuration, so the services that follow
+    /// would otherwise reach all of them. A miss has already returned the others to waiting:
+    /// the addressed slave was not there, and leaving the rest in configuration would make the
+    /// next service hit them.
+    /// </summary>
+    private async Task<bool> SelectOnlyAsync(LssAddress address, CancellationToken cancellationToken)
+    {
+        await _master.SwitchStateGlobalAsync(LssState.Waiting, cancellationToken).ConfigureAwait(false);
+        return await SelectAsync(address, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

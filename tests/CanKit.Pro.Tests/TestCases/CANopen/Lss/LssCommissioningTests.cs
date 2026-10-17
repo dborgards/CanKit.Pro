@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Lss;
+using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -212,6 +213,102 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Configure_Does_Not_Reach_A_Slave_Already_In_Configuration()
+    {
+        using var bench = new Bench();
+        var parked = bench.Unconfigured(First)[0];
+        var target = bench.Unconfigured(Second)[0];
+        await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => parked.LssState() == LssState.Configuration
+            && target.LssState() == LssState.Configuration);
+
+        var result = await new LssCommissioning(bench.Master).ConfigureSlaveAsync(
+            Second, new LssSlaveConfiguration { NodeId = 0x30 });
+        result.Succeeded.Should().BeTrue();
+        target.NodeId.Should().Be(0x30);
+        parked.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        await WaitUntilAsync(() => parked.LssState() == LssState.Waiting && target.LssState() == LssState.Waiting);
+    }
+
+    [Fact]
+    public async Task Inquire_Reads_The_Addressed_Slave_When_Another_Is_In_Configuration()
+    {
+        using var bench = new Bench();
+        var first = bench.Slave(1, 5, new LssSlaveOptions());
+        var second = bench.Slave(2, 6, new LssSlaveOptions());
+        SetIdentity(first, First);
+        SetIdentity(second, Second);
+        await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration);
+
+        var result = await new LssCommissioning(bench.Master).InquireSlaveAsync(Second);
+        result.Succeeded.Should().BeTrue();
+        result.Address.Should().Be(Second);
+        result.NodeId.Should().Be(6);
+    }
+
+    [Fact]
+    public async Task An_Assigning_Scan_Does_Not_Rewrite_A_Slave_Already_In_Configuration()
+    {
+        using var bench = new Bench();
+        var parked = bench.Slave(1, 5, new LssSlaveOptions());
+        SetIdentity(parked, new LssAddress(8, 8, 8, 8));
+        await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => parked.LssState() == LssState.Configuration);
+        var free = bench.Unconfigured(First)[0];
+        var peer = bench.Slave(3, 2, new LssSlaveOptions { Enabled = false });
+
+        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = KnownVendor(),
+            AssignFromNodeId = 0x40,
+            Limit = 1,
+        });
+        scan.Stop.Should().Be(LssScanStop.LimitReached);
+        free.NodeId.Should().Be(0x40);
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => parked.State == NmtState.PreOperational);
+        parked.NodeId.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task A_Scan_That_Misses_After_Parking_One_Slave_Releases_It()
+    {
+        using var bench = new Bench();
+        var slaves = bench.Unconfigured(First, new LssAddress(9, 1, 1, 2));
+        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = KnownVendor(),
+        });
+        scan.Stop.Should().Be(LssScanStop.NoMatch);
+        scan.Slaves.Should().ContainSingle();
+        scan.Slaves[0].Address.Should().Be(First);
+        await WaitUntilAsync(() => slaves.All(slave => slave.LssState() == LssState.Waiting));
+    }
+
+    [Fact]
+    public async Task A_Rejected_Service_Is_Not_A_Success_And_Is_Not_Activated()
+    {
+        var rejectedId = new ServiceMaster { NodeId = new LssServiceResult(LssCommand.NodeIdOutOfRange, 0) };
+        var nodeId = await new LssCommissioning(rejectedId).ConfigureSlaveAsync(
+            First, new LssSlaveConfiguration { NodeId = 4 });
+        nodeId.Selected.Should().BeTrue();
+        nodeId.Succeeded.Should().BeFalse();
+        nodeId.NodeIdResult!.Value.ErrorCode.Should().Be(LssCommand.NodeIdOutOfRange);
+
+        var rejectedTiming = new ServiceMaster { Timing = new LssServiceResult(LssCommand.BitTimingNotSupported, 0) };
+        var timing = await new LssCommissioning(rejectedTiming).ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 10,
+            ActivateBitRate = 250_000,
+        });
+        timing.Succeeded.Should().BeFalse();
+        rejectedTiming.ActivateCalled.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_Selective_Switch_That_Throws_Releases_The_Slave()
     {
         var master = new SelectiveThrowMaster();
@@ -221,7 +318,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         await configure.Should().ThrowAsync<InvalidOperationException>();
         var inquire = async () => await tool.InquireSlaveAsync(First);
         await inquire.Should().ThrowAsync<InvalidOperationException>();
-        master.Releases.Should().Be(2);
+        master.Releases.Should().Be(4);
     }
 
     [Fact]
@@ -231,6 +328,16 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var tool = new LssCommissioning(bench.Master);
         var act = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan { Store = true });
         await act.Should().ThrowAsync<ArgumentException>();
+        var selector = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan { BitTimingSelector = 0 });
+        await selector.Should().ThrowAsync<ArgumentException>();
+        var index = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan { BitTimingIndex = 0 });
+        await index.Should().ThrowAsync<ArgumentException>();
+        var both = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            BitTimingSelector = 0,
+            BitTimingIndex = 1,
+        });
+        await both.Should().ThrowAsync<ArgumentException>();
 
         var timing = async () => await tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
         {
@@ -451,6 +558,74 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
                 throw new TimeoutException("The LSS slave did not reach the expected state.");
             await Task.Delay(1);
         }
+    }
+
+    /// <summary>Confirmed services return the scripted results. Selective switch always hits.</summary>
+    private sealed class ServiceMaster : ILssMaster
+    {
+        public LssServiceResult NodeId { get; init; } = LssServiceResult.Success;
+
+        public LssServiceResult Timing { get; init; } = LssServiceResult.Success;
+
+        public bool ActivateCalled { get; private set; }
+
+        public LssMasterOptions Options { get; } = new();
+
+        public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
+            => Task.FromResult(true);
+
+        public Task<LssServiceResult> ConfigureNodeIdAsync(byte nodeId, CancellationToken cancellationToken = default)
+            => Task.FromResult(NodeId);
+
+        public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(Timing);
+
+        public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
+            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+        {
+            ActivateCalled = true;
+            return Task.CompletedTask;
+        }
+
+        public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(LssServiceResult.Success);
+
+        public Task<uint> InquireVendorIdAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<uint> InquireProductCodeAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<uint> InquireRevisionNumberAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<uint> InquireSerialNumberAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<LssAddress> InquireAddressAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(new LssAddress(0, 0, 0, 0));
+
+        public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default) => Task.FromResult((byte)0);
+
+        public Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default)
+            => Task.FromResult(false);
+
+        public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(false);
+
+        public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public void Dispose()
+        {
+        }
+
+        public ValueTask DisposeAsync() => default;
     }
 
     /// <summary>
