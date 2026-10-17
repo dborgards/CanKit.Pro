@@ -1335,7 +1335,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task The_Second_Delay_Drops_The_Flying_Master_Nmt_Frame()
+    public async Task Starting_The_Flying_Master_During_The_First_Switch_Delay_Keeps_The_Node_Id()
     {
         using var bench = new Bench();
         var slave = bench.Slave(1, 5, new LssSlaveOptions
