@@ -1451,6 +1451,34 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Silence_Starts_After_A_Send_Already_In_The_Driver_And_Holds_The_Next_Heartbeat()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus), heartbeats: true);
+        using var slave = (CanOpenNode)CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => holding.Holding);
+
+        // The boot-up is inside the driver. Silence must not start, and must not drop it,
+        // until that send returns.
+        var starting = slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromSeconds(5)));
+        await Task.Delay(50);
+        starting.IsCompleted.Should().BeFalse();
+        holding.Release();
+        await starting.WaitAsync(TimeSpan.FromSeconds(2));
+
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(30));
+        await Task.Delay(80);
+        heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
+        slave.CompleteLssSilence(0);
+        await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)) >= 2);
+    }
+
+    [Fact]
     public async Task Starting_The_Flying_Master_During_The_First_Switch_Delay_Keeps_The_Node_Id()
     {
         using var bench = new Bench();
