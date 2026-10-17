@@ -78,6 +78,60 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public void A_Subscribe_Failure_Disposes_An_Owned_Service_And_Not_A_Shared_One()
+    {
+        var owned = new RejectingSubscribeService();
+        var openOwned = () => CanOpenLss.OpenMaster(owned, Quick(), leaveOpen: false);
+        openOwned.Should().Throw<InvalidOperationException>();
+        owned.Disposals.Should().Be(1);
+
+        var shared = new RejectingSubscribeService();
+        var openShared = () => CanOpenLss.OpenMaster(shared, Quick());
+        openShared.Should().Throw<InvalidOperationException>();
+        shared.Disposals.Should().Be(0);
+    }
+
+    [Fact]
+    public void CapCancelDelay_Clamps_A_Delay_CancelAfter_Cannot_Express()
+    {
+        LssMaster.CapCancelDelay(TimeSpan.FromMilliseconds(10)).Should().Be(TimeSpan.FromMilliseconds(10));
+        var huge = TimeSpan.FromMilliseconds((double)int.MaxValue + 1000);
+        LssMaster.CapCancelDelay(huge).Should().Be(TimeSpan.FromMilliseconds(int.MaxValue));
+    }
+
+    [Fact]
+    public async Task Dispose_Observes_A_Reader_That_Fails_Immediately()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-fault");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var raw = new CanBusService(bus);
+        var service = new FaultingReadService(raw, faultImmediately: true);
+        var master = CanOpenLss.OpenMaster(service, Quick());
+        await WaitUntilAsync(() => service.FramesOpened > 0);
+        master.Dispose();
+        await using var asyncMaster = CanOpenLss.OpenMaster(service, Quick());
+        await WaitUntilAsync(() => service.FramesOpened > 1);
+    }
+
+    [Fact]
+    public async Task A_Drained_Identify_Keeps_The_Match_When_The_Reader_Fails()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-fault-match");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var raw = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
+        var service = new FaultingReadService(raw, faultImmediately: false);
+        await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            FastscanTimeout = TimeSpan.FromMilliseconds(120),
+            IdentificationTimeout = TimeSpan.FromSeconds(5),
+        });
+
+        (await master.IdentifyNonConfiguredSlavesAsync()).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Switch_Global_Is_Unconfirmed_And_Selects_Configuration()
     {
         using var rig = Rig.Open(SlaveA);
@@ -896,5 +950,127 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         }
 
         public void Dispose() => _inner.Dispose();
+    }
+
+    /// <summary>Subscribe fails, so opening the master never starts a reader.</summary>
+    private sealed class RejectingSubscribeService : ICanBusService
+    {
+        public int Disposals { get; private set; }
+
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 0;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add { }
+            remove { }
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => throw new InvalidOperationException("subscribe failed");
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => throw new InvalidOperationException("subscribe failed");
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => Array.Empty<FilterOverlap>();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public void Dispose() => Disposals++;
+    }
+
+    /// <summary>
+    /// The reader's frame stream fails. Immediately, so disposal observes a faulted reader, or
+    /// after the first frame, so a drain that already matched can still return that match.
+    /// </summary>
+    private sealed class FaultingReadService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly bool _faultImmediately;
+        private int _framesOpened;
+
+        public FaultingReadService(ICanBusService inner, bool faultImmediately)
+        {
+            _inner = inner;
+            _faultImmediately = faultImmediately;
+        }
+
+        public int FramesOpened => Volatile.Read(ref _framesOpened);
+
+        public ICanBus Bus => _inner.Bus;
+
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => new FaultingSubscription(_inner.Subscribe(predicate, bufferCapacity, includeEcho), this);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription(_inner.Subscribe(filter, bufferCapacity, includeEcho), this);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+
+        public void Dispose() => _inner.Dispose();
+
+        private void Opened() => Interlocked.Increment(ref _framesOpened);
+
+        private sealed class FaultingSubscription : ISubscription
+        {
+            private readonly ISubscription _inner;
+            private readonly FaultingReadService _owner;
+
+            public FaultingSubscription(ISubscription inner, FaultingReadService owner)
+            {
+                _inner = inner;
+                _owner = owner;
+            }
+
+            public IAsyncEnumerable<CanFrameEvent> Frames
+            {
+                get
+                {
+                    _owner.Opened();
+                    if (_owner._faultImmediately)
+                        throw new InvalidOperationException("reader failed");
+                    return FaultAfter(_inner.Frames);
+                }
+            }
+
+            public bool TryRead(out CanFrameEvent frameEvent) => _inner.TryRead(out frameEvent);
+
+            public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+                => _inner.WaitToReadAsync(cancellationToken);
+
+            public void Reconfigure(CanIdFilter filter) => _inner.Reconfigure(filter);
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => _inner.Reconfigure(predicate);
+
+            public void Dispose() => _inner.Dispose();
+
+            private static async IAsyncEnumerable<CanFrameEvent> FaultAfter(IAsyncEnumerable<CanFrameEvent> frames)
+            {
+                await foreach (var frame in frames.ConfigureAwait(false))
+                {
+                    yield return frame;
+                    throw new InvalidOperationException("reader failed");
+                }
+            }
+        }
     }
 }
