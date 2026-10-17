@@ -113,7 +113,8 @@ public class LssCodecTests
         (failed != LssServiceResult.Success).Should().BeTrue();
         failed.Equals((object)LssServiceResult.Success).Should().BeFalse();
         failed.Equals((object?)null).Should().BeFalse();
-        failed.Equals("no").Should().BeFalse();
+        object other = new LssAddress(0, 0, 0, 0);
+        failed.Equals(other).Should().BeFalse();
         failed.GetHashCode().Should().Be(new LssServiceResult(0xFF, 0x2A).GetHashCode());
 
         LssFastscanResult.Found(new LssAddress(1, 0, 0, 1)).Succeeded.Should().BeTrue();
