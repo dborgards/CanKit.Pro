@@ -35,7 +35,7 @@
 > | L3 ISO-TP (ISO 15765-2), Kodierer und aktorgetriebener `IIsoTpChannel` (§5.4, §6.4, §6.7, ADR-4) | `CanKit.Pro.IsoTp` |
 > | L3 J1939-TP (BAM/CM) (§6.6) | `CanKit.Pro.J1939Tp` |
 > | L4 UDS-Client über ISO-TP (§6.5) | `CanKit.Pro.Uds` |
-> | L4 CANopen (CiA 301, CiA 304, CiA 305 LSS master) | `CanKit.Pro.CANopen` |
+> | L4 CANopen (CiA 301, CiA 304, CiA 305 LSS master and slave) | `CanKit.Pro.CANopen` |
 > | L4 J1939-Applikation | `CanKit.Pro.J1939` |
 >
 > Der Frame-Ownership-/Lifetime-Vertrag (§8.1, ADR-9) ist die eine Ausnahme: er wurde im Fork
