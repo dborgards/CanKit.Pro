@@ -20,7 +20,7 @@ internal sealed partial class SrdoEngine : IDisposable
     private readonly IProtocolActor _actor;
     private readonly IDeadlineScheduler _deadlines;
     private readonly ObjectDictionary _od;
-    private readonly byte _nodeId;
+    private byte _nodeId;
     private readonly ISrdoEngineHost _host;
     private readonly SrdoRuntime?[] _runtimes;
     private readonly SrdoState[] _snapshots;
@@ -49,6 +49,9 @@ internal sealed partial class SrdoEngine : IDisposable
 
     public int SrdoCount { get; }
     public bool IsOperational => _operational;
+
+    /// <summary>The node-id the first-cycle delay is computed from. Actor only.</summary>
+    internal void SetNodeId(byte nodeId) => _nodeId = nodeId;
 
     /// <summary>Snapshot for any thread.</summary>
     public SrdoState GetState(int srdoNumber)

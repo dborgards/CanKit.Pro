@@ -51,7 +51,8 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 public interface ICanOpenNode : IDisposable
 {
-    /// <summary>Node identifier (1..127) this instance answers as on the bus.</summary>
+    /// <summary>Node identifier (1..127) this instance answers as on the bus. <c>0xFF</c> while
+    /// an LSS slave has no active node-id yet (CiA 305): nothing on the bus is addressed with it.</summary>
     byte NodeId { get; }
 
     /// <summary>Options this node was constructed with.</summary>

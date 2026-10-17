@@ -149,6 +149,13 @@ internal sealed partial class CanOpenNode
     private void ApplyFlyingMasterStartup()
     {
         if (_suppressFlyingMasterStartup || _disposed != 0) return;
+        // An unconfigured LSS slave has no node-id to claim with.
+        if (LayerSettingsBlockBoot())
+        {
+            if (_flyingMasterRole != FlyingMasterRole.Inactive)
+                StopFlyingMasterCore();
+            return;
+        }
         if (FlyingMasterEnabled)
         {
             if (_flyingMasterRole == FlyingMasterRole.Inactive)

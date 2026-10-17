@@ -43,7 +43,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 {
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
-    private readonly byte _nodeId;
+    // Active node-id. Mutable when layer setting services are on: a pending node-id becomes
+    // active on NMT reset communication, or at once when an unconfigured slave is given one
+    // (CiA 305 §8.3). With LSS off it is assigned once and never written again.
+    private volatile byte _nodeId;
     private readonly CanOpenNodeOptions _options;
 
     private readonly ProtocolActor _actor;
@@ -196,11 +199,21 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         bool ownsService, ITimeSource? timeSource = null, CanOpenDeviceDescription? description = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
-        CanOpenCobId.ValidateNodeId(nodeId);
-        _nodeId = nodeId;
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
         _ownsService = ownsService;
+        var layer = ResolveLayerSettings(nodeId, description);
+        _lssEnabled = layer.Enabled;
+        _table0Mask = layer.Table0;
+        _nodeId = layer.NodeId;
+        _pendingNodeId = layer.NodeId;
+        _persistentNodeId = layer.NodeId;
+        _pendingSelector = _activeSelector = _persistentSelector = layer.Selector;
+        _pendingIndex = _activeIndex = _persistentIndex = layer.Index;
+        _profileCobIdNodeId = layer.NodeId;
+        _sdoCobIdNodeId = layer.NodeId;
+        _powerOnNodeId = layer.NodeId;
+        _factoryNodeId = layer.NodeId;
 
         // The time source is a test seam (#113): inhibit times, event timers and every deadline
         // are measured against the actor's monotonic source, which a test can drive by hand.
@@ -277,6 +290,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     || (id == CanOpenCobId.GlobalFailsafeCommand && _srdoCount > 0)
                     || id is CanOpenCobId.FlyingMasterClaim or CanOpenCobId.FlyingMasterTrigger
                         or CanOpenCobId.FlyingMasterDetect or CanOpenCobId.FlyingMasterForce
+                    || (_lssEnabled && id == CanOpenCobId.LssMasterMessage)
                     || (id >= 0x080 && id <= 0x77F);
             }, includeEcho: true);
         }
@@ -295,6 +309,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _actor.Post(() =>
         {
             ApplyAllCommunicationObjects();
+            // An unconfigured LSS slave stays in NMT reset-communication waiting (§8.3.1):
+            // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
+            if (LayerSettingsBlockBoot()) return;
             _state = NmtState.PreOperational;
             _ = EmitHeartbeat(0x00);
         });
@@ -484,6 +501,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private Task EmitHeartbeat(byte payload)
     {
+        if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         uint cobId = CanOpenCobId.Heartbeat(_nodeId);
         var frame = new[] { payload };
         var link = _heartbeatSendChain.ContinueWith(
@@ -495,6 +513,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
     private Task EmitEmcy(EmcyMessage msg, CancellationToken cancellationToken = default)
     {
+        if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         uint cobId = _emcyCobId;
         var frame = msg.Encode();
         byte errorRegister = msg.ErrorRegister;
@@ -826,6 +845,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         _heartbeatProducer.Dispose();
         _heartbeatConsumer.Dispose();
+        CancelLssActivation();
         _syncProducerHandle?.Dispose();
         _syncProducerHandle = null;
         DisposePdoRuntime();
@@ -1322,6 +1342,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 if (!isRtr) HandleFlyingMasterFrame(cobId, data);
                 return;
             }
+            // LSS master message (CiA 305 §7.3). DLC is 8; anything else is ignored.
+            if (_lssEnabled && cobId == CanOpenCobId.LssMasterMessage)
+            {
+                if (!isRtr && !isFd && data.Length == Lss.LssFrames.Length)
+                    HandleLss(data);
+                return;
+            }
             // CiA DSP 304: SRDO pairs on this node's configured ids, GFC on 001h. Before SYNC
             // and the RPDO table: an SRDO id can be nothing else on this node (the validators
             // keep 101h–180h and 001h out of every other object).
@@ -1479,9 +1506,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // Raise NmtCommandReceived only for matching targets — ICanOpenNode documents the
         // event for commands that address this node (or broadcast), not every peer NMT on a
         // shared bus.
-        bool forUs = target == 0 || target == _nodeId;
+        // 0xFF is not an address. A selective command never matches an unconfigured slave.
+        bool active = CanOpenCobId.IsActiveNodeId(_nodeId);
+        bool forUs = target == 0 || (active && target == _nodeId);
         if (!forUs) return;
         if (ShouldIgnoreOwnNmt(cmd, target)) return;
+        // Start, stop and enter pre-operational need an active node-id. A broadcast reset
+        // still applies: that is how an unconfigured slave reloads its persistent node-id.
+        if (!active && cmd is NmtCommand.Start or NmtCommand.Stop or NmtCommand.EnterPreOperational)
+            return;
         // The cold broadcast is this node's own reset. Counting it here means the send
         // completion does not apply that reset a second time.
         if (target == 0 && cmd == NmtCommand.ResetCommunication && _coldResetPending)
@@ -2499,6 +2532,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
         Action<CanOpenTransportException?>? onSendCompleted = null)
     {
+        // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
+        // The in-flight send is treated as confirmed so an SDO timeout can still decide it.
+        if (IsLssSilent())
+        {
+            onSendCompleted?.Invoke(null);
+            return Task.CompletedTask;
+        }
         // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via

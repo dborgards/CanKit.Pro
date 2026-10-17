@@ -433,12 +433,15 @@ internal sealed partial class CanOpenNode
         // is stored is what the dictionary held at the "save", not what a writer changed while the
         // actor was still getting to it (Codex on #133). Only the actor-owned state moves to the loop.
         var stored = SnapshotRestorableValues();
+        byte profileNodeId = _profileCobIdNodeId;
         RunOnActor(() =>
         {
             _powerOnValues = stored;
             // A store after "load" is the newer instruction: the next reset restores what was
             // just stored, not the defaults the earlier "load" asked for.
             _restoreDefaultsOnReset = false;
+            // The snapshot now holds the COB-IDs of the node-id they were last retargeted to.
+            NoteLayerSettingsPowerOn(profileNodeId);
         });
         return OdWriteDecision.Handled;
     }
@@ -752,6 +755,10 @@ internal sealed partial class CanOpenNode
         // sub-state reset communication is passed."
         _nodeGuardingProducerToggle = false;
         ResetLifeGuardingState();
+        // Reset node reloads the persistent node-id into the pending one. Reset communication
+        // keeps the pending node-id. Neither command reloads the bit timing (CiA 305 §8.3).
+        if (_lssEnabled && !communicationOnly)
+            _pendingNodeId = _persistentNodeId;
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
         SuspendFlyingMasterForReset();
@@ -766,6 +773,7 @@ internal sealed partial class CanOpenNode
         {
             _powerOnValues = _factoryDefaults;
             _restoreDefaultsOnReset = false;
+            if (_lssEnabled) _powerOnNodeId = _factoryNodeId;
         }
         RestoreValues(_powerOnValues, communicationOnly);
         // The application's turn, still in Initialisation: its objects are restored before the
@@ -777,6 +785,29 @@ internal sealed partial class CanOpenNode
         // A subscriber may have disposed the node; its timers are gone and nothing is announced.
         if (Volatile.Read(ref _disposed) != 0) return;
 
+        if (_lssEnabled)
+        {
+            // Restore put the power-on COB-IDs back. 1200h is not among them, so its baseline
+            // stays at the id the live record still names. An unconfigured pending node-id
+            // leaves the slave in reset-communication waiting.
+            _profileCobIdNodeId = _powerOnNodeId;
+            if (!CanOpenCobId.IsActiveNodeId(_pendingNodeId))
+            {
+                _nodeId = CanOpenCobId.UnconfiguredNodeId;
+                _srdo.SetNodeId(_nodeId);
+                return;
+            }
+            ApplyActiveNodeId(_pendingNodeId);
+        }
+        EnterPreOperationalFromReset();
+    }
+
+    /// <summary>
+    /// The boot-up tail of an NMT reset, and of an unconfigured LSS slave that has just been
+    /// given a node-id in 1..127. Does not raise <see cref="ICanOpenNode.ApplicationReset"/>.
+    /// </summary>
+    private void EnterPreOperationalFromReset()
+    {
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
