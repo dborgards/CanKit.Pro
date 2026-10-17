@@ -415,7 +415,7 @@ namespace CanKit.Pro.CANopen.Lss
     public interface ILssMaster : System.IAsyncDisposable, System.IDisposable
     {
         CanKit.Pro.CANopen.Lss.LssMasterOptions Options { get; }
-        System.Threading.Tasks.Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = default, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = default, System.Threading.CancellationToken cancellationToken = default, bool returnToWaiting = false);
         System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssServiceResult> ConfigureNodeIdAsync(byte nodeId, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssFastscanResult> FastscanAsync(CanKit.Pro.CANopen.Lss.LssFastscanRequest? request = null, System.Threading.CancellationToken cancellationToken = default);
