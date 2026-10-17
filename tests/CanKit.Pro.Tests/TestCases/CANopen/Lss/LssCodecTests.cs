@@ -73,6 +73,8 @@ public class LssCodecTests
         (address == new LssAddress(1, 2, 3, 4)).Should().BeTrue();
         (address != new LssAddress(1, 2, 3, 5)).Should().BeTrue();
         address.Equals((object)new LssAddress(1, 2, 3, 4)).Should().BeTrue();
+        object foreign = new object();
+        address.Equals(foreign).Should().BeFalse();
         address.GetHashCode().Should().Be(new LssAddress(1, 2, 3, 4).GetHashCode());
         address.ToString().Should().Contain("00000001");
 

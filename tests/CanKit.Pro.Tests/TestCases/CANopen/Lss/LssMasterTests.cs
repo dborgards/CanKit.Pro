@@ -471,7 +471,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
 
         var prefix = async () => await rig.Master.FastscanAsync(new LssFastscanRequest
         {
-            VendorId = new LssFastscanField { KnownHighBitCount = 33 },
+            VendorId = new LssFastscanField { KnownHighBitCount = -1 },
         });
         await prefix.Should().ThrowAsync<ArgumentOutOfRangeException>();
 
@@ -481,8 +481,30 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         });
         await prefixOnMatch.Should().ThrowAsync<ArgumentException>();
 
+        var tooWide = async () => await rig.Master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { KnownHighBitCount = 33 },
+        });
+        await tooWide.Should().ThrowAsync<ArgumentOutOfRangeException>();
+
         var missing = async () => await rig.Master.FastscanAsync(new LssFastscanRequest { VendorId = null! });
         await missing.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task A_Short_Frame_And_An_Extended_Frame_Are_Not_An_Lss_Response()
+    {
+        using var rig = Rig.Open(SlaveA);
+        using (var shortFrame = CanFrame.Classic(
+            unchecked((int)CanOpenCobId.LssSlaveMessage), new byte[] { 1, 2 }, isExtendedFrame: false))
+            rig.MasterBus.Transmit(shortFrame);
+        using (var extended = CanFrame.Classic(
+            unchecked((int)CanOpenCobId.LssSlaveMessage), new byte[LssFrames.Length], isExtendedFrame: true))
+            rig.MasterBus.Transmit(extended);
+
+        var found = await rig.Master.FastscanAsync();
+        found.Succeeded.Should().BeTrue();
+        found.Address.Should().Be(SlaveA);
     }
 
     [Fact]
