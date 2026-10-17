@@ -624,11 +624,12 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         again.NodeId.Should().Be(0x12);
     }
 
+#if NET
     [Fact]
     public async Task ReadIdentities_Does_Not_Treat_A_Timeout_As_A_Zero()
     {
         var proxy = DispatchProxy.Create<ICanOpenNode, UploadStub>();
-        var stub = (UploadStub)(object)proxy;
+        var stub = (UploadStub)proxy;
         stub.NodeId = 2;
         stub.Upload = sub =>
         {
@@ -640,6 +641,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var thrown = await act.Should().ThrowAsync<SdoAbortException>();
         thrown.Which.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
     }
+#endif
 
     [Fact]
     public async Task A_Disposed_Master_Lets_The_Scan_End()
@@ -685,6 +687,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+#if NET
     private class UploadStub : DispatchProxy
     {
         public byte NodeId { get; set; }
@@ -702,6 +705,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             throw new NotSupportedException(targetMethod.Name);
         }
     }
+#endif
 
     /// <summary>Confirmed services return the scripted results. Selective switch always hits.</summary>
     private sealed class ServiceMaster : ILssMaster
