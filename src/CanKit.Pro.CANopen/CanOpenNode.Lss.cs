@@ -647,6 +647,10 @@ internal sealed partial class CanOpenNode : ILssSlave
             _profileCobIdNodeId = nodeId;
             _sdoCobIdNodeId = nodeId;
             _nodeId = nodeId;
+            // 1014h is rewritten only when the id changed. Assigning the same id again, after a
+            // reset cleared the cached producer, must still follow the record or EMCY goes out
+            // on 000h.
+            ApplyEmcyConfiguration();
         });
     }
 

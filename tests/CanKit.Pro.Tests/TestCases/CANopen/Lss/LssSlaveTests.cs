@@ -1310,6 +1310,31 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Assigning_The_Same_Node_Id_Again_Sends_Emcy_On_That_Id()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions { Store = new MemoryStore() });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        (await bench.Master.StoreConfigurationAsync()).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetNode, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId
+            && slave.State == NmtState.Initializing);
+
+        (await bench.Master.ConfigureNodeIdAsync(5)).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slave.NodeId == 5 && slave.State == NmtState.PreOperational);
+
+        int before = heard.Ids.Count;
+        await slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => heard.Ids.Count > before);
+        var sent = heard.Ids.Skip(before).ToArray();
+        sent.Should().NotContain(CanOpenCobId.NmtCommand);
+        sent.Should().Contain(CanOpenCobId.Emcy(5));
+    }
+
+    [Fact]
     public async Task The_Second_Delay_Drops_The_Flying_Master_Nmt_Frame()
     {
         using var bench = new Bench();
