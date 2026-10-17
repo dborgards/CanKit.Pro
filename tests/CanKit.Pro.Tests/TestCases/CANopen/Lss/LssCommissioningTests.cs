@@ -368,6 +368,48 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         slave.NodeId.Should().Be(0x10);
     }
 
+    [Fact]
+    public async Task Inquire_Can_Miss_And_A_Partial_Identity_Counts_The_Rest_As_Zero()
+    {
+        using var bench = new Bench();
+        var tool = new LssCommissioning(bench.Master);
+        tool.Master.Should().BeSameAs(bench.Master);
+        var missing = () => new LssUnconfiguredScanResult(null!, LssScanStop.NoUnconfiguredSlave);
+        missing.Should().Throw<ArgumentNullException>().WithParameterName("slaves");
+
+        var slave = bench.Slave(1, 5, new LssSlaveOptions());
+        SetIdentity(slave, First);
+        var missed = await tool.InquireSlaveAsync(Second);
+        missed.Selected.Should().BeFalse();
+        missed.Succeeded.Should().BeFalse();
+        await WaitUntilAsync(() => slave.LssState() == LssState.Waiting);
+
+        var partial = bench.Slave(2, 6, new LssSlaveOptions { Enabled = false });
+        partial.ObjectDictionary.WriteUnsigned(0x1018, 0x00, 1);
+        partial.ObjectDictionary.WriteUnsigned(0x1018, 0x01, 9);
+        var client = bench.Slave(3, 2, new LssSlaveOptions { Enabled = false });
+        var read = await tool.ReadIdentitiesAsync(client, new byte[] { 6 });
+        read.Should().ContainSingle();
+        read[0].Address.Should().Be(new LssAddress(9, 0, 0, 0));
+        read[0].Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_Disposed_Master_Lets_The_Scan_End()
+    {
+        using var bench = new Bench();
+        var first = bench.Unconfigured(First)[0];
+        var tool = new LssCommissioning(bench.Master);
+        using var cancel = new CancellationTokenSource();
+        var scan = tool.ScanUnconfiguredAsync(cancellationToken: cancel.Token);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration);
+        bench.Master.Dispose();
+        cancel.Cancel();
+        var act = async () => await scan;
+        var thrown = await act.Should().ThrowAsync<Exception>();
+        (thrown.Which is ObjectDisposedException or OperationCanceledException).Should().BeTrue();
+    }
+
     private static void SetIdentity(ICanOpenNode node, LssAddress address)
     {
         var od = node.ObjectDictionary;
