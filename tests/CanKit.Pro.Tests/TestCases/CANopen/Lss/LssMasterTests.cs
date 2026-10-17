@@ -26,7 +26,9 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     private static LssMasterOptions Quick() => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        FastscanTimeout = TimeSpan.FromMilliseconds(40),
+        // A zero bit is a missing reply. 40ms loses that reply on a busy runner and the
+        // next check then accepts the late frame as its own.
+        FastscanTimeout = TimeSpan.FromMilliseconds(120),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
     };
@@ -396,7 +398,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
         });
-        skipped.Succeeded.Should().BeTrue();
+        skipped.Status.Should().Be(LssFastscanStatus.Found);
         skipped.Address.VendorId.Should().Be(1);
         skipped.Address.ProductCode.Should().Be(0);
         skipped.Address.SerialNumber.Should().Be(1);

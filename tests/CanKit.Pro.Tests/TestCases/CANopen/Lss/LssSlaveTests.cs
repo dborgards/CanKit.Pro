@@ -397,7 +397,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         slave.Dispose();
         var finished = await Task.WhenAny(held, Task.Delay(1000));
         finished.Should().BeSameAs(held);
-        held.IsCompletedSuccessfully.Should().BeTrue();
+        held.Status.Should().Be(TaskStatus.RanToCompletion);
         heard.Ids.Should().NotContain(CanOpenCobId.NmtCommand);
         await activate;
     }
