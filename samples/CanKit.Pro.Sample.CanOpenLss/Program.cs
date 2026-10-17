@@ -147,8 +147,10 @@ namespace CanKit.Sample.CanOpenLss
             IEnumerable<byte> ids;
             if (HasFlag(args, "--probe-all"))
             {
-                ids = Enumerable.Range(CanOpenCobId.MinNodeId, CanOpenCobId.MaxNodeId)
-                    .Select(value => (byte)value);
+                Console.WriteLine("Probing node-ids 1..127 together, then reading 1018h of the nodes that answer.");
+                var present = await CanOpenDiscovery.ScanAsync(client, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                ids = present.Select(node => node.NodeId);
             }
             else
             {
@@ -178,6 +180,11 @@ namespace CanKit.Sample.CanOpenLss
             };
             var result = await tool.ConfigureSlaveAsync(ReadAddress(args), configuration, cancellationToken)
                 .ConfigureAwait(false);
+            if (configuration.NodeId is not null && result.Succeeded)
+            {
+                Console.WriteLine(
+                    "The node-id is pending until NMT reset communication to the node-id that is active now.");
+            }
             return Print(result);
         }
 
@@ -206,7 +213,7 @@ namespace CanKit.Sample.CanOpenLss
             }, cancellationToken).ConfigureAwait(false);
             Console.WriteLine($"Stop: {scan.Stop}");
             bool failed = PrintAll(scan.Slaves) || scan.Stop == LssScanStop.SlaveRejected
-                || scan.Stop == LssScanStop.NoMatch;
+                || scan.Stop == LssScanStop.NoMatch || scan.Stop == LssScanStop.TimedOut;
             return failed ? 1 : 0;
         }
 
@@ -235,13 +242,16 @@ namespace CanKit.Sample.CanOpenLss
             if (!result.Selected)
                 return $"{result.Address}  not selected";
             var node = result.NodeId is { } id ? $"node 0x{id:X2}" : "node (unchanged)";
+            var nodeIdError = result.NodeIdResult is { Succeeded: false } rejected
+                ? $"node-id {rejected}"
+                : null;
             var store = result.StoreResult is { } stored
                 ? (stored.Succeeded ? "stored" : $"store {stored}")
                 : null;
             var timing = result.BitTimingResult is { } rate
                 ? (rate.Succeeded ? "bit timing set" : $"bit timing {rate}")
                 : null;
-            return string.Join("  ", new[] { result.Address.ToString(), node, timing, store }
+            return string.Join("  ", new[] { result.Address.ToString(), node, nodeIdError, timing, store }
                 .Where(part => part is not null));
         }
 
