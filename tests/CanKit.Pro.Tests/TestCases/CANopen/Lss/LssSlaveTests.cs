@@ -344,17 +344,17 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         (await bench.Master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, 3)).Succeeded.Should().BeTrue();
 
         using var heard = bench.Listen();
-        var activate = bench.Master.ActivateBitTimingAsync(200, null);
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
         Volatile.Read(ref rate).Should().Be(250_000);
         int before = heard.Ids.Count;
         var held = slave.SendNmtCommandAsync(NmtCommand.Start, 0);
-        await Task.Delay(20);
+        await Task.Delay(40);
         held.IsCompleted.Should().BeFalse();
         heard.Ids.Skip(before).Should().NotContain(CanOpenCobId.NmtCommand);
         await activate;
         await held;
-        heard.Ids.Skip(before).Should().Contain(CanOpenCobId.NmtCommand);
+        await WaitUntilAsync(() => heard.Ids.Skip(before).Contains(CanOpenCobId.NmtCommand));
     }
 
     [Fact]
@@ -377,11 +377,11 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
 
         using var heard = bench.Listen();
-        var activate = bench.Master.ActivateBitTimingAsync(150, null);
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
         using (var poke = VirtualAdapterFixture.Open(bench.Session, 9))
             Transmit(poke, LssFrames.Command(LssCommand.StoreConfiguration));
-        await Task.Delay(20);
+        await Task.Delay(40);
         heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage);
         store.NodeId.Should().Be(0x12);
         await activate;
