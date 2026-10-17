@@ -68,15 +68,8 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
     private static void Transmit(ICanBus bus, byte[] payload)
     {
-        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
-        try
-        {
-            bus.Transmit(frame);
-        }
-        finally
-        {
-            frame.Dispose();
-        }
+        using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
+        bus.Transmit(frame);
     }
 
     [Fact]
@@ -449,6 +442,43 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x1F90, 0x06).Should().Be((uint)(4000 + 10 * 0x20));
         od.ReadUnsigned(0x1301, 0x05).Should().Be(CanOpenCobId.SrdoDefaultCobId1(0x20));
         od.ReadUnsigned(0x1301, 0x06).Should().Be(CanOpenCobId.SrdoDefaultCobId2(0x20));
+    }
+
+    [Fact]
+    public async Task Srdo_Defaults_Appear_When_An_Unconfigured_Slave_Gets_A_Node_Id_And_Clear_Above_64()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId, srdoCount: 1);
+        var od = slave.ObjectDictionary;
+        od.ReadUnsigned(0x1301, 0x05).Should().Be(0);
+        od.ReadUnsigned(0x1301, 0x06).Should().Be(0);
+
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(5)).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slave.NodeId == 5);
+        od.ReadUnsigned(0x1301, 0x05).Should().Be(CanOpenCobId.SrdoDefaultCobId1(5));
+        od.ReadUnsigned(0x1301, 0x06).Should().Be(CanOpenCobId.SrdoDefaultCobId2(5));
+
+        var configured = bench.Slave(2, 5, new LssSlaveOptions(), srdoCount: 1);
+        var peer = bench.Slave(3, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench.Master, configured);
+        (await bench.Master.ConfigureNodeIdAsync(70)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => configured.NodeId == 70);
+        configured.ObjectDictionary.ReadUnsigned(0x1301, 0x05).Should().Be(0);
+        configured.ObjectDictionary.ReadUnsigned(0x1301, 0x06).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task An_Unconfigured_Flying_Master_Claims_After_It_Receives_A_Node_Id()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        slave.StartFlyingMaster(0, TimeSpan.FromMilliseconds(100));
+        using var heard = bench.Listen();
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x15)).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slave.NodeId == 0x15 && heard.Ids.Contains(CanOpenCobId.FlyingMasterDetect));
     }
 
     [Fact]
