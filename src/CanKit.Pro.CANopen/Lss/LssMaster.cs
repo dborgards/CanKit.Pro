@@ -64,7 +64,7 @@ internal sealed partial class LssMaster : ILssMaster
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService)
     {
         _service = service;
-        Options = options ?? throw new ArgumentNullException(nameof(options));
+        Options = options;
         options.Validate();
         _ownsService = ownsService;
         _subscription = service.Subscribe(frame =>

@@ -88,8 +88,9 @@ internal sealed partial class LssMaster
         int firstUnknownBit = 31;
         if (field.KnownHighBitCount > 0)
         {
+            // KnownHighBitCount 32 already returned above, so at least one bit is still unknown.
             int unknown = 32 - field.KnownHighBitCount;
-            uint prefixMask = unknown == 0 ? 0xFFFFFFFFu : 0xFFFFFFFFu << unknown;
+            uint prefixMask = 0xFFFFFFFFu << unknown;
             id = field.Value & prefixMask;
             // One step checks the known prefix (annex A.3.4). A miss means no slave has it.
             if (!await ProbeAsync(id, (byte)unknown, lssSub, lssSub, cancellationToken).ConfigureAwait(false))
