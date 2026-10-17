@@ -71,7 +71,7 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// switch the master is still on the old rate and the slave will not hear the frame.
     /// </summary>
     Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-        CancellationToken cancellationToken = default, bool returnToWaiting = false);
+        bool returnToWaiting = false, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Asks the single slave in LSS configuration to copy pending node-id and bit timing to

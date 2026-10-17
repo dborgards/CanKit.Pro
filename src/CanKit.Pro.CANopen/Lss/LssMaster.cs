@@ -162,7 +162,7 @@ internal sealed partial class LssMaster : ILssMaster
 
     /// <inheritdoc />
     public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-        CancellationToken cancellationToken = default, bool returnToWaiting = false)
+        bool returnToWaiting = false, CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
             await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
