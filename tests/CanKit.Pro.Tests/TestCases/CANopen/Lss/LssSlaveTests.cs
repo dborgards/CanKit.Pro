@@ -286,6 +286,22 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Fastscan_LssNext_Four_Does_Not_Finish_An_Earlier_Number()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        SetIdentity(slave, Address);
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+        using var heard = bench.Listen();
+        Transmit(poke, LssFrames.Fastscan(0, LssCommand.FastscanReset, 0, 0));
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
+        int replies = heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage);
+        Transmit(poke, LssFrames.Fastscan(Address.VendorId, 0, 0, 4));
+        await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage) > replies);
+        slave.LssState().Should().Be(LssState.Waiting);
+    }
+
+    [Fact]
     public async Task Store_Persists_The_Pending_Node_Id_And_Bit_Timing_And_The_Next_Open_Loads_Them()
     {
         var store = new MemoryStore();
@@ -355,6 +371,125 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await activate;
         await held;
         await WaitUntilAsync(() => heard.Ids.Skip(before).Contains(CanOpenCobId.NmtCommand));
+    }
+
+    [Fact]
+    public async Task Disposing_The_Slave_Drops_A_Held_Nmt()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        var held = slave.SendNmtCommandAsync(NmtCommand.Start, 0);
+        await Task.Delay(30);
+        held.IsCompleted.Should().BeFalse();
+        slave.Dispose();
+        var finished = await Task.WhenAny(held, Task.Delay(1000));
+        finished.Should().BeSameAs(held);
+        held.IsCompletedSuccessfully.Should().BeTrue();
+        heard.Ids.Should().NotContain(CanOpenCobId.NmtCommand);
+        await activate;
+    }
+
+    [Fact]
+    public async Task A_Driver_Fault_Completes_A_Held_Nmt_And_The_Heartbeat_Behind_It_Still_Goes()
+    {
+        await AssertHeldNmtFailure(cancel: false);
+    }
+
+    [Fact]
+    public async Task A_Cancelled_Held_Nmt_Completes_And_The_Heartbeat_Behind_It_Still_Goes()
+    {
+        await AssertHeldNmtFailure(cancel: true);
+    }
+
+    private static async Task AssertHeldNmtFailure(bool cancel)
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        var service = new FaultingService(new CanBusService(bus));
+        using var slave = new CanOpenNode(service, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
+            },
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        }, ownsService: true);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        var held = slave.SendNmtCommandAsync(NmtCommand.Start, 0);
+        service.FaultNextNmt(cancel);
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(20));
+        await Task.Delay(200);
+        slave.StopHeartbeatProducer();
+        held.IsCompleted.Should().BeFalse();
+        await activate;
+        var act = async () => await held;
+        if (cancel) await act.Should().ThrowAsync<OperationCanceledException>();
+        else await act.Should().ThrowAsync<TimeoutException>();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(5)));
+    }
+
+    [Fact]
+    public async Task The_Switch_Silence_Drops_An_Sdo_Upload_From_The_Slave()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        using var cancel = new CancellationTokenSource();
+        var upload = slave.SdoUploadAsync(2, 0x1000, 0x00, cancel.Token);
+        await Task.Delay(40);
+        heard.Ids.Should().NotContain(CanOpenCobId.SdoRx(2));
+        cancel.Cancel();
+        var act = async () => await upload;
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        await activate;
+    }
+
+    [Fact]
+    public void A_Superseded_Switch_Delay_Does_Not_Start_Silence()
+    {
+        using var bench = new Bench();
+        var slave = (CanOpenNode)bench.Slave(1, 5);
+        slave.BeginLssSilence(generation: -1, TimeSpan.FromMilliseconds(10));
+        slave.CompleteLssSilence(generation: -1);
+        slave.LssState().Should().Be(LssState.Waiting);
+        slave.Dispose();
+        slave.BeginLssSilence(generation: 0, TimeSpan.FromMilliseconds(10));
+        slave.CompleteLssSilence(generation: -1);
     }
 
     [Fact]
@@ -535,6 +670,54 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task An_Inactive_Srdo_Keeps_Its_Signature_When_The_Node_Id_Changes()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions(), srdoCount: 1);
+        var od = slave.ObjectDictionary;
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        slave.StoreParameters();
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x20)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == 0x20);
+        od.ReadUnsigned(0x1301, 0x05).Should().Be(CanOpenCobId.SrdoDefaultCobId1(0x20));
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+    }
+
+    [Fact]
+    public async Task A_Custom_Flying_Master_Slot_Is_Not_Rewritten()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        // Smaller than the priority time divided by 127, so the write is accepted, and not the
+        // pre-defined slot, so a node-id change has to leave it.
+        slave.ObjectDictionary.WriteUnsigned(0x1F90, 0x06, 11);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x15)).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slave.NodeId == 0x15);
+        slave.ObjectDictionary.ReadUnsigned(0x1F90, 0x06).Should().Be(11u);
+    }
+
+    [Fact]
+    public void Storing_Parameters_Without_Lss_Leaves_The_Layer_Node_Id_Unset()
+    {
+        using var bench = new Bench();
+        var node = bench.Slave(1, 5, new LssSlaveOptions { Enabled = false });
+        node.StoreParameters();
+        node.NodeId.Should().Be(5);
+    }
+
+    [Fact]
+    public void A_Missing_Cob_Id_Is_Left_Alone()
+    {
+        using var bench = new Bench();
+        var slave = (CanOpenNode)bench.Slave(1, 5);
+        slave.RetargetCobId(0x2000, 0x01, 0x180, 0x181).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task An_Unconfigured_Flying_Master_Claims_After_It_Receives_A_Node_Id()
     {
         using var bench = new Bench();
@@ -559,6 +742,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         (await bench.Master.ConfigureBitTimingAsync(0, 2)).Succeeded.Should().BeTrue();
         (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
         (await bench.Master.ConfigureBitTimingAsync(0, 0)).ErrorCode.Should().Be(LssCommand.BitTimingNotSupported);
+        (await bench.Master.ConfigureBitTimingAsync(0x80, 1)).ErrorCode.Should().Be(LssCommand.BitTimingNotSupported);
         (await bench.Master.StoreConfigurationAsync()).ErrorCode.Should().Be(LssCommand.StoreNotSupported);
 
         var silent = CanOpenDeviceDescription.ParseEds(Eds(lss: false, baud250: false, baud500: true));
@@ -1347,6 +1531,52 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             _disposables.Add(item);
             return item;
         }
+    }
+
+    /// <summary>The next NMT confirmation fails, so a held flush can be seen to finish that send.</summary>
+    private sealed class FaultingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private int _fault;
+
+        public FaultingService(ICanBusService inner) => _inner = inner;
+
+        public void FaultNextNmt(bool cancel) => Volatile.Write(ref _fault, cancel ? 2 : 1);
+
+        public ICanBus Bus => _inner.Bus;
+
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (frame.ID == 0)
+            {
+                int fault = Interlocked.Exchange(ref _fault, 0);
+                if (fault == 1)
+                    return Task.FromException<TxConfirmation>(new TimeoutException("driver rejected the frame"));
+                if (fault == 2)
+                    return Task.FromException<TxConfirmation>(new OperationCanceledException());
+            }
+
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() => _inner.Dispose();
     }
 
     private sealed class Listener : IDisposable
