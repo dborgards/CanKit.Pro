@@ -794,6 +794,31 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task An_Unconfigured_Reset_Does_Not_Hide_A_Peer_On_The_Freed_Node_Id()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions { Store = new MemoryStore() });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        var seen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        slave.EmcyReceived += (_, _) => seen.TrySetResult(true);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        (await bench.Master.StoreConfigurationAsync()).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetNode, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId
+            && slave.State == NmtState.Initializing);
+
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+        using var frame = CanFrame.Classic(
+            unchecked((int)CanOpenCobId.Emcy(5)),
+            new byte[] { 0x00, 0x10, 0x01, 0, 0, 0, 0, 0 },
+            isExtendedFrame: false);
+        poke.Transmit(frame);
+        var arrived = await Task.WhenAny(seen.Task, Task.Delay(TimeSpan.FromSeconds(2)));
+        arrived.Should().Be(seen.Task);
+    }
+
+    [Fact]
     public async Task The_Second_Delay_Drops_The_Flying_Master_Nmt_Frame()
     {
         using var bench = new Bench();

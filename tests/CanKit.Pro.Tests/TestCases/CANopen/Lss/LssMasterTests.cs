@@ -508,6 +508,16 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Activate_Can_Return_The_Slave_To_Waiting_Before_The_Switch()
+    {
+        using var rig = Rig.Open(SlaveA, nodeId: 5);
+        await EnterConfigurationAsync(rig);
+        (await rig.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        await rig.Master.ActivateBitTimingAsync(20, returnToWaiting: true);
+        rig.Slave.State.Should().Be(LssState.Waiting);
+    }
+
+    [Fact]
     public async Task Manufacturer_Command_Round_Trips_And_Times_Out_Without_A_Handler()
     {
         using var rig = Rig.Open(SlaveA, nodeId: 4);

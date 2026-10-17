@@ -118,10 +118,14 @@ internal sealed partial class LssMaster : ILssMaster
 
     /// <inheritdoc />
     public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, bool returnToWaiting = false)
         => Execute(async ct =>
         {
             await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
+            // Before either delay. Afterwards the slave transmits at the new rate and this
+            // channel, which is not reconfigured, would not reach it.
+            if (returnToWaiting)
+                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
             if (delay > TimeSpan.Zero)
                 await Task.Delay(delay, ct).ConfigureAwait(false);
