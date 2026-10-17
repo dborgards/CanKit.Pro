@@ -591,6 +591,34 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Timeout_After_A_Confirmed_Node_Id_Keeps_That_Id()
+    {
+        var master = new FoundMaster { ThrowOnBitTiming = true };
+        var scan = await new LssCommissioning(master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            Limit = 2,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+        });
+
+        scan.Stop.Should().Be(LssScanStop.TimedOut);
+        scan.Slaves.Should().ContainSingle();
+        scan.Slaves[0].NodeId.Should().Be(0x10);
+        scan.Slaves[0].NodeIdResult!.Value.Succeeded.Should().BeTrue();
+        scan.Slaves[0].BitTimingResult.Should().BeNull();
+        master.ConfigureCalls.Should().Be(1);
+
+        var again = async () => await new LssCommissioning(master).ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            NodeId = 0x11,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+        });
+        await again.Should().ThrowAsync<LssTimeoutException>();
+    }
+
+    [Fact]
     public async Task Configure_Does_Not_Send_A_Second_Waiting_Frame_After_Activation()
     {
         var master = new FoundMaster();
@@ -835,6 +863,8 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public bool ThrowOnSecondConfigure { get; init; }
 
+        public bool ThrowOnBitTiming { get; init; }
+
         public LssMasterOptions Options { get; } = new();
 
         public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
@@ -859,7 +889,11 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
             CancellationToken cancellationToken = default)
-            => Task.FromResult(LssServiceResult.Success);
+        {
+            if (ThrowOnBitTiming)
+                throw new LssTimeoutException(LssCommand.ConfigureBitTiming, TimeSpan.FromMilliseconds(300));
+            return Task.FromResult(LssServiceResult.Success);
+        }
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
             bool returnToWaiting = false, CancellationToken cancellationToken = default)

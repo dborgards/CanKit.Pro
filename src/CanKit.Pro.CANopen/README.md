@@ -1040,7 +1040,7 @@ a service stops the batch; its result carries the code. Slaves configured earlie
 pending bit rate, and the stored rate when store already succeeded. This tool does not roll
 them back to the rate the network is still using; the caller does that before a power cycle.
 A confirmed service that times out stops the scan and returns the slaves that already received
-a node-id. Configure node-id writes the pending node-id. On a slave that already has an active
+a node-id, including the slave whose configure node-id succeeded before a later service timed out. Configure node-id writes the pending node-id. On a slave that already has an active
 node-id it takes effect at the next NMT reset communication, which this tool does not send.
 
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`

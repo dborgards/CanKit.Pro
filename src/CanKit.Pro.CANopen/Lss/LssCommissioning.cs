@@ -283,21 +283,30 @@ public sealed class LssCommissioning
                     continue;
                 }
 
-                LssCommissioningResult result;
+                Applied applied;
                 try
                 {
-                    result = await ConfigureFoundSlaveAsync(
+                    applied = await ConfigureFoundSlaveAsync(
                         found.Address, (byte)nextId, scan, cancellationToken).ConfigureAwait(false);
                 }
                 catch (LssTimeoutException)
                 {
-                    // The slaves already given a node-id stay in the result. The one that did
-                    // not answer is not among them.
+                    // Configure node-id itself did not confirm. The slaves already given a
+                    // node-id stay in the result. This one is not among them.
                     completed = new LssUnconfiguredScanResult(slaves, LssScanStop.TimedOut);
                     return completed;
                 }
 
-                slaves.Add(result);
+                slaves.Add(applied.Result);
+                if (applied.Timeout is not null)
+                {
+                    // Configure node-id already succeeded. A later service timing out must not
+                    // hide that id, or the next assignment would give it to another slave.
+                    completed = new LssUnconfiguredScanResult(slaves, LssScanStop.TimedOut);
+                    return completed;
+                }
+
+                var result = applied.Result;
                 if (!result.Succeeded)
                 {
                     completed = new LssUnconfiguredScanResult(slaves, LssScanStop.SlaveRejected);
@@ -358,6 +367,8 @@ public sealed class LssCommissioning
                 configuration.ActivateBitRate,
                 configuration.ReleaseToWaiting,
                 cancellationToken).ConfigureAwait(false);
+            if (applied.Timeout is not null)
+                throw applied.Timeout;
             return applied.Result;
         }
         finally
@@ -421,7 +432,7 @@ public sealed class LssCommissioning
         return results;
     }
 
-    private async Task<LssCommissioningResult> ConfigureFoundSlaveAsync(
+    private async Task<Applied> ConfigureFoundSlaveAsync(
         LssAddress address,
         byte nodeId,
         LssUnconfiguredScan scan,
@@ -443,7 +454,7 @@ public sealed class LssCommissioning
                 scan.ActivateBitRate,
                 returnToWaiting: true,
                 cancellationToken).ConfigureAwait(false);
-            return applied.Result;
+            return applied;
         }
         finally
         {
@@ -454,15 +465,22 @@ public sealed class LssCommissioning
 
     private readonly struct Applied
     {
-        public Applied(LssCommissioningResult result, bool releasedByActivation)
+        public Applied(LssCommissioningResult result, bool releasedByActivation, LssTimeoutException? timeout = null)
         {
             Result = result;
             ReleasedByActivation = releasedByActivation;
+            Timeout = timeout;
         }
 
         public LssCommissioningResult Result { get; }
 
         public bool ReleasedByActivation { get; }
+
+        /// <summary>
+        /// Set when configure node-id succeeded and a later service timed out. The result still
+        /// names that node-id. A timeout before any confirmed node-id is thrown instead.
+        /// </summary>
+        public LssTimeoutException? Timeout { get; }
     }
 
     private async Task<Applied> ApplyAsync(
@@ -486,33 +504,45 @@ public sealed class LssCommissioning
                 return new Applied(new LssCommissioningResult(true, address, id, nodeIdResult), false);
         }
 
-        if (selector is { } table && index is { } tableIndex && (nodeIdResult is null || nodeIdResult.Value.Succeeded))
+        try
         {
-            timingResult = await _master.ConfigureBitTimingAsync(table, tableIndex, cancellationToken)
-                .ConfigureAwait(false);
+            if (selector is { } table && index is { } tableIndex && (nodeIdResult is null || nodeIdResult.Value.Succeeded))
+            {
+                timingResult = await _master.ConfigureBitTimingAsync(table, tableIndex, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            // Store while both ends are still on the current bitrate. Activation is the last
+            // configuration service: after it, the slave transmits at the new rate (§6.5).
+            // A rejected node-id has already returned, so only the timing result can still fail.
+            bool servicesOk = timingResult is null || timingResult.Value.Succeeded;
+            if (store && servicesOk)
+                storeResult = await _master.StoreConfigurationAsync(cancellationToken).ConfigureAwait(false);
+
+            // A rejected store must not switch the live rate: the timing was not persisted, and the
+            // master's switch callback would leave the rest of the network at the old rate.
+            bool stored = storeResult is null || storeResult.Value.Succeeded;
+            bool releasedByActivation = false;
+            if (stored && timingResult is { Succeeded: true } && activateDelay is { } delay)
+            {
+                await _master.ActivateBitTimingAsync(delay, activateRate, returnToWaiting, cancellationToken)
+                    .ConfigureAwait(false);
+                releasedByActivation = returnToWaiting;
+            }
+
+            return new Applied(
+                new LssCommissioningResult(true, address, nodeId, nodeIdResult, timingResult, storeResult),
+                releasedByActivation);
         }
-
-        // Store while both ends are still on the current bitrate. Activation is the last
-        // configuration service: after it, the slave transmits at the new rate (§6.5).
-        // A rejected node-id has already returned, so only the timing result can still fail.
-        bool servicesOk = timingResult is null || timingResult.Value.Succeeded;
-        if (store && servicesOk)
-            storeResult = await _master.StoreConfigurationAsync(cancellationToken).ConfigureAwait(false);
-
-        // A rejected store must not switch the live rate: the timing was not persisted, and the
-        // master's switch callback would leave the rest of the network at the old rate.
-        bool stored = storeResult is null || storeResult.Value.Succeeded;
-        bool releasedByActivation = false;
-        if (stored && timingResult is { Succeeded: true } && activateDelay is { } delay)
+        catch (LssTimeoutException ex) when (nodeIdResult is { Succeeded: true })
         {
-            await _master.ActivateBitTimingAsync(delay, activateRate, returnToWaiting, cancellationToken)
-                .ConfigureAwait(false);
-            releasedByActivation = returnToWaiting;
+            // The pending node-id is already on the slave. Dropping this result would let the
+            // next scan assign the same id again.
+            return new Applied(
+                new LssCommissioningResult(true, address, nodeId, nodeIdResult, timingResult, storeResult),
+                releasedByActivation: false,
+                timeout: ex);
         }
-
-        return new Applied(
-            new LssCommissioningResult(true, address, nodeId, nodeIdResult, timingResult, storeResult),
-            releasedByActivation);
     }
 
     private async Task<LssUnconfiguredScanResult> Finish(
