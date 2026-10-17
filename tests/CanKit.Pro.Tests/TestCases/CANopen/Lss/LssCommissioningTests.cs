@@ -204,11 +204,11 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var first = bench.Unconfigured(First, Second)[0];
         var tool = new LssCommissioning(bench.Master);
         using var cancel = new CancellationTokenSource();
-        // Vendor, product and revision are known, so only the serial is scanned. A full
-        // four-field scan can miss the configuration window when the suite is loaded.
+        // Vendor, product and revision are known, so only the serial is scanned. Every
+        // Fastscan step occupies FastscanTimeout, so the answering bits take the whole window.
         var scan = tool.ScanUnconfiguredAsync(
             new LssUnconfiguredScan { Fastscan = KnownVendor() }, cancel.Token);
-        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 30);
         cancel.Cancel();
         var act = async () => await scan;
         await act.Should().ThrowAsync<OperationCanceledException>();
@@ -652,7 +652,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         using var cancel = new CancellationTokenSource();
         var scan = tool.ScanUnconfiguredAsync(
             new LssUnconfiguredScan { Fastscan = KnownVendor() }, cancel.Token);
-        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 30);
         bench.Master.Dispose();
         cancel.Cancel();
         var act = async () => await scan;
@@ -739,7 +739,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             => Task.FromResult(Timing);
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
         {
             ActivateCalled = true;
             return Task.CompletedTask;
@@ -816,7 +816,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             => Task.FromResult(LssServiceResult.Success);
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
 
         public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
@@ -883,7 +883,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             => throw new NotSupportedException();
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
         public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
