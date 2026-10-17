@@ -7,7 +7,9 @@ namespace CanKit.Pro.CANopen.Safety;
 /// <summary>
 /// CANopen Safety (CiA DSP 304 V1.0) on a node: the SRDOs it produces and consumes, the global
 /// failsafe command, and — for a master or tool — the configuration and verification of a
-/// peer's safety parameters. Reached through <see cref="CanOpenSafetyExtensions.Safety"/>.
+/// peer's safety parameters, run as the configuration entity of CiA 319 v2.0.0 (identity
+/// verification, the configuration steps, the storage, the checksum of an SRVT the peer does not
+/// implement). Reached through <see cref="CanOpenSafetyExtensions.Safety"/>.
 /// A node has SRDOs only when opened with <see cref="CanOpenNodeOptions.SrdoCount"/> &gt; 0 or
 /// a device description that declares them.
 /// </summary>
@@ -74,9 +76,20 @@ public interface ICanOpenSafety
     /// which is also reported on <c>BackgroundExceptionOccurred</c> as a transport failure.</exception>
     Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default);
 
-    /// <summary>§9.2 Figure 9: downloads 1300h, every record (deleted first, created last), the
-    /// checksums 13FFh:n, reads everything back and compares byte for byte, and only then writes
-    /// 13FEh = A5h and reads it back. Before the first frame, every mapping entry is checked against
+    /// <summary>The configuration entity of CiA 319 v2.0.0 clause 5 on the §9.2 Figure 9
+    /// transaction. First the peer's identity (CiA 319 §5.2): 1018h:01, :02 and :03 are uploaded
+    /// and compared with the bound description's <c>VendorNumber</c>, <c>ProductNumber</c> and
+    /// <c>RevisionNumber</c>; a difference ends the call with those entries as the mismatches, and
+    /// nothing is written. Then (§5.3 step 1) it downloads 1300h, every record (deleted first,
+    /// created last) and the checksums 13FFh:n, (step 2) reads everything back and compares byte for
+    /// byte, and only then (step 3) writes 13FEh = A5h and reads it back — step 4 is the peer's own
+    /// check of the checksums, and a peer that found one wrong answers that readback with 0. When
+    /// <see cref="PeerSafetyConfiguration.Storage"/> asks for it (step 5), the "save" signature
+    /// is then downloaded to 1010h at that sub-index, so the acknowledged configuration outlasts
+    /// the peer's reset. A tx SRDO whose communication record the bound description declares
+    /// without sub-index 3 has no SRVT on the peer (CiA 319 §6.2): the sub-index is neither written
+    /// nor read back, its checksum takes the default 20 ms, and the configuration must say 20 ms
+    /// there. Before the first frame, every mapping entry is checked against
     /// the peer's bound EDS/DCF (declared, mappable, of a fixed width equal to the entry's, access
     /// in the SRDO's direction), since
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
@@ -84,14 +97,18 @@ public interface ICanOpenSafety
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
     /// The transaction works from the description and the configuration as they were when it
     /// started — when it owns the peer's channel, after any call it waited for: its pre-check, the
-    /// gate of every transfer, the writes and the readback use copies taken then, not the bound
-    /// description or the caller's <paramref name="configuration"/>. A rebind, an unbind or an
-    /// edit in place of either before that moment is seen; one after it takes effect for the next
-    /// call, not half-way through this one.
-    /// An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync.
+    /// gate of every transfer, the identity, the writes and the readback use copies taken then, not
+    /// the bound description or the caller's <paramref name="configuration"/>. A rebind, an unbind
+    /// or an edit in place of either before that moment is seen; one after it takes effect for the
+    /// next call, not half-way through this one.
+    /// An SDO abort, a timeout or a gate refusal propagates as from SdoDownloadAsync; one from the
+    /// step-5 store comes after the acknowledgement, which the peer then holds unstored.
     /// The peer's 13FEh is 0 once at least one parameter write has been
     /// accepted, because every such write clears it; an abort before that — for example
     /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
+    /// <exception cref="PeerSdoAccessException">No description is bound for the peer, or the
+    /// sub-index of 1010h that <see cref="PeerSafetyConfiguration.Storage"/> names is not declared by
+    /// it — refused before the first frame, as the gate would refuse the transfer.</exception>
     /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
     /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
     /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
@@ -102,14 +119,18 @@ public interface ICanOpenSafety
     /// knows (no <c>DataType</c>, or an unknown code: its width cannot be known), or does not make
     /// accessible in the
     /// SRDO's direction — checked before
-    /// the first frame, because §9.2 deletes every SRDO of the peer first. What only the peer can
-    /// judge stays the peer's.</exception>
+    /// the first frame, because §9.2 deletes every SRDO of the peer first; or gives a tx SRDO whose
+    /// record the description declares without sub-index 3 an SRVT other than 20 ms (CiA 319 §6.2).
+    /// What only the peer can judge stays the peer's.</exception>
     Task<PeerSafetyResult> ConfigurePeerSafetyAsync(byte peerNodeId, PeerSafetyConfiguration configuration, CancellationToken cancellationToken = default);
 
     /// <summary>§8.3.1 step D: uploads 13FEh (must be A5h), 13FFh:n of every expected SRDO (must
     /// equal the checksum of the expected record) and the records themselves, and compares. An
     /// SRDO the expectation does not name must be deleted; its checksum is not compared, because
-    /// the device checks only those of existing SRDOs (§9.5). Nothing is written. The peer's SDO
+    /// the device checks only those of existing SRDOs (§9.5). A tx SRDO whose record the bound
+    /// description declares without sub-index 3 is compared without it, and its checksum expected
+    /// at an SRVT of 20 ms (CiA 319 §6.2). The identity of CiA 319 §5.2 is not read: it belongs to
+    /// the configuration, and a DCF bound for the boot-up is bound for that node-id. Nothing is written. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.
     /// The transaction works from the description and the expectation as they were when it
@@ -119,7 +140,9 @@ public interface ICanOpenSafety
     /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
     /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
     /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
-    /// <exception cref="ArgumentException">The expectation names an SRDO above the peer's count.</exception>
+    /// <exception cref="ArgumentException">The expectation names an SRDO above the peer's count,
+    /// or gives a tx SRDO whose record the description declares without sub-index 3 an SRVT other
+    /// than 20 ms (CiA 319 §6.2).</exception>
     Task<PeerSafetyResult> VerifyPeerSafetyConfigurationAsync(byte peerNodeId, PeerSafetyConfiguration expected, CancellationToken cancellationToken = default);
 
     /// <summary>Splits an SRDO pair of another node into <paramref name="sink"/>, like

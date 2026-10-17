@@ -172,24 +172,30 @@ internal sealed partial class CanOpenNode
     /// call, not half-way through this one. Built from one reading of the description
     /// (<see cref="DescribedObjects"/>, the same one an expectation derived from the description
     /// is built from); only what the transaction reads is kept: the declared pairs of the safety
-    /// area 1300h–13FFh (the only objects its transfers touch), the highest SRDO record the file
-    /// declares (the implied records), and the described entries the pre-check reads (the mapped
-    /// objects of a configuration).
+    /// area 1300h–13FFh, of 1018h and of 1010h (the only objects its transfers touch), the
+    /// file's identity (CiA 319 §5.2), which communication records the file declares without an
+    /// SRVT (CiA 319 §6.2), the highest SRDO record the file declares (the implied records), and
+    /// the described entries the pre-check reads (the mapped objects of a configuration).
     /// </summary>
     private sealed class PeerDescriptionBinding
     {
-        private readonly HashSet<(ushort, byte)> _safetyPairs = new();
+        private readonly HashSet<(ushort, byte)> _pairs = new();
+        private readonly HashSet<int> _recordsWithoutValidationTime = new();
         private readonly Dictionary<(ushort, byte), DescribedEntry> _mapped = new();
 
         public PeerDescriptionBinding(DescribedObjects? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects)
         {
             IsBound = description is not null;
             if (description is null) return;
-            foreach (var (index, entries) in description.Ordered(static i => i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum))
+            foreach (var (index, entries) in description.Ordered(static i =>
+                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.StoreParameters))
             {
-                foreach (var entry in entries) _safetyPairs.Add((index, entry.Subindex));
+                foreach (var entry in entries) _pairs.Add((index, entry.Subindex));
+                if (SrdoRecords.IsCommunicationRecord(index) && !entries.Any(e => e.Subindex == 0x03))
+                    _recordsWithoutValidationTime.Add(index - SrdoRecords.CommunicationBase);
             }
             DescribedSrdoCount = description.SrdoCount;
+            Identity = description.Identity;
             foreach (var (index, subindex) in mappedObjects)
             {
                 if (!description.TryGet(index, out var entries)) continue;
@@ -203,8 +209,18 @@ internal sealed partial class CanOpenNode
 
         public int DescribedSrdoCount { get; }
 
-        /// <summary>The pair as declared at the start; a transaction transfers safety objects only.</summary>
-        public bool Declares(ushort index, byte subindex) => _safetyPairs.Contains((index, subindex));
+        /// <summary>The file's identity at the start (<see cref="DescribedObjects.Identity"/>); default when nothing was bound.</summary>
+        public (uint VendorId, uint ProductCode, uint RevisionNumber) Identity { get; }
+
+        /// <summary>The pair as declared at the start; a transaction transfers the safety objects, 1018h and 1010h only.</summary>
+        public bool Declares(ushort index, byte subindex) => _pairs.Contains((index, subindex));
+
+        /// <summary>CiA 319 v2.0.0 §6.2: an SRD's EDS "should include the SRVT parameter for all
+        /// supported SRDOs", so a communication record the file declares without sub-index 3 is
+        /// one whose SRVT the SRD does not implement. True for a record declared with it — and for
+        /// one the file does not declare at all, which a higher record implies
+        /// (<see cref="IsImpliedSrdoRecordEntry"/>) and a device provides whole, at its defaults.</summary>
+        public bool ImplementsValidationTime(int srdoNumber) => !_recordsWithoutValidationTime.Contains(srdoNumber);
 
         /// <summary>A mapped object's entry as described at the start, for the pre-check.</summary>
         public bool TryGetMappedEntry(ushort index, byte subindex, out DescribedEntry entry) => _mapped.TryGetValue((index, subindex), out entry);

@@ -224,10 +224,12 @@ internal sealed partial class CanOpenNode
     {
         private readonly Dictionary<ushort, List<DescribedEntry>> _objects;
 
-        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile)
+        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile,
+            (uint VendorId, uint ProductCode, uint RevisionNumber) identity)
         {
             _objects = objects;
             IsConfigurationFile = isConfigurationFile;
+            Identity = identity;
             int highest = 0;
             foreach (var index in objects.Keys)
             {
@@ -240,11 +242,17 @@ internal sealed partial class CanOpenNode
         {
             var objects = new Dictionary<ushort, List<DescribedEntry>>();
             foreach (var pair in description.Objects.Objects) objects[pair.Key] = EntriesOf(pair.Value);
-            return new DescribedObjects(objects, description.IsConfigurationFile);
+            var info = description.DeviceInfo;
+            return new DescribedObjects(objects, description.IsConfigurationFile, (info.VendorNumber, info.ProductNumber, info.RevisionNumber));
         }
 
         /// <summary>Whether the description is a DCF (<see cref="CanOpenDeviceDescription.IsConfigurationFile"/>).</summary>
         public bool IsConfigurationFile { get; }
+
+        /// <summary>The file's <c>[DeviceInfo]</c> identity — <c>VendorNumber</c>, <c>ProductNumber</c>,
+        /// <c>RevisionNumber</c> (CiA 306) — as read at the capture: what 1018h:01–03 of the device
+        /// the file describes hold (CiA 319 v2.0.0 §5.2).</summary>
+        public (uint VendorId, uint ProductCode, uint RevisionNumber) Identity { get; }
 
         /// <summary>The highest SRDO record declared (<see cref="DescribedSrdoCount"/>); 0 without one.</summary>
         public int SrdoCount { get; }

@@ -65,7 +65,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             od.AddU8(comm, 0x00, 6, ro, nm);
             od.AddU8(comm, 0x01, (byte)SrdoDirection.None, acc, nm);
             od.AddU16(comm, 0x02, 25, acc, nm);
-            od.AddU8(comm, 0x03, 20, acc, nm);
+            od.AddU8(comm, 0x03, SrdoRecords.DefaultValidationTimeMs, acc, nm);
             od.AddU8(comm, 0x04, SrdoRecords.TransmissionType, ro, nm);
             od.AddU32(comm, 0x05, predefined ? CanOpenCobId.SrdoDefaultCobId1(nodeId) : 0u, acc, nm);
             od.AddU32(comm, 0x06, predefined ? CanOpenCobId.SrdoDefaultCobId2(nodeId) : 0u, acc, nm);
