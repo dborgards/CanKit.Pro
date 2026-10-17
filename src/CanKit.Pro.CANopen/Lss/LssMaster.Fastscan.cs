@@ -52,17 +52,25 @@ internal sealed partial class LssMaster
         {
             // Validation refuses to skip the vendor-id and refuses to skip more than two numbers,
             // so index always lands on a number that is scanned and the loop returns on LSSNext 0.
-            var scanned = await ScanFieldAsync(fields[index], (byte)index, cancellationToken).ConfigureAwait(false);
-            if (scanned is not uint id)
-                return LssFastscanResult.NoMatch(AddressFrom(found));
-            found[index] = id;
-
             int next = index + 1;
             while (next < 4 && fields[next].Mode == LssFastscanFieldMode.Skip) next++;
             // The last confirmation uses LSSNext 0, which is what switches the slave that matched
-            // the whole address into configuration (§6.7.3).
+            // the whole address into configuration (§6.7.3, annex A.3.5). Bit 0 of this field is
+            // sent with that same LSSNext. For every earlier field that value is the next field,
+            // not 0, so a slave that treats BitCheck 0 and LSSNext 0 as the switch stays in the scan.
             byte lssNext = next >= 4 ? (byte)0 : (byte)next;
-            if (!await ProbeAsync(id, 0, (byte)index, lssNext, cancellationToken).ConfigureAwait(false))
+            var scanned = await ScanFieldAsync(fields[index], (byte)index, lssNext, cancellationToken)
+                .ConfigureAwait(false);
+            if (!scanned.Matched)
+                return LssFastscanResult.NoMatch(AddressFrom(found));
+            found[index] = scanned.Id;
+            // Bit 0 already carried this field's confirmation LSSNext (annex A.3.5). A slave
+            // that answered has stored that LSSNext as its position, or has switched into
+            // configuration when the value was 0, and will not answer the same frame again.
+            // A slave whose least significant bit is 1 did not answer, so it is still on this
+            // field and the complete number is sent once more (§6.7.3).
+            if (!scanned.Bit0Acknowledged
+                && !await ProbeAsync(scanned.Id, 0, (byte)index, lssNext, cancellationToken).ConfigureAwait(false))
                 return LssFastscanResult.NoMatch(AddressFrom(found));
             if (lssNext == 0)
                 return LssFastscanResult.Found(AddressFrom(found));
@@ -70,10 +78,11 @@ internal sealed partial class LssMaster
         }
     }
 
-    private async Task<uint?> ScanFieldAsync(LssFastscanField field, byte lssSub, CancellationToken cancellationToken)
+    private async Task<FieldScan> ScanFieldAsync(LssFastscanField field, byte lssSub, byte lssNextAtBit0,
+        CancellationToken cancellationToken)
     {
         if (field.Mode == LssFastscanFieldMode.Match || field.KnownHighBitCount == 32)
-            return field.Value;
+            return FieldScan.Hit(field.Value);
 
         uint id = 0;
         int firstUnknownBit = 31;
@@ -84,7 +93,7 @@ internal sealed partial class LssMaster
             id = field.Value & prefixMask;
             // One step checks the known prefix (annex A.3.4). A miss means no slave has it.
             if (!await ProbeAsync(id, (byte)unknown, lssSub, lssSub, cancellationToken).ConfigureAwait(false))
-                return null;
+                return FieldScan.Miss();
             firstUnknownBit = unknown - 1;
         }
 
@@ -93,21 +102,46 @@ internal sealed partial class LssMaster
         // The mask of the next step includes every bit already decided, so a slave that missed an
         // earlier bit cannot answer a later one. Slaves are not dropped on a single miss: the
         // "no response, set the bit" step has to reach the same slaves.
+        // Bit 0 is sent with the LSSNext of the following confirmation (annex A.3.5). For the
+        // vendor-id that value is the next field, never 0: BitCheck 0 together with LSSNext 0 is
+        // the completion that switches the slave, and sending it while the vendor-id is still
+        // being decided would leave the scan with nobody answering the later fields. An
+        // acknowledgement of bit 0 means the slave has already taken that LSSNext.
+        bool bit0Acknowledged = false;
         for (int bit = firstUnknownBit; bit >= 0; bit--)
         {
-            if (!await ProbeAsync(id, (byte)bit, lssSub, lssSub, cancellationToken).ConfigureAwait(false))
+            byte lssNext = bit == 0 ? lssNextAtBit0 : lssSub;
+            if (!await ProbeAsync(id, (byte)bit, lssSub, lssNext, cancellationToken).ConfigureAwait(false))
                 id |= 1u << bit;
+            else if (bit == 0)
+                bit0Acknowledged = true;
         }
-        return id;
+        return FieldScan.Hit(id, bit0Acknowledged);
+    }
+
+    private readonly struct FieldScan
+    {
+        private FieldScan(bool matched, uint id, bool bit0Acknowledged)
+        {
+            Matched = matched;
+            Id = id;
+            Bit0Acknowledged = bit0Acknowledged;
+        }
+
+        public bool Matched { get; }
+        public uint Id { get; }
+        public bool Bit0Acknowledged { get; }
+
+        public static FieldScan Hit(uint id, bool bit0Acknowledged = false) => new(true, id, bit0Acknowledged);
+        public static FieldScan Miss() => new(false, 0, false);
     }
 
     private async Task<bool> ProbeAsync(uint idNumber, byte bitCheck, byte lssSub, byte lssNext,
         CancellationToken cancellationToken)
     {
-        int watermark = Watermark();
-        await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken)
+        var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken)
             .ConfigureAwait(false);
-        var response = await ReceiveAsync(watermark, static d => d[0] == LssCommand.IdentifySlave,
+        var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifySlave,
             Options.FastscanTimeout, cancellationToken).ConfigureAwait(false);
         if (Options.FastscanCycleTime > TimeSpan.Zero)
             await Task.Delay(Options.FastscanCycleTime, cancellationToken).ConfigureAwait(false);

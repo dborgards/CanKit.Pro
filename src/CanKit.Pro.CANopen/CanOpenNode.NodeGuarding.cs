@@ -106,6 +106,7 @@ internal sealed partial class CanOpenNode
 
     private void SendNodeGuardingRtr(byte producerNodeId)
     {
+        if (LssTransmitSuppressed()) return;
         // RTR (remote transmission request) on 0x700 + producer. CiA 301 §7.2.8.3.2.1 Figure 44
         // draws the request with DLC 1, the length of the response it asks for. CanKit derives a
         // frame's DLC from its data length and refuses data on a remote frame

@@ -2534,11 +2534,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
         // The in-flight send is treated as confirmed so an SDO timeout can still decide it.
-        if (IsLssSilent())
-        {
-            onSendCompleted?.Invoke(null);
+        if (LssTransmitSuppressed(onSendCompleted))
             return Task.CompletedTask;
-        }
         // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via
@@ -2735,6 +2732,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 foreach (var (cobId, payload) in frames)
                 {
                     if (shouldStop?.Invoke() == true) return;
+                    // The same switch-delay rule as SendControlFrame. A confirmed non-send keeps
+                    // the batch moving; the peer's timeout decides a transfer that lost its frames.
+                    if (LssTransmitSuppressed())
+                    {
+                        onFrameConfirmed?.Invoke();
+                        continue;
+                    }
                     try
                     {
                         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
