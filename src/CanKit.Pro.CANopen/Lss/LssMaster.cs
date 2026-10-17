@@ -22,15 +22,8 @@ public static class CanOpenLss
         var resolved = options ?? new LssMasterOptions();
         resolved.Validate();
         var service = new CanBusService(bus);
-        try
-        {
-            return new LssMaster(service, resolved, ownsService: true);
-        }
-        catch
-        {
-            service.Dispose();
-            throw;
-        }
+        // leaveOpen false: a failure while the master is constructed disposes this private service.
+        return OpenMaster(service, resolved, leaveOpen: false);
     }
 
     /// <summary>
@@ -83,7 +76,6 @@ internal sealed partial class LssMaster : ILssMaster
         options.Validate();
         _ownsService = ownsService;
         ISubscription? subscribed = null;
-        Task? reader = null;
         try
         {
             subscribed = service.Subscribe(frame =>
@@ -92,26 +84,16 @@ internal sealed partial class LssMaster : ILssMaster
                 return !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
             });
             _subscription = subscribed;
-            reader = Task.Run(ReadAsync);
-            _readerTask = reader;
+            _readerTask = Task.Run(ReadAsync);
         }
         catch
         {
+            // Subscribe failed before the reader task existed. Cancel and dispose what this
+            // constructor already created so the caller can open again on the same service.
             _lifetime.Cancel();
             _readerCts.Cancel();
             subscribed?.Dispose();
             _inbound.Writer.TryComplete();
-            if (reader is not null)
-            {
-                try
-                {
-                    reader.Wait(TimeSpan.FromSeconds(2));
-                }
-                catch (AggregateException)
-                {
-                    // The reader stops because construction was abandoned.
-                }
-            }
             _readerCts.Dispose();
             _lifetime.Dispose();
             _gate.Dispose();
@@ -410,9 +392,7 @@ internal sealed partial class LssMaster : ILssMaster
             if (left <= 0)
                 return first;
             using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var remaining = TimeSpan.FromSeconds((double)left / Stopwatch.Frequency);
-            if (remaining > TimeSpan.FromMilliseconds(int.MaxValue))
-                remaining = TimeSpan.FromMilliseconds(int.MaxValue);
+            var remaining = CapCancelDelay(TimeSpan.FromSeconds((double)left / Stopwatch.Frequency));
             timeoutSource.CancelAfter(remaining);
             try
             {
@@ -428,10 +408,7 @@ internal sealed partial class LssMaster : ILssMaster
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
-                if (!drain && first is not null)
-                    return first;
-                if (Stopwatch.GetTimestamp() >= deadline)
-                    return first;
+                // The next iteration returns the match, or the deadline when it has passed.
             }
             catch (CanOpenTransportException)
             {
@@ -441,6 +418,17 @@ internal sealed partial class LssMaster : ILssMaster
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/> rejects a delay above
+    /// <see cref="int.MaxValue"/> milliseconds. A double conversion of a full-size window can
+    /// land just past that, so the delay is capped.
+    /// </summary>
+    internal static TimeSpan CapCancelDelay(TimeSpan remaining)
+    {
+        var max = TimeSpan.FromMilliseconds(int.MaxValue);
+        return remaining > max ? max : remaining;
     }
 
     private static CanOpenTransportException ReaderEnded()
