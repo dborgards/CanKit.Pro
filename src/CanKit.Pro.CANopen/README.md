@@ -7,7 +7,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — and CANopen Safety as it reads CiA DSP 304 V1.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — and CANopen Safety as it reads CiA DSP 304 V1.0 and, for the configuration entity, CiA 319 v2.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
@@ -36,7 +36,8 @@ FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
 (`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-035 to FR-CO-046 are CANopen
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
-(`docs/reviews/2026-10-09-canopen-safety-scope.md`). The SRS's "Quelle" column says for each
+(`docs/reviews/2026-10-09-canopen-safety-scope.md`), and FR-CO-047 the configuration entity
+after CiA 319 v2.0.0 (17 October 2026). The SRS's "Quelle" column says for each
 of them whether a standard requires it, the architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
@@ -87,6 +88,7 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-044 | `ConfigurePeerSafetyAsync` after §9.2 (write, read back, compare, `A5h` only without a difference) and `VerifyPeerSafetyConfigurationAsync` after §8.3.1 step D, both through the peer-SDO gate ([Configuring a peer](#configuring-a-peer)) |
 | FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start, and no Start goes to node 0 while one is assigned; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
+| FR-CO-047 | `ConfigurePeerSafetyAsync` as the configuration entity of CiA 319 v2.0.0: the identity of §5.2 first, the steps of §5.3 with the storage of step 5 (`PeerSafetyConfiguration.Storage`, `PeerSafetyResult.Stored`), and the §6.2 default for the SRVT of a tx SRDO the peer does not implement, in the verification too ([Configuring a peer](#configuring-a-peer)) |
 
 ## Not built, and why
 
@@ -133,6 +135,16 @@ Deliberate omissions, each checked against the norm text:
   locally, on the bus with `WritableCommunicationParameters` or a file that declares it `rw`;
   §9.2 needs the tool to write it). To be reconciled against EN 50325-5:2010 in #289.
 * **Bit-granular SRDO mapping, more than 8 objects per SRDO, 29-bit SRDO COB-IDs** — as for PDOs.
+* **The safety application layer of CiA 319 clauses 7 and 8** — the *Safety application
+  configuration valid* and *… signature* objects a CiA profile or a manufacturer-specific profile
+  places in its own area, and the data set they sign. Which objects, in which order, is the
+  profile's to say, and no profile with safety provisions is implemented here. What they share
+  with the SRDO signature is the polynomial: `SrdoCrc.Crc16Xmodem`, suitable for up to 2048 bytes,
+  with the choices V1.0 leaves open (#289).
+* **The device side of CiA 319** — step 4 of its §5.3 at the write of `A5h` (a device here checks
+  the checksums at the transition to Operational, FR-CO-038, and keeps `A5h` until then), the
+  `13FEh` rules §5.3 states for the download indication, the periodic recalculation, and the
+  start-up check of §5.4 against what was stored. Tracked in #308.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
 
@@ -570,6 +582,14 @@ namespace `CanKit.Pro.CANopen.Safety` and is reached through `node.Safety()`, an
 `ICanOpenNode` (the interface is not widened); on a node this library did not create it throws
 `NotSupportedException`.
 
+The tool side — configuring a device as its *configuration entity* — follows **CiA 319 version
+2.0.0** (draft specification proposal, 2 December 2025), the implementation and configuration
+specification for safety-related devices: the identity verification of its §5.2, the sequence of
+§5.3 with the storage of step 5, and the rule of §6.2 for the checksum of an SRVT the device does
+not implement. Its clauses 7 and 8, the safety application layer of CiA profiles and of
+manufacturer-specific profiles, and what it says the device does are not built — see
+[Not built](#not-built-and-why). "CiA 319" in this section means that version.
+
 ### Opening a safety node
 
 `CanOpenNodeOptions.SrdoCount` (0..64, default 0) is the number of SRDOs the node implements.
@@ -799,7 +819,17 @@ COB-IDs of SRDO 1 for a node-id 1..64, §8.3.3); an SRDO whose creation the devi
 COB-IDs that are not a consecutive pair or that another existing SRDO holds, no mapping record,
 a mapping that does not apply (§8.4.2.2) — is left out, as the device leaves it deleted.
 
-The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
+The call is the *configuration entity* of CiA 319 clause 5. Its first frames verify the peer's
+identity (§5.2): `1018h:01` (vendor-ID), `:02` (product code) and `:03` (revision number) are
+uploaded and compared with the `VendorNumber`, `ProductNumber` and `RevisionNumber` of the bound
+EDS/DCF's `[DeviceInfo]`. All three are read; a peer that is not the device the file describes
+ends the call with those entries as its `Mismatches` — the four bytes the file encodes to, the
+bytes the peer returned, whatever their number — and nothing written. The three entries pass the
+peer-SDO gate like every other transfer, so the file must declare them; without a bound
+description the call is refused before any frame. The further checks the note of §5.2 names
+(firmware and hardware version, serial number, physical location) are the application's.
+
+Then the call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
 above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` is not exactly one
 byte — it is UNSIGNED8, so none, two or four bytes are refused rather than read by their low byte —
 or a count above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
@@ -822,15 +852,40 @@ use; a slot above the count is no part of the SRDO and is neither written nor re
 file need not declare it. It reads all of it back and compares byte for byte.
 Only without a difference does it write `13FEh` = `A5h` and read that back too.
 
+That is §5.3 of CiA 319, steps 1 to 3: the configuration data, then the checksums, then the
+readback, then `A5h`. Step 4 is the peer's — it recalculates the checksums itself and, where one
+does not match, sets `13FEh` back to 0 — and the readback of `A5h` shows it, so a peer whose
+checksum convention differs from this implementation's (#289) fails the result instead of running
+on a configuration it did not accept. Step 5 is optional and asked for with
+`PeerSafetyConfiguration.Storage`: `AllParameters` downloads the "save" signature to `1010h:01`,
+`CommunicationParameters` to `1010h:02`, after the acknowledgement, so that what the peer stores
+includes `13FEh` = `A5h` and `13FFh`; `PeerSafetyResult.Stored` says the peer confirmed it, and
+nothing is stored when the readback differed. A sub-index the bound file does not declare is
+refused before the first frame (`PeerSdoAccessException`), as the gate would refuse the transfer —
+but then after the acknowledgement; a store the peer aborts propagates after the acknowledgement,
+which the peer then holds unstored.
+
+An SRD need not implement the SRVT of a tx SRDO, and its EDS "should include the SRVT parameter
+for all supported SRDOs" (CiA 319 §6.2): a tx SRDO whose communication record the bound file
+declares *without* sub-index `03h` has none on the peer. The call neither writes nor reads that
+sub-index back, and the checksum it writes is the one over 20 ms — the value §6.2 prescribes for
+the calculation, and what a peer without an SRVT of its own computes. The configuration must say
+20 ms for such an SRDO; another value is refused before the first frame (`ArgumentException`),
+because it cannot be written and a checksum over it would not be the peer's. A consumer's SRVT is
+not optional and is written whatever the file declares; a record the file does not declare at all,
+implied by a higher one, counts as whole, as a device provides it. The verification applies the
+same rule, so a DCF without the sub-index verifies against what the device holds.
+
 `PeerSafetyResult.Succeeded` means acknowledged. Otherwise `Mismatches` lists each
-(index, sub-index) with the bytes written and the bytes read, and the result is not `Succeeded`:
+(index, sub-index) with the bytes written and the bytes read — or, for `1018h`, the bytes the
+file's identity encodes to and the bytes the peer returned, with nothing written — and the result is not `Succeeded`:
 `A5h` is written only after a clean readback, and a readback of `A5h` that differs fails the
 result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates as from
 `SdoDownloadAsync`. `13FEh` is 0 once at least one parameter write has been accepted, because
 every such write clears it; an abort before that — for example `0800 0022h` from an Operational
 peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
-One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also works from the peer description as it was when it started — the moment it owns the peer's channel, after any call it waited for: its pre-check and the gate of each of its transfers read a snapshot taken then — the declared pairs of the safety area 1300h–13FFh, the highest SRDO record, and the described entries of the mapped objects — not the bound instance, which is publicly mutable. Rebinding, unbinding or editing the bound description in place during it takes effect for the next call — an edit landing while the snapshot is being taken is the one case the snapshot does not cover ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)). The same holds for the configuration or expectation passed in: a copy taken at that moment is what is checked, written and compared, so an SRDO added to the caller's instance meanwhile is not part of the transaction.
+One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also works from the peer description as it was when it started — the moment it owns the peer's channel, after any call it waited for: its pre-check, the identity and the gate of each of its transfers read a snapshot taken then — the declared pairs of the safety area 1300h–13FFh, of 1018h and of 1010h, the file's identity, the records declared without an SRVT, the highest SRDO record, and the described entries of the mapped objects — not the bound instance, which is publicly mutable. Rebinding, unbinding or editing the bound description in place during it takes effect for the next call — an edit landing while the snapshot is being taken is the one case the snapshot does not cover ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)). The same holds for the configuration or expectation passed in: a copy taken at that moment is what is checked, written and compared, so an SRDO added to the caller's instance meanwhile is not part of the transaction.
 
 ### Verifying, and the boot-up
 
@@ -839,7 +894,10 @@ it uploads `13FEh` (must be `A5h`), `13FFh:n` of every expected SRDO (must equal
 of the expected record) and the records, and compares them with what a configuration with
 `expected` would have written (`1300h` aside, which step D does not list). An SRDO the
 expectation does not name must be deleted (sub-index `01h` = 0); its checksum is not compared,
-because the device checks the checksums of existing SRDOs only (§9.5).
+because the device checks the checksums of existing SRDOs only (§9.5). A tx SRDO whose record the
+bound file declares without sub-index `03h` is compared without it and expected at the checksum
+over 20 ms (CiA 319 §6.2, as for a configuration). The identity of CiA 319 §5.2 is not read: it
+belongs to the configuration, and the boot-up binds a DCF for a node-id.
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
 least one SRDO is a safety slave; an EDS carries no parameter values and never makes one. Before
@@ -1113,7 +1171,7 @@ CanKit.Pro.CANopen/
   CanOpenNode.PeerSdo.cs              // partial: peer EDS/DCF binding and the client SDO gate
   CanOpenNode.ForeignPdo.cs           // partial: splitting a peer's PDO
   CanOpenNode.Safety.cs               // partial: CiA 304 objects, their validation, ICanOpenSafety, the SRDO send chain
-  CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2) and verifying (step D) a peer's safety parameters
+  CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2, as the CiA 319 configuration entity) and verifying (step D) a peer's safety parameters
   CanOpenNode.ForeignSrdo.cs          // partial: splitting a peer's SRDO pair
   CanOpenDiscovery.cs                 // listen-only discovery and the scan on request
   CanOpenNodeOptions.cs
@@ -1211,6 +1269,13 @@ Each item names what a caller does about it.
 
 ## Changes since 1.3.0
 
+* **`ConfigurePeerSafetyAsync` is the configuration entity of CiA 319 v2.0.0** (FR-CO-047): it
+  reads the peer's `1018h:01`–`03` first and compares them with the bound file's `[DeviceInfo]`,
+  so a file that leaves them out now refuses the call at the gate, and a peer that is another
+  device ends it with those entries as mismatches; `PeerSafetyConfiguration.Storage` asks for the
+  step-5 store through `1010h`, reported in `PeerSafetyResult.Stored`; and a tx SRDO whose record
+  the file declares without sub-index `03h` is configured and verified without it, at the §6.2
+  default of 20 ms.
 * **`CanOpenNodeOptions.With(...)` validates the copy it returns**, as the node does when it is
   opened: an out-of-range value now throws `ArgumentOutOfRangeException` from `With` rather than
   from `OpenNode`. It gained `srdoCount` and `enableChangeOfStateSrdo`; the 1.3.0 signature is

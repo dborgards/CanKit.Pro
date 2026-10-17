@@ -14,6 +14,14 @@ wenn das Verhalten gebaut ist, das sie prüfen.
 
 Nachgetragen (09.10.2026): umgesetzt als FR-CO-035..046 (SRS §4.3.2), ADR-12; PR #291.
 
+Nachgetragen (17.10.2026): die Tool-Seite (Posten 10, 11) ist um die Konfigurationsinstanz nach
+CiA 319 v2.0.0 (Draft Specification Proposal vom 02.12.2025) ergänzt — Identitätsprüfung über
+`1018h:01–03` gegen `[DeviceInfo]` der gebundenen Datei (§5.2), Schritt 5 Speichern über `1010h`
+(`PeerSafetyConfiguration.Storage`), die SRVT-Regel für nicht implementierte Sub-Indizes 03h
+eines tx-SRDO (§6.2) — und steht als FR-CO-047. Die Geräteseite von CiA 319 (§5.3 Schritt 4 beim
+A5h-Write, die 13FEh-Regeln, die periodische Prüfung, §5.4 Start) ist #308; Clause 7 und 8
+(Safety Application Layer der Profile) sind nicht gebaut.
+
 ## Woher die Belege kommen
 
 | Stufe | Was so belegt ist |
