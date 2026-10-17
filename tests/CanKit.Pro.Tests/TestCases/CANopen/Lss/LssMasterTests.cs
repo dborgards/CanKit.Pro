@@ -213,6 +213,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var act = async () => await rig.Master.InquireVendorIdAsync();
         await act.Should().ThrowAsync<LssTimeoutException>();
         (await rig.Master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
+        (await rig.Master.InquireRevisionNumberAsync()).Should().Be(SlaveA.RevisionNumber);
     }
 
     [Fact]
@@ -430,6 +431,24 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         });
         missed.Status.Should().Be(LssFastscanStatus.NoMatch);
         slave.State.Should().Be(LssState.Waiting);
+
+        // A known prefix the slave does not have ends the scan before any later bit.
+        var prefixMiss = await master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { KnownHighBitCount = 8, Value = 0xFF00_0000 },
+        });
+        prefixMiss.Status.Should().Be(LssFastscanStatus.NoMatch);
+        slave.State.Should().Be(LssState.Waiting);
+
+        var known = await master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { KnownHighBitCount = 32, Value = SlaveA.VendorId },
+            ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = SlaveA.ProductCode },
+            RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = SlaveA.RevisionNumber },
+            SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = SlaveA.SerialNumber },
+        });
+        known.Status.Should().Be(LssFastscanStatus.Found);
+        known.Address.Should().Be(SlaveA);
     }
 
     [Fact]
