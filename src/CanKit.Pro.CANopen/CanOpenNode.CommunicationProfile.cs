@@ -790,6 +790,10 @@ internal sealed partial class CanOpenNode
                 {
                     _nodeId = CanOpenCobId.UnconfiguredNodeId;
                     _srdo.SetNodeId(_nodeId);
+                    // 1014h still names the power-on producer. This node no longer owns that
+                    // id, so a peer that takes it must not be dropped as our own echo.
+                    // Heartbeats already follow _nodeId.
+                    _emcyCobId = 0;
                     return;
                 }
 
