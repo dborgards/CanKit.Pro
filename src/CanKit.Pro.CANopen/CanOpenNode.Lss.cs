@@ -126,6 +126,17 @@ internal sealed partial class CanOpenNode : ILssSlave
         return until != 0 && Stopwatch.GetTimestamp() < until;
     }
 
+    /// <summary>
+    /// CiA 305 §6.5. Every transmit path asks this before it touches the driver: during the
+    /// second switch delay the frame is not sent, and the caller treats that as a confirmation.
+    /// </summary>
+    private bool LssTransmitSuppressed(Action<CanOpenTransportException?>? onSendCompleted = null)
+    {
+        if (!IsLssSilent()) return false;
+        onSendCompleted?.Invoke(null);
+        return true;
+    }
+
     private void CancelLssActivation()
     {
         _lssActivationGeneration++;
@@ -426,7 +437,8 @@ internal sealed partial class CanOpenNode : ILssSlave
         byte bitCheck = data[5];
         byte lssSub = data[6];
         byte lssNext = data[7];
-        if (lssSub > 3 || lssNext > 3) return null;
+        // LSSNext 4 is the corrigendum's compatibility value for the last LSS number.
+        if (lssSub > 3 || (lssNext > 3 && lssNext != 4)) return null;
         if (bitCheck == LssCommand.FastscanReset)
         {
             _fastscanPos = 0;
@@ -436,8 +448,12 @@ internal sealed partial class CanOpenNode : ILssSlave
         uint mask = 0xFFFF_FFFFu << bitCheck;
         uint idNumber = LssFrames.ReadU32(data);
         if ((LssIdentityPart(lssSub) & mask) != (idNumber & mask)) return null;
-        _fastscanPos = lssNext;
-        if (bitCheck == 0 && lssNext < lssSub)
+        _fastscanPos = lssNext == 4 ? 0 : lssNext;
+        // LSSNext 0 switches only once it is below the current number. A vendor-id probe
+        // whose LSSNext is also 0 (LSSSub is 0) therefore stays in the scan, which is what a
+        // master that copies LSSSub into LSSNext for every bit relies on. LSSNext 4 is the
+        // same completion as LSSNext 0 on the serial number.
+        if (bitCheck == 0 && (lssNext < lssSub || (lssNext == 4 && lssSub == 3)))
             _lssState = LssState.Configuration;
         return LssFrames.Command(LssCommand.IdentifySlave);
     }

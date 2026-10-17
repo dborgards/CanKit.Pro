@@ -258,6 +258,33 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Full_Fastscan_Finds_An_Address_Whose_Every_Bit_Is_Zero()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        SetIdentity(slave, new LssAddress(0, 0, 0, 0));
+        var found = await bench.Master.FastscanAsync();
+        found.Status.Should().Be(LssFastscanStatus.Found);
+        found.Address.Should().Be(new LssAddress(0, 0, 0, 0));
+        slave.LssState().Should().Be(LssState.Configuration);
+    }
+
+    [Fact]
+    public async Task Fastscan_Accepts_LssNext_Four_As_The_Completion()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        SetIdentity(slave, Address);
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+        Transmit(poke, LssFrames.Fastscan(0, LssCommand.FastscanReset, 0, 0));
+        Transmit(poke, LssFrames.Fastscan(Address.VendorId, 0, 0, 1));
+        Transmit(poke, LssFrames.Fastscan(Address.ProductCode, 0, 1, 2));
+        Transmit(poke, LssFrames.Fastscan(Address.RevisionNumber, 0, 2, 3));
+        Transmit(poke, LssFrames.Fastscan(Address.SerialNumber, 0, 3, 4));
+        await WaitUntilAsync(() => slave.LssState() == LssState.Configuration);
+    }
+
+    [Fact]
     public async Task Store_Persists_The_Pending_Node_Id_And_Bit_Timing_And_The_Next_Open_Loads_Them()
     {
         var store = new MemoryStore();
@@ -360,6 +387,35 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         store.NodeId.Should().Be(0x12);
         await activate;
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
+    }
+
+    [Fact]
+    public async Task The_Second_Delay_Suppresses_A_Node_Guarding_Rtr()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        slave.StartNodeGuardingConsumer(2, TimeSpan.FromMilliseconds(30), 2);
+
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(2)));
+        var activate = bench.Master.ActivateBitTimingAsync(200, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        await Task.Delay(40);
+        int duringSilence = heard.Ids.Count;
+        await Task.Delay(90);
+        heard.Ids.Skip(duringSilence).Should().NotContain(CanOpenCobId.Heartbeat(2));
+        await activate;
+        await WaitUntilAsync(() => heard.Ids.Skip(duringSilence).Contains(CanOpenCobId.Heartbeat(2)));
     }
 
     [Fact]
