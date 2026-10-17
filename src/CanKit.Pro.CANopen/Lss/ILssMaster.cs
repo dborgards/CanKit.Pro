@@ -63,9 +63,13 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// of the same length (§6.4.4, §7.5.3). This call waits out both periods. When
     /// <paramref name="bitsPerSecond"/> and <see cref="LssMasterOptions.BitRateSwitch"/> are both
     /// set, the switch runs after the first period, before slaves may transmit again.
+    /// When <paramref name="returnToWaiting"/> is <see langword="true"/>, switch state global
+    /// (waiting) is sent immediately after the activate frame, before either delay: the slave
+    /// is still on the current bitrate then, and a waiting frame sent after the switch would
+    /// not be received.
     /// </summary>
     Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default, bool returnToWaiting = false);
 
     /// <summary>
     /// Asks the single slave in LSS configuration to copy pending node-id and bit timing to
