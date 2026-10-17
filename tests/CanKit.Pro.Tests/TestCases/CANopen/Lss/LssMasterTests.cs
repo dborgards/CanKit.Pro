@@ -545,14 +545,13 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     {
         var session = VirtualAdapterFixture.NewSession("lss-close");
         using var bus = VirtualAdapterFixture.Open(session, 0);
-        var service = new CanBusService(bus);
-        var master = CanOpenLss.OpenMaster(service, Quick());
+        using var service = new CanBusService(bus);
+        await using var master = CanOpenLss.OpenMaster(service, Quick());
         var inquire = master.InquireVendorIdAsync();
         await Task.Delay(50);
         service.Dispose();
         var act = async () => await inquire;
         await act.Should().ThrowAsync<LssTimeoutException>();
-        await master.DisposeAsync();
     }
 
     [Fact]

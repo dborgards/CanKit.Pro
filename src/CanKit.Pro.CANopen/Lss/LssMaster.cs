@@ -236,14 +236,8 @@ internal sealed partial class LssMaster : ILssMaster
         _readerCts.Cancel();
         _subscription.Dispose();
         _inbound.Writer.TryComplete();
-        try
-        {
-            _readerTask.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch (AggregateException)
-        {
-            // The reader reports its own failure by ending. Disposal still finishes.
-        }
+        // The reader completes when it is cancelled and when the subscription ends.
+        _readerTask.Wait(TimeSpan.FromSeconds(2));
         if (_ownsService) _service.Dispose();
         _readerCts.Dispose();
         _lifetime.Dispose();
@@ -259,14 +253,7 @@ internal sealed partial class LssMaster : ILssMaster
         _readerCts.Cancel();
         _subscription.Dispose();
         _inbound.Writer.TryComplete();
-        try
-        {
-            await _readerTask.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected: the reader stops because it was cancelled.
-        }
+        await _readerTask.ConfigureAwait(false);
         if (_ownsService) _service.Dispose();
         _readerCts.Dispose();
         _lifetime.Dispose();
@@ -400,14 +387,14 @@ internal sealed partial class LssMaster : ILssMaster
                 _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, copy));
             }
         }
+        catch (OperationCanceledException)
+        {
+            // Disposal cancels the reader. Completing this task is what lets Dispose finish.
+        }
         finally
         {
             _inbound.Writer.TryComplete();
         }
-
-        // Cancel completes the subscription without throwing, so the loop above ends
-        // cleanly. Faulting the reader is what Dispose and DisposeAsync wait for.
-        _readerCts.Token.ThrowIfCancellationRequested();
     }
 
     private void ThrowIfDisposed()
