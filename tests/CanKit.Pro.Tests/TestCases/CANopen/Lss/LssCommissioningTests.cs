@@ -200,12 +200,28 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var first = bench.Unconfigured(First, Second)[0];
         var tool = new LssCommissioning(bench.Master);
         using var cancel = new CancellationTokenSource();
-        var scan = tool.ScanUnconfiguredAsync(cancellationToken: cancel.Token);
-        await WaitUntilAsync(() => first.LssState() == LssState.Configuration);
+        // Vendor, product and revision are known, so only the serial is scanned. A full
+        // four-field scan can miss the configuration window when the suite is loaded.
+        var scan = tool.ScanUnconfiguredAsync(
+            new LssUnconfiguredScan { Fastscan = KnownVendor() }, cancel.Token);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
         cancel.Cancel();
         var act = async () => await scan;
         await act.Should().ThrowAsync<OperationCanceledException>();
-        await WaitUntilAsync(() => first.LssState() == LssState.Waiting);
+        await WaitUntilAsync(() => first.LssState() == LssState.Waiting, seconds: 10);
+    }
+
+    [Fact]
+    public async Task A_Selective_Switch_That_Throws_Releases_The_Slave()
+    {
+        var master = new SelectiveThrowMaster();
+        var tool = new LssCommissioning(master);
+
+        var configure = async () => await tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration { NodeId = 4 });
+        await configure.Should().ThrowAsync<InvalidOperationException>();
+        var inquire = async () => await tool.InquireSlaveAsync(First);
+        await inquire.Should().ThrowAsync<InvalidOperationException>();
+        master.Releases.Should().Be(2);
     }
 
     [Fact]
@@ -426,15 +442,87 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         else od.WriteUnsigned(0x1018, subindex, value);
     }
 
-    private static async Task WaitUntilAsync(Func<bool> ready)
+    private static async Task WaitUntilAsync(Func<bool> ready, int seconds = 3)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(seconds);
         while (!ready())
         {
             if (DateTime.UtcNow >= deadline)
                 throw new TimeoutException("The LSS slave did not reach the expected state.");
             await Task.Delay(1);
         }
+    }
+
+    /// <summary>
+    /// Selective switch fails after the slave may already be in configuration. The other
+    /// services are never reached; the global switch is the release.
+    /// </summary>
+    private sealed class SelectiveThrowMaster : ILssMaster
+    {
+        public int Releases { get; private set; }
+
+        public LssMasterOptions Options { get; } = new();
+
+        public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
+        {
+            Releases++;
+            return Task.CompletedTask;
+        }
+
+        public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
+            => throw new InvalidOperationException("selective switch failed");
+
+        public Task<LssServiceResult> ConfigureNodeIdAsync(byte nodeId, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
+            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            => throw new NotSupportedException();
+
+        public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<uint> InquireVendorIdAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<uint> InquireProductCodeAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<uint> InquireRevisionNumberAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<uint> InquireSerialNumberAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<LssAddress> InquireAddressAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public void Dispose()
+        {
+        }
+
+        public ValueTask DisposeAsync() => default;
     }
 
     private sealed class MemoryStore : ILssConfigurationStore

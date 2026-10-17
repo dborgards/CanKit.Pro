@@ -107,7 +107,8 @@ public sealed class LssSlaveConfiguration
 
     /// <summary>
     /// When <see langword="true"/> (the default), switch state global returns the slave to
-    /// waiting after the services, whether they succeeded or not.
+    /// waiting after the services, whether they succeeded or not. Activation sends that frame
+    /// before the switch delay, while the slave is still on the current bitrate.
     /// </summary>
     public bool ReleaseToWaiting { get; init; } = true;
 }
@@ -309,7 +310,7 @@ public sealed class LssCommissioning
             configuration.ActivateBitRate,
             nameof(configuration));
 
-        if (!await _master.SwitchStateSelectiveAsync(address, cancellationToken).ConfigureAwait(false))
+        if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
 
         try
@@ -322,6 +323,7 @@ public sealed class LssCommissioning
                 configuration.BitTimingIndex,
                 configuration.ActivateDelayMilliseconds,
                 configuration.ActivateBitRate,
+                configuration.ReleaseToWaiting,
                 cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -340,7 +342,7 @@ public sealed class LssCommissioning
         LssAddress address,
         CancellationToken cancellationToken = default)
     {
-        if (!await _master.SwitchStateSelectiveAsync(address, cancellationToken).ConfigureAwait(false))
+        if (!await SelectAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
 
         try
@@ -400,6 +402,7 @@ public sealed class LssCommissioning
                 scan.BitTimingIndex,
                 scan.ActivateDelayMilliseconds,
                 scan.ActivateBitRate,
+                returnToWaiting: true,
                 cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -416,6 +419,7 @@ public sealed class LssCommissioning
         byte? index,
         ushort? activateDelay,
         int? activateRate,
+        bool returnToWaiting,
         CancellationToken cancellationToken)
     {
         LssServiceResult? nodeIdResult = null;
@@ -445,7 +449,8 @@ public sealed class LssCommissioning
         // master's switch callback would leave the rest of the network at the old rate.
         bool stored = storeResult is null || storeResult.Value.Succeeded;
         if (stored && timingResult is { Succeeded: true } && activateDelay is { } delay)
-            await _master.ActivateBitTimingAsync(delay, activateRate, cancellationToken).ConfigureAwait(false);
+            await _master.ActivateBitTimingAsync(delay, activateRate, cancellationToken, returnToWaiting)
+                .ConfigureAwait(false);
 
         return new LssCommissioningResult(true, address, nodeId, nodeIdResult, timingResult, storeResult);
     }
@@ -458,6 +463,23 @@ public sealed class LssCommissioning
         if (releaseParked)
             await ReleaseToWaitingAsync().ConfigureAwait(false);
         return new LssUnconfiguredScanResult(slaves, stop);
+    }
+
+    /// <summary>
+    /// Selective switch, and a release if it throws after the slave may already be in configuration.
+    /// A miss returns <see langword="false"/> and leaves other slaves where they are.
+    /// </summary>
+    private async Task<bool> SelectAsync(LssAddress address, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _master.SwitchStateSelectiveAsync(address, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await ReleaseToWaitingAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
