@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -56,8 +57,8 @@ internal sealed partial class LssMaster : ILssMaster
         SingleReader = true,
         SingleWriter = true,
     });
+    private readonly CancellationTokenSource _lifetime = new();
 
-    private int _received;
     private int _disposed;
 
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService)
@@ -82,23 +83,25 @@ internal sealed partial class LssMaster : ILssMaster
     {
         if (state is not (LssState.Waiting or LssState.Configuration))
             throw new ArgumentOutOfRangeException(nameof(state), state, "LSS state is waiting or configuration.");
-        return Execute(ct => SendAsync(LssFrames.SwitchGlobal(state), ct), cancellationToken);
+        return Execute(async ct =>
+        {
+            await SendAsync(LssFrames.SwitchGlobal(state), ct).ConfigureAwait(false);
+        }, cancellationToken);
     }
 
     /// <inheritdoc />
     public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            int watermark = Watermark();
             await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveVendor, address.VendorId), ct)
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveProduct, address.ProductCode), ct)
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveRevision, address.RevisionNumber), ct)
                 .ConfigureAwait(false);
-            await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber), ct)
+            var sent = await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber), ct)
                 .ConfigureAwait(false);
-            var response = await ReceiveAsync(watermark, static d => d[0] == LssCommand.SwitchSelectiveAcknowledge,
+            var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.SwitchSelectiveAcknowledge,
                 Options.ResponseTimeout, ct).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
@@ -169,9 +172,8 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            int watermark = Watermark();
-            await SendAsync(LssFrames.Command(LssCommand.InquireNodeId), ct).ConfigureAwait(false);
-            var response = await ReceiveRequiredAsync(watermark, LssCommand.InquireNodeId, ct).ConfigureAwait(false);
+            var sent = await SendAsync(LssFrames.Command(LssCommand.InquireNodeId), ct).ConfigureAwait(false);
+            var response = await ReceiveRequiredAsync(sent, LssCommand.InquireNodeId, ct).ConfigureAwait(false);
             return response[1];
         }, cancellationToken);
 
@@ -179,7 +181,6 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            int watermark = Watermark();
             await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteVendor, range.VendorId), ct).ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteProduct, range.ProductCode), ct)
                 .ConfigureAwait(false);
@@ -189,9 +190,9 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialLow, range.SerialLow), ct)
                 .ConfigureAwait(false);
-            await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh), ct)
+            var sent = await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh), ct)
                 .ConfigureAwait(false);
-            var response = await ReceiveAsync(watermark, static d => d[0] == LssCommand.IdentifySlave,
+            var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifySlave,
                 Options.IdentificationTimeout, ct).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
@@ -200,9 +201,9 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            int watermark = Watermark();
-            await SendAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote), ct).ConfigureAwait(false);
-            var response = await ReceiveAsync(watermark, static d => d[0] == LssCommand.IdentifyNonConfiguredSlave,
+            var sent = await SendAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote), ct)
+                .ConfigureAwait(false);
+            var response = await ReceiveAsync(sent, static d => d[0] == LssCommand.IdentifyNonConfiguredSlave,
                 Options.IdentificationTimeout, ct).ConfigureAwait(false);
             return response is not null;
         }, cancellationToken);
@@ -214,9 +215,8 @@ internal sealed partial class LssMaster : ILssMaster
         var payload = LssFrames.Manufacturer(commandSpecifier, parameters.Span);
         return Execute(async ct =>
         {
-            int watermark = Watermark();
-            await SendAsync(payload, ct).ConfigureAwait(false);
-            return await ReceiveAsync(watermark, d => d[0] == commandSpecifier, Options.ResponseTimeout, ct)
+            var sent = await SendAsync(payload, ct).ConfigureAwait(false);
+            return await ReceiveAsync(sent, d => d[0] == commandSpecifier, Options.ResponseTimeout, ct)
                 .ConfigureAwait(false);
         }, cancellationToken);
     }
@@ -225,6 +225,7 @@ internal sealed partial class LssMaster : ILssMaster
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _lifetime.Cancel();
         _readerCts.Cancel();
         _subscription.Dispose();
         _inbound.Writer.TryComplete();
@@ -237,14 +238,17 @@ internal sealed partial class LssMaster : ILssMaster
             // The reader reports its own failure by ending. Disposal still finishes.
         }
         if (_ownsService) _service.Dispose();
-        _gate.Dispose();
         _readerCts.Dispose();
+        _lifetime.Dispose();
+        // The gate stays undisposed. SemaphoreSlim.Dispose does not release a waiter, and a
+        // command that already passed WaitAsync still has to Release it.
     }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _lifetime.Cancel();
         _readerCts.Cancel();
         _subscription.Dispose();
         _inbound.Writer.TryComplete();
@@ -257,16 +261,15 @@ internal sealed partial class LssMaster : ILssMaster
             // Expected: the reader stops because it was cancelled.
         }
         if (_ownsService) _service.Dispose();
-        _gate.Dispose();
         _readerCts.Dispose();
+        _lifetime.Dispose();
     }
 
     private Task<LssServiceResult> ConfirmedAsync(byte[] request, byte commandSpecifier, CancellationToken cancellationToken)
         => Execute(async ct =>
         {
-            int watermark = Watermark();
-            await SendAsync(request, ct).ConfigureAwait(false);
-            var response = await ReceiveRequiredAsync(watermark, commandSpecifier, ct).ConfigureAwait(false);
+            var sent = await SendAsync(request, ct).ConfigureAwait(false);
+            var response = await ReceiveRequiredAsync(sent, commandSpecifier, ct).ConfigureAwait(false);
             return new LssServiceResult(response[1], response[2]);
         }, cancellationToken);
 
@@ -275,16 +278,24 @@ internal sealed partial class LssMaster : ILssMaster
 
     private async Task<uint> InquireU32CoreAsync(byte commandSpecifier, CancellationToken cancellationToken)
     {
-        int watermark = Watermark();
-        await SendAsync(LssFrames.Command(commandSpecifier), cancellationToken).ConfigureAwait(false);
-        var response = await ReceiveRequiredAsync(watermark, commandSpecifier, cancellationToken).ConfigureAwait(false);
+        var sent = await SendAsync(LssFrames.Command(commandSpecifier), cancellationToken).ConfigureAwait(false);
+        var response = await ReceiveRequiredAsync(sent, commandSpecifier, cancellationToken).ConfigureAwait(false);
         return LssFrames.ReadU32(response);
     }
 
     private async Task<T> Execute<T>(Func<CancellationToken, Task<T>> body, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetime.Token);
+        try
+        {
+            await _gate.WaitAsync(linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(LssMaster));
+        }
+
         try
         {
             ThrowIfDisposed();
@@ -292,18 +303,7 @@ internal sealed partial class LssMaster : ILssMaster
         }
         finally
         {
-            // Dispose may have disposed the gate while this command was in flight.
-            if (Volatile.Read(ref _disposed) == 0)
-            {
-                try
-                {
-                    _gate.Release();
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Dispose passed the flag check and then disposed the gate.
-                }
-            }
+            _gate.Release();
         }
     }
 
@@ -314,52 +314,59 @@ internal sealed partial class LssMaster : ILssMaster
             return true;
         }, cancellationToken);
 
-    private int Watermark() => Volatile.Read(ref _received);
-
-    private async Task SendAsync(byte[] payload, CancellationToken cancellationToken)
+    private async Task<Sent> SendAsync(byte[] payload, CancellationToken cancellationToken)
     {
-        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
-        try
-        {
-            var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
-                .ConfigureAwait(false);
-            if (!confirmation.Confirmed)
-                throw new CanOpenTransportException(
-                    $"LSS master frame 0x{payload[0]:X2} was not confirmed: {confirmation.FailureReason}.");
-        }
-        finally
-        {
-            frame.Dispose();
-        }
+        using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
+        var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        if (!confirmation.Confirmed)
+            throw new CanOpenTransportException(
+                $"LSS master frame 0x{payload[0]:X2} was not confirmed: {confirmation.FailureReason}.");
+        return new Sent(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
     }
 
-    private async Task<byte[]?> ReceiveAsync(int watermark, Func<byte[], bool> match, TimeSpan timeout,
+    private async Task<byte[]?> ReceiveAsync(Sent sent, Func<byte[], bool> match, TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
-        try
+        // The deadline starts when the frame was handed to the driver, not when this wait
+        // begins: a response already queued can still be late (TxConfirmation.HostTransmitTimestamp).
+        long deadline = sent.Transmit + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        while (true)
         {
-            while (await _inbound.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false))
+            while (_inbound.Reader.TryRead(out var item))
+            {
+                if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
+                if (match(item.Data)) return item.Data;
+            }
+
+            long left = deadline - Stopwatch.GetTimestamp();
+            if (left <= 0)
+                return null;
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource.CancelAfter(TimeSpan.FromSeconds((double)left / Stopwatch.Frequency));
+            try
+            {
+                if (!await _inbound.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false))
+                {
+                    ThrowIfDisposed();
+                    return null;
+                }
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 while (_inbound.Reader.TryRead(out var item))
                 {
-                    if (item.Sequence <= watermark) continue;
+                    if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
                     if (match(item.Data)) return item.Data;
                 }
+                return null;
             }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return null;
-        }
-        ThrowIfDisposed();
-        return null;
     }
 
-    private async Task<byte[]> ReceiveRequiredAsync(int watermark, byte commandSpecifier, CancellationToken cancellationToken)
+    private async Task<byte[]> ReceiveRequiredAsync(Sent sent, byte commandSpecifier, CancellationToken cancellationToken)
     {
-        var response = await ReceiveAsync(watermark, d => d[0] == commandSpecifier, Options.ResponseTimeout,
+        var response = await ReceiveAsync(sent, d => d[0] == commandSpecifier, Options.ResponseTimeout,
             cancellationToken).ConfigureAwait(false);
         if (response is null)
         {
@@ -379,8 +386,7 @@ internal sealed partial class LssMaster : ILssMaster
                 var data = frameEvent.Frame.Data;
                 if (data.Length != LssFrames.Length) continue;
                 var copy = data.ToArray();
-                var sequence = Interlocked.Increment(ref _received);
-                if (!_inbound.Writer.TryWrite(new Inbound(sequence, copy))) return;
+                if (!_inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, copy))) return;
             }
         }
         catch (OperationCanceledException)
@@ -399,15 +405,27 @@ internal sealed partial class LssMaster : ILssMaster
             throw new ObjectDisposedException(nameof(LssMaster));
     }
 
+    private readonly struct Sent
+    {
+        public Sent(long handoff, long transmit)
+        {
+            Handoff = handoff;
+            Transmit = transmit;
+        }
+
+        public long Handoff { get; }
+        public long Transmit { get; }
+    }
+
     private readonly struct Inbound
     {
-        public Inbound(int sequence, byte[] data)
+        public Inbound(long arrival, byte[] data)
         {
-            Sequence = sequence;
+            Arrival = arrival;
             Data = data;
         }
 
-        public int Sequence { get; }
+        public long Arrival { get; }
         public byte[] Data { get; }
     }
 }

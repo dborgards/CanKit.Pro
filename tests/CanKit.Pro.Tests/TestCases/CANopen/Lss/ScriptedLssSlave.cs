@@ -198,51 +198,51 @@ internal sealed class ScriptedLssSlave : IDisposable
 
     private byte[]? Handle(byte[] data)
     {
-            _commands.Add(data[0]);
-            switch (data[0])
-            {
-                case LssCommand.SwitchStateGlobal:
-                    if (data[1] is LssCommand.ModeWaiting or LssCommand.ModeConfiguration)
-                    {
-                        State = (LssState)data[1];
-                        _selectiveStep = 0;
-                        _identifyStep = 0;
-                    }
+        _commands.Add(data[0]);
+        switch (data[0])
+        {
+            case LssCommand.SwitchStateGlobal:
+                if (data[1] is LssCommand.ModeWaiting or LssCommand.ModeConfiguration)
+                {
+                    State = (LssState)data[1];
+                    _selectiveStep = 0;
+                    _identifyStep = 0;
+                }
+                return null;
+            case LssCommand.ConfigureNodeId:
+                return ConfigureNodeId(data[1]);
+            case LssCommand.ConfigureBitTiming:
+                return ConfigureBitTiming(data[1], data[2]);
+            case LssCommand.ActivateBitTiming:
+                return Activate(LssFrames.ReadSwitchDelay(data));
+            case LssCommand.StoreConfiguration:
+                return Store();
+            case LssCommand.SwitchSelectiveVendor:
+            case LssCommand.SwitchSelectiveProduct:
+            case LssCommand.SwitchSelectiveRevision:
+            case LssCommand.SwitchSelectiveSerial:
+                return Selective(data);
+            case >= LssCommand.IdentifyRemoteVendor and <= LssCommand.IdentifyRemoteSerialHigh:
+                return Identify(data);
+            case LssCommand.IdentifyNonConfiguredRemote:
+                return Unconfigured && State is LssState.Waiting or LssState.Configuration
+                    ? LssFrames.Command(LssCommand.IdentifyNonConfiguredSlave)
+                    : null;
+            case LssCommand.Fastscan:
+                return Fastscan(data);
+            case LssCommand.InquireVendorId:
+            case LssCommand.InquireProductCode:
+            case LssCommand.InquireRevisionNumber:
+            case LssCommand.InquireSerialNumber:
+                return Inquire(data[0]);
+            case LssCommand.InquireNodeId:
+                if (State != LssState.Configuration) return null;
+                return LssFrames.InquireNodeId(_activeNodeId ?? _pendingNodeId);
+            default:
+                if (!LssCommand.IsManufacturerSpecific(data[0]) || State != LssState.Configuration)
                     return null;
-                case LssCommand.ConfigureNodeId:
-                    return ConfigureNodeId(data[1]);
-                case LssCommand.ConfigureBitTiming:
-                    return ConfigureBitTiming(data[1], data[2]);
-                case LssCommand.ActivateBitTiming:
-                    return Activate(LssFrames.ReadSwitchDelay(data));
-                case LssCommand.StoreConfiguration:
-                    return Store();
-                case LssCommand.SwitchSelectiveVendor:
-                case LssCommand.SwitchSelectiveProduct:
-                case LssCommand.SwitchSelectiveRevision:
-                case LssCommand.SwitchSelectiveSerial:
-                    return Selective(data);
-                case >= LssCommand.IdentifyRemoteVendor and <= LssCommand.IdentifyRemoteSerialHigh:
-                    return Identify(data);
-                case LssCommand.IdentifyNonConfiguredRemote:
-                    return Unconfigured && State is LssState.Waiting or LssState.Configuration
-                        ? LssFrames.Command(LssCommand.IdentifyNonConfiguredSlave)
-                        : null;
-                case LssCommand.Fastscan:
-                    return Fastscan(data);
-                case LssCommand.InquireVendorId:
-                case LssCommand.InquireProductCode:
-                case LssCommand.InquireRevisionNumber:
-                case LssCommand.InquireSerialNumber:
-                    return Inquire(data[0]);
-                case LssCommand.InquireNodeId:
-                    if (State != LssState.Configuration) return null;
-                    return LssFrames.InquireNodeId(_activeNodeId ?? _pendingNodeId);
-                default:
-                    if (!LssCommand.IsManufacturerSpecific(data[0]) || State != LssState.Configuration)
-                        return null;
-                    return Manufacturer?.Invoke(data[0], data);
-            }
+                return Manufacturer?.Invoke(data[0], data);
+        }
     }
 
     private bool Unconfigured => _pendingNodeId == CanOpenCobId.UnconfiguredNodeId && _activeNodeId is null;
@@ -407,7 +407,8 @@ internal sealed class ScriptedLssSlave : IDisposable
         var bitCheck = data[5];
         var lssSub = data[6];
         var lssNext = data[7];
-        if (lssSub > 3 || lssNext > 3) return null;
+        // LSSNext 4 is the corrigendum's compatibility value for the last field.
+        if (lssSub > 3 || (lssNext > 3 && lssNext != 4)) return null;
         if (bitCheck == LssCommand.FastscanReset)
         {
             _fastscanPos = 0;
@@ -417,8 +418,10 @@ internal sealed class ScriptedLssSlave : IDisposable
         uint mask = 0xFFFF_FFFFu << bitCheck;
         var idNumber = LssFrames.ReadU32(data);
         if ((Address[lssSub] & mask) != (idNumber & mask)) return null;
-        _fastscanPos = lssNext;
-        if (bitCheck == 0 && lssNext < lssSub)
+        _fastscanPos = lssNext == 4 ? 0 : lssNext;
+        // BitCheck 0 and LSSNext 0 is the switch into configuration, including when LSSSub is 0.
+        // LSSNext below LSSSub is the same switch as used by slaves that compare the two.
+        if (bitCheck == 0 && (lssNext == 0 || lssNext < lssSub || (lssNext == 4 && lssSub == 3)))
             State = LssState.Configuration;
         return LssFrames.Command(LssCommand.IdentifySlave);
     }
@@ -431,14 +434,7 @@ internal sealed class ScriptedLssSlave : IDisposable
             Array.Copy(payload, sized, Math.Min(length, payload.Length));
             payload = sized;
         }
-        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssSlaveMessage), payload, isExtendedFrame: false);
-        try
-        {
-            await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
-        }
-        finally
-        {
-            frame.Dispose();
-        }
+        using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssSlaveMessage), payload, isExtendedFrame: false);
+        await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
     }
 }
