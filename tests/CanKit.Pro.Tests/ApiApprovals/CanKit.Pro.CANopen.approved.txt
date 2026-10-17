@@ -516,6 +516,26 @@ namespace CanKit.Pro.CANopen.Lss
         public const byte SwitchStateGlobal = 4;
         public static bool IsManufacturerSpecific(byte commandSpecifier) { }
     }
+    public sealed class LssCommissioning
+    {
+        public LssCommissioning(CanKit.Pro.CANopen.Lss.ILssMaster master) { }
+        public CanKit.Pro.CANopen.Lss.ILssMaster Master { get; }
+        public System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssCommissioningResult> ConfigureSlaveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, CanKit.Pro.CANopen.Lss.LssSlaveConfiguration configuration, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssCommissioningResult> InquireSlaveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssCommissioningResult>> ReadIdentitiesAsync(CanKit.Pro.CANopen.ICanOpenNode client, System.Collections.Generic.IEnumerable<byte> nodeIds, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssUnconfiguredScanResult> ScanUnconfiguredAsync(CanKit.Pro.CANopen.Lss.LssUnconfiguredScan? scan = null, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class LssCommissioningResult
+    {
+        public LssCommissioningResult(bool selected, CanKit.Pro.CANopen.Lss.LssAddress address, byte? nodeId = default, CanKit.Pro.CANopen.Lss.LssServiceResult? nodeIdResult = default, CanKit.Pro.CANopen.Lss.LssServiceResult? bitTimingResult = default, CanKit.Pro.CANopen.Lss.LssServiceResult? storeResult = default) { }
+        public CanKit.Pro.CANopen.Lss.LssAddress Address { get; }
+        public CanKit.Pro.CANopen.Lss.LssServiceResult? BitTimingResult { get; }
+        public byte? NodeId { get; }
+        public CanKit.Pro.CANopen.Lss.LssServiceResult? NodeIdResult { get; }
+        public bool Selected { get; }
+        public CanKit.Pro.CANopen.Lss.LssServiceResult? StoreResult { get; }
+        public bool Succeeded { get; }
+    }
     public sealed class LssFastscanField
     {
         public LssFastscanField() { }
@@ -578,6 +598,14 @@ namespace CanKit.Pro.CANopen.Lss
         public System.TimeSpan IdentificationTimeout { get; init; }
         public System.TimeSpan ResponseTimeout { get; init; }
     }
+    public enum LssScanStop
+    {
+        NoUnconfiguredSlave = 0,
+        NoMatch = 1,
+        LimitReached = 2,
+        NodeIdsExhausted = 3,
+        SlaveRejected = 4,
+    }
     public readonly struct LssServiceResult : System.IEquatable<CanKit.Pro.CANopen.Lss.LssServiceResult>
     {
         public LssServiceResult(byte errorCode, byte specError) { }
@@ -592,6 +620,17 @@ namespace CanKit.Pro.CANopen.Lss
         public override string ToString() { }
         public static bool operator !=(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
         public static bool operator ==(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
+    }
+    public sealed class LssSlaveConfiguration
+    {
+        public LssSlaveConfiguration() { }
+        public int? ActivateBitRate { get; init; }
+        public ushort? ActivateDelayMilliseconds { get; init; }
+        public byte? BitTimingIndex { get; init; }
+        public byte? BitTimingSelector { get; init; }
+        public byte? NodeId { get; init; }
+        public bool ReleaseToWaiting { get; init; }
+        public bool Store { get; init; }
     }
     public sealed class LssSlaveOptions
     {
@@ -617,6 +656,24 @@ namespace CanKit.Pro.CANopen.Lss
         public LssTimeoutException(byte commandSpecifier, System.TimeSpan timeout) { }
         public byte CommandSpecifier { get; }
         public System.TimeSpan Timeout { get; }
+    }
+    public sealed class LssUnconfiguredScan
+    {
+        public LssUnconfiguredScan() { }
+        public int? ActivateBitRate { get; init; }
+        public ushort? ActivateDelayMilliseconds { get; init; }
+        public byte? AssignFromNodeId { get; init; }
+        public byte? BitTimingIndex { get; init; }
+        public byte? BitTimingSelector { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanRequest? Fastscan { get; init; }
+        public int? Limit { get; init; }
+        public bool Store { get; init; }
+    }
+    public sealed class LssUnconfiguredScanResult
+    {
+        public LssUnconfiguredScanResult(System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssCommissioningResult> slaves, CanKit.Pro.CANopen.Lss.LssScanStop stop) { }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssCommissioningResult> Slaves { get; }
+        public CanKit.Pro.CANopen.Lss.LssScanStop Stop { get; }
     }
 }
 namespace CanKit.Pro.CANopen.Nmt
