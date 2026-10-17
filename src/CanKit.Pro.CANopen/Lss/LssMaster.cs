@@ -340,11 +340,8 @@ internal sealed partial class LssMaster : ILssMaster
         long deadline = sent.Transmit + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
         while (true)
         {
-            while (_inbound.Reader.TryRead(out var item))
-            {
-                if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
-                if (match(item.Data)) return item.Data;
-            }
+            if (TryTake(sent, deadline, match) is { } already)
+                return already;
 
             long left = deadline - Stopwatch.GetTimestamp();
             if (left <= 0)
@@ -361,14 +358,19 @@ internal sealed partial class LssMaster : ILssMaster
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                while (_inbound.Reader.TryRead(out var item))
-                {
-                    if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
-                    if (match(item.Data)) return item.Data;
-                }
-                return null;
+                return TryTake(sent, deadline, match);
             }
         }
+    }
+
+    private byte[]? TryTake(Sent sent, long deadline, Func<byte[], bool> match)
+    {
+        while (_inbound.Reader.TryRead(out var item))
+        {
+            if (item.Arrival < sent.Handoff || item.Arrival > deadline) continue;
+            if (match(item.Data)) return item.Data;
+        }
+        return null;
     }
 
     private async Task<byte[]> ReceiveRequiredAsync(Sent sent, byte commandSpecifier, CancellationToken cancellationToken)
@@ -393,17 +395,19 @@ internal sealed partial class LssMaster : ILssMaster
                 var data = frameEvent.Frame.Data;
                 if (data.Length != LssFrames.Length) continue;
                 var copy = data.ToArray();
-                if (!_inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, copy))) return;
+                // Disposal completes the channel. The frame is no longer a response; the
+                // subscription ending is what stops this loop.
+                _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, copy));
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // Dispose.
         }
         finally
         {
             _inbound.Writer.TryComplete();
         }
+
+        // Cancel completes the subscription without throwing, so the loop above ends
+        // cleanly. Faulting the reader is what Dispose and DisposeAsync wait for.
+        _readerCts.Token.ThrowIfCancellationRequested();
     }
 
     private void ThrowIfDisposed()

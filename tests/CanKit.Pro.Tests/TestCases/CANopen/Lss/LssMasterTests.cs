@@ -508,6 +508,54 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Frame_From_Another_Node_Is_Not_An_Lss_Response()
+    {
+        using var rig = Rig.Open(SlaveA);
+        using var peer = VirtualAdapterFixture.Open(rig.Session, 2);
+        using (var other = CanFrame.Classic(0x123, new byte[LssFrames.Length], isExtendedFrame: false))
+            peer.Transmit(other);
+        using (var extended = CanFrame.Classic(
+            unchecked((int)CanOpenCobId.LssSlaveMessage), new byte[LssFrames.Length], isExtendedFrame: true))
+            peer.Transmit(extended);
+
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => rig.Slave.State == LssState.Configuration);
+        (await rig.Master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
+    }
+
+    [Fact]
+    public async Task A_Timeout_Shorter_Than_The_Response_Misses_It()
+    {
+        using var rig = Rig.Open(SlaveA);
+        var master = Rig.ReplaceOptions(rig, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromTicks(1),
+            FastscanTimeout = TimeSpan.FromMilliseconds(40),
+            FastscanCycleTime = TimeSpan.FromMilliseconds(1),
+            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        await master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => rig.Slave.State == LssState.Configuration);
+        var act = async () => await master.InquireVendorIdAsync();
+        await act.Should().ThrowAsync<LssTimeoutException>();
+    }
+
+    [Fact]
+    public async Task Closing_The_Service_Ends_An_Inquire_As_A_Timeout()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-close");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        var service = new CanBusService(bus);
+        var master = CanOpenLss.OpenMaster(service, Quick());
+        var inquire = master.InquireVendorIdAsync();
+        await Task.Delay(50);
+        service.Dispose();
+        var act = async () => await inquire;
+        await act.Should().ThrowAsync<LssTimeoutException>();
+        await master.DisposeAsync();
+    }
+
+    [Fact]
     public async Task Activate_Can_Return_The_Slave_To_Waiting_Before_The_Switch()
     {
         using var rig = Rig.Open(SlaveA, nodeId: 5);
