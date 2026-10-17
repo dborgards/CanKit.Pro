@@ -1,12 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Lss;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -550,6 +552,96 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task An_Assigning_Scan_Stops_When_The_Found_Slave_Cannot_Be_Selected_Again()
+    {
+        var master = new FoundMaster { SelectiveHit = false };
+        var scan = await new LssCommissioning(master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            Limit = 1,
+        });
+
+        scan.Stop.Should().Be(LssScanStop.SlaveRejected);
+        scan.Slaves.Should().ContainSingle();
+        scan.Slaves[0].Selected.Should().BeFalse();
+        scan.Slaves[0].Address.Should().Be(First);
+        master.SelectiveCalls.Should().Be(1);
+        master.ConfigureCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task An_Assigning_Scan_Configures_In_Place_When_Fastscan_Skips_A_Middle_Number()
+    {
+        var product = new FoundMaster();
+        var skippedProduct = await new LssCommissioning(product).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = new LssFastscanRequest
+            {
+                VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+                ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            },
+            AssignFromNodeId = 0x10,
+            Limit = 1,
+        });
+        skippedProduct.Stop.Should().Be(LssScanStop.LimitReached);
+        skippedProduct.Slaves[0].Succeeded.Should().BeTrue();
+        skippedProduct.Slaves[0].NodeId.Should().Be(0x10);
+        product.SelectiveCalls.Should().Be(0);
+        product.ConfigureCalls.Should().Be(1);
+
+        var revision = new FoundMaster();
+        var skippedRevision = await new LssCommissioning(revision).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            Fastscan = new LssFastscanRequest
+            {
+                VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+                ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+                RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            },
+            AssignFromNodeId = 0x11,
+            Limit = 1,
+        });
+        skippedRevision.Stop.Should().Be(LssScanStop.LimitReached);
+        skippedRevision.Slaves[0].Succeeded.Should().BeTrue();
+        skippedRevision.Slaves[0].NodeId.Should().Be(0x11);
+        revision.SelectiveCalls.Should().Be(0);
+        revision.ConfigureCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_Cleanup_Failure_Does_Not_Hide_A_Successful_Configure()
+    {
+        var cancelled = new ServiceMaster { OnRelease = new OperationCanceledException() };
+        var configured = await new LssCommissioning(cancelled).ConfigureSlaveAsync(
+            First, new LssSlaveConfiguration { NodeId = 0x11 });
+        configured.Succeeded.Should().BeTrue();
+        configured.NodeId.Should().Be(0x11);
+
+        var transport = new ServiceMaster { OnRelease = new CanOpenTransportException("the waiting frame was late") };
+        var again = await new LssCommissioning(transport).ConfigureSlaveAsync(
+            First, new LssSlaveConfiguration { NodeId = 0x12 });
+        again.Succeeded.Should().BeTrue();
+        again.NodeId.Should().Be(0x12);
+    }
+
+    [Fact]
+    public async Task ReadIdentities_Does_Not_Treat_A_Timeout_As_A_Zero()
+    {
+        var proxy = DispatchProxy.Create<ICanOpenNode, UploadStub>();
+        var stub = (UploadStub)(object)proxy;
+        stub.NodeId = 2;
+        stub.Upload = sub =>
+        {
+            if (sub == 0x01) return Task.FromResult(new byte[] { 9, 0, 0, 0 });
+            throw new SdoAbortException(0x1018, sub, SdoAbortCode.SdoProtocolTimedOut, SdoAbortOrigin.Local);
+        };
+
+        var act = async () => await new LssCommissioning(new ServiceMaster()).ReadIdentitiesAsync(proxy, new byte[] { 6 });
+        var thrown = await act.Should().ThrowAsync<SdoAbortException>();
+        thrown.Which.AbortCode.Should().Be((uint)SdoAbortCode.SdoProtocolTimedOut);
+    }
+
+    [Fact]
     public async Task A_Disposed_Master_Lets_The_Scan_End()
     {
         using var bench = new Bench();
@@ -593,6 +685,24 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    private class UploadStub : DispatchProxy
+    {
+        public byte NodeId { get; set; }
+
+        public Func<byte, Task<byte[]>>? Upload { get; set; }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            if (targetMethod is null) return null;
+            if (targetMethod.Name == "get_" + nameof(ICanOpenNode.NodeId)) return NodeId;
+            if (targetMethod.Name == nameof(ICanOpenNode.SdoUploadAsync))
+                return Upload!((byte)args![2]!);
+            if (targetMethod.ReturnType == typeof(void)) return null;
+            if (targetMethod.ReturnType == typeof(Task)) return Task.CompletedTask;
+            throw new NotSupportedException(targetMethod.Name);
+        }
+    }
+
     /// <summary>Confirmed services return the scripted results. Selective switch always hits.</summary>
     private sealed class ServiceMaster : ILssMaster
     {
@@ -604,8 +714,15 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public LssMasterOptions Options { get; } = new();
 
+        public Exception? OnRelease { get; init; }
+
+        private int _globals;
+
         public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
-            => Task.CompletedTask;
+        {
+            if (++_globals > 1 && OnRelease is not null) throw OnRelease;
+            return Task.CompletedTask;
+        }
 
         public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
             => Task.FromResult(true);
@@ -649,6 +766,80 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
             CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
+
+        public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public void Dispose()
+        {
+        }
+
+        public ValueTask DisposeAsync() => default;
+    }
+
+    /// <summary>
+    /// Fastscan reports one slave and then stops. Selective switch and configure node-id are
+    /// counted so a test can see whether a skipped LSS number stayed in configuration.
+    /// </summary>
+    private sealed class FoundMaster : ILssMaster
+    {
+        public bool SelectiveHit { get; init; } = true;
+
+        public int SelectiveCalls { get; private set; }
+
+        public int ConfigureCalls { get; private set; }
+
+        public LssMasterOptions Options { get; } = new();
+
+        public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
+            => Task.CompletedTask;
+
+        public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
+        {
+            SelectiveCalls++;
+            return Task.FromResult(SelectiveHit);
+        }
+
+        public Task<LssServiceResult> ConfigureNodeIdAsync(byte nodeId, CancellationToken cancellationToken = default)
+        {
+            ConfigureCalls++;
+            return Task.FromResult(LssServiceResult.Success);
+        }
+
+        public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(LssServiceResult.Success);
+
+        public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
+            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            => Task.CompletedTask;
+
+        public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(LssServiceResult.Success);
+
+        public Task<uint> InquireVendorIdAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<uint> InquireProductCodeAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<uint> InquireRevisionNumberAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<uint> InquireSerialNumberAsync(CancellationToken cancellationToken = default) => Task.FromResult(0u);
+
+        public Task<LssAddress> InquireAddressAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(new LssAddress(0, 0, 0, 0));
+
+        public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default) => Task.FromResult((byte)0);
+
+        public Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default)
+            => Task.FromResult(false);
+
+        public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
+            => Task.FromResult(false);
+
+        public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
+            CancellationToken cancellationToken = default)
+            => Task.FromResult(LssFastscanResult.Found(First));
 
         public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
             CancellationToken cancellationToken = default)

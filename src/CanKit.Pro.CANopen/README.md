@@ -1034,7 +1034,9 @@ on the bitrate the next Fastscan still uses. A slave that rejects a service stop
 its result carries the code.
 
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
-from a node that has already booted.
+from a node that has already booted. A missing later sub-index is 0. A timeout or any other
+abort is not reported as a zero LSS number. Switching the slaves back to waiting after a
+service is best-effort: if that frame fails, the configuration result is still returned.
 
 ```csharp
 var tool = new LssCommissioning(master);

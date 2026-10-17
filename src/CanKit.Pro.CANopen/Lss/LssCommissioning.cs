@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Core.Exceptions;
 
 namespace CanKit.Pro.CANopen.Lss;
 
@@ -368,8 +369,9 @@ public sealed class LssCommissioning
     /// <summary>
     /// Reads <c>1018h:01</c>..<c>04</c> of each booted node in <paramref name="nodeIds"/> through
     /// <paramref name="client"/>. A node that does not answer, or aborts the vendor-id, is
-    /// skipped. A missing later sub-index counts as 0. This is how a configured slave, which
-    /// does not take part in Fastscan, is listed.
+    /// skipped. A missing later sub-index (<c>0609 0011h</c>) counts as 0. A timeout or any
+    /// other abort is reported, so a partial answer is not stored as a fabricated LSS number.
+    /// This is how a configured slave, which does not take part in Fastscan, is listed.
     /// </summary>
     public async Task<IReadOnlyList<LssCommissioningResult>> ReadIdentitiesAsync(
         ICanOpenNode client,
@@ -466,8 +468,8 @@ public sealed class LssCommissioning
 
         // Store while both ends are still on the current bitrate. Activation is the last
         // configuration service: after it, the slave transmits at the new rate (§6.5).
-        bool servicesOk = (nodeIdResult is null || nodeIdResult.Value.Succeeded)
-            && (timingResult is null || timingResult.Value.Succeeded);
+        // A rejected node-id has already returned, so only the timing result can still fail.
+        bool servicesOk = timingResult is null || timingResult.Value.Succeeded;
         if (store && servicesOk)
             storeResult = await _master.StoreConfigurationAsync(cancellationToken).ConfigureAwait(false);
 
@@ -524,6 +526,7 @@ public sealed class LssCommissioning
     /// <summary>
     /// Returns every slave to waiting. Uses its own token: the caller's token is often already
     /// cancelled when this runs from a <c>finally</c>, and the waiting frame would never be sent.
+    /// A failure here must not replace a configuration the slave already applied.
     /// </summary>
     private async Task ReleaseToWaitingAsync()
     {
@@ -535,6 +538,14 @@ public sealed class LssCommissioning
         catch (ObjectDisposedException)
         {
             // The master went away with the scan.
+        }
+        catch (OperationCanceledException)
+        {
+            // The cleanup token elapsed, or the send was cancelled with the master.
+        }
+        catch (CanKitException)
+        {
+            // The waiting frame did not go out. The result of the service still stands.
         }
     }
 
@@ -565,7 +576,7 @@ public sealed class LssCommissioning
             var data = await client.SdoUploadAsync(nodeId, 0x1018, subindex, cancellationToken).ConfigureAwait(false);
             return ToUInt32(data);
         }
-        catch (Sdo.SdoAbortException)
+        catch (Sdo.SdoAbortException ex) when (ex.AbortCode == (uint)Sdo.SdoAbortCode.SubIndexDoesNotExist)
         {
             return 0;
         }
