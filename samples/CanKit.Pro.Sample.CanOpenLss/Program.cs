@@ -39,8 +39,6 @@ namespace CanKit.Sample.CanOpenLss
             var endpoint = demo
                 ? DemoNetwork.Endpoint
                 : GetArg(args, "--endpoint") ?? "virtual://canopen-lss/0";
-            var bitrate = GetInt(args, "--bitrate", 500_000, 1);
-
             using var cancellation = new CancellationTokenSource();
             Console.CancelKeyPress += (_, e) =>
             {
@@ -50,6 +48,7 @@ namespace CanKit.Sample.CanOpenLss
 
             try
             {
+                var bitrate = GetInt(args, "--bitrate", 500_000, 1);
                 using var demoNetwork = demo ? DemoNetwork.Start() : null;
                 using var bus = CanBus.Open(endpoint, cfg =>
                     cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitrate));
@@ -80,6 +79,14 @@ namespace CanKit.Sample.CanOpenLss
                 return Fail(exception);
             }
             catch (ArgumentException exception)
+            {
+                return Fail(exception);
+            }
+            catch (FormatException exception)
+            {
+                return Fail(exception);
+            }
+            catch (OverflowException exception)
             {
                 return Fail(exception);
             }
@@ -296,11 +303,8 @@ namespace CanKit.Sample.CanOpenLss
         {
             var text = GetArg(args, name);
             if (text is null) return defaultValue;
-            if (!int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
-                || value < minimum || value > maximum)
-            {
+            if (!TryParseInt(text, out var value) || value < minimum || value > maximum)
                 throw new ArgumentException($"{name} must be an integer in {minimum}..{maximum}.");
-            }
 
             return value;
         }
@@ -308,49 +312,86 @@ namespace CanKit.Sample.CanOpenLss
         private static uint GetUInt(string[] args, string name)
         {
             var text = GetArg(args, name) ?? throw new ArgumentException($"{name} is required.");
-            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-            {
-                return uint.Parse(text.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
-            }
-
-            return uint.Parse(text, CultureInfo.InvariantCulture);
+            if (!TryParseUInt(text, out var value))
+                throw new ArgumentException($"{name} must be an unsigned integer.");
+            return value;
         }
 
         private static byte? ReadNodeId(string[] args, string name, bool required)
         {
-            var text = GetArg(args, name);
-            if (text is null)
-            {
-                if (required) throw new ArgumentException($"{name} is required.");
+            if (TryParseBounded(args, name, required, byte.MaxValue, out _) is not { } parsed)
                 return null;
-            }
-
-            uint value = text.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-                ? uint.Parse(text.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture)
-                : uint.Parse(text, CultureInfo.InvariantCulture);
-            if (value > byte.MaxValue) throw new ArgumentException($"{name} does not fit in one byte.");
-            return (byte)value;
+            return (byte)parsed;
         }
 
         private static byte? ReadOptionalByte(string[] args, string name)
         {
-            var text = GetArg(args, name);
-            if (text is null) return null;
-            return byte.Parse(text, CultureInfo.InvariantCulture);
+            if (TryParseBounded(args, name, required: false, byte.MaxValue, out _) is not { } parsed)
+                return null;
+            return (byte)parsed;
         }
 
         private static ushort? ReadOptionalUShort(string[] args, string name)
         {
-            var text = GetArg(args, name);
-            if (text is null) return null;
-            return ushort.Parse(text, CultureInfo.InvariantCulture);
+            if (TryParseBounded(args, name, required: false, ushort.MaxValue, out _) is not { } parsed)
+                return null;
+            return (ushort)parsed;
         }
 
         private static int? ReadOptionalInt(string[] args, string name)
         {
             var text = GetArg(args, name);
             if (text is null) return null;
-            return int.Parse(text, CultureInfo.InvariantCulture);
+            if (!TryParseInt(text, out var value))
+                throw new ArgumentException($"{name} must be an integer.");
+            return value;
+        }
+
+        /// <summary>
+        /// Decimal or <c>0x</c> hex. <see langword="null"/> when the flag is absent and
+        /// <paramref name="required"/> is false. Throws <see cref="ArgumentException"/> otherwise.
+        /// </summary>
+        private static uint? TryParseBounded(string[] args, string name, bool required, uint maximum, out uint value)
+        {
+            var text = GetArg(args, name);
+            if (text is null)
+            {
+                if (required) throw new ArgumentException($"{name} is required.");
+                value = 0;
+                return null;
+            }
+
+            if (!TryParseUInt(text, out value) || value > maximum)
+                throw new ArgumentException($"{name} must be an integer in 0..{maximum}.");
+            return value;
+        }
+
+        private static bool TryParseUInt(string text, out uint value)
+        {
+            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                return uint.TryParse(text.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out value);
+            }
+
+            return uint.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryParseInt(string text, out int value)
+        {
+            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+            {
+                if (uint.TryParse(text.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var unsigned)
+                    && unsigned <= int.MaxValue)
+                {
+                    value = (int)unsigned;
+                    return true;
+                }
+
+                value = 0;
+                return false;
+            }
+
+            return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
         }
 
         /// <summary>
