@@ -332,6 +332,37 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task A_Store_During_The_Second_Delay_Is_Answered_When_The_Slave_May_Transmit()
+    {
+        var store = new MemoryStore();
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            Store = store,
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x12)).Succeeded.Should().BeTrue();
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+
+        using var heard = bench.Listen();
+        var activate = bench.Master.ActivateBitTimingAsync(150, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        using (var poke = VirtualAdapterFixture.Open(bench.Session, 9))
+            Transmit(poke, LssFrames.Command(LssCommand.StoreConfiguration));
+        await Task.Delay(20);
+        heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage);
+        store.NodeId.Should().Be(0x12);
+        await activate;
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
+    }
+
+    [Fact]
     public async Task Predefined_Cob_Ids_Follow_The_New_Node_Id_And_A_Custom_One_Does_Not()
     {
         using var bench = new Bench();

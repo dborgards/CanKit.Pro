@@ -45,6 +45,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     private int _lssActivationGeneration;
     private IDisposable? _lssActivation;
     private long _lssSilentUntil;
+    private byte[]? _lssDeferredReply;
 
     /// <inheritdoc />
     LssState ILssSlave.State
@@ -130,6 +131,7 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivationGeneration++;
         _lssActivation?.Dispose();
         _lssActivation = null;
+        _lssDeferredReply = null;
         Volatile.Write(ref _lssSilentUntil, 0);
     }
 
@@ -200,6 +202,22 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private void ReplyLss(byte[]? payload)
     {
+        if (payload is null) return;
+        // A command that arrives during the second switch delay is applied, and the response
+        // goes out once the slave may transmit again. Dropping it would make the master time out
+        // on a service the slave already performed.
+        if (IsLssSilent())
+        {
+            _lssDeferredReply = payload;
+            return;
+        }
+        _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
+    }
+
+    private void FlushDeferredLssReply()
+    {
+        var payload = _lssDeferredReply;
+        _lssDeferredReply = null;
         if (payload is null) return;
         _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
     }
@@ -278,6 +296,7 @@ internal sealed partial class CanOpenNode : ILssSlave
             {
                 if (generation != _lssActivationGeneration) return;
                 Volatile.Write(ref _lssSilentUntil, 0);
+                FlushDeferredLssReply();
             });
         });
     }
