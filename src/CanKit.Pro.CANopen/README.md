@@ -1004,7 +1004,10 @@ node-id back into the pending one first. Neither reset reloads the bit timing.
 `1010h` does not store the layer settings, and an LSS store does not rewrite the object
 dictionary. Table 0 indexes follow `BaudRate_*` in the device description when the file names
 any of them; otherwise every named CiA 301 rate is accepted. `BitRateSwitch` is called when the
-pending timing becomes active. The open channel is not reconfigured.
+pending timing becomes active. The open channel is not reconfigured. During the second switch
+delay the node transmits nothing. NMT, boot-up and heartbeat that come due in that window are
+sent when the delay ends, and a flying-master Reset Communication is applied only once that
+frame has been sent. Other frames are not sent.
 
 ```csharp
 var store = new MyLssStore();

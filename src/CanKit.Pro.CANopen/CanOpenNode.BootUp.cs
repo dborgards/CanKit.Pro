@@ -545,8 +545,14 @@ internal sealed partial class CanOpenNode
     private Task<bool> SendNmtReporting(byte[] payload)
     {
         // Flying-master NMT uses this path rather than SendControlFrame. The switch delay
-        // drops the frame and reports it confirmed, the same as every other transmit.
-        if (LssTransmitSuppressed()) return Task.FromResult(true);
+        // holds the frame: completing with true here would apply the reset before it is sent.
+        if (TryHoldThroughSilence(CanOpenCobId.NmtCommand, payload, out var held))
+            return held;
+        return SendNmtPayload(payload);
+    }
+
+    private Task<bool> SendNmtPayload(byte[] payload)
+    {
         var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
         return Task.Run(async () =>
         {

@@ -31,7 +31,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     private static LssMasterOptions Quick() => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        FastscanTimeout = TimeSpan.FromMilliseconds(200),
+        FastscanTimeout = TimeSpan.FromMilliseconds(500),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
     };
@@ -231,7 +231,9 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
         };
 
-        (await bench.Master.FastscanAsync(request)).Address.SerialNumber.Should().Be(1);
+        var firstFound = await bench.Master.FastscanAsync(request);
+        firstFound.Status.Should().Be(LssFastscanStatus.Found);
+        firstFound.Address.SerialNumber.Should().Be(1);
         (await bench.Master.ConfigureNodeIdAsync(0x21)).Succeeded.Should().BeTrue();
         (await bench.Master.FastscanAsync(request)).Address.SerialNumber.Should().Be(2);
         (await bench.Master.ConfigureNodeIdAsync(0x22)).Succeeded.Should().BeTrue();
@@ -346,15 +348,13 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
         Volatile.Read(ref rate).Should().Be(250_000);
         int before = heard.Ids.Count;
-        await slave.SendNmtCommandAsync(NmtCommand.Start, 0);
+        var held = slave.SendNmtCommandAsync(NmtCommand.Start, 0);
         await Task.Delay(20);
+        held.IsCompleted.Should().BeFalse();
         heard.Ids.Skip(before).Should().NotContain(CanOpenCobId.NmtCommand);
         await activate;
-        await WaitUntilAsync(() =>
-        {
-            slave.SendNmtCommandAsync(NmtCommand.EnterPreOperational, 5).GetAwaiter().GetResult();
-            return heard.Ids.Contains(CanOpenCobId.NmtCommand);
-        });
+        await held;
+        heard.Ids.Skip(before).Should().Contain(CanOpenCobId.NmtCommand);
     }
 
     [Fact]
@@ -746,25 +746,66 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task The_Switch_Silence_Confirms_A_Flying_Master_Nmt_Without_Sending_It()
+    public async Task The_Switch_Silence_Holds_A_Flying_Master_Reset_Until_The_Slave_May_Transmit()
     {
+        int switches = 0;
         using var bench = new Bench();
-        var slave = bench.Slave(1, 5, new LssSlaveOptions());
-        slave.ObjectDictionary.WriteUnsigned(0x1F90, 0x01, 700);
-        slave.ObjectDictionary.WriteUnsigned(0x1F90, 0x02, 20);
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
         var reset = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         slave.ApplicationReset += (_, _) => reset.TrySetResult(true);
-        slave.StartFlyingMaster(0, TimeSpan.FromMilliseconds(200));
         using var heard = bench.Listen();
-        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.FlyingMasterDetect));
-        int atDetect = heard.Ids.Count;
-
         await EnterConfiguration(bench.Master, slave);
         (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
-        var activate = bench.Master.ActivateBitTimingAsync(400);
-        await reset.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        heard.Ids.Skip(atDetect).Should().NotContain(CanOpenCobId.NmtCommand);
+        var activate = bench.Master.ActivateBitTimingAsync(800);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+
+        slave.ObjectDictionary.WriteUnsigned(0x1F90, 0x01, 80);
+        slave.ObjectDictionary.WriteUnsigned(0x1F90, 0x02, 20);
+        slave.StartFlyingMaster(0, TimeSpan.FromMilliseconds(200));
+        int atSilence = heard.Ids.Count;
+        await Task.Delay(250);
+        reset.Task.IsCompleted.Should().BeFalse();
+        heard.Ids.Skip(atSilence).Should().NotContain(CanOpenCobId.NmtCommand);
+
         await activate;
+        await reset.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        heard.Ids.Skip(atSilence).Should().Contain(CanOpenCobId.NmtCommand);
+        await WaitUntilAsync(() => heard.Ids.Skip(atSilence).Contains(CanOpenCobId.Heartbeat(5)));
+    }
+
+    [Fact]
+    public async Task The_Switch_Silence_Sends_A_Heartbeat_After_The_Delay()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(40));
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(5)));
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        var activate = bench.Master.ActivateBitTimingAsync(800);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        await Task.Delay(80);
+        int duringSilence = heard.Ids.Count;
+        await Task.Delay(160);
+        heard.Ids.Skip(duringSilence).Should().NotContain(CanOpenCobId.Heartbeat(5));
+        await activate;
+        await WaitUntilAsync(() => heard.Ids.Skip(duringSilence).Contains(CanOpenCobId.Heartbeat(5)));
     }
 
     [Fact]

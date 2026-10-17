@@ -2533,7 +2533,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         Action<CanOpenTransportException?>? onSendCompleted = null)
     {
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
-        // The in-flight send is treated as confirmed so an SDO timeout can still decide it.
+        // NMT and heartbeat are sent when the delay ends. Anything else is dropped, and an
+        // in-flight SDO send is reported confirmed so its timeout can still decide it.
+        if (HoldsAcrossLssSilence(cobId) && TryHoldThroughSilence(cobId, payload, out var held))
+            return held;
         if (LssTransmitSuppressed(onSendCompleted))
             return Task.CompletedTask;
         // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmedAsync for
