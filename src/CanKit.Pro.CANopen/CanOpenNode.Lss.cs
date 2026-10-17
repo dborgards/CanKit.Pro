@@ -146,8 +146,11 @@ internal sealed partial class CanOpenNode : ILssSlave
     private static bool HoldsAcrossLssSilence(uint cobId)
     {
         if (cobId == CanOpenCobId.NmtCommand) return true;
+        // 0x700 is not a heartbeat. Subtracting the minimum node-id wraps it, and every
+        // other non-heartbeat COB-ID, past 127 in the same way, so one comparison is enough.
         uint nodeId = cobId - CanOpenCobId.HeartbeatBase;
-        return nodeId >= CanOpenCobId.MinNodeId && nodeId <= CanOpenCobId.MaxNodeId;
+        return nodeId - CanOpenCobId.MinNodeId
+            <= (uint)(CanOpenCobId.MaxNodeId - CanOpenCobId.MinNodeId);
     }
 
     private bool TryHoldThroughSilence(uint cobId, byte[] payload, out Task<bool> held)
@@ -195,33 +198,42 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         foreach (var item in held)
         {
-            try
-            {
-                if (item.CobId == CanOpenCobId.NmtCommand)
-                    item.Signal.TrySetResult(await SendNmtPayload(item.Payload).ConfigureAwait(false));
-                else
-                {
-                    await SendControlFrame(item.CobId, item.Payload).ConfigureAwait(false);
-                    item.Signal.TrySetResult(true);
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                item.Signal.TrySetCanceled();
-            }
-            catch (ObjectDisposedException ex)
-            {
-                item.Signal.TrySetException(ex);
-            }
-            catch (CanKitException ex)
-            {
-                item.Signal.TrySetException(ex);
-            }
-            catch (InvalidOperationException ex)
-            {
-                item.Signal.TrySetException(ex);
-            }
+            // Every outcome completes the signal. SendNmtPayload can surface a driver exception
+            // that is not a CanKitException; leaving the signal unfinished would stall the
+            // flying-master NMT chain, and the frames queued behind this one would stay held.
+            Task<bool> send = item.CobId == CanOpenCobId.NmtCommand
+                ? SendNmtPayload(item.Payload)
+                : SendHeldControl(item.CobId, item.Payload);
+            await send.ContinueWith(
+                static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
+                item.Signal,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default).ConfigureAwait(false);
         }
+    }
+
+    private async Task<bool> SendHeldControl(uint cobId, byte[] payload)
+    {
+        await SendControlFrame(cobId, payload).ConfigureAwait(false);
+        return true;
+    }
+
+    private static void CompleteHeld(TaskCompletionSource<bool> signal, Task<bool> send)
+    {
+        if (send.Status == TaskStatus.RanToCompletion)
+        {
+            signal.TrySetResult(send.Result);
+            return;
+        }
+
+        if (IsNmtCancellation(send))
+        {
+            signal.TrySetCanceled();
+            return;
+        }
+
+        signal.TrySetException(send.Exception!.InnerExceptions);
     }
 
     private void DropHeldTransmits()
@@ -367,7 +379,8 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private byte[]? ConfigureLssNodeId(byte nodeId)
     {
-        if (_lssState != LssState.Configuration || _options.Lss?.NodeIdConfigurationSupported == false)
+        var lss = _options.Lss;
+        if (_lssState != LssState.Configuration || (lss is not null && !lss.NodeIdConfigurationSupported))
             return null;
         if (!CanOpenCobId.IsLayerSettingNodeId(nodeId))
             return LssFrames.Confirmed(LssCommand.ConfigureNodeId, LssCommand.NodeIdOutOfRange, 0);
@@ -401,7 +414,9 @@ internal sealed partial class CanOpenNode : ILssSlave
         if (selector == LssBitTiming.Cia301Table)
             return index < 32 && (_table0Mask & (1u << index)) != 0 && LssBitTiming.TryGetCia301Rate(index, out _);
         if (!LssBitTiming.IsManufacturerTable(selector)) return false;
-        return _options.Lss?.ManufacturerRates?.ContainsKey((selector, index)) == true;
+        var lss = _options.Lss;
+        if (lss is null || lss.ManufacturerRates is null) return false;
+        return lss.ManufacturerRates.ContainsKey((selector, index));
     }
 
     private void ActivateLssBitTiming(ushort delayMilliseconds)
@@ -417,21 +432,31 @@ internal sealed partial class CanOpenNode : ILssSlave
 
         int generation = _lssActivationGeneration;
         var delay = TimeSpan.FromMilliseconds(delayMilliseconds);
-        _lssActivation = _actor.Schedule(delay, () =>
-        {
-            if (generation != _lssActivationGeneration || Volatile.Read(ref _disposed) != 0) return;
-            _activeSelector = _pendingSelector;
-            _activeIndex = _pendingIndex;
-            // Silence is the actor's second delay, not a wall-clock window: a late actor
-            // keeps the slave quiet until that callback, which is the clock Schedule uses.
-            Volatile.Write(ref _lssSilent, 1);
-            InvokeBitRateSwitch(_activeSelector, _activeIndex);
-            _lssActivation = _actor.Schedule(delay, () =>
-            {
-                if (generation != _lssActivationGeneration) return;
-                EndLssSilence();
-            });
-        });
+        _lssActivation = _actor.Schedule(delay, () => BeginLssSilence(generation, delay));
+    }
+
+    /// <summary>
+    /// Starts the second switch delay. A generation that lost to a later activate, or a node
+    /// that is already disposed, does nothing: the timer may still run after it was superseded.
+    /// </summary>
+    internal void BeginLssSilence(int generation, TimeSpan delay)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (generation != _lssActivationGeneration) return;
+        _activeSelector = _pendingSelector;
+        _activeIndex = _pendingIndex;
+        // Silence is the actor's second delay, not a wall-clock window: a late actor
+        // keeps the slave quiet until that callback, which is the clock Schedule uses.
+        Volatile.Write(ref _lssSilent, 1);
+        InvokeBitRateSwitch(_activeSelector, _activeIndex);
+        _lssActivation = _actor.Schedule(delay, () => CompleteLssSilence(generation));
+    }
+
+    /// <summary>Ends the switch silence when this activation is still the current one.</summary>
+    internal void CompleteLssSilence(int generation)
+    {
+        if (generation != _lssActivationGeneration) return;
+        EndLssSilence();
     }
 
     private void CommitPendingBitTiming()
@@ -457,7 +482,9 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         if (selector == LssBitTiming.Cia301Table)
             return LssBitTiming.TryGetCia301Rate(index, out bitsPerSecond);
-        if (_options.Lss?.ManufacturerRates is { } rates && rates.TryGetValue((selector, index), out bitsPerSecond))
+        // The hook that calls this lives on the same options object, so it is present here.
+        var rates = _options.Lss!.ManufacturerRates;
+        if (rates is not null && rates.TryGetValue((selector, index), out bitsPerSecond))
             return true;
         bitsPerSecond = 0;
         return false;
@@ -625,7 +652,8 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private void RetargetFlyingMasterSlot(byte from, byte to)
     {
-        if (!_od.TryReadUnsigned(Co.FlyingMasterTiming, 0x06, out var slot)) return;
+        // 1F90h:06 is created with the communication profile, so a missing entry is a broken node.
+        uint slot = _od.ReadUnsigned(Co.FlyingMasterTiming, 0x06);
         if (slot != (uint)(4000 + 10 * from)) return;
         uint updated = (uint)(4000 + 10 * to);
         _od.WriteRawUnchecked(Co.FlyingMasterTiming, 0x06, new[] { (byte)updated, (byte)(updated >> 8) });
@@ -647,8 +675,9 @@ internal sealed partial class CanOpenNode : ILssSlave
         // A node-id outside 1..64 has no pre-defined pair (CiA DSP 304 §8.3.3). Populate wrote
         // 0 for it, and leaving the set puts a still-default pair back to 0. A pair the
         // application changed does not match and is left alone.
-        bool wasValid = _od.TryReadUnsigned(Safety.SrdoRecords.ConfigurationValid, 0, out var signature)
-            && signature == Safety.SrdoRecords.ConfigurationValidValue;
+        // 13FEh is created with the SRDO records. This method already returned when there are none.
+        bool wasValid = _od.ReadUnsigned(Safety.SrdoRecords.ConfigurationValid, 0)
+            == Safety.SrdoRecords.ConfigurationValidValue;
         bool changed = RetargetCobId(comm, 0x05, from1, to1);
         changed |= RetargetCobId(comm, 0x06, from2, to2);
         if (!wasValid || !changed) return;
@@ -656,8 +685,10 @@ internal sealed partial class CanOpenNode : ILssSlave
         // COB-IDs with a matching 13FFh, then A5h again, or the next operational period
         // treats the SRDO as invalid and it neither produces nor consumes. COB-ID 0 is not
         // a pair: the checksum is refreshed and the signature stays clear.
-        bool active = Safety.SrdoRecords.TryReadCommunication(_od, 1, out var parameter)
-            && parameter.Direction != Safety.SrdoDirection.None;
+        // A missing direction reads as "not active". The record is always present when this runs;
+        // treating a failed read as no direction keeps the signature path the same either way.
+        Safety.SrdoRecords.TryReadCommunication(_od, 1, out var parameter);
+        bool active = parameter.Direction != Safety.SrdoDirection.None;
         if (active)
         {
             ushort crc = Safety.SrdoCrc.Compute(parameter,
@@ -669,7 +700,7 @@ internal sealed partial class CanOpenNode : ILssSlave
             new[] { Safety.SrdoRecords.ConfigurationValidValue });
     }
 
-    private bool RetargetCobId(ushort index, byte subindex, uint fromCanId, uint toCanId)
+    internal bool RetargetCobId(ushort index, byte subindex, uint fromCanId, uint toCanId)
     {
         if (!_od.TryReadUnsigned(index, subindex, out var word)) return false;
         if ((word & CanOpenCobId.CanIdMask) != fromCanId) return false;
