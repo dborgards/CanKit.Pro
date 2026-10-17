@@ -436,7 +436,10 @@ public sealed class LssCommissioning
         if (store && servicesOk)
             storeResult = await _master.StoreConfigurationAsync(cancellationToken).ConfigureAwait(false);
 
-        if (timingResult is { Succeeded: true } && activateDelay is { } delay)
+        // A rejected store must not switch the live rate: the timing was not persisted, and the
+        // master's switch callback would leave the rest of the network at the old rate.
+        bool stored = storeResult is null || storeResult.Value.Succeeded;
+        if (stored && timingResult is { Succeeded: true } && activateDelay is { } delay)
             await _master.ActivateBitTimingAsync(delay, activateRate, cancellationToken).ConfigureAwait(false);
 
         return new LssCommissioningResult(true, address, nodeId, nodeIdResult, timingResult, storeResult);

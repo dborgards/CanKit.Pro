@@ -292,6 +292,29 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         });
         held.Succeeded.Should().BeTrue();
         slave.LssState().Should().Be(LssState.Configuration);
+
+        int switches = 0;
+        var rejecting = bench.Slave(2, 6, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                switches++;
+                return Task.CompletedTask;
+            },
+        });
+        SetIdentity(rejecting, Second);
+        var notStored = await tool.ConfigureSlaveAsync(Second, new LssSlaveConfiguration
+        {
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 20,
+            ActivateBitRate = 250_000,
+            Store = true,
+        });
+        notStored.Succeeded.Should().BeFalse();
+        notStored.StoreResult!.Value.ErrorCode.Should().Be(LssCommand.StoreNotSupported);
+        await Task.Delay(40);
+        switches.Should().Be(0);
     }
 
     private static void SetIdentity(ICanOpenNode node, LssAddress address)
