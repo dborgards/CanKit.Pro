@@ -15,6 +15,35 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Lss;
 public class LssMasterBoundaryTests
 {
     [Theory]
+    [InlineData(0, -1)]
+    [InlineData(0, 3)]
+    [InlineData(1, -1)]
+    [InlineData(1, 3)]
+    [InlineData(2, -1)]
+    [InlineData(2, 3)]
+    [InlineData(3, -1)]
+    [InlineData(3, 3)]
+    public async Task Fastscan_Rejects_An_Undefined_Mode_In_Every_Field_Before_Transmission(int field, int mode)
+    {
+        using var rig = new ClockedLssRig();
+        rig.Service.Send = _ => throw new InvalidOperationException("Invalid Fastscan input reached the wire.");
+        var fields = new[] { new LssFastscanField(), new(), new(), new() };
+        fields[field] = new LssFastscanField { Mode = (LssFastscanFieldMode)mode };
+        var scan = async () => await rig.Master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = fields[0],
+            ProductCode = fields[1],
+            RevisionNumber = fields[2],
+            SerialNumber = fields[3],
+        }).WaitAsync(LssTestTiming.SchedulingBudget);
+
+        var failure = await scan.Should().ThrowAsync<ArgumentOutOfRangeException>();
+        failure.Which.ParamName.Should().Be(nameof(LssFastscanField.Mode));
+        failure.Which.ActualValue.Should().Be((LssFastscanFieldMode)mode);
+        rig.Service.Commands.Should().BeEmpty();
+    }
+
+    [Theory]
     [InlineData(CanFrameType.Can20, FrameFlags.None, 0x7F)]
     [InlineData(CanFrameType.CanFd, FrameFlags.None, 0x42)]
     [InlineData(CanFrameType.Can20, FrameFlags.Error, 0x42)]

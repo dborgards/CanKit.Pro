@@ -143,6 +143,7 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// </summary>
     /// <exception cref="ArgumentException">The vendor-id is skipped, or more than two LSS numbers
     /// are skipped. A partial scan must still select one slave (§6.7, annex A.3.4).</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A field mode is undefined or its known-high-bit count is outside 0..32.</exception>
     Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
         CancellationToken cancellationToken = default);
 

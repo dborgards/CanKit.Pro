@@ -30,6 +30,8 @@ internal sealed partial class LssMaster
             var field = fields[i];
             if (field is null)
                 throw new ArgumentException("Each LSS Fastscan field must be set.");
+            if (field.Mode is not (LssFastscanFieldMode.Scan or LssFastscanFieldMode.Match or LssFastscanFieldMode.Skip))
+                throw new ArgumentOutOfRangeException(nameof(field.Mode), field.Mode, "Fastscan mode must be Scan, Match or Skip.");
             if (i == 0 && field.Mode == LssFastscanFieldMode.Skip)
                 throw new ArgumentException("The vendor-id cannot be skipped in LSS Fastscan.");
             if (field.Mode == LssFastscanFieldMode.Skip) skips++;
