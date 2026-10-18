@@ -236,7 +236,7 @@ internal sealed partial class CanOpenNode
     /// <summary>What CiA 319 §5.2 compares the peer with: the file's own 1018h:01–03 — "the
     /// entries in the EDS corresponding to the SRD" — as declared (ParameterValue, DefaultValue
     /// where none). Checked before the first frame: each of the three has a value this
-    /// implementation reads (a plain number; <c>$NODEID</c> has no place in an identity); the
+    /// implementation reads (a plain number; a <c>$NODEID</c> formula is no identity and refused); the
     /// <c>[DeviceInfo]</c> numbers, where set, agree with them — a file that contradicts itself
     /// describes no one device, and an absent <c>[DeviceInfo]</c> key, which reads as 0, is not
     /// a contradiction; and the three are not all 0 — a file that says vendor-ID, product code
@@ -261,7 +261,7 @@ internal sealed partial class CanOpenNode
     private static uint IdentityValue(byte peerNodeId, byte subindex, uint? declared)
         => declared ?? throw new InvalidOperationException(
             $"The description bound for node 0x{peerNodeId:X2} declares 1018h:{subindex:X2} without a value this implementation can read " +
-            "(ParameterValue, or DefaultValue where none: a plain number), so the peer's identity cannot be verified against it (CiA 319 §5.2). Nothing was sent.");
+            "(ParameterValue, or DefaultValue where none: a plain number, not a $NODEID formula), so the peer's identity cannot be verified against it (CiA 319 §5.2). Nothing was sent.");
 
     private static void EnsureDeviceInfoAgrees(byte peerNodeId, string key, uint deviceInfo, byte subindex, uint declared)
     {

@@ -305,6 +305,23 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
     }
 
+    /// <summary>A <c>$NODEID</c> formula is no identity: resolved with any node-id it would make
+    /// up a value to verify the peer against — with 0, the fixture's own vendor-ID, which this
+    /// peer answers. Refused before any frame, like an entry without a value.</summary>
+    [Fact]
+    public async Task A_File_Declaring_An_Identity_Entry_As_A_Node_Id_Formula_Is_Refused_Before_Any_Frame()
+    {
+        var text = PatchedSection(FixtureText(), "[1018sub1]", "DefaultValue=0x00000100", "DefaultValue=$NODEID+0x100");
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, CanOpenDeviceDescription.ParseDcf(text));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("1018h:01").And.Contain("without a value").And.Contain("$NODEID");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
     /// <summary>A file whose 1018h:01, :02 and :03 are all 0 describes no device: comparing a peer
     /// with it would prove nothing. Refused before any frame.</summary>
     [Fact]

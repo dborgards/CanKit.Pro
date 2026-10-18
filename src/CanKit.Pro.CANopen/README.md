@@ -838,7 +838,9 @@ the peer is another device and that answer is reported as a mismatch with no byt
 file's `[DeviceInfo]` numbers are a second source: where set, they must agree with the `1018h`
 entries, and a file that contradicts itself is refused before the first frame
 (`InvalidOperationException`), as is one whose three entries are all 0, which carries no
-identity; an absent `[DeviceInfo]` key, which EdsDcfNet reads as 0, is neither. Without a bound
+identity, or one declaring an entry without a value this implementation reads (a plain number; a
+`$NODEID` formula is no identity); an absent `[DeviceInfo]` key, which EdsDcfNet reads as 0, is
+none of these. Without a bound
 description the call is refused before any frame, naming `1018h:01` — the first transfer, which
 would have nothing to be compared with. The further checks the note of §5.2 names (firmware and
 hardware version, serial number, physical location) are the application's.

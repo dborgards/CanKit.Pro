@@ -130,7 +130,8 @@ public interface ICanOpenSafety
     /// sub-index <see cref="PeerSafetyConfiguration.Storage"/> names — refused before the first
     /// frame by the gate that would refuse the transfer.</exception>
     /// <exception cref="InvalidOperationException">The bound description declares a 1018h entry
-    /// without a value this implementation reads, contradicts itself (a <c>[DeviceInfo]</c> number
+    /// without a value this implementation reads (a plain number; a <c>$NODEID</c> formula is no
+    /// identity), contradicts itself (a <c>[DeviceInfo]</c> number
     /// set and unlike its 1018h entry) or has 1018h:01–03 all 0, so it carries no identity to
     /// verify the peer against (CiA 319 §5.2) — refused before the first frame; or the peer's
     /// 13FFh:00 is not exactly one byte (it is UNSIGNED8; none, two or four bytes are refused, a

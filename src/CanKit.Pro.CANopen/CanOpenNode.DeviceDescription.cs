@@ -249,9 +249,10 @@ internal sealed partial class CanOpenNode
             {
                 foreach (var entry in identity)
                 {
-                    // An identity is a plain number; a $NODEID formula has no place in one and is
-                    // evaluated with node-id 0, which is no node.
-                    var value = ParseUnsigned(0, entry, out _);
+                    // An identity is a plain number. A $NODEID formula has no place in one and is
+                    // not read: resolved with any node-id it would make up a value to verify a
+                    // peer against, so the entry counts as having no value, which is refused.
+                    var value = IsNodeIdFormula(entry.Value) ? null : ParseUnsigned(0, entry, out _);
                     switch (entry.Subindex)
                     {
                         case 0x01: vendorId = value; break;
@@ -1027,6 +1028,9 @@ internal sealed partial class CanOpenNode
     // -----------------------------------------------------------------------------------------
 
     private uint? ParseUnsigned(DescribedEntry entry, out string? raw) => ParseUnsigned(_nodeId, entry, out raw);
+
+    private static bool IsNodeIdFormula(string? value)
+        => value is not null && value.IndexOf("$NODEID", StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static uint? ParseUnsigned(byte nodeId, DescribedEntry entry, out string? raw)
     {
