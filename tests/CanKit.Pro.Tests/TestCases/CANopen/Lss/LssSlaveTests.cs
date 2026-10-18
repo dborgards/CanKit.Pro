@@ -219,10 +219,10 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Fastscan_Finds_Unconfigured_Slaves_In_Numeric_Order()
     {
-        using var bench = new Bench();
-        var first = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
-        var second = bench.Slave(2, CanOpenCobId.UnconfiguredNodeId);
-        var third = bench.Slave(3, CanOpenCobId.UnconfiguredNodeId);
+        using var bench = new ClockedLssNodeRig();
+        var first = bench.Add();
+        var second = bench.Add();
+        var third = bench.Add();
         SetIdentity(first, new LssAddress(1, 1, 1, 1));
         SetIdentity(second, new LssAddress(1, 1, 1, 2));
         SetIdentity(third, new LssAddress(1, 1, 1, 3));
@@ -233,15 +233,15 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
         };
 
-        var firstFound = await bench.Master.FastscanAsync(request);
+        var firstFound = await bench.RunAsync(bench.Master.FastscanAsync(request));
         firstFound.Status.Should().Be(LssFastscanStatus.Found);
         firstFound.Address.SerialNumber.Should().Be(1);
-        (await bench.Master.ConfigureNodeIdAsync(0x21)).Succeeded.Should().BeTrue();
-        (await bench.Master.FastscanAsync(request)).Address.SerialNumber.Should().Be(2);
-        (await bench.Master.ConfigureNodeIdAsync(0x22)).Succeeded.Should().BeTrue();
-        (await bench.Master.FastscanAsync(request)).Address.SerialNumber.Should().Be(3);
-        (await bench.Master.ConfigureNodeIdAsync(0x23)).Succeeded.Should().BeTrue();
-        (await bench.Master.FastscanAsync(request)).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
+        (await bench.RunAsync(bench.Master.ConfigureNodeIdAsync(0x21))).Succeeded.Should().BeTrue();
+        (await bench.RunAsync(bench.Master.FastscanAsync(request))).Address.SerialNumber.Should().Be(2);
+        (await bench.RunAsync(bench.Master.ConfigureNodeIdAsync(0x22))).Succeeded.Should().BeTrue();
+        (await bench.RunAsync(bench.Master.FastscanAsync(request))).Address.SerialNumber.Should().Be(3);
+        (await bench.RunAsync(bench.Master.ConfigureNodeIdAsync(0x23))).Succeeded.Should().BeTrue();
+        (await bench.RunAsync(bench.Master.FastscanAsync(request))).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
 
         first.NodeId.Should().Be(0x21);
         second.NodeId.Should().Be(0x22);
@@ -251,10 +251,10 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Full_Fastscan_Reads_The_Identity_From_The_Object_Dictionary()
     {
-        using var bench = new Bench();
-        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        using var bench = new ClockedLssNodeRig();
+        var slave = bench.Add();
         SetIdentity(slave, new LssAddress(1, 0, 0, 1));
-        var found = await bench.Master.FastscanAsync();
+        var found = await bench.RunAsync(bench.Master.FastscanAsync());
         found.Status.Should().Be(LssFastscanStatus.Found);
         found.Address.Should().Be(new LssAddress(1, 0, 0, 1));
         slave.LssState().Should().Be(LssState.Configuration);
@@ -263,10 +263,10 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Full_Fastscan_Finds_An_Address_Whose_Every_Bit_Is_Zero()
     {
-        using var bench = new Bench();
-        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId);
+        using var bench = new ClockedLssNodeRig();
+        var slave = bench.Add();
         SetIdentity(slave, new LssAddress(0, 0, 0, 0));
-        var found = await bench.Master.FastscanAsync();
+        var found = await bench.RunAsync(bench.Master.FastscanAsync());
         found.Status.Should().Be(LssFastscanStatus.Found);
         found.Address.Should().Be(new LssAddress(0, 0, 0, 0));
         slave.LssState().Should().Be(LssState.Configuration);
@@ -1152,14 +1152,14 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         using var heard = bench.Listen();
         Transmit(poke, LssFrames.Fastscan(0, LssCommand.FastscanReset, 0, 0));
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
-        int afterReset = heard.Ids.Count;
+        int repliesAfterReset = heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage);
         Transmit(poke, LssFrames.Fastscan(Address.VendorId, 0, 0, 0));
-        await WaitUntilAsync(() => heard.Ids.Count > afterReset);
+        await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage) > repliesAfterReset);
         slave.LssState().Should().Be(LssState.Waiting);
 
         int before = heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage);
-        Transmit(poke, LssFrames.Fastscan(0, 0, 4, 0));
-        Transmit(poke, LssFrames.Fastscan(0, 0, 0, 5));
+        Transmit(poke, LssFrames.Fastscan(0, LssCommand.FastscanReset, 4, 0));
+        Transmit(poke, LssFrames.Fastscan(Address.VendorId, 0, 0, 5));
         await Task.Delay(40);
         heard.Ids.Count(id => id == CanOpenCobId.LssSlaveMessage).Should().Be(before);
         slave.LssState().Should().Be(LssState.Waiting);
@@ -1606,6 +1606,47 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         }
         await send.WaitAsync(TimeSpan.FromSeconds(3));
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.NmtCommand));
+    }
+
+    [Fact]
+    public async Task A_Queued_Silence_Completion_During_Disposal_Does_Not_Flush_Held_Frames()
+    {
+        int nmtFrames = 0;
+        using var service = new LssTestService
+        {
+            Send = frame =>
+            {
+                if (frame.ID == CanOpenCobId.NmtCommand) Interlocked.Increment(ref nmtFrames);
+                return Task.FromResult(new TxConfirmation { Confirmed = true });
+            },
+        };
+        using var slave = new CanOpenNode(service, 5,
+            new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false);
+        await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
+        var send = slave.SendNmtCommandAsync(NmtCommand.Start, 2);
+        await WaitUntilAsync(() => HasHeldTransmit(slave));
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var blocked = slave.PostToActorAsync(() =>
+        {
+            entered.TrySetResult(true);
+            release.Wait(LssTestTiming.SchedulingBudget);
+        });
+        try
+        {
+            await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            var completion = slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
+            // BeginDispose marks the node disposed now; its actor cleanup follows the completion.
+            var disposing = slave.DisposeAsync().AsTask();
+            release.Set();
+            await Task.WhenAll(blocked, completion, disposing, send).WaitAsync(LssTestTiming.SchedulingBudget);
+            Volatile.Read(ref nmtFrames).Should().Be(0);
+        }
+        finally
+        {
+            release.Set();
+            await blocked.WaitAsync(LssTestTiming.SchedulingBudget);
+        }
     }
 
     [Theory]

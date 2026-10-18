@@ -523,8 +523,9 @@ internal sealed partial class CanOpenNode : ILssSlave
         WaitForTransmitsToDrain();
         _lssDelayElapsed = false;
         var switching = InvokeBitRateSwitch(_activeSelector, _activeIndex);
+        Action resume = () => TryEndLssSilence(generation);
         _ = switching.ContinueWith(
-            _ => RunOnActor(() => TryEndLssSilence(generation)),
+            _ => RunOnActor(resume),
             CancellationToken.None,
             TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
