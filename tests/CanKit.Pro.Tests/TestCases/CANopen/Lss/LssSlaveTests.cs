@@ -1399,8 +1399,8 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var second = slave.SendEmcyAsync(0x2000, 0x02);
         _ = slave.State;
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await ReleaseOldIdentitySend((CanOpenNode)slave, holding);
         await WaitUntilAsync(() => slave.NodeId == 6 && slave.State == NmtState.PreOperational);
-        holding.Release();
         await first;
         await second;
 
@@ -1428,8 +1428,8 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfiguration(bench.Master, slave);
         (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await ReleaseOldIdentitySend((CanOpenNode)slave, holding);
         await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
-        holding.Release();
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(5)));
         await Task.Delay(50);
         heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
@@ -1461,6 +1461,77 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         heard.Ids.Count(id => id == CanOpenCobId.Emcy(5)).Should().Be(1);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task A_New_Node_Id_Waits_For_Reserved_Old_Id_Frames(bool ordered, bool dispose)
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        uint oldCobId = ordered ? CanOpenCobId.SdoTx(5) : CanOpenCobId.Emcy(5);
+        using var holding = new HoldingService(new CanBusService(bus), heldCobId: oldCobId);
+        using var slave = (CanOpenNode)CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions { Lss = new LssSlaveOptions() });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(0x20)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        using var releaseBatch = new ManualResetEventSlim();
+        int confirmed = 0;
+        var oldSend = ordered
+            ? slave.SendOrderedControlFrames(null, null, () =>
+            {
+                if (Interlocked.Increment(ref confirmed) == 1) releaseBatch.Wait(LssTestTiming.SchedulingBudget);
+            }, (oldCobId, new byte[] { 1 }), (oldCobId, new byte[] { 2 }))
+            : slave.SendEmcyAsync(0x1000, 1);
+        Task disposing = Task.CompletedTask;
+        try
+        {
+            await WaitUntilAsync(() => holding.Holding);
+            await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+            await WaitUntilAsync(() => slave.NodeId == 0x20 || slave.IsWaitingForLssTransmits);
+            slave.NodeId.Should().Be(5, "a reserved old-ID send still owns the driver");
+            heard.Ids.Should().NotContain(CanOpenCobId.Heartbeat(0x20));
+            if (dispose)
+            {
+                disposing = Task.Run(async () => await slave.DisposeAsync());
+                await WaitUntilAsync(() =>
+                {
+                    try { slave.SendSyncAsync(new CancellationToken(canceled: true)); return false; }
+                    catch (ObjectDisposedException) { return true; }
+                });
+            }
+            holding.Release();
+            if (dispose)
+            {
+                releaseBatch.Set();
+                await oldSend.WaitAsync(LssTestTiming.SchedulingBudget);
+                await disposing.WaitAsync(LssTestTiming.SchedulingBudget);
+                slave.NodeId.Should().Be(5, "disposal aborts the pending identity change");
+                heard.Ids.Should().NotContain(CanOpenCobId.Heartbeat(0x20));
+            }
+            else
+            {
+                await WaitUntilAsync(() => slave.NodeId == 0x20 && slave.State == NmtState.PreOperational);
+                await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(0x20)));
+                releaseBatch.Set();
+                await oldSend.WaitAsync(LssTestTiming.SchedulingBudget);
+                await peer.SendSyncAsync();
+                await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Sync));
+                heard.Ids.Where(id => id == oldCobId || id == CanOpenCobId.Heartbeat(0x20))
+                    .Should().Equal(oldCobId, CanOpenCobId.Heartbeat(0x20));
+            }
+        }
+        finally
+        {
+            holding.Release();
+            releaseBatch.Set();
+            await oldSend.WaitAsync(LssTestTiming.SchedulingBudget);
+            await disposing.WaitAsync(LssTestTiming.SchedulingBudget);
+        }
+    }
+
     [Fact]
     public async Task An_Emcy_Queued_Before_The_Producer_Is_Cleared_Is_Not_Sent()
     {
@@ -1481,13 +1552,156 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfiguration(bench.Master, slave);
         (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
         await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await ReleaseOldIdentitySend((CanOpenNode)slave, holding);
         await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
-        holding.Release();
         await first;
         await second;
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Emcy(5)));
         await Task.Delay(50);
         heard.Ids.Count(id => id == CanOpenCobId.Emcy(5)).Should().Be(1);
+    }
+
+    private static async Task ReleaseOldIdentitySend(CanOpenNode node, HoldingService holding)
+    {
+        try
+        {
+            await WaitUntilAsync(() => node.IsWaitingForLssTransmits);
+            node.NodeId.Should().Be(5);
+        }
+        finally
+        {
+            holding.Release();
+        }
+    }
+
+    [Fact]
+    public async Task A_Disposed_Node_Drops_Queued_Transport_Work()
+    {
+        int sent = 0;
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var service = new LssTestService
+        {
+            Send = frame =>
+            {
+                Interlocked.Increment(ref sent);
+                if (frame.ID == CanOpenCobId.Emcy(5))
+                {
+                    entered.TrySetResult(true);
+                    return release.Task;
+                }
+                return Task.FromResult(new TxConfirmation { Confirmed = true });
+            },
+        };
+        using var node = new CanOpenNode(service, 5,
+            new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false);
+        Task heartbeat = Task.CompletedTask;
+        await node.PostToActorAsync(() => heartbeat = node.HeartbeatSendChain);
+        await heartbeat.WaitAsync(LssTestTiming.SchedulingBudget);
+        var first = node.SendEmcyAsync(0x1000, 1);
+        Task second = Task.CompletedTask;
+        try
+        {
+            await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            second = node.SendEmcyAsync(0x2000, 2);
+            await node.PostToActorAsync(() => { });
+            await node.DisposeAsync();
+            int before = Volatile.Read(ref sent);
+            release.TrySetResult(new TxConfirmation { Confirmed = true });
+            await Task.WhenAll(first, second).WaitAsync(LssTestTiming.SchedulingBudget);
+            await node.SendControlFrame(CanOpenCobId.Sync, Array.Empty<byte>());
+            await node.Invoking(n => n.SendControlFrame(1, new byte[] { 1 }, rejectSuppression: true))
+                .Should().ThrowAsync<ObjectDisposedException>();
+            await node.SendOrderedControlFrames((CanOpenCobId.SdoTx(5), new byte[] { 1 }));
+            Volatile.Read(ref sent).Should().Be(before);
+        }
+        finally
+        {
+            release.TrySetResult(new TxConfirmation { Confirmed = true });
+            await Task.WhenAll(first, second).WaitAsync(LssTestTiming.SchedulingBudget);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Cancelled_Queued_Emcy_Does_Not_Change_The_Error_Register(bool alreadyCancelled)
+    {
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int emergencies = 0;
+        using var service = new LssTestService
+        {
+            Send = frame =>
+            {
+                if (frame.ID != CanOpenCobId.Emcy(5)) return Task.FromResult(new TxConfirmation { Confirmed = true });
+                Interlocked.Increment(ref emergencies);
+                entered.TrySetResult(true);
+                return release.Task;
+            },
+        };
+        using var node = new CanOpenNode(service, 5,
+            new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false);
+        using var cancel = new CancellationTokenSource();
+        var first = node.SendEmcyAsync(0x1000, 1);
+        Task second = Task.CompletedTask;
+        try
+        {
+            await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            if (alreadyCancelled) cancel.Cancel();
+            second = node.SendEmcyAsync(0x2000, 2, cancellationToken: cancel.Token);
+            await node.PostToActorAsync(() => { });
+            if (!alreadyCancelled) cancel.Cancel();
+            release.TrySetResult(new TxConfirmation { Confirmed = true });
+            await first.WaitAsync(LssTestTiming.SchedulingBudget);
+            await second.Invoking(task => task.WaitAsync(LssTestTiming.SchedulingBudget))
+                .Should().ThrowAsync<OperationCanceledException>();
+            Volatile.Read(ref emergencies).Should().Be(1);
+            node.ObjectDictionary.ReadUnsigned(0x1001, 0).Should().Be(1);
+        }
+        finally
+        {
+            release.TrySetResult(new TxConfirmation { Confirmed = true });
+            await first.WaitAsync(LssTestTiming.SchedulingBudget);
+        }
+    }
+
+    [Fact]
+    public async Task A_New_Identity_Boots_Before_Any_Queued_Heartbeat_State()
+    {
+        var frames = new System.Collections.Concurrent.ConcurrentQueue<(uint Id, byte State)>();
+        using var service = new LssTestService
+        {
+            Send = frame =>
+            {
+                if (frame.ID is >= 0x701 and <= 0x77F) frames.Enqueue(((uint)frame.ID, frame.Data.Span[0]));
+                return Task.FromResult(new TxConfirmation { Confirmed = true });
+            },
+        };
+        using var node = new CanOpenNode(service, 5,
+            new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false, new ManualTimeSource());
+        async Task FeedAsync(uint cobId, byte[] payload)
+        {
+            await service.Subscription.Enqueue(new CanFrameEvent(
+                new CanFrameView(CanFrameType.Can20, (int)cobId, payload, FrameFlags.None), false, TimeSpan.Zero, 0));
+            await node.PostToActorAsync(() => { });
+        }
+        Task heartbeat = Task.CompletedTask;
+        await node.PostToActorAsync(() => heartbeat = node.HeartbeatSendChain);
+        await heartbeat.WaitAsync(LssTestTiming.SchedulingBudget);
+        await FeedAsync(CanOpenCobId.LssMasterMessage, LssFrames.SwitchGlobal(LssState.Configuration));
+        await FeedAsync(CanOpenCobId.LssMasterMessage, LssFrames.ConfigureNodeId(0x20));
+        node.StartHeartbeatProducer(TimeSpan.FromSeconds(1));
+        await node.PostToActorAsync(() => node.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
+        await FeedAsync(CanOpenCobId.NmtCommand, new byte[] { (byte)NmtCommand.Start, 5 });
+        await WaitUntilAsync(() => node.HasHeldLssTransmits);
+        await FeedAsync(CanOpenCobId.NmtCommand, new byte[] { (byte)NmtCommand.ResetCommunication, 5 });
+        node.NodeId.Should().Be(0x20);
+        await node.PostToActorAsync(() => heartbeat = node.HeartbeatSendChain);
+        await node.PostToActorAsync(() => node.CompleteLssSilence(0));
+        await heartbeat.WaitAsync(LssTestTiming.SchedulingBudget);
+        frames.Where(frame => frame.Id == CanOpenCobId.Heartbeat(0x20)).Select(frame => frame.State)
+            .Should().Equal(new byte[] { 0 }, "the old Operational heartbeat must not precede the new identity's boot-up");
     }
 
     [Fact]

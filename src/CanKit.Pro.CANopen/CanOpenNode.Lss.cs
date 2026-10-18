@@ -57,6 +57,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     // closes the gate before waiting for these reservations to drain, so no later frame can
     // prolong the wait or reach the driver before the adapter switch finishes.
     private int _lssTxInFlight;
+    private int _nodeIdGeneration;
     private int _lssWaitingForTransmits;
     private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
@@ -161,13 +162,19 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// silence has started is queued rather than dropped.
     /// </summary>
     private Task<bool>? GateTransmit(uint cobId, byte[] payload, Action<CanOpenTransportException?>? onSendCompleted,
-        CancellationToken cancellationToken, bool rejectSuppression = false)
+        CancellationToken cancellationToken, bool rejectSuppression = false, int? nodeIdGeneration = null)
     {
         if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<bool>(cancellationToken);
         Action? reportSuppressed = null;
         Task<bool>? finished = null;
         lock (_lssTxGate)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+                return rejectSuppression
+                    ? Task.FromException<bool>(new ObjectDisposedException(nameof(CanOpenNode)))
+                    : Task.FromResult(false);
+            if (nodeIdGeneration is { } generation && generation != _nodeIdGeneration)
+                return Task.FromResult(false);
             if (IsLssSilent())
             {
                 if (HoldsAcrossLssSilence(cobId))
@@ -193,11 +200,12 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// False means the frame is suppressed. True means the caller sends and then
     /// <see cref="ReleaseTransmit"/>.
     /// </summary>
-    private bool TryReserveTransmit()
+    private bool TryReserveTransmit(int? nodeIdGeneration = null)
     {
         lock (_lssTxGate)
         {
-            if (IsLssSilent()) return false;
+            if (Volatile.Read(ref _disposed) != 0 || IsLssSilent()
+                || (nodeIdGeneration is { } generation && generation != _nodeIdGeneration)) return false;
             _lssTxInFlight++;
             return true;
         }
@@ -247,7 +255,7 @@ internal sealed partial class CanOpenNode : ILssSlave
         var copy = new byte[payload.Length];
         Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
         var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal, cancellationToken));
+        _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal, cancellationToken, _nodeIdGeneration));
         return cancellationToken.CanBeCanceled ? WaitForHeldTransmit(signal, cancellationToken) : signal.Task;
     }
 
@@ -290,7 +298,7 @@ internal sealed partial class CanOpenNode : ILssSlave
             // progress holds what has not reached the driver yet.
             Task<bool> send = item.IsNmt
                 ? SendNmtReporting(item.Payload, item.CancellationToken)
-                : SendHeldHeartbeat(item.Payload, item.CancellationToken);
+                : SendHeldHeartbeat(item.Payload, item.CancellationToken, item.NodeIdGeneration);
             await send.ContinueWith(
                 static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
                 item.Signal,
@@ -300,13 +308,14 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
     }
 
-    private async Task<bool> SendHeldHeartbeat(byte[] payload, CancellationToken cancellationToken)
+    private async Task<bool> SendHeldHeartbeat(byte[] payload, CancellationToken cancellationToken, int nodeIdGeneration)
     {
         // A reset may have changed the identity while this heartbeat or boot-up was held.
         // Like EmitHeartbeat, resolve it when reached and discard it if no identity is active.
         byte nodeId = _nodeId;
         if (!CanOpenCobId.IsActiveNodeId(nodeId)) return false;
-        await SendControlFrame(CanOpenCobId.Heartbeat(nodeId), payload, cancellationToken).ConfigureAwait(false);
+        await SendControlFrame(CanOpenCobId.Heartbeat(nodeId), payload, cancellationToken,
+            nodeIdGeneration: nodeIdGeneration).ConfigureAwait(false);
         return true;
     }
 
@@ -342,20 +351,29 @@ internal sealed partial class CanOpenNode : ILssSlave
             item.Signal.TrySetResult(false);
     }
 
+    private void CompleteLssTransmitHold()
+    {
+        if (Volatile.Read(ref _disposed) != 0) DropHeldTransmits();
+        else EndLssSilence();
+    }
+
     private readonly struct HeldTransmit
     {
-        public HeldTransmit(uint cobId, byte[] payload, TaskCompletionSource<bool> signal, CancellationToken cancellationToken)
+        public HeldTransmit(uint cobId, byte[] payload, TaskCompletionSource<bool> signal, CancellationToken cancellationToken,
+            int nodeIdGeneration)
         {
             IsNmt = cobId == CanOpenCobId.NmtCommand;
             Payload = payload;
             Signal = signal;
             CancellationToken = cancellationToken;
+            NodeIdGeneration = nodeIdGeneration;
         }
 
         public bool IsNmt { get; }
         public byte[] Payload { get; }
         public TaskCompletionSource<bool> Signal { get; }
         public CancellationToken CancellationToken { get; }
+        public int NodeIdGeneration { get; }
     }
 
     private void CancelLssActivation()
@@ -366,10 +384,8 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssDeferredReply = null;
         _lssDelayElapsed = false;
         // The node may transmit again. Disposal must not put a frame on a bus that is going away.
-        if (Volatile.Read(ref _disposed) != 0)
-            DropHeldTransmits();
-        else if (_lssBitRateSwitch.Status == TaskStatus.RanToCompletion)
-            EndLssSilence();
+        if (Volatile.Read(ref _disposed) != 0 || _lssBitRateSwitch.Status == TaskStatus.RanToCompletion)
+            CompleteLssTransmitHold();
     }
 
     // Actor thread. Invalid or unsupported commands draw no response (§7.3), except store,

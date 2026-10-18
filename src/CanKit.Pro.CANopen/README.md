@@ -1014,6 +1014,9 @@ node boots, and it stays in LSS configuration. A node that already has an active
 it until the next NMT reset communication, which copies the pending node-id into the active one
 and retargets pre-defined COB-IDs that still name the old one. Reset node copies the persistent
 node-id back into the pending one first. Neither reset reloads the bit timing.
+An identity change closes the transmit gate and drains old-ID reservations before publishing
+the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs
+resolve their COB-ID after the change. A bit-rate switch already holding the gate stays silent.
 
 `ILssConfigurationStore` is the only persistence. Without one, store answers "not supported".
 `1010h` does not store the layer settings, and an LSS store does not rewrite the object

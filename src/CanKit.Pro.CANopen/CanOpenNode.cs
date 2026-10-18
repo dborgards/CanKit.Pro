@@ -520,6 +520,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = new[] { payload };
+        int generation = Volatile.Read(ref _nodeIdGeneration);
         var link = _heartbeatSendChain.ContinueWith(
             _ =>
             {
@@ -528,7 +529,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // to announce on 0x700.
                 if (Volatile.Read(ref _disposed) != 0 || !CanOpenCobId.IsActiveNodeId(_nodeId))
                     return Task.CompletedTask;
-                return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame);
+                return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame, nodeIdGeneration: generation);
             },
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _heartbeatSendChain = link;
@@ -540,15 +541,18 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
         byte errorRegister = msg.ErrorRegister;
+        // Resolve the producer and reserve its send in one actor turn. A reset that drains
+        // the previous send can retarget the dictionary before this queued emergency starts.
+        Func<Task> transmit = () =>
+        {
+            if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+            uint cobId = _emcyCobId;
+            if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
+            _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
+            return SendControlFrame(cobId, frame, cancellationToken);
+        };
         var link = _emcySendChain.ContinueWith(
-            _ =>
-            {
-                if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
-                uint cobId = _emcyCobId;
-                if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
-                _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
-                return SendControlFrame(cobId, frame, cancellationToken);
-            },
+            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : _actor.PostAsync(transmit).Unwrap(),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _emcySendChain = link;
         return link;
@@ -2556,8 +2560,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
-    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
-        Action<CanOpenTransportException?>? onSendCompleted = null, bool rejectSuppression = false)
+    internal Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
+        Action<CanOpenTransportException?>? onSendCompleted = null, bool rejectSuppression = false,
+        int? nodeIdGeneration = null)
     {
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
         // NMT and heartbeat are sent when the delay ends. Anything else is dropped, and an
@@ -2566,7 +2571,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // cannot start until this frame has been handed to the driver.
         // Validate the frame before reserving: a construction failure never owns a send slot.
         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-        if (GateTransmit(cobId, payload, onSendCompleted, cancellationToken, rejectSuppression) is { } finished)
+        if (GateTransmit(cobId, payload, onSendCompleted, cancellationToken, rejectSuppression, nodeIdGeneration) is { } finished)
             return finished;
         // We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
@@ -2769,9 +2774,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// after each frame that was confirmed, so the owner of a long batch can tell progress from
     /// silence. It must be cheap and thread-safe.
     /// </summary>
-    private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
+    internal Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
         Func<bool>? shouldStop, Action? onFrameConfirmed, params (uint CobId, byte[] Payload)[] frames)
     {
+        int generation = Volatile.Read(ref _nodeIdGeneration);
         return Task.Run(async () =>
         {
             CanOpenTransportException? failure = null;
@@ -2786,7 +2792,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     try
                     {
                         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-                        if (!TryReserveTransmit())
+                        if (!TryReserveTransmit(generation))
                         {
                             onFrameConfirmed?.Invoke();
                             continue;

@@ -41,7 +41,7 @@ internal sealed class LssTestService : ICanBusService
     public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        Commands.Enqueue(frame.Data.Span[0]);
+        if (!frame.Data.IsEmpty) Commands.Enqueue(frame.Data.Span[0]);
         return Send(frame);
     }
 
