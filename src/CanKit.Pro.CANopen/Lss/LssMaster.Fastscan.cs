@@ -146,14 +146,24 @@ internal sealed partial class LssMaster
         // Only consecutive Fastscan probes need this gap. A completed scan releases the gate
         // immediately; another scan still observes the previous probe's gap.
         await DelayUntilAsync(_nextFastscanAt, cancellationToken).ConfigureAwait(false);
-        var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken)
-            .ConfigureAwait(false);
-        // Annex A.3.3: the master cycle contains the whole response timeout. A second slave's
-        // 4Fh that arrives after the first must not be read as the next bit.
-        var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
-            Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
-        _nextFastscanAt = TickMath.DueAt(_time.GetTimestamp(), Options.FastscanCycleTime, _time.Frequency);
-        return response is not null;
+        long responseUntil = 0;
+        try
+        {
+            var sent = await SendForReplyAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext),
+                Options.FastscanTimeout, cancellationToken).ConfigureAwait(false);
+            long start = sent.Transmit > 0 ? sent.Transmit : _time.GetTimestamp();
+            responseUntil = TickMath.DueAt(start, Options.FastscanTimeout, _time.Frequency);
+            // Annex A.3.3: the master cycle contains the whole response timeout. A second
+            // slave's 4Fh must not become the next probe's answer, even after cancellation.
+            var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
+                Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
+            return response is not null;
+        }
+        finally
+        {
+            long end = Math.Max(_time.GetTimestamp(), Math.Max(responseUntil, _nextCommandAt));
+            _nextFastscanAt = TickMath.DueAt(end, Options.FastscanCycleTime, _time.Frequency);
+        }
     }
 
     private static LssAddress AddressFrom(uint[] found)

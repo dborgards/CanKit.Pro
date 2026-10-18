@@ -282,7 +282,7 @@ public class LssMasterBoundaryTests
         (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(expected);
 
         // The post-scan service is not a Fastscan probe and must not pay that gap.
-        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(TimeSpan.FromSeconds(5));
         int commands = rig.Service.Commands.Count;
         using var cancel = new CancellationTokenSource();
         var next = rig.Master.FastscanAsync(request, cancel.Token);

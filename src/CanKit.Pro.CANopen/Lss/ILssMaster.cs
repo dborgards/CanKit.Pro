@@ -21,6 +21,12 @@ namespace CanKit.Pro.CANopen.Lss;
 /// response of switch state selective, identify, or the Fastscan reset step is a normal result:
 /// no slave matched.
 /// </para>
+/// <para>
+/// Cancellation returns promptly, but later commands wait out an abandoned response window
+/// so its delayed replies cannot answer a new request. A cancelled Fastscan also preserves
+/// its probe's cycle gap. Failed transmit confirmation conservatively starts the recovery
+/// window when the send ends.
+/// </para>
 /// </remarks>
 public interface ILssMaster : IDisposable, IAsyncDisposable
 {

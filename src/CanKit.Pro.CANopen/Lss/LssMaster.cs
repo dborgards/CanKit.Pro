@@ -77,7 +77,7 @@ internal sealed partial class LssMaster : ILssMaster
     private readonly CancellationTokenSource _lifetime = new();
 
     private int _disposed;
-    // Guarded by _gate. An aborted activation must not release its silence reservation.
+    // Guarded by _gate. Interrupted requests retain response-window/silence reservations.
     private long _nextCommandAt;
 
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService, ProtocolActor? timers = null)
@@ -137,7 +137,8 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveRevision, address.RevisionNumber), ct)
                 .ConfigureAwait(false);
-            var sent = await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber), ct)
+            var sent = await SendForReplyAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber),
+                Options.ResponseTimeout, ct)
                 .ConfigureAwait(false);
             var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.SwitchSelectiveAcknowledge,
                 Options.ResponseTimeout, ct).ConfigureAwait(false);
@@ -251,7 +252,8 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            var sent = await SendAsync(LssFrames.Command(LssCommand.InquireNodeId), ct).ConfigureAwait(false);
+            var sent = await SendForReplyAsync(LssFrames.Command(LssCommand.InquireNodeId), Options.ResponseTimeout, ct)
+                .ConfigureAwait(false);
             var response = await ReceiveRequiredAsync(sent, LssCommand.InquireNodeId, ct).ConfigureAwait(false);
             return response[1];
         }, cancellationToken);
@@ -269,7 +271,8 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialLow, range.SerialLow), ct)
                 .ConfigureAwait(false);
-            var sent = await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh), ct)
+            var sent = await SendForReplyAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh),
+                Options.IdentificationTimeout, ct)
                 .ConfigureAwait(false);
             // The whole identification window is occupied, so a later slave is not left
             // queued for the next command.
@@ -282,7 +285,8 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            var sent = await SendAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote), ct)
+            var sent = await SendForReplyAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote),
+                Options.IdentificationTimeout, ct)
                 .ConfigureAwait(false);
             var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifyNonConfiguredSlave,
                 Options.IdentificationTimeout, ct, drain: true).ConfigureAwait(false);
@@ -296,7 +300,7 @@ internal sealed partial class LssMaster : ILssMaster
         var payload = LssFrames.Manufacturer(commandSpecifier, parameters.Span);
         return Execute(async ct =>
         {
-            var sent = await SendAsync(payload, ct).ConfigureAwait(false);
+            var sent = await SendForReplyAsync(payload, Options.ResponseTimeout, ct).ConfigureAwait(false);
             return await ReceiveAsync(sent, d => d.Span[0] == commandSpecifier, Options.ResponseTimeout, ct)
                 .ConfigureAwait(false);
         }, cancellationToken);
@@ -355,7 +359,7 @@ internal sealed partial class LssMaster : ILssMaster
     private Task<LssServiceResult> ConfirmedAsync(byte[] request, byte commandSpecifier, CancellationToken cancellationToken)
         => Execute(async ct =>
         {
-            var sent = await SendAsync(request, ct).ConfigureAwait(false);
+            var sent = await SendForReplyAsync(request, Options.ResponseTimeout, ct).ConfigureAwait(false);
             var response = await ReceiveRequiredAsync(sent, commandSpecifier, ct).ConfigureAwait(false);
             return new LssServiceResult(response[1], response[2]);
         }, cancellationToken);
@@ -365,7 +369,8 @@ internal sealed partial class LssMaster : ILssMaster
 
     private async Task<uint> InquireU32CoreAsync(byte commandSpecifier, CancellationToken cancellationToken)
     {
-        var sent = await SendAsync(LssFrames.Command(commandSpecifier), cancellationToken).ConfigureAwait(false);
+        var sent = await SendForReplyAsync(LssFrames.Command(commandSpecifier), Options.ResponseTimeout, cancellationToken)
+            .ConfigureAwait(false);
         var response = await ReceiveRequiredAsync(sent, commandSpecifier, cancellationToken).ConfigureAwait(false);
         return LssFrames.ReadU32(response);
     }
@@ -425,6 +430,21 @@ internal sealed partial class LssMaster : ILssMaster
         return new Sent(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
     }
 
+    private async Task<Sent> SendForReplyAsync(byte[] payload, TimeSpan responseWindow, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await SendAsync(payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Failed confirmation does not prove that no slave received the request.
+            _nextCommandAt = Math.Max(_nextCommandAt,
+                TickMath.DueAt(_time.GetTimestamp(), responseWindow, _time.Frequency));
+            throw;
+        }
+    }
+
     private async Task<byte[]?> ReceiveAsync(Sent sent, Func<ReadOnlyMemory<byte>, bool> match, TimeSpan timeout,
         CancellationToken cancellationToken, bool drain = false)
     {
@@ -463,7 +483,14 @@ internal sealed partial class LssMaster : ILssMaster
         catch (CanOpenTransportException)
         {
             if (first is not null) return first;
+            _nextCommandAt = Math.Max(_nextCommandAt, deadline);
             ThrowIfDisposed();
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            // A later handoff cannot distinguish a delayed reply to this abandoned request.
+            _nextCommandAt = Math.Max(_nextCommandAt, deadline);
             throw;
         }
     }
