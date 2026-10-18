@@ -55,6 +55,10 @@ how many errors rule a rate out (default 2), `--passes` how many times to walk t
 demo bus the loopback ignores the configured rate, so the first candidate wins; on real hardware
 the reported rate is the one the bus actually runs. Reopen the adapter at that rate afterwards.
 
+`--allow-non-listen-only` opens each probe in normal mode instead of listen-only, for an adapter
+that rejects listen-only but is silent in normal mode. This is reactive: a wrong candidate may put
+error frames on the bus, against the spirit of CiA 801 §5.2.1. Use it only where that is acceptable.
+
 The adapter has to actually apply each candidate rate, or every probe listens at the interface's
 existing rate and the first one with traffic is reported regardless of its value. On SocketCAN
 that means the `#netlink` endpoint, as above: CanKit sets the bit rate and listen-only mode only

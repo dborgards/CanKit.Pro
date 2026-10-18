@@ -227,16 +227,22 @@ namespace CanKit.Sample.CanOpenLss
             };
 
             // CiA 801 §5.2.1: each candidate is opened in listen-only mode, so the search never
-            // transmits. On the demo bus the probes join the demo session on their own channels;
-            // on a real adapter the one channel is reopened per candidate (§5.2.3, Figure 2).
+            // transmits. --allow-non-listen-only opens normal mode instead, for an adapter that
+            // rejects listen-only but is silent in normal mode; it is reactive, so a wrong
+            // candidate may put error frames on the bus. On the demo bus the probes join the demo
+            // session on their own channels; on a real adapter the one channel is reopened per
+            // candidate (§5.2.3, Figure 2).
+            var probeMode = allowNonListenOnly ? ChannelWorkMode.Normal : ChannelWorkMode.ListenOnly;
             var channel = 10;
             Func<int, CanKit.Abstractions.API.Can.ICanBus> factory = demo
-                ? rate => CanBus.Open($"virtual://{DemoNetwork.Session}/{channel++}", cfg => ConfigureListenOnly(cfg, rate))
-                : rate => CanBus.Open(endpoint, cfg => ConfigureListenOnly(cfg, rate));
+                ? rate => CanBus.Open($"virtual://{DemoNetwork.Session}/{channel++}", cfg => ConfigureProbe(cfg, rate, probeMode))
+                : rate => CanBus.Open(endpoint, cfg => ConfigureProbe(cfg, rate, probeMode));
 
-            Console.WriteLine($"CiA 801 bit-rate detection on {(demo ? "the demo bus" : endpoint)}, listen-only.");
-            Console.WriteLine(
-                $"Listening up to {options.ListenWindow.TotalMilliseconds:0} ms per candidate; transmitting nothing.");
+            var mode = allowNonListenOnly ? "normal mode (reactive)" : "listen-only";
+            Console.WriteLine($"CiA 801 bit-rate detection on {(demo ? "the demo bus" : endpoint)}, {mode}.");
+            Console.WriteLine(allowNonListenOnly
+                ? $"Listening up to {options.ListenWindow.TotalMilliseconds:0} ms per candidate; a wrong rate may emit error frames."
+                : $"Listening up to {options.ListenWindow.TotalMilliseconds:0} ms per candidate; transmitting nothing.");
             if (!demo)
                 Console.WriteLine("A producer has to be on the bus (heartbeat, SYNC, or SDO reads of 1000h/1001h/1018h).");
 
@@ -261,10 +267,10 @@ namespace CanKit.Sample.CanOpenLss
             return 1;
         }
 
-        private static void ConfigureListenOnly(
-            CanKit.Abstractions.API.Common.IBusInitOptionsConfigurator cfg, int bitrate)
+        private static void ConfigureProbe(
+            CanKit.Abstractions.API.Common.IBusInitOptionsConfigurator cfg, int bitrate, ChannelWorkMode workMode)
             => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitrate)
-                .SetWorkMode(ChannelWorkMode.ListenOnly).EnableErrorInfo();
+                .SetWorkMode(workMode).EnableErrorInfo();
 
         private static IReadOnlyList<int>? ReadCandidates(string[] args)
         {
