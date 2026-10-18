@@ -14,6 +14,42 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenPdoEngineTests
 {
+    [Theory]
+    [InlineData(0xFE, false)]
+    [InlineData(0xFF, false)]
+    [InlineData(0xFE, true)]
+    [InlineData(0xFF, true)]
+    public async Task Mpdo_Transmission_Type_Writes_Require_Event_Driven_Types(byte mode, bool isTpdo)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var masterBus = Open(session, 1);
+        using var device = CanOpen.OpenNode(bus, Device, MasterConfigurable);
+        using var master = CanOpen.OpenNode(masterBus, Master);
+        if (isTpdo) device.Pdo().ConfigureMultiplexedTpdo(1, (MpdoAddressMode)mode, Tpdo1);
+        else device.Pdo().ConfigureMultiplexedRpdo(1, (MpdoAddressMode)mode, Rpdo1);
+        ushort comm = isTpdo ? (ushort)0x1800 : (ushort)0x1400;
+        var od = device.ObjectDictionary;
+        uint cobId = od.ReadUnsigned(comm, 1);
+        foreach (bool disabled in new[] { false, true })
+        {
+            od.WriteUnsigned(comm, 1, disabled ? cobId | CanOpenCobId.InvalidBit : cobId);
+            foreach (byte allowed in new byte[] { 254, 255 })
+            {
+                od.WriteUnsigned(comm, 2, allowed);
+                await DownloadAsync(master, comm, 2, new[] { allowed });
+                foreach (byte rejected in new byte[] { 0, 1, 240, 252, 253 })
+                {
+                    Action localWrite = () => od.WriteUnsigned(comm, 2, rejected);
+                    localWrite.Should().Throw<ArgumentException>().WithMessage("*0x06040043*");
+                    (await DownloadShouldAbortAsync(master, comm, 2, new[] { rejected })).AbortCode
+                        .Should().Be((uint)CanKit.Pro.CANopen.Sdo.SdoAbortCode.GeneralParameterIncompatibility);
+                    od.ReadUnsigned(comm, 2).Should().Be(allowed);
+                }
+            }
+        }
+    }
+
     [Fact]
     public void With_Overrides_The_Pdo_Count_And_Preserves_Other_Options()
     {

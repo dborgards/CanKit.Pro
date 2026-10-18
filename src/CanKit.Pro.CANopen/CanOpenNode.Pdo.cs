@@ -190,7 +190,7 @@ internal sealed partial class CanOpenNode
                     // Tables 68 and 72: "An attempt to change the value of the transmission type to
                     // any not supported value shall be responded with … 0609 0030h."
                     byte type = value[0];
-                    if (isTpdo && _od.TryReadUnsigned((ushort)(index + 0x200), 0, out var mode) && mode >= 0xFE
+                    if (_od.TryReadUnsigned((ushort)(index + 0x200), 0, out var mode) && mode >= 0xFE
                         && !CanOpenTransmissionType.IsEventDriven(type))
                         return OdWriteDecision.Reject(SdoAbortCode.GeneralParameterIncompatibility);
                     bool reserved = isTpdo
