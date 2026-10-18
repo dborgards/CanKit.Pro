@@ -48,6 +48,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     private IDisposable? _lssActivation;
     private int _lssSilent;
     private Task _lssBitRateSwitch = Task.CompletedTask;
+    private LssSwitchCancellation? _lssCurrentSwitchCancellation;
     private readonly CancellationTokenSource _lssBitRateLifetime = new();
     private Task _lssBitRateCancellation = Task.CompletedTask;
     private bool _lssBitRateCleanupStarted;
@@ -510,6 +511,7 @@ internal sealed partial class CanOpenNode : ILssSlave
         if (_lssState != LssState.Configuration || _options.Lss?.BitTimingSupported == false)
             return;
         CancelLssActivation();
+        _lssCurrentSwitchCancellation?.Cancel();
         if (delayMilliseconds == 0)
         {
             BeginLssSilence(_lssActivationGeneration, TimeSpan.Zero);
@@ -571,7 +573,10 @@ internal sealed partial class CanOpenNode : ILssSlave
         if (hook is null || !TryResolveBitRate(selector, index, out var rate)) return _lssBitRateSwitch;
         // Repeated activate commands must not run two adapter reconfigurations concurrently.
         var previous = _lssBitRateSwitch;
-        var cancellationToken = _lssBitRateLifetime.Token;
+        _lssCurrentSwitchCancellation?.Cancel();
+        var cancellation = new LssSwitchCancellation(_lssBitRateLifetime.Token);
+        _lssCurrentSwitchCancellation = cancellation;
+        var cancellationToken = cancellation.Token;
         var switching = Task.Run(async () =>
         {
             await previous.ContinueWith(static completed => { _ = completed.Exception; },
@@ -580,6 +585,12 @@ internal sealed partial class CanOpenNode : ILssSlave
             await hook(rate, cancellationToken).ConfigureAwait(false);
         });
         _lssBitRateSwitch = switching;
+        _ = switching.ContinueWith(
+            static (finished, state) =>
+            {
+                _ = finished.Exception;
+                ((LssSwitchCancellation)state!).Finish();
+            }, cancellation, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         _ = switching.ContinueWith(
             task =>
             {
@@ -594,15 +605,54 @@ internal sealed partial class CanOpenNode : ILssSlave
         return switching;
     }
 
+    private sealed class LssSwitchCancellation
+    {
+        private readonly CancellationTokenSource _source = new();
+        private readonly CancellationTokenRegistration _lifetimeRegistration;
+        private readonly object _gate = new();
+        private Task? _cancellation;
+        private bool _finished;
+
+        public LssSwitchCancellation(CancellationToken lifetime)
+            => _lifetimeRegistration = lifetime.Register(static state => ((LssSwitchCancellation)state!).Cancel(), this);
+
+        public CancellationToken Token => _source.Token;
+
+        public void Cancel()
+        {
+            lock (_gate)
+            {
+                if (_finished || _cancellation is not null) return;
+                // Supersession runs on the actor; disposal can race it on another thread.
+                // Neither caller may run application cancellation handlers or dispose their source.
+                _cancellation = Task.Run(() =>
+                {
+                    try { _source.Cancel(); }
+                    catch (AggregateException) { /* every cancellation callback was invoked */ }
+                });
+            }
+        }
+
+        public void Finish()
+        {
+            Task cancellation;
+            lock (_gate)
+            {
+                _finished = true;
+                cancellation = _cancellation ?? Task.CompletedTask;
+            }
+            _lifetimeRegistration.Dispose();
+            // The hook may finish while a cancellation handler still runs. Keep its token usable.
+            _ = cancellation.ContinueWith(static (_, state) => ((CancellationTokenSource)state!).Dispose(),
+                _source, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+    }
+
     private void CancelLssBitRateSwitch()
     {
         // Application cancellation callbacks may block or throw. Never run them on the actor
         // or on the thread disposing the node.
-        _lssBitRateCancellation = Task.Run(() =>
-        {
-            try { _lssBitRateLifetime.Cancel(); }
-            catch (AggregateException) { /* every cancellation callback was invoked */ }
-        });
+        _lssBitRateCancellation = Task.Run(() => _lssBitRateLifetime.Cancel());
     }
 
     private void DisposeLssBitRateLifetime()

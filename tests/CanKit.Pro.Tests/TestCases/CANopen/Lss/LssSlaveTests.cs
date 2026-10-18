@@ -1902,6 +1902,120 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task A_New_Activation_Cancels_The_Previous_Hook_And_Recovers_Without_Disposal(bool callbackThrows)
+    {
+        var started = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondStarted = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecond = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseCancellation = new ManualResetEventSlim();
+        int calls = 0;
+        using var bench = new Bench();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = async (_, token) =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    token.Register(() =>
+                    {
+                        cancelled.TrySetResult(true);
+                        releaseCancellation.Wait();
+                        if (callbackThrows) throw new InvalidOperationException("application cancellation handler failed");
+                    });
+                    started.TrySetResult(token);
+                    await releaseFirst.Task;
+                    token.ThrowIfCancellationRequested();
+                }
+                else
+                {
+                    secondStarted.TrySetResult(token);
+                    await releaseSecond.Task;
+                }
+            },
+        });
+        try
+        {
+            await EnterConfiguration(bench.Master, slave);
+            await bench.Master.ActivateBitTimingAsync(0);
+            var firstToken = await started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            var send = slave.SendNmtCommandAsync(NmtCommand.Start, 2);
+            await WaitUntilAsync(() => HasHeldTransmit(slave));
+            // Cancel as soon as the new activation arrives, before its first switch delay ends.
+            Transmit(poke, LssFrames.ActivateBitTiming(ushort.MaxValue));
+            await cancelled.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            await slave.PostToActorAsync(() => { });
+            firstToken.WaitHandle.WaitOne(0).Should().BeTrue();
+            Volatile.Read(ref calls).Should().Be(1);
+            send.IsCompleted.Should().BeFalse();
+            // Supersede the long first delay and start the replacement immediately.
+            Transmit(poke, LssFrames.ActivateBitTiming(0));
+            await WaitUntilAsync(() => slave.LssActivationGeneration == 3);
+            secondStarted.Task.IsCompleted.Should().BeFalse("the previous adapter hook still runs");
+            releaseFirst.TrySetResult(true);
+            var secondToken = await secondStarted.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            firstToken.WaitHandle.WaitOne(0).Should().BeTrue("the old token stays usable until its cancellation handlers finish");
+            secondToken.IsCancellationRequested.Should().BeFalse("a replacement gets its own cancellation scope");
+            send.IsCompleted.Should().BeFalse("only a successful switch may release the held NMT");
+            releaseSecond.TrySetResult(true);
+            await send.WaitAsync(LssTestTiming.SchedulingBudget);
+            Volatile.Read(ref calls).Should().Be(2);
+        }
+        finally
+        {
+            releaseCancellation.Set();
+            releaseFirst.TrySetResult(true);
+            releaseSecond.TrySetResult(true);
+        }
+    }
+
+    [Fact]
+    public async Task A_Superseded_Queued_Adapter_Switch_Is_Skipped()
+    {
+        var started = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        using var bench = new Bench();
+        var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, token) =>
+            {
+                if (Interlocked.Increment(ref calls) != 1) return Task.CompletedTask;
+                started.TrySetResult(token);
+                return release.Task;
+            },
+        });
+        try
+        {
+            await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+            var token = await started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            Task skipped = Task.CompletedTask;
+            await slave.PostToActorAsync(() =>
+            {
+                slave.BeginLssSilence(0, TimeSpan.Zero);
+                skipped = slave.LssBitRateSwitchCompletion;
+                slave.BeginLssSilence(0, TimeSpan.Zero);
+            });
+            await WaitUntilAsync(() => token.IsCancellationRequested);
+            Volatile.Read(ref calls).Should().Be(1, "cancellation cannot forcibly finish a noncooperative hook");
+            skipped.IsCompleted.Should().BeFalse();
+            release.TrySetResult(true);
+            await slave.LssBitRateSwitchCompletion.WaitAsync(LssTestTiming.SchedulingBudget);
+            await skipped.Invoking(task => task.WaitAsync(LssTestTiming.SchedulingBudget))
+                .Should().ThrowAsync<OperationCanceledException>();
+            Volatile.Read(ref calls).Should().Be(2, "only the newest queued callback may start");
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Periodic_Heartbeats_Do_Not_Accumulate_During_A_Pending_Or_Failed_Switch(bool switchFails)
     {
         var clock = new ManualTimeSource();

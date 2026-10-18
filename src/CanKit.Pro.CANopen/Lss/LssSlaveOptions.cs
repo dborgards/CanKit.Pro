@@ -78,7 +78,9 @@ public sealed class LssSlaveOptions
     /// a zero delay. While the node is active, a failure is reported on its background exception
     /// event and keeps transmission suppressed until a later successful activation. Switch
     /// callbacks are serialized.
-    /// The token requests cancellation asynchronously when the node is disposed. The callback
+    /// The token requests cancellation asynchronously when another activation supersedes the
+    /// switch or the node is disposed. A replacement callback starts only after the previous
+    /// callback finishes, with a fresh token. The callback
     /// must cooperate with cancellation or provide its own timeout; a task that ignores the
     /// token cannot be forcibly stopped, and does not block disposal. Pending callbacks do not
     /// start after cancellation. The node never resumes transmission merely because a hook is slow.

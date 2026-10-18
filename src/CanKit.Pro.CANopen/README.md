@@ -507,6 +507,9 @@ non-zero time is a consumer whose timeout is armed immediately, so a producer th
 appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
 `0x700 + id`.
 
+For every node, periodic producer ticks are coalesced while a heartbeat send is outstanding;
+transmission recovery sends no catch-up burst, including when LSS is disabled.
+
 `HeartbeatTimeout`, `NodeGuardingTimeout` and `EmcyReceived` share the node's event queue
 with heartbeats, SYNC, PDOs and NMT, and keep their place in that order. They are the events
 the queue will not drop when a subscriber falls behind `EventQueueCapacity` (default 64). A
@@ -1022,11 +1025,13 @@ delay. While the node is active, failed or cancelled callbacks are reported on
 `BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
 Repeated activations serialize the callbacks.
 
-Disposing the node requests cancellation through the callback's lifetime token, without waiting
-for application cancellation handlers. Callbacks must honor that token or implement their own
-timeout. A callback that ignores cancellation can continue after disposal; queued callbacks are
-not started once cancellation is requested. The node never resumes transmission on an assumed
-switch completion or a timeout alone.
+A new activation requests cancellation of the previous callback as soon as it is received,
+including during the first switch delay. Disposal also requests cancellation. Neither waits for
+application cancellation handlers. The replacement callback gets a fresh token and starts only
+after the previous callback finishes. Callbacks must honor their token or implement their own
+timeout: a callback that ignores cancellation still delays later callbacks and can continue after
+disposal. Queued callbacks are not started after their cancellation is requested. The node never
+resumes transmission on an assumed switch completion or a timeout alone.
 
 NMT, boot-up and heartbeat that come due in that window are held; cancelled NMT commands are
 not sent, and heartbeat frames use the node-id active when they are sent.
