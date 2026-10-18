@@ -1018,13 +1018,24 @@ dictionary. Table 0 indexes follow `BaudRate_*` in the device description when t
 any of them; otherwise every named CiA 301 rate is accepted. `BitRateSwitch` is called when the
 pending timing becomes active; the callback can reconfigure the channel. The node stays silent
 until both the second switch delay and the callback complete successfully, including for a zero
-delay. Failed or cancelled callbacks are reported on `BackgroundExceptionOccurred` and keep the
-node silent until a later successful activation. Repeated activations serialize the callbacks.
+delay. While the node is active, failed or cancelled callbacks are reported on
+`BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
+Repeated activations serialize the callbacks.
+
+Disposing the node requests cancellation through the callback's lifetime token, without waiting
+for application cancellation handlers. Callbacks must honor that token or implement their own
+timeout. A callback that ignores cancellation can continue after disposal; queued callbacks are
+not started once cancellation is requested. The node never resumes transmission on an assumed
+switch completion or a timeout alone.
+
 NMT, boot-up and heartbeat that come due in that window are held; cancelled NMT commands are
-not sent, and heartbeat frames use the node-id active when they are sent. A flying-master Reset
-Communication is applied only once its NMT frame has been sent. An SRDO pair already reserved
-finishes before switching starts; pairs due during silence are dropped as a unit. A GFC command
-that cannot be transmitted fails with `CanOpenTransportException`. Other frames are not sent.
+not sent, and heartbeat frames use the node-id active when they are sent.
+Periodic heartbeat ticks are coalesced while a send is outstanding, so recovery does not replay
+a backlog. Disposal discards queued heartbeats.
+A flying-master Reset Communication is applied only once its NMT frame has been sent. An SRDO
+pair already reserved finishes before switching starts; pairs due during silence are dropped
+as a unit. A GFC command that cannot be transmitted fails with `CanOpenTransportException`.
+Other frames are not sent.
 
 ```csharp
 var store = new MyLssStore();

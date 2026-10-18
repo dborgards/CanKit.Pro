@@ -227,8 +227,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _srdoInFlight = new bool[_srdoCount + 1];
         _srdoPending = new SrdoPair?[_srdoCount + 1];
         _srdo = new Safety.SrdoEngine(_actor, _actor.TimeSource, _deadlines, _od, _nodeId, _srdoCount, this);
-        _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0,
-            () => { _ = EmitHeartbeat((byte)_state); });
+        _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0, EmitPeriodicHeartbeat);
         _heartbeatConsumer = new HeartbeatConsumer(_deadlines);
         _heartbeatConsumer.TimedOut += (producer, timeout) => RaiseHeartbeatTimeout(producer, timeout);
         AttachFlyingMasterHeartbeatWatch();
@@ -498,6 +497,24 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // before the tick that became due while the application's reset hook ran, and before the
     // reply to a poll that was already in the mailbox (Codex and Bugbot on #133). Actor loop only.
     private Task _heartbeatSendChain = Task.CompletedTask;
+    private bool _periodicHeartbeatPending;
+
+    internal Task HeartbeatSendChain => _heartbeatSendChain;
+
+    private void EmitPeriodicHeartbeat()
+    {
+        // A timer tick is replaceable. Keep one outstanding periodic send even if a switch
+        // or the driver holds it indefinitely, rather than retaining a continuation per tick.
+        if (_periodicHeartbeatPending) return;
+        _periodicHeartbeatPending = true;
+        var send = EmitHeartbeat((byte)_state);
+        Action completed = () => _periodicHeartbeatPending = false;
+        _ = send.ContinueWith(task =>
+        {
+            _ = task.Exception;
+            RunOnActor(completed);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
 
     private Task EmitHeartbeat(byte payload)
     {
@@ -509,7 +526,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // The id is the one active when this frame is reached, not the one active when
                 // it was queued behind an earlier heartbeat. An unconfigured slave has nothing
                 // to announce on 0x700.
-                if (!CanOpenCobId.IsActiveNodeId(_nodeId))
+                if (Volatile.Read(ref _disposed) != 0 || !CanOpenCobId.IsActiveNodeId(_nodeId))
                     return Task.CompletedTask;
                 return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame);
             },
@@ -831,6 +848,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private bool BeginDispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+        CancelLssBitRateSwitch();
         try { _readerCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
 
         // On the actor already (a subscriber disposing from ApplicationReset, say) the cleanup runs
@@ -854,6 +872,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _heartbeatProducer.Dispose();
         _heartbeatConsumer.Dispose();
         CancelLssActivation();
+        DisposeLssBitRateLifetime();
         _syncProducerHandle?.Dispose();
         _syncProducerHandle = null;
         DisposePdoRuntime();
@@ -2721,7 +2740,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// Sends control frames in order on a single background task so Reset bootup (0x00) cannot
     /// race behind the subsequent Pre-Operational heartbeat.
     /// </summary>
-    private Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
+    internal Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
         => SendOrderedControlFrames(onSendCompleted: null, frames);
 
     /// <summary>

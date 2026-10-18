@@ -48,6 +48,9 @@ internal sealed partial class CanOpenNode : ILssSlave
     private IDisposable? _lssActivation;
     private int _lssSilent;
     private Task _lssBitRateSwitch = Task.CompletedTask;
+    private readonly CancellationTokenSource _lssBitRateLifetime = new();
+    private Task _lssBitRateCancellation = Task.CompletedTask;
+    private bool _lssBitRateCleanupStarted;
     private bool _lssDelayElapsed;
     // Sends that passed the silence check and have not reached ReleaseTransmit. BeginLssSilence
     // waits for this to hit zero before raising the flag, still under _lssTxGate, so a frame
@@ -56,6 +59,20 @@ internal sealed partial class CanOpenNode : ILssSlave
     private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
     private readonly object _lssTxGate = new();
+
+    // Internal synchronization seams for protocol tests; no private field names are required.
+    internal bool HasLssTransmitsInFlight
+    {
+        get { lock (_lssTxGate) return _lssTxInFlight != 0; }
+    }
+
+    internal bool HasHeldLssTransmits
+    {
+        get { lock (_lssTxGate) return _lssHeldTx.Count != 0; }
+    }
+
+    internal int LssActivationGeneration => Volatile.Read(ref _lssActivationGeneration);
+    internal Task LssBitRateSwitchCompletion => _lssBitRateSwitch;
 
     /// <inheritdoc />
     LssState ILssSlave.State
@@ -554,21 +571,52 @@ internal sealed partial class CanOpenNode : ILssSlave
         if (hook is null || !TryResolveBitRate(selector, index, out var rate)) return _lssBitRateSwitch;
         // Repeated activate commands must not run two adapter reconfigurations concurrently.
         var previous = _lssBitRateSwitch;
+        var cancellationToken = _lssBitRateLifetime.Token;
         var switching = Task.Run(async () =>
         {
             await previous.ContinueWith(static completed => { _ = completed.Exception; },
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
-            await hook(rate, CancellationToken.None).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            await hook(rate, cancellationToken).ConfigureAwait(false);
         });
         _lssBitRateSwitch = switching;
         _ = switching.ContinueWith(
-            task => RaiseBackgroundException(task.IsCanceled
-                ? new OperationCanceledException("The LSS bit-rate switch was cancelled.")
-                : task.Exception!.GetBaseException()),
+            task =>
+            {
+                var error = task.IsCanceled
+                    ? new OperationCanceledException("The LSS bit-rate switch was cancelled.")
+                    : task.Exception!.GetBaseException();
+                if (Volatile.Read(ref _disposed) == 0) RaiseBackgroundException(error);
+            },
             CancellationToken.None,
             TaskContinuationOptions.NotOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
         return switching;
+    }
+
+    private void CancelLssBitRateSwitch()
+    {
+        // Application cancellation callbacks may block or throw. Never run them on the actor
+        // or on the thread disposing the node.
+        _lssBitRateCancellation = Task.Run(() =>
+        {
+            try { _lssBitRateLifetime.Cancel(); }
+            catch (AggregateException) { /* every cancellation callback was invoked */ }
+        });
+    }
+
+    private void DisposeLssBitRateLifetime()
+    {
+        if (_lssBitRateCleanupStarted) return;
+        _lssBitRateCleanupStarted = true;
+        // Keep the source usable until both the hook chain and cancellation callbacks finish.
+        _ = Task.WhenAll(_lssBitRateSwitch, _lssBitRateCancellation).ContinueWith(
+            finished =>
+            {
+                _ = finished.Exception;
+                _lssBitRateLifetime.Dispose();
+            },
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private bool TryResolveBitRate(byte selector, byte index, out int bitsPerSecond)

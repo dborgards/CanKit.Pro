@@ -75,8 +75,13 @@ public sealed class LssSlaveOptions
     /// open, so the callback reopens the channel or records the rate. <see langword="null"/>
     /// (the default) only updates the slave's active table entry. Transmission resumes only
     /// after both the second switch delay and this task complete successfully, including for
-    /// a zero delay. A failure is reported on the node's background exception event and keeps
-    /// transmission suppressed until a later successful activation. Switch callbacks are serialized.
+    /// a zero delay. While the node is active, a failure is reported on its background exception
+    /// event and keeps transmission suppressed until a later successful activation. Switch
+    /// callbacks are serialized.
+    /// The token requests cancellation asynchronously when the node is disposed. The callback
+    /// must cooperate with cancellation or provide its own timeout; a task that ignores the
+    /// token cannot be forcibly stopped, and does not block disposal. Pending callbacks do not
+    /// start after cancellation. The node never resumes transmission merely because a hook is slow.
     /// </summary>
     public Func<int, CancellationToken, Task>? BitRateSwitch { get; init; }
 

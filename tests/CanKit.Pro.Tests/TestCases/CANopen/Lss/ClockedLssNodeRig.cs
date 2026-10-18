@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Reflection;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -19,10 +18,6 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Lss;
 /// </summary>
 internal sealed class ClockedLssNodeRig : IDisposable
 {
-    private static readonly FieldInfo TransmitGate = typeof(CanOpenNode)
-        .GetField("_lssTxGate", BindingFlags.Instance | BindingFlags.NonPublic)!;
-    private static readonly FieldInfo InFlight = typeof(CanOpenNode)
-        .GetField("_lssTxInFlight", BindingFlags.Instance | BindingFlags.NonPublic)!;
     private readonly VirtualClock _clock = new();
     private readonly ProtocolActor _timers;
     private readonly LssTestService _service = new();
@@ -88,12 +83,9 @@ internal sealed class ClockedLssNodeRig : IDisposable
             await service.Subscription.Enqueue(Frame(frame));
             // Enqueue completes after the reader posts the frame; this getter is an actor barrier.
             _ = ((ILssSlave)node).State;
-            var gate = TransmitGate.GetValue(node)!;
             var limit = DateTime.UtcNow + LssTestTiming.SchedulingBudget;
-            while (true)
+            while (node.HasLssTransmitsInFlight)
             {
-                lock (gate)
-                    if ((int)InFlight.GetValue(node)! == 0) break;
                 if (DateTime.UtcNow >= limit) throw new TimeoutException("The node reply did not drain.");
                 await Task.Yield();
             }
