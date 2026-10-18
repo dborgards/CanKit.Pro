@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Core.Exceptions;
@@ -255,9 +256,8 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private async Task SendHeldInOrder(HeldTransmit[] held)
     {
-        foreach (var item in held)
+        foreach (var item in held.Where(static item => !item.Signal.Task.IsCanceled))
         {
-            if (item.Signal.Task.IsCanceled) continue;
             // Every outcome completes the signal. SendNmtReporting can surface a driver exception
             // that is not a CanKitException; leaving the signal unfinished would stall the
             // flying-master NMT chain, and the frames queued behind this one would stay held.

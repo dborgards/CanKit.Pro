@@ -631,11 +631,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
             return confirmation.Confirmed ? null : new CanOpenTransportException(
                 $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {confirmation.FailureReason}.");
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return ex as CanOpenTransportException ?? new CanOpenTransportException(
                 $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
