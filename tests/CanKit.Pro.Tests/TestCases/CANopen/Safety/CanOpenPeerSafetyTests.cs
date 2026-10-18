@@ -32,9 +32,16 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
-    /// <summary>The fixture's text, line endings normalised: what the files below derive from.</summary>
+    /// <summary>The fixture's text, line endings normalised: what the files below derive from.
+    /// Joined with the directory separator rather than Path.Combine, which CodeQL flags ("may
+    /// silently drop its earlier arguments") even over literal segments, as
+    /// <c>CanOpenDeviceDescriptionPropertyTests.Fixture</c> does.</summary>
     private static string FixtureText()
-        => System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n");
+    {
+        var sep = System.IO.Path.DirectorySeparatorChar;
+        var dir = AppContext.BaseDirectory.TrimEnd(sep, System.IO.Path.AltDirectorySeparatorChar);
+        return System.IO.File.ReadAllText(dir + sep + "TestCases" + sep + "CANopen" + sep + "Fixtures" + sep + "safety.dcf").Replace("\r\n", "\n");
+    }
 
     /// <summary>The file that lists every safety object of node 5 (the peer gate reads it).</summary>
     private static CanOpenDeviceDescription PeerFile() => CanOpenDeviceDescription.ParseDcf(FixtureText());
