@@ -467,3 +467,8 @@ Einstufung als optional zurückgenommen und ihn als Pflicht der Master-Rolle fes
 Mit #164 ist die Wahl des aktiven Masters und der Boot-up-Manager an CiA 302-2 Version 4.1.0
 gebunden; Frage 4 und Frage 5 sind damit beantwortet. Bit-granulares Mapping, CiA 304
 und CiA 305 bleiben außerhalb beider Runden.
+
+Nachgetragen (17.10.2026): CiA 304 ist seit dem 09.10. als FR-CO-035..046 im Lieferumfang.
+CiA 305 v3.0.0 ist ab FR-CO-047 ebenfalls im Lieferumfang, beginnend mit dem LSS-Master.
+Der Satz oben bleibt stehen, weil er den Zuschnitt vom 16.09. festhält. Bit-granulares
+Mapping bleibt draußen.
