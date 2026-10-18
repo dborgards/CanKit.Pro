@@ -1037,6 +1037,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         {
             private readonly ISubscription _inner;
             private readonly FaultingReadService _owner;
+            private bool _opened;
+            private bool _delivered;
 
             public FaultingSubscription(ISubscription inner, FaultingReadService owner)
             {
@@ -1048,17 +1050,34 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             {
                 get
                 {
-                    _owner.Opened();
+                    Opened();
                     if (_owner._faultImmediately)
                         throw new InvalidOperationException("reader failed");
                     return FaultAfter(_inner.Frames);
                 }
             }
 
-            public bool TryRead(out CanFrameEvent frameEvent) => _inner.TryRead(out frameEvent);
+            public bool TryRead(out CanFrameEvent frameEvent)
+            {
+                if (!_inner.TryRead(out frameEvent)) return false;
+                _delivered = true;
+                return true;
+            }
 
             public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
-                => _inner.WaitToReadAsync(cancellationToken);
+            {
+                Opened();
+                if (_owner._faultImmediately || _delivered)
+                    throw new InvalidOperationException("reader failed");
+                return _inner.WaitToReadAsync(cancellationToken);
+            }
+
+            private void Opened()
+            {
+                if (_opened) return;
+                _opened = true;
+                _owner.Opened();
+            }
 
             public void Reconfigure(CanIdFilter filter) => _inner.Reconfigure(filter);
 

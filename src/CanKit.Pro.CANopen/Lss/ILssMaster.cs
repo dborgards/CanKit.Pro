@@ -60,7 +60,8 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <summary>
     /// Tells every slave in LSS configuration to copy the pending bit rate to the active one
     /// after <paramref name="switchDelayMilliseconds"/>, and to stay silent for a second period
-    /// of the same length (§6.4.4, §7.5.3). This call waits out both periods. When
+    /// of the same length (§6.4.4, §7.5.3). Both periods are measured from the activation
+    /// transmission; delayed confirmations do not restart them. This call waits out both periods. When
     /// <paramref name="bitsPerSecond"/> and <see cref="LssMasterOptions.BitRateSwitch"/> are both
     /// set, the switch runs after the first period, before slaves may transmit again.
     /// When <paramref name="returnToWaiting"/> is <see langword="true"/>, switch state global

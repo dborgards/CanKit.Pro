@@ -61,6 +61,9 @@ internal sealed class LssTestSubscription : ISubscription
     public TaskCompletionSource<bool> CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Func<CanFrameEvent, bool>? Filter { get; set; }
     public bool ParkReader { get; set; }
+    public Exception? ReadFailure { get; set; }
+    public bool FailAfterFirstRead { get; set; }
+    private bool _readOne;
     public bool Disposed { get; private set; }
     public IAsyncEnumerable<CanFrameEvent> Frames => ReadFramesAsync();
 
@@ -74,8 +77,10 @@ internal sealed class LssTestSubscription : ISubscription
 
     public bool TryRead(out CanFrameEvent frameEvent)
     {
+        if (ReadFailure is { } error && (!FailAfterFirstRead || _readOne)) throw error;
         if (_frames.Reader.TryRead(out var item))
         {
+            _readOne = true;
             frameEvent = item.Frame;
             item.Delivered.TrySetResult(true);
             return true;
@@ -84,7 +89,11 @@ internal sealed class LssTestSubscription : ISubscription
         return false;
     }
     public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
-        => _frames.Reader.WaitToReadAsync(cancellationToken);
+    {
+        Started.TrySetResult(true);
+        return ParkReader ? new ValueTask<bool>(WaitParkedAsync(cancellationToken))
+            : _frames.Reader.WaitToReadAsync(cancellationToken);
+    }
     public void Reconfigure(CanIdFilter filter) => throw new NotSupportedException();
     public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => throw new NotSupportedException();
 
@@ -97,14 +106,18 @@ internal sealed class LssTestSubscription : ISubscription
     private async IAsyncEnumerable<CanFrameEvent> ReadFramesAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        Started.TrySetResult(true);
+        while (await WaitToReadAsync(cancellationToken))
+            while (TryRead(out var frame)) yield return frame;
+    }
+
+    private async Task<bool> WaitParkedAsync(CancellationToken cancellationToken)
+    {
         try
         {
-            if (ParkReader)
+            // Ignore cancellation until the test releases this intentionally stalled reader.
+            await Release.Task;
+            if (cancellationToken.IsCancellationRequested)
             {
-                // Deliberately emulate a subscription that cannot finish during Dispose's
-                // bounded wait. Release is always signalled by the test's finally block.
-                await Release.Task;
                 try
                 {
                     using var handle = cancellationToken.WaitHandle;
@@ -114,14 +127,8 @@ internal sealed class LssTestSubscription : ISubscription
                 {
                     CancellationObserved.TrySetException(ex);
                 }
-                yield break;
             }
-
-            await foreach (var frame in _frames.Reader.ReadAllAsync(cancellationToken))
-            {
-                yield return frame.Frame;
-                frame.Delivered.TrySetResult(true);
-            }
+            return false;
         }
         finally
         {

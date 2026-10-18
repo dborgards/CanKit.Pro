@@ -198,4 +198,157 @@ public class LssMasterBoundaryTests
         (await rig.RunAsync(scan)).Succeeded.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task Activation_And_Waiting_Confirmations_Do_Not_Restart_The_Switch_Delay()
+    {
+        var switched = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (_, _) => { switched.TrySetResult(true); return Task.CompletedTask; },
+        });
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame =>
+        {
+            var confirmation = await send(frame);
+            rig.Clock.Advance(TimeSpan.FromMilliseconds(
+                frame.Data.Span[0] == LssCommand.ActivateBitTiming ? 60 : 30));
+            return confirmation;
+        };
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(10));
+        switched.Task.IsCompleted.Should().BeFalse();
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(9));
+        switched.Task.IsCompleted.Should().BeFalse();
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        await switched.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(200));
+    }
+
+    [Theory]
+    [InlineData(150)]
+    [InlineData(250)]
+    public async Task A_Late_Activation_Confirmation_Waits_Only_The_Remaining_Absolute_Period(int latency)
+    {
+        bool switched = false;
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (_, _) => { switched = true; return Task.CompletedTask; },
+        });
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame =>
+        {
+            var confirmation = await send(frame);
+            rig.Clock.Advance(TimeSpan.FromMilliseconds(latency));
+            return confirmation;
+        };
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000);
+        switched.Should().BeTrue("the first deadline already passed before confirmation");
+        if (latency < 200)
+        {
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(200 - latency));
+            activating.IsCompleted.Should().BeFalse();
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200 - latency));
+        }
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, latency)));
+    }
+
+    [Fact]
+    public async Task An_Unstamped_Activation_Uses_The_Current_Clock_As_Its_Fallback()
+    {
+        using var rig = new ClockedLssRig();
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame => (await send(frame)) with { HostTransmitTimestamp = 0 };
+
+        var activating = rig.Master.ActivateBitTimingAsync(100);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Theory]
+    [InlineData(0, true)]
+    [InlineData(1, false)]
+    public async Task The_Deadline_Drains_Stamped_Replies_While_The_Background_Reader_Is_Parked(int offset, bool accepted)
+    {
+        using var service = new LssTestService();
+        service.Subscription.ParkReader = true;
+        Task? forwarded = null;
+        service.Send = frame =>
+        {
+            var payload = new byte[LssFrames.Length];
+            payload[0] = frame.Data.Span[0];
+            payload[1] = 0x42;
+            // Queue the frame before confirmation, without waiting for the parked reader.
+            long arrival = 1000 + Stopwatch.Frequency + offset;
+            forwarded = service.Subscription.Enqueue(new CanFrameEvent(
+                new CanFrameView(CanFrameType.Can20, (int)CanOpenCobId.LssSlaveMessage, payload, FrameFlags.None),
+                false, TimeSpan.Zero, arrival));
+            return Task.FromResult(new TxConfirmation
+            {
+                Confirmed = true,
+                HostHandoffTimestamp = 500,
+                HostTransmitTimestamp = 1000,
+            });
+        };
+        using var master = CanOpenLss.OpenMaster(service);
+        try
+        {
+            await service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (accepted)
+                (await master.InquireNodeIdAsync()).Should().Be(0x42);
+            else
+            {
+                var inquire = async () => await master.InquireNodeIdAsync();
+                await inquire.Should().ThrowAsync<LssTimeoutException>();
+            }
+            await forwarded!.WaitAsync(TimeSpan.FromSeconds(5));
+            service.Subscription.Finished.Task.IsCompleted.Should().BeFalse();
+        }
+        finally
+        {
+            service.Subscription.Release.TrySetResult(true);
+            await service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task A_Subscription_Pull_Failure_Is_Reported_As_A_Transport_Error()
+    {
+        using var service = new LssTestService();
+        var failure = new InvalidOperationException("pull failed");
+        service.Subscription.ReadFailure = failure;
+        service.Send = _ => Task.FromResult(new TxConfirmation { Confirmed = true });
+        using var master = CanOpenLss.OpenMaster(service);
+
+        var inquire = async () => await master.InquireNodeIdAsync();
+        var error = await inquire.Should().ThrowAsync<CanOpenTransportException>();
+        error.Which.InnerException.Should().BeSameAs(failure);
+    }
+
+    [Fact]
+    public async Task A_Drained_Match_Survives_A_Subsequent_Subscription_Pull_Failure()
+    {
+        using var service = new LssTestService();
+        service.Subscription.ReadFailure = new InvalidOperationException("pull failed after response");
+        service.Subscription.FailAfterFirstRead = true;
+        service.Send = frame =>
+        {
+            _ = service.Subscription.Enqueue(new CanFrameEvent(new CanFrameView(CanFrameType.Can20,
+                (int)CanOpenCobId.LssSlaveMessage, LssFrames.Command(LssCommand.IdentifyNonConfiguredSlave),
+                FrameFlags.None), false, TimeSpan.Zero));
+            return Task.FromResult(new TxConfirmation { Confirmed = true });
+        };
+        using var master = CanOpenLss.OpenMaster(service);
+
+        (await master.IdentifyNonConfiguredSlavesAsync().WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+    }
+
 }

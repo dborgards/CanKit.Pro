@@ -62,6 +62,7 @@ internal sealed partial class LssMaster : ILssMaster
     private readonly ProtocolActor _timers;
     private readonly bool _ownsTimers;
     private readonly ISubscription _subscription;
+    private readonly object _receiveGate = new();
     private readonly CancellationTokenSource _readerCts = new();
     private readonly Task _readerTask;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -159,21 +160,25 @@ internal sealed partial class LssMaster : ILssMaster
             throw new ArgumentException("Returning to waiting after a zero delay requires a bit rate and BitRateSwitch callback.");
         return Execute(async ct =>
         {
-            await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
+            var sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
+            var time = _timers.TimeSource;
+            long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
+            long switchAt = TickMath.DueAt(start, delay, time.Frequency);
+            long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
             // A positive delay leaves the slave on the current rate, so waiting still reaches it.
             // A zero delay applies the new rate inside that activate frame. Waiting has to follow
             // this master's switch, or it goes out at the rate the slave just left.
             if (returnToWaiting && delay > TimeSpan.Zero)
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
-                await DelayAsync(delay, ct).ConfigureAwait(false);
+                await DelayUntilAsync(switchAt, ct).ConfigureAwait(false);
             if (bitsPerSecond is int rate && Options.BitRateSwitch is { } switchRate)
                 await switchRate(rate, ct).ConfigureAwait(false);
             if (returnToWaiting && delay == TimeSpan.Zero)
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
-                await DelayAsync(delay, ct).ConfigureAwait(false);
+                await DelayUntilAsync(resumeAt, ct).ConfigureAwait(false);
         }, cancellationToken);
     }
 
@@ -441,11 +446,16 @@ internal sealed partial class LssMaster : ILssMaster
         }
     }
 
-    private async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+    private Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+        => DelayUntilAsync(TickMath.DueAt(_timers.TimeSource.GetTimestamp(), delay,
+            _timers.TimeSource.Frequency), cancellationToken);
+
+    private async Task DelayUntilAsync(long deadline, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (_timers.TimeSource.GetTimestamp() >= deadline) return;
         var elapsed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var timer = _timers.Schedule(delay, () => elapsed.TrySetResult(true));
+        using var timer = _timers.ScheduleAt(deadline, () => elapsed.TrySetResult(true));
         using var cancelled = cancellationToken.Register(() => elapsed.TrySetCanceled());
         await elapsed.Task.ConfigureAwait(false);
     }
@@ -458,12 +468,47 @@ internal sealed partial class LssMaster : ILssMaster
     private void TakeAvailable(Sent sent, long deadline, Func<ReadOnlyMemory<byte>, bool> match, ref byte[]? first,
         bool stopAtFirst)
     {
-        while (_inbound.Reader.TryRead(out var item))
+        lock (_receiveGate)
         {
-            if (!InWindow(sent, item.Arrival, deadline)) continue;
-            if (!match(item.Data)) continue;
-            first ??= item.Data.ToArray();
-            if (stopAtFirst) return;
+            CanOpenTransportException? readError = null;
+            try
+            {
+                ForwardAvailable();
+            }
+            catch (CanOpenTransportException ex)
+            {
+                readError = ex;
+            }
+            while (_inbound.Reader.TryRead(out var item))
+            {
+                if (!InWindow(sent, item.Arrival, deadline)) continue;
+                if (!match(item.Data)) continue;
+                first ??= item.Data.ToArray();
+                if (stopAtFirst) return;
+            }
+            if (readError is not null && first is null) throw readError;
+        }
+    }
+
+    // Both consumers hold _receiveGate from dequeue through forwarding. At a deadline the
+    // command can drain the subscription itself without overtaking a frame held by the reader.
+    private void ForwardAvailable()
+    {
+        try
+        {
+            while (_subscription.TryRead(out var frameEvent))
+            {
+                var data = frameEvent.Frame.Data;
+                if (data.Length != LssFrames.Length) continue;
+                _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, data));
+            }
+        }
+        catch (Exception ex)
+        {
+            var error = new CanOpenTransportException("The LSS master reader ended before a slave answered.", ex);
+            _inbound.Writer.TryComplete(error);
+            _readerCts.Cancel();
+            throw error;
         }
     }
 
@@ -491,14 +536,9 @@ internal sealed partial class LssMaster : ILssMaster
     {
         try
         {
-            await foreach (var frameEvent in _subscription.Frames.WithCancellation(_readerCts.Token)
-                               .ConfigureAwait(false))
+            while (await _subscription.WaitToReadAsync(_readerCts.Token).ConfigureAwait(false))
             {
-                var data = frameEvent.Frame.Data;
-                if (data.Length != LssFrames.Length) continue;
-                // The event owns its payload for as long as the event lives. Only a frame that
-                // matches a waiter is copied.
-                _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, data));
+                lock (_receiveGate) ForwardAvailable();
             }
         }
         catch (OperationCanceledException)
