@@ -1519,6 +1519,72 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Draining_Existing_Sends_Closes_The_Gate_To_New_Transmissions(bool ordered)
+    {
+        var driver = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var switchStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var switchFinished = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var frames = new System.Collections.Concurrent.ConcurrentQueue<uint>();
+        using var service = new LssTestService
+        {
+            Send = frame =>
+            {
+                frames.Enqueue((uint)frame.ID);
+                if (frame.ID == CanOpenCobId.Heartbeat(5))
+                {
+                    entered.TrySetResult(true);
+                    return driver.Task;
+                }
+                return Task.FromResult(new TxConfirmation { Confirmed = true });
+            },
+        };
+        using var slave = new CanOpenNode(service, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    switchStarted.TrySetResult(true);
+                    return switchFinished.Task;
+                },
+            },
+        }, ownsService: false);
+        await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+        slave.ObjectDictionary.WriteUnsigned(0x1005, 0, CanOpenCobId.Sync);
+        await slave.PostToActorAsync(() => { });
+        var starting = slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+        try
+        {
+            await WaitUntilAsync(() => slave.IsWaitingForLssTransmits);
+            var nmt = slave.SendNmtCommandAsync(NmtCommand.Start, 2);
+            Task suppressed = ordered
+                ? slave.SendOrderedControlFrames((CanOpenCobId.SdoTx(5), new byte[] { 1 }))
+                : slave.SendSyncAsync();
+            await suppressed.WaitAsync(LssTestTiming.SchedulingBudget);
+            frames.Should().Equal(new[] { CanOpenCobId.Heartbeat(5) }, "only the previously reserved boot-up may reach the driver");
+            HasHeldTransmit(slave).Should().BeTrue("new NMT commands are held as soon as the gate closes");
+            nmt.IsCompleted.Should().BeFalse();
+            switchStarted.Task.IsCompleted.Should().BeFalse("the existing driver send must finish first");
+            driver.TrySetResult(new TxConfirmation { Confirmed = true });
+            await starting.WaitAsync(LssTestTiming.SchedulingBudget);
+            await switchStarted.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            nmt.IsCompleted.Should().BeFalse("the adapter switch is still pending");
+            switchFinished.TrySetResult(true);
+            await nmt.WaitAsync(LssTestTiming.SchedulingBudget);
+            frames.Should().Equal(CanOpenCobId.Heartbeat(5), CanOpenCobId.NmtCommand);
+        }
+        finally
+        {
+            driver.TrySetResult(new TxConfirmation { Confirmed = true });
+            switchFinished.TrySetResult(true);
+            await starting.WaitAsync(LssTestTiming.SchedulingBudget);
+        }
+    }
+
+    [Theory]
     [InlineData(0x20)]
     [InlineData(0xFF)]
     public async Task A_Held_Heartbeat_Uses_The_Node_Id_Active_After_Reset(byte nextNodeId)

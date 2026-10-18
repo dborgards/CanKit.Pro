@@ -54,8 +54,8 @@ internal sealed partial class CanOpenNode : ILssSlave
     private bool _lssBitRateCleanupStarted;
     private bool _lssDelayElapsed;
     // Sends that passed the silence check and have not reached ReleaseTransmit. BeginLssSilence
-    // waits for this to hit zero before raising the flag, still under _lssTxGate, so a frame
-    // cannot be dropped or leave once the second delay has started.
+    // closes the gate before waiting for these reservations to drain, so no later frame can
+    // prolong the wait or reach the driver before the adapter switch finishes.
     private int _lssTxInFlight;
     private int _lssWaitingForTransmits;
     private byte[]? _lssDeferredReply;
@@ -217,13 +217,13 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         lock (_lssTxGate)
         {
+            Volatile.Write(ref _lssSilent, 1);
             while (_lssTxInFlight != 0)
             {
                 Volatile.Write(ref _lssWaitingForTransmits, 1);
                 Monitor.Wait(_lssTxGate);
             }
             Volatile.Write(ref _lssWaitingForTransmits, 0);
-            Volatile.Write(ref _lssSilent, 1);
         }
     }
 
@@ -544,8 +544,8 @@ internal sealed partial class CanOpenNode : ILssSlave
         // keeps the slave quiet until that callback, which is the clock Schedule uses.
         // The flag is read under this gate by a transmit on another thread, and cleared
         // under it, so the write that starts the silence takes the same gate.
-        // In-flight sends reserved the right to touch the driver. They finish first; the
-        // flag goes up under the same gate, so the next frame is held or dropped instead.
+        // Close admission under the gate before draining existing driver reservations.
+        // Already reserved sends finish first; later frames are held or dropped immediately.
         WaitForTransmitsToDrain();
         // Disposal can begin on another thread while the actor waits for the driver.
         if (Volatile.Read(ref _disposed) != 0) return;

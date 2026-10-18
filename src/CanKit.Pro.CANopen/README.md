@@ -1035,6 +1035,8 @@ resumes transmission on an assumed switch completion or a timeout alone.
 
 NMT, boot-up and heartbeat that come due in that window are held; cancelled NMT commands are
 not sent, and heartbeat frames use the node-id active when they are sent.
+The transmit gate closes before waiting for existing driver reservations to finish, so new
+traffic cannot prolong the drain or reach the driver before the switch completes.
 Periodic heartbeat ticks are coalesced while a send is outstanding, so recovery does not replay
 a backlog. Disposal discards queued heartbeats.
 A flying-master Reset Communication is applied only once its NMT frame has been sent. An SRDO
