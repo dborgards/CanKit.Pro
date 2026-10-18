@@ -548,45 +548,17 @@ internal sealed partial class CanOpenNode
         // holds the frame: completing with true here would apply the reset before it is sent.
         // The same gate as every other transmit: a frame already reserved goes out before
         // silence starts, and one that arrives during the delay is held.
+        var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
         if (GateTransmit(CanOpenCobId.NmtCommand, payload, null) is { } held)
-            return (Task<bool>)held;
-        return SendNmtPayload(payload);
-    }
-
-    private Task<bool> SendNmtPayload(byte[] payload)
-    {
-        CanFrame frame;
-        try
-        {
-            frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
-        }
-        catch (Exception)
-        {
-            ReleaseTransmit();
-            throw;
-        }
-
+            return held;
         var send = Task.Run(async () =>
         {
-            try
-            {
-                var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
-                if (conf.Confirmed) return true;
-                RaiseBackgroundException(new CanOpenTransportException(
-                    $"CANopen frame TX on COB-ID 0x{CanOpenCobId.NmtCommand:X3} failed: {conf.FailureReason}."));
-                return false;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
+            var conf = await SendReservedFrame(frame).ConfigureAwait(false);
+            if (conf.Confirmed) return true;
+            RaiseBackgroundException(new CanOpenTransportException(
+                $"CANopen frame TX on COB-ID 0x{CanOpenCobId.NmtCommand:X3} failed: {conf.FailureReason}."));
+            return false;
         });
-        _ = send.ContinueWith(
-            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
-            this,
-            CancellationToken.None,
-            TaskContinuationOptions.None,
-            TaskScheduler.Default);
         return send;
     }
 }

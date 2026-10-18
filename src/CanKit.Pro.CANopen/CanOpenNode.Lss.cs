@@ -136,10 +136,10 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// Silence cannot start while that slot is open, and a holdable frame that arrives once
     /// silence has started is queued rather than dropped.
     /// </summary>
-    private Task? GateTransmit(uint cobId, byte[] payload, Action<CanOpenTransportException?>? onSendCompleted)
+    private Task<bool>? GateTransmit(uint cobId, byte[] payload, Action<CanOpenTransportException?>? onSendCompleted)
     {
         Action? reportSuppressed = null;
-        Task? finished = null;
+        Task<bool>? finished = null;
         lock (_lssTxGate)
         {
             if (IsLssSilent())
@@ -147,7 +147,7 @@ internal sealed partial class CanOpenNode : ILssSlave
                 if (HoldsAcrossLssSilence(cobId))
                     return EnqueueHeldTransmit(cobId, payload);
                 reportSuppressed = () => onSendCompleted?.Invoke(null);
-                finished = Task.CompletedTask;
+                finished = Task.FromResult(true);
             }
             else
             {
@@ -244,14 +244,14 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         foreach (var item in held)
         {
-            // Every outcome completes the signal. SendNmtPayload can surface a driver exception
+            // Every outcome completes the signal. SendNmtReporting can surface a driver exception
             // that is not a CanKitException; leaving the signal unfinished would stall the
             // flying-master NMT chain, and the frames queued behind this one would stay held.
             // Through the gate again: a silence that started while this flush was in
             // progress holds what has not reached the driver yet.
-            Task<bool> send = item.CobId == CanOpenCobId.NmtCommand
+            Task<bool> send = item.IsNmt
                 ? SendNmtReporting(item.Payload)
-                : SendHeldControl(item.CobId, item.Payload);
+                : SendHeldHeartbeat(item.Payload);
             await send.ContinueWith(
                 static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
                 item.Signal,
@@ -261,9 +261,13 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
     }
 
-    private async Task<bool> SendHeldControl(uint cobId, byte[] payload)
+    private async Task<bool> SendHeldHeartbeat(byte[] payload)
     {
-        await SendControlFrame(cobId, payload).ConfigureAwait(false);
+        // A reset may have changed the identity while this heartbeat or boot-up was held.
+        // Like EmitHeartbeat, resolve it when reached and discard it if no identity is active.
+        byte nodeId = _nodeId;
+        if (!CanOpenCobId.IsActiveNodeId(nodeId)) return false;
+        await SendControlFrame(CanOpenCobId.Heartbeat(nodeId), payload).ConfigureAwait(false);
         return true;
     }
 
@@ -303,12 +307,12 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         public HeldTransmit(uint cobId, byte[] payload, TaskCompletionSource<bool> signal)
         {
-            CobId = cobId;
+            IsNmt = cobId == CanOpenCobId.NmtCommand;
             Payload = payload;
             Signal = signal;
         }
 
-        public uint CobId { get; }
+        public bool IsNmt { get; }
         public byte[] Payload { get; }
         public TaskCompletionSource<bool> Signal { get; }
     }

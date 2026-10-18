@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -34,6 +35,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         FastscanTimeout = TimeSpan.FromMilliseconds(500),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        BitRateSwitch = (_, _) => Task.CompletedTask,
     };
 
     private static async Task WaitUntilAsync(Func<bool> condition)
@@ -1478,6 +1480,100 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)) >= 2);
     }
 
+    [Theory]
+    [InlineData(0x20)]
+    [InlineData(0xFF)]
+    public async Task A_Held_Heartbeat_Uses_The_Node_Id_Active_After_Reset(byte nextNodeId)
+    {
+        using var bench = new Bench();
+        var slave = (CanOpenNode)bench.Slave(1, 5);
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(nextNodeId)).Succeeded.Should().BeTrue();
+        await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(30));
+        await WaitUntilAsync(() => HasHeldTransmit(slave));
+
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == nextNodeId);
+        int atReset = heard.Ids.Count;
+        await slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
+        Task drained = Task.CompletedTask;
+        await slave.PostToActorAsync(() => drained = (Task)typeof(CanOpenNode)
+            .GetField("_heartbeatSendChain", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(slave)!);
+        await drained.WaitAsync(TimeSpan.FromSeconds(3));
+        await peer.SendSyncAsync();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Sync));
+        if (nextNodeId != CanOpenCobId.UnconfiguredNodeId)
+            await WaitUntilAsync(() => heard.Ids.Skip(atReset).Contains(CanOpenCobId.Heartbeat(nextNodeId)));
+        heard.Ids.Skip(atReset).Should().NotContain(CanOpenCobId.Heartbeat(5));
+        heard.Ids.Should().NotContain(CanOpenCobId.HeartbeatBase);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task A_Failing_Send_Releases_The_Silence_Reservation_Before_Notifying_Subscribers(int failure)
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus), heartbeats: true);
+        using var slave = (CanOpenNode)CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        var returned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        slave.BackgroundExceptionOccurred += (_, _) =>
+        {
+            // Bound the wait so a regression fails without wedging disposal of the test node.
+            returned.TrySetResult(Task.Run(() => slave.LssState()).Wait(TimeSpan.FromSeconds(2)));
+        };
+        await WaitUntilAsync(() => holding.Holding);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var starting = slave.PostToActorAsync(() =>
+        {
+            entered.TrySetResult(true);
+            slave.BeginLssSilence(0, TimeSpan.FromMinutes(1));
+        });
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        if (failure == 2) holding.Reject();
+        else holding.Fail(cancelled: failure == 1);
+        (await returned.Task.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue(
+            "a failure subscriber must be able to read the slave while silence starts");
+        await starting.WaitAsync(TimeSpan.FromSeconds(3));
+        await slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
+    }
+
+    [Fact]
+    public async Task An_Ordered_Batch_Is_Suppressed_During_Silence_And_Can_Send_Afterwards()
+    {
+        using var bench = new Bench();
+        var slave = (CanOpenNode)bench.Slave(1, 5);
+        using var heard = bench.Listen();
+        await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
+        var send = typeof(CanOpenNode).GetMethod("SendOrderedControlFrames",
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            new[] { typeof((uint, byte[])[]) }, null)!;
+        var suppressed = new[] { (CanOpenCobId.SdoTx(5), new byte[] { 1 }), (CanOpenCobId.SdoTx(5), new byte[] { 2 }) };
+        await ((Task)send.Invoke(slave, new object[] { suppressed })!).WaitAsync(TimeSpan.FromSeconds(3));
+        await slave.PostToActorAsync(() => slave.CompleteLssSilence(0));
+        var resumed = new[] { (CanOpenCobId.SdoTx(6), new byte[] { 1 }) };
+        await ((Task)send.Invoke(slave, new object[] { resumed })!).WaitAsync(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.SdoTx(6)));
+        heard.Ids.Should().NotContain(CanOpenCobId.SdoTx(5));
+    }
+
+    private static bool HasHeldTransmit(CanOpenNode slave)
+    {
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
+        var gate = typeof(CanOpenNode).GetField("_lssTxGate", flags)!.GetValue(slave)!;
+        lock (gate)
+            return ((System.Collections.ICollection)typeof(CanOpenNode)
+                .GetField("_lssHeldTx", flags)!.GetValue(slave)!).Count != 0;
+    }
+
     [Fact]
     public async Task Starting_The_Flying_Master_During_The_First_Switch_Delay_Keeps_The_Node_Id()
     {
@@ -1720,6 +1816,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
         public void Release() => _release.TrySetResult(true);
 
+        public void Reject() => _release.TrySetResult(false);
+
+        public void Fail(bool cancelled) => _release.TrySetException(cancelled
+            ? new OperationCanceledException("driver cancelled the frame")
+            : new TimeoutException("driver rejected the frame"));
+
         public ICanBus Bus => _inner.Bus;
 
         public int SubscriptionCount => _inner.SubscriptionCount;
@@ -1752,7 +1854,8 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
         private async Task<TxConfirmation> HoldAsync(CanFrame frame, TimeSpan? timeout, CancellationToken cancellationToken)
         {
-            await _release.Task.ConfigureAwait(false);
+            if (!await _release.Task.ConfigureAwait(false))
+                return new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Rejected };
             return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
         }
     }

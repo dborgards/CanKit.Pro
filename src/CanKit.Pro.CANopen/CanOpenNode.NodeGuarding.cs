@@ -123,12 +123,11 @@ internal sealed partial class CanOpenNode
         // A guarding poll is dropped for the delay, not held. Reserving the send keeps it
         // from leaving after silence has been asked to start.
         if (!TryReserveTransmit()) return;
-        var svc = _service;
-        var send = System.Threading.Tasks.Task.Run(async () =>
+        _ = System.Threading.Tasks.Task.Run(async () =>
         {
             try
             {
-                var conf = await svc.SendConfirmedAsync(frame).ConfigureAwait(false);
+                var conf = await SendReservedFrame(frame).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     RaiseBackgroundException(new CanOpenTransportException(
@@ -137,12 +136,6 @@ internal sealed partial class CanOpenNode
             }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
-        _ = send.ContinueWith(
-            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
-            this,
-            System.Threading.CancellationToken.None,
-            System.Threading.Tasks.TaskContinuationOptions.None,
-            System.Threading.Tasks.TaskScheduler.Default);
     }
 
     private void OnNodeGuardingTimeout(byte producerNodeId)

@@ -2545,20 +2545,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // in-flight SDO send is reported confirmed so its timeout can still decide it.
         // The gate either finishes the frame (held or dropped) or reserves the send so silence
         // cannot start until this frame has been handed to the driver.
+        // Validate the frame before reserving: a construction failure never owns a send slot.
+        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
         if (GateTransmit(cobId, payload, onSendCompleted) is { } finished)
             return finished;
-        CanFrame frame;
-        try
-        {
-            // Classic 11-bit CAN frame; no extended bit. Built after the reservation so a throw
-            // here still releases it: silence waits until this slot is gone.
-            frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-        }
-        catch (Exception)
-        {
-            ReleaseTransmit();
-            throw;
-        }
         // We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via
@@ -2570,8 +2560,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             CanOpenTransportException? failure = null;
             try
             {
-                var conf = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
-                    .ConfigureAwait(false);
+                var conf = await SendReservedFrame(frame, cancellationToken).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     failure = new CanOpenTransportException(
@@ -2609,16 +2598,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             {
                 onSendCompleted?.Invoke(failure);
             }
-        }, cancellationToken);
-        // Also when the token cancels the task before the body runs: the reservation has to
-        // end or the switch delay never starts.
-        _ = send.ContinueWith(
-            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
-            this,
-            CancellationToken.None,
-            TaskContinuationOptions.None,
-            TaskScheduler.Default);
+        });
         return send;
+    }
+
+    /// <summary>
+    /// The reservation covers only the driver call. Release it before callers report failures
+    /// or invoke callbacks, since those may synchronously wait for the actor that starts silence.
+    /// </summary>
+    private async Task<TxConfirmation> SendReservedFrame(CanFrame frame, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseTransmit();
+        }
     }
 
     /// <summary>
@@ -2766,47 +2764,40 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     // The same switch-delay rule as SendControlFrame. A confirmed non-send keeps
                     // the batch moving; the peer's timeout decides a transfer that lost its frames.
                     // Reserved sends finish before a new silence can start.
-                    if (!TryReserveTransmit())
-                    {
-                        onFrameConfirmed?.Invoke();
-                        continue;
-                    }
-
                     try
                     {
-                        try
+                        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+                        if (!TryReserveTransmit())
                         {
-                            var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-                            var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
-                            if (!conf.Confirmed)
+                            onFrameConfirmed?.Invoke();
+                            continue;
+                        }
+
+                        var conf = await SendReservedFrame(frame).ConfigureAwait(false);
+                        if (!conf.Confirmed)
+                        {
+                            var unconfirmed = new CanOpenTransportException(
+                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                            RaiseBackgroundException(unconfirmed);
+                            if (onSendCompleted is not null)
                             {
-                                var unconfirmed = new CanOpenTransportException(
-                                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
-                                RaiseBackgroundException(unconfirmed);
-                                if (onSendCompleted is not null)
-                                {
-                                    failure = unconfirmed;
-                                    return;
-                                }
-                            }
-                            else
-                            {
-                                onFrameConfirmed?.Invoke();
+                                failure = unconfirmed;
+                                return;
                             }
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            // As in SendControlFrame: the event carries the transfer's failure.
-                            failure = ex as CanOpenTransportException
-                                ?? new CanOpenTransportException(
-                                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
-                            RaiseBackgroundException(failure);
-                            return;
+                            onFrameConfirmed?.Invoke();
                         }
                     }
-                    finally
+                    catch (Exception ex)
                     {
-                        ReleaseTransmit();
+                        // As in SendControlFrame: the event carries the transfer's failure.
+                        failure = ex as CanOpenTransportException
+                            ?? new CanOpenTransportException(
+                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                        RaiseBackgroundException(failure);
+                        return;
                     }
                 }
             }
