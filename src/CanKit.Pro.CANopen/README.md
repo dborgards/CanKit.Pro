@@ -369,15 +369,20 @@ peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID 
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
 by the peer-SDO gate, or does not return a word.
 
-The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
+The mapping is read live from `1600h`–`17FFh` / `1A00h`–`1BFFh` through the same SDO client, so
 the peer description bound for that node applies. A read that aborts, times out, is refused by
 that gate, or is not a mapping of at most 64 bits uses the mapping in the
 file passed to the call — and so does a value of another width than its type: sub-index `00h` must
 be exactly one byte (UNSIGNED8) and each entry exactly four (UNSIGNED32); a longer one is not cut
-to its low bytes. The SRDO observer reads its live mapping the same way. Observations of one peer run one after another. A CAN-ID CiA 301
+to its low bytes. The SRDO observer reads its live mapping the same way. Observations of one peer run one after another. A base-frame CAN-ID CiA 301
 restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
 A payload shorter than the mapping writes nothing; a dummy entry `0001h`–`0007h` consumes its
 bits and writes no signal.
+
+A local SDO timeout or transport failure switches the remaining reads of that observation to
+file fallback. An offline peer therefore costs one failed live request, even when the file
+declares 512 PDOs. The next observation retries live reads. A peer-sent SDO abort or a gate
+refusal applies only to the requested entry; cancellation still propagates.
 
 The live reads of one observation — COB-IDs, mapping — are one snapshot of the peer: the observer
 takes the peer's SDO channel, without waiting, and holds it to the end, so a safety transaction

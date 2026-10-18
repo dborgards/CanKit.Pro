@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -210,8 +209,7 @@ public partial class CanOpenPdoEngineTests
     [InlineData(255, true)]
     public async Task Device_Description_Loads_Mpdo_Modes(byte mode, bool dcf)
     {
-        var description = CanOpenDeviceDescription.Load(Path.Combine(AppContext.BaseDirectory,
-            Path.Combine("TestCases", "CANopen", "Fixtures", dcf ? "device.dcf" : "device.eds")));
+        var description = CanOpenDeviceDescription.Load(PdoFixture(dcf ? "device.dcf" : "device.eds"));
         if (dcf)
         {
             description.Objects.Objects[0x1600].SubObjects[0].ParameterValue = mode.ToString();
@@ -244,8 +242,7 @@ public partial class CanOpenPdoEngineTests
     [InlineData(OdDataType.Unsigned56, 7, "0x123456789ABCDE")]
     public async Task Native_Integer_Widths_Load_From_Eds_And_Transmit(OdDataType type, int width, string value)
     {
-        var description = CanOpenDeviceDescription.Load(Path.Combine(AppContext.BaseDirectory,
-            Path.Combine("TestCases", "CANopen", "Fixtures", "device.eds")));
+        var description = CanOpenDeviceDescription.Load(PdoFixture("device.eds"));
         var entry = description.Objects.Objects[0x2000];
         entry.DataType = (ushort)type;
         entry.DefaultValue = value;

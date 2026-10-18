@@ -15,6 +15,11 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenPdoEngineTests
 {
+    private static string PdoFixture(string name)
+        => string.Join(System.IO.Path.DirectorySeparatorChar.ToString(),
+            AppContext.BaseDirectory.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar),
+            "TestCases", "CANopen", "Fixtures", name);
+
     private static void SetSyncStart(ICanOpenNode node, byte start, byte type = 1)
     {
         var od = node.ObjectDictionary;
@@ -261,8 +266,7 @@ public partial class CanOpenPdoEngineTests
         var session = NewSession();
         using var bus = Open(session, 0);
         using var wire = new Wire(session, 2);
-        var file = CanOpenDeviceDescription.Load(System.IO.Path.Combine(System.AppContext.BaseDirectory,
-            System.IO.Path.Combine("TestCases", "CANopen", "Fixtures", "pdo-timing.dcf")));
+        var file = CanOpenDeviceDescription.Load(PdoFixture("pdo-timing.dcf"));
         using var device = new CanOpenNode(new CanKit.Pro.RawCan.CanBusService(bus), Device,
             new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource(), description: file);
         device.DeviceDescription!.IsExact.Should().BeTrue(string.Join("\n", device.DeviceDescription.Findings));

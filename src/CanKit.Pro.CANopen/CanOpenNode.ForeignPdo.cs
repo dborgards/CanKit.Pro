@@ -72,8 +72,24 @@ internal sealed partial class CanOpenNode
         // upload below meets, so the whole snapshot is the file's (#295).
         var channel = PeerSdoChannel(peerNodeId);
         bool held = channel.Wait(0);
-        LiveUpload upload = held
-            ? (index, subindex, ct) => SdoUploadCoreAsync(peerNodeId, index, subindex, SdoTransferMode.Auto, ct)
+        Exception? unavailable = null;
+        Task<byte[]> UploadLive(ushort index, byte subindex, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return unavailable is { } failure ? Task.FromException<byte[]>(failure) : ReadLiveAsync(index, subindex, ct);
+        }
+        async Task<byte[]> ReadLiveAsync(ushort index, byte subindex, CancellationToken ct)
+        {
+            try { return await SdoUploadCoreAsync(peerNodeId, index, subindex, SdoTransferMode.Auto, ct).ConfigureAwait(false); }
+            catch (Exception ex) when (IsPeerUnavailableForPdoSnapshot(ex))
+            {
+                // A timeout or transport failure applies to this snapshot, not just one OD
+                // record. Otherwise an offline peer with 512 PDOs incurs 1,024 timeouts.
+                unavailable = ex;
+                throw;
+            }
+        }
+        LiveUpload upload = held ? UploadLive
             : (_, _, _) => Task.FromException<byte[]>(InFlightRefusal(peerNodeId));
         try
         {
@@ -412,6 +428,10 @@ internal sealed partial class CanOpenNode
     /// already has a transfer with that server (<see cref="InvalidOperationException"/>).
     /// Cancellation is not one of these — it propagates.
     /// </summary>
+    private static bool IsPeerUnavailableForPdoSnapshot(Exception ex)
+        => ex is CanOpenTransportException
+           || ex is SdoAbortException { Origin: SdoAbortOrigin.Local, AbortCode: (uint)SdoAbortCode.SdoProtocolTimedOut };
+
     private static bool IsLiveReadUnavailable(Exception ex)
         => ex is SdoAbortException or CanOpenTransportException or InvalidOperationException;
 

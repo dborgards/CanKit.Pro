@@ -1,13 +1,70 @@
+using System;
+using System.Text;
 using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Pdo;
+using CanKit.Pro.RawCan;
+using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
 namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenForeignPdoObserveTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Offline_Peer_With_512_Pdos_Uses_One_Failure_Per_Snapshot(bool transportFailure)
+    {
+        var optional = new StringBuilder("SupportedObjects=1025\n");
+        var sections = new StringBuilder();
+        for (int n = 0; n < 512; n++)
+        {
+            string tx = (0x1800 + n).ToString("X4");
+            string rx = (0x1400 + n).ToString("X4");
+            optional.Append($"{2 * n + 1}=0x{tx}\n{2 * n + 2}=0x{rx}\n");
+            sections.Append(Comm(tx, n == 511 ? "$NODEID+0x180" : "0x80000191", true));
+            sections.Append(Comm(rx, "0x80000211", false));
+        }
+        optional.Append("1025=0x1BFF\n");
+        sections.Append(Map("1BFF", "1", "0x20010008"));
+        var file = CanOpenDeviceDescription.ParseEds(Eds(optional.ToString(), "SupportedObjects=0", sections.ToString()));
+        using var service = new StarvedReaderBusService();
+        var clock = new ManualTimeSource();
+        using var tool = new CanOpenNode(service, Tool,
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(100) }, ownsService: false, clock);
+        tool.BindPeerDeviceDescription(Peer, file);
+        int requests = 0;
+        async Task ExpireRequest()
+        {
+            await tool.PostToActorAsync(() => { }).ConfigureAwait(false);
+            clock.Advance(TimeSpan.FromMilliseconds(101));
+            await tool.PostToActorAsync(() => { }).ConfigureAwait(false);
+        }
+        service.ConfirmSendAsync = (frame, ct) =>
+        {
+            bool request = frame.ID == CanOpenCobId.SdoRx(Peer) && frame.Data.Span[0] == 0x40;
+            if (!request) return Task.FromResult(new TxConfirmation { Confirmed = true });
+            System.Threading.Interlocked.Increment(ref requests);
+            if (!transportFailure) _ = Task.Run(ExpireRequest);
+            return Task.FromResult(new TxConfirmation { Confirmed = !transportFailure });
+        };
+        for (int snapshot = 1; snapshot <= 2; snapshot++)
+        {
+            var sink = new ListSink();
+            var result = await tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 42 }, file, sink)
+                .WithTimeoutAsync(ShortTimeout);
+            result.Decoded.Should().BeTrue();
+            result.Observations.Should().ContainSingle();
+            result.Observations[0].PdoNumber.Should().Be(512);
+            result.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
+            sink.Signals.Should().ContainSingle();
+            sink.Signals[0].Value.Should().Equal(42);
+            System.Threading.Volatile.Read(ref requests).Should().Be(snapshot);
+        }
+    }
+
     [Fact]
     public async Task Observe_Extended_Bit_Mapping_And_Mpdo_From_The_File()
     {
