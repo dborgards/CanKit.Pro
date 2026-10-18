@@ -26,8 +26,9 @@ public sealed class LssMasterOptions
     public TimeSpan FastscanTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
-    /// Extra gap after a Fastscan step's response window, before the next request (annex A.3.3,
-    /// master cycle time). The window itself is <see cref="FastscanTimeout"/>. Defaults to 1 ms.
+    /// Extra gap after a Fastscan step's response window, before the next Fastscan request
+    /// (annex A.3.3, master cycle time), including a new scan. The completed scan returns without
+    /// waiting for this gap. The window itself is <see cref="FastscanTimeout"/>. Defaults to 1 ms.
     /// Zero disables the extra gap.
     /// </summary>
     public TimeSpan FastscanCycleTime { get; init; } = TimeSpan.FromMilliseconds(1);

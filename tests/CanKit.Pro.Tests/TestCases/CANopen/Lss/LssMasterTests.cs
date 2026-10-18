@@ -24,14 +24,17 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     private static readonly LssAddress SlaveA = new(1, 1, 1, 1);
     private static readonly LssAddress SlaveB = new(1, 1, 1, 2);
     private static readonly LssAddress SlaveC = new(1, 1, 1, 3);
+    // The virtual-bus integration tests allow subscription/reader/thread-pool scheduling up to
+    // five seconds. Protocol timeout boundaries are exercised on ClockedLssRig instead.
+    private static readonly TimeSpan VirtualBusSchedulingBudget = TimeSpan.FromSeconds(5);
 
     private static LssMasterOptions Quick() => new()
     {
-        ResponseTimeout = TimeSpan.FromMilliseconds(300),
+        ResponseTimeout = VirtualBusSchedulingBudget,
         // Fastscan tests drive this window on a virtual clock.
         FastscanTimeout = TimeSpan.FromMilliseconds(50),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
-        IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        IdentificationTimeout = VirtualBusSchedulingBudget,
     };
 
     private static async Task WaitUntilAsync(Func<bool> condition)
@@ -122,7 +125,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var service = new FaultingReadService(raw, faultImmediately: false);
         await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            ResponseTimeout = VirtualBusSchedulingBudget,
             IdentificationTimeout = TimeSpan.FromSeconds(5),
         });
 
@@ -144,16 +147,17 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Selective_Switch_Matches_One_Address_And_Then_Inquire_Works()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 5);
-        (await rig.Master.SwitchStateSelectiveAsync(new LssAddress(1, 1, 1, 9))).Should().BeFalse();
-        rig.Slave.State.Should().Be(LssState.Waiting);
+        using var rig = new ClockedLssRig();
+        var slave = rig.Add(SlaveA, nodeId: 5);
+        (await rig.RunAsync(rig.Master.SwitchStateSelectiveAsync(new LssAddress(1, 1, 1, 9)))).Should().BeFalse();
+        slave.State.Should().Be(LssState.Waiting);
 
-        (await rig.Master.SwitchStateSelectiveAsync(SlaveA)).Should().BeTrue();
-        rig.Slave.State.Should().Be(LssState.Configuration);
-        (await rig.Master.SwitchStateSelectiveAsync(SlaveA)).Should().BeFalse();
+        (await rig.RunAsync(rig.Master.SwitchStateSelectiveAsync(SlaveA))).Should().BeTrue();
+        slave.State.Should().Be(LssState.Configuration);
+        (await rig.RunAsync(rig.Master.SwitchStateSelectiveAsync(SlaveA))).Should().BeFalse();
 
-        (await rig.Master.InquireAddressAsync()).Should().Be(SlaveA);
-        (await rig.Master.InquireNodeIdAsync()).Should().Be(5);
+        (await rig.RunAsync(rig.Master.InquireAddressAsync())).Should().Be(SlaveA);
+        (await rig.RunAsync(rig.Master.InquireNodeIdAsync())).Should().Be(5);
     }
 
     [Fact]
@@ -232,47 +236,50 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Unconfigured_Slave_Takes_A_NodeId_Immediately_And_Answers_NonConfigured_Only_Before_That()
     {
-        using var rig = Rig.Open(SlaveA);
-        (await rig.Master.IdentifyNonConfiguredSlavesAsync()).Should().BeTrue();
-        await EnterConfigurationAsync(rig);
-        (await rig.Master.InquireNodeIdAsync()).Should().Be(CanOpenCobId.UnconfiguredNodeId);
-        (await rig.Master.ConfigureNodeIdAsync(0x15)).Succeeded.Should().BeTrue();
-        rig.Slave.ActiveNodeId.Should().Be(0x15);
-        (await rig.Master.InquireNodeIdAsync()).Should().Be(0x15);
+        using var rig = new ClockedLssRig();
+        var slave = rig.Add(SlaveA);
+        (await rig.RunAsync(rig.Master.IdentifyNonConfiguredSlavesAsync())).Should().BeTrue();
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        (await rig.RunAsync(rig.Master.InquireNodeIdAsync())).Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        (await rig.RunAsync(rig.Master.ConfigureNodeIdAsync(0x15))).Succeeded.Should().BeTrue();
+        slave.ActiveNodeId.Should().Be(0x15);
+        (await rig.RunAsync(rig.Master.InquireNodeIdAsync())).Should().Be(0x15);
         await rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
-        await WaitUntilAsync(() => rig.Slave.State == LssState.Waiting);
-        (await rig.Master.IdentifyNonConfiguredSlavesAsync()).Should().BeFalse();
+        slave.State.Should().Be(LssState.Waiting);
+        (await rig.RunAsync(rig.Master.IdentifyNonConfiguredSlavesAsync())).Should().BeFalse();
     }
 
     [Fact]
     public async Task Confirmed_Service_Times_Out_When_The_Slave_Is_Waiting_Or_Silent()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 4);
-        var act = async () => await rig.Master.ConfigureNodeIdAsync(4);
+        using var rig = new ClockedLssRig();
+        var slave = rig.Add(SlaveA, nodeId: 4);
+        var act = async () => await rig.RunAsync(rig.Master.ConfigureNodeIdAsync(4));
         var timeout = await act.Should().ThrowAsync<LssTimeoutException>();
         timeout.Which.CommandSpecifier.Should().Be(LssCommand.ConfigureNodeId);
         timeout.Which.Timeout.Should().Be(rig.Master.Options.ResponseTimeout);
 
-        await EnterConfigurationAsync(rig);
-        rig.Slave.NodeIdConfigurationSupported = false;
-        var ignored = async () => await rig.Master.ConfigureNodeIdAsync(4);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        slave.NodeIdConfigurationSupported = false;
+        var ignored = async () => await rig.RunAsync(rig.Master.ConfigureNodeIdAsync(4));
         await ignored.Should().ThrowAsync<LssTimeoutException>();
 
-        rig.Slave.BitTimingSupported = false;
-        var timing = async () => await rig.Master.ConfigureBitTimingAsync(0, 2);
+        slave.BitTimingSupported = false;
+        var timing = async () => await rig.RunAsync(rig.Master.ConfigureBitTimingAsync(0, 2));
         await timing.Should().ThrowAsync<LssTimeoutException>();
     }
 
     [Fact]
     public async Task A_Short_Slave_Frame_Is_Not_A_Confirmation()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 4);
-        await EnterConfigurationAsync(rig);
-        rig.Slave.ReplyWithLength(7);
-        var act = async () => await rig.Master.InquireVendorIdAsync();
+        using var rig = new ClockedLssRig();
+        var slave = rig.Add(SlaveA, nodeId: 4);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        slave.ReplyWithLength(7);
+        var act = async () => await rig.RunAsync(rig.Master.InquireVendorIdAsync());
         await act.Should().ThrowAsync<LssTimeoutException>();
-        (await rig.Master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
-        (await rig.Master.InquireRevisionNumberAsync()).Should().Be(SlaveA.RevisionNumber);
+        (await rig.RunAsync(rig.Master.InquireVendorIdAsync())).Should().Be(SlaveA.VendorId);
+        (await rig.RunAsync(rig.Master.InquireRevisionNumberAsync())).Should().Be(SlaveA.RevisionNumber);
     }
 
     [Fact]
@@ -367,8 +374,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         int switches = 0;
         var withSwitch = Rig.ReplaceOptions(rig, new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromMilliseconds(300),
-            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+            ResponseTimeout = VirtualBusSchedulingBudget,
+            IdentificationTimeout = VirtualBusSchedulingBudget,
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
             BitRateSwitch = (_, _) =>
             {
@@ -383,20 +390,19 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Identify_Remote_Matches_The_Inclusive_Range_In_Either_State()
     {
-        var session = VirtualAdapterFixture.NewSession("lss-id");
-        using var masterBus = VirtualAdapterFixture.Open(session, 0);
-        using var master = CanOpenLss.OpenMaster(masterBus, Quick());
-        using var inRange = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveB, 8);
-        using var outOfRange = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 2), SlaveC, 9);
+        using var rig = new ClockedLssRig();
+        var inRange = rig.Add(SlaveB, 8);
+        rig.Add(SlaveC, 9);
+        var master = rig.Master;
 
         var hit = new LssIdentityRange(1, 1, 1, 1, 2, 2);
-        (await master.IdentifyRemoteSlavesAsync(hit)).Should().BeTrue();
+        (await rig.RunAsync(master.IdentifyRemoteSlavesAsync(hit))).Should().BeTrue();
         var miss = new LssIdentityRange(1, 1, 1, 1, 9, 9);
-        (await master.IdentifyRemoteSlavesAsync(miss)).Should().BeFalse();
+        (await rig.RunAsync(master.IdentifyRemoteSlavesAsync(miss))).Should().BeFalse();
 
         await master.SwitchStateGlobalAsync(LssState.Configuration);
-        await WaitUntilAsync(() => inRange.State == LssState.Configuration);
-        (await master.IdentifyRemoteSlavesAsync(hit)).Should().BeTrue();
+        inRange.State.Should().Be(LssState.Configuration);
+        (await rig.RunAsync(master.IdentifyRemoteSlavesAsync(hit))).Should().BeTrue();
     }
 
     [Fact]
@@ -659,7 +665,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
         await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            ResponseTimeout = VirtualBusSchedulingBudget,
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
             IdentificationTimeout = TimeSpan.FromSeconds(5),
         });
@@ -704,9 +710,9 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         bool waitingDuringSwitch = true;
         var master = Rig.ReplaceOptions(rig, new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            ResponseTimeout = VirtualBusSchedulingBudget,
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
-            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+            IdentificationTimeout = VirtualBusSchedulingBudget,
             BitRateSwitch = (_, _) =>
             {
                 waitingDuringSwitch = rig.Slave.State == LssState.Waiting;
@@ -724,11 +730,12 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Manufacturer_Command_Round_Trips_And_Times_Out_Without_A_Handler()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 4);
-        (await rig.Master.TransceiveManufacturerAsync(0x90, new byte[] { 1, 2 })).Should().BeNull();
+        using var rig = new ClockedLssRig();
+        var slave = rig.Add(SlaveA, nodeId: 4);
+        (await rig.RunAsync(rig.Master.TransceiveManufacturerAsync(0x90, new byte[] { 1, 2 }))).Should().BeNull();
 
-        await EnterConfigurationAsync(rig);
-        rig.Slave.Manufacturer = (cs, data) =>
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        slave.Manufacturer = (cs, data) =>
         {
             cs.Should().Be(0x90);
             data[1].Should().Be(1);
@@ -737,7 +744,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             reply[1] = 0x55;
             return reply;
         };
-        var response = await rig.Master.TransceiveManufacturerAsync(0x90, new byte[] { 1, 2 });
+        var response = await rig.RunAsync(rig.Master.TransceiveManufacturerAsync(0x90, new byte[] { 1, 2 }));
         response.Should().NotBeNull();
         response![1].Should().Be(0x55);
 

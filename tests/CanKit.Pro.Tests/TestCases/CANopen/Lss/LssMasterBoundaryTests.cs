@@ -212,6 +212,49 @@ public class LssMasterBoundaryTests
         (await rig.RunAsync(scan)).Succeeded.Should().BeTrue();
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Fastscan_Returns_Without_A_Terminal_Gap_And_The_Next_Scan_Still_Waits(bool found)
+    {
+        var window = TimeSpan.FromMilliseconds(100);
+        var gap = TimeSpan.FromSeconds(1);
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            FastscanTimeout = window,
+            FastscanCycleTime = gap,
+        });
+        if (found) rig.Add(new LssAddress(1, 0, 0, 0));
+        var request = new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+            ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
+        };
+
+        var result = await rig.RunAsync(rig.Master.FastscanAsync(request));
+        result.Succeeded.Should().Be(found);
+        int probes = found ? 3 : 1;
+        (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(window * probes + gap * (probes - 1));
+
+        // The post-scan service is not a Fastscan probe and must not pay that gap.
+        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
+        int commands = rig.Service.Commands.Count;
+        using var cancel = new CancellationTokenSource();
+        var next = rig.Master.FastscanAsync(request, cancel.Token);
+        await rig.ArmedAsync(gap);
+        rig.Service.Commands.Count.Should().Be(commands);
+        await rig.Clock.AdvanceAsync(gap - TimeSpan.FromTicks(1));
+        rig.Service.Commands.Count.Should().Be(commands);
+        await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
+        await rig.ArmedAsync(window);
+        rig.Service.Commands.Count.Should().Be(commands + 1);
+        cancel.Cancel();
+        var cancelled = async () => await next.WaitAsync(TimeSpan.FromSeconds(5));
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+    }
+
     [Fact]
     public async Task Activation_And_Waiting_Confirmations_Do_Not_Restart_The_Switch_Delay()
     {
@@ -366,6 +409,32 @@ public class LssMasterBoundaryTests
     }
 
     [Fact]
+    public async Task A_Subscription_Failure_After_An_Unrelated_Reply_Preserves_The_Cause()
+    {
+        using var rig = new ClockedLssRig(parkReader: true);
+        var failure = new InvalidOperationException("pull failed after unrelated reply");
+        rig.Service.Subscription.ReadFailure = failure;
+        rig.Service.Subscription.FailAfterFirstRead = true;
+        rig.Service.Send = frame =>
+        {
+            _ = rig.Service.Subscription.Enqueue(new CanFrameEvent(new CanFrameView(CanFrameType.Can20,
+                (int)CanOpenCobId.LssSlaveMessage, LssFrames.InquireNodeId(4), FrameFlags.None), false, TimeSpan.Zero));
+            return Task.FromResult(new TxConfirmation { Confirmed = true });
+        };
+        try
+        {
+            var identify = async () => await rig.RunAsync(rig.Master.IdentifyNonConfiguredSlavesAsync());
+            var error = await identify.Should().ThrowAsync<CanOpenTransportException>();
+            error.Which.InnerException.Should().BeSameAs(failure);
+        }
+        finally
+        {
+            rig.Service.Subscription.Release.TrySetResult(true);
+            await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
     public async Task An_Unstamped_Reply_Drained_At_Expiry_Does_Not_Answer_The_Next_Identify()
     {
         var window = TimeSpan.FromMilliseconds(100);
@@ -391,6 +460,50 @@ public class LssMasterBoundaryTests
         {
             rig.Service.Subscription.Release.TrySetResult(true);
             await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task An_Unstamped_Reply_Buffered_Before_A_Request_Does_Not_Answer_It(bool selective, bool parkReader)
+    {
+        using var rig = new ClockedLssRig(parkReader: parkReader);
+        try
+        {
+            Func<Task<bool>> request = selective
+                ? () => rig.Master.SwitchStateSelectiveAsync(new LssAddress(1, 2, 3, 4))
+                : () => rig.Master.IdentifyNonConfiguredSlavesAsync();
+            (await rig.RunAsync(request())).Should().BeFalse();
+            byte command = selective ? LssCommand.SwitchSelectiveAcknowledge : LssCommand.IdentifyNonConfiguredSlave;
+            CanFrameEvent Reply() => new(new CanFrameView(CanFrameType.Can20,
+                (int)CanOpenCobId.LssSlaveMessage, LssFrames.Command(command), FrameFlags.None), false, TimeSpan.Zero);
+            var stale = rig.Service.Subscription.Enqueue(Reply());
+            if (!parkReader) await stale.WaitAsync(TimeSpan.FromSeconds(5));
+
+            (await rig.RunAsync(request())).Should().BeFalse("the queued frame predates the request");
+            await stale.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // Missing timestamps remain supported for a fresh reply produced during the send.
+            Task? delivered = null;
+            rig.Service.Send = frame =>
+            {
+                if (frame.Data.Span[0] == (selective ? LssCommand.SwitchSelectiveSerial : LssCommand.IdentifyNonConfiguredRemote))
+                    delivered = rig.Service.Subscription.Enqueue(Reply());
+                return Task.FromResult(new TxConfirmation { Confirmed = true });
+            };
+            (await rig.RunAsync(request())).Should().BeTrue();
+            await delivered!.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            if (parkReader)
+            {
+                rig.Service.Subscription.Release.TrySetResult(true);
+                await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            }
         }
     }
 
@@ -457,10 +570,14 @@ public class LssMasterBoundaryTests
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    public async Task A_Missed_Waiting_Window_Without_A_Host_Switch_Is_A_Transport_Error(bool rate, bool callback)
+    [InlineData(false, false, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
+    [InlineData(false, true, true)]
+    public async Task A_Missed_Waiting_Window_Without_A_Host_Switch_Is_A_Transport_Error(
+        bool rate, bool callback, bool lateWaiting)
     {
         using var rig = new ClockedLssRig(new LssMasterOptions
         {
@@ -469,15 +586,28 @@ public class LssMasterBoundaryTests
         var send = rig.Service.Send;
         rig.Service.Send = async frame =>
         {
+            if (lateWaiting && frame.Data.Span[0] == LssCommand.SwitchStateGlobal)
+                rig.Clock.Advance(TimeSpan.FromMilliseconds(150));
             var confirmation = await send(frame);
-            rig.Clock.Advance(TimeSpan.FromMilliseconds(150));
+            if (!lateWaiting)
+                rig.Clock.Advance(TimeSpan.FromMilliseconds(150));
             return confirmation;
         };
 
-        var activate = async () => await rig.Master.ActivateBitTimingAsync(100,
-            bitsPerSecond: rate ? 250_000 : null, returnToWaiting: true).WaitAsync(TimeSpan.FromSeconds(5));
+        var activating = rig.Master.ActivateBitTimingAsync(100,
+            bitsPerSecond: rate ? 250_000 : null, returnToWaiting: true);
+        activating.IsCompleted.Should().BeFalse("the slaves are still in their silent period");
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(50));
+        var following = rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
+        int sent = rig.Service.Commands.Count;
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50) - TimeSpan.FromTicks(1));
+        rig.Service.Commands.Count.Should().Be(sent, "the gate must stay held during the silent period");
+        activating.IsCompleted.Should().BeFalse();
+        await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
+        var activate = async () => await activating.WaitAsync(TimeSpan.FromSeconds(5));
         await activate.Should().ThrowAsync<CanOpenTransportException>();
-        rig.Service.Commands.Should().ContainSingle().Which.Should().Be(LssCommand.ActivateBitTiming);
+        await following.WaitAsync(TimeSpan.FromSeconds(5));
+        rig.Service.Commands.Count.Should().Be(sent + 1);
     }
 
     [Theory]

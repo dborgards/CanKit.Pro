@@ -68,7 +68,8 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// (waiting) is sent while both ends still share a bitrate. A positive delay sends it
     /// before either delay when it can be confirmed as transmitted before the first deadline.
     /// If that window was missed, the host switches rate and sends waiting after the second
-    /// period; without a host switch the call fails. A zero delay has already moved the slave, so the frame is sent
+    /// period; without a host switch the call fails after both periods have elapsed. A zero
+    /// delay has already moved the slave, so the frame is sent
     /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
     /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
     /// switch the master is still on the old rate and the slave will not hear the frame.

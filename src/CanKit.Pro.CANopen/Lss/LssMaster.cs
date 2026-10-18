@@ -178,9 +178,6 @@ internal sealed partial class LssMaster : ILssMaster
                     waitingAtNewRate = transmitted >= switchAt;
                 }
             }
-            if (waitingAtNewRate && (bitsPerSecond is null || Options.BitRateSwitch is null))
-                throw new CanOpenTransportException(
-                    "The waiting frame could not be verified before the old-rate deadline. A host bit-rate switch is required to return the slaves to waiting.");
             if (delay > TimeSpan.Zero)
                 await DelayUntilAsync(switchAt, ct).ConfigureAwait(false);
             if (bitsPerSecond is int rate && Options.BitRateSwitch is { } switchRate)
@@ -189,6 +186,9 @@ internal sealed partial class LssMaster : ILssMaster
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
                 await DelayUntilAsync(resumeAt, ct).ConfigureAwait(false);
+            if (waitingAtNewRate && (bitsPerSecond is null || Options.BitRateSwitch is null))
+                throw new CanOpenTransportException(
+                    "The waiting frame could not be verified before the old-rate deadline. Both switch-delay periods have elapsed; a host bit-rate switch is required to return the slaves to waiting.");
             if (waitingAtNewRate && delay > TimeSpan.Zero)
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
         }, cancellationToken);
@@ -396,6 +396,13 @@ internal sealed partial class LssMaster : ILssMaster
     private async Task<Sent> SendAsync(byte[] payload, CancellationToken cancellationToken)
     {
         using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
+        lock (_receiveGate)
+        {
+            // Nothing already buffered can answer this request, even without arrival stamps.
+            // Serialize the discard with dequeue/forwarding by the background reader.
+            ForwardAvailable();
+            while (_inbound.Reader.TryRead(out _)) { }
+        }
         var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
             .ConfigureAwait(false);
         if (!confirmation.Confirmed)
@@ -415,67 +422,39 @@ internal sealed partial class LssMaster : ILssMaster
         TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
         if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
             return first;
-        var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var timer = _timers.ScheduleAt(deadline, () => expired.TrySetResult(true));
-        using var cancelled = cancellationToken.Register(() => expired.TrySetCanceled());
-        using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        try
+        using var timeoutSource = new ClockTimeout(_timers, deadline);
+        using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+        while (true)
         {
-            while (true)
+            cancellationToken.ThrowIfCancellationRequested();
+            TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
+            if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
+                return first;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
-                if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
-                    return first;
-                try
-                {
-                    var readable = _inbound.Reader.WaitToReadAsync(window.Token).AsTask();
-                    if (await Task.WhenAny(readable, expired.Task).ConfigureAwait(false) == expired.Task)
-                    {
-                        // Finish the availability wait before the final drain or the next command.
-                        window.Cancel();
-                        await Task.WhenAny(readable).ConfigureAwait(false);
-                        // Expiry won; observe a concurrent reader fault without replacing that outcome.
-                        _ = readable.Exception;
-                        await expired.Task.ConfigureAwait(false);
-                        TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
-                        return first;
-                    }
-                    if (!await readable.ConfigureAwait(false))
-                    {
-                        if (first is not null) return first;
-                        ThrowIfDisposed();
-                        throw ReaderEnded();
-                    }
-                }
-                catch (CanOpenTransportException)
+                if (!await _inbound.Reader.WaitToReadAsync(window.Token).ConfigureAwait(false))
                 {
                     if (first is not null) return first;
                     ThrowIfDisposed();
-                    throw;
+                    throw ReaderEnded();
                 }
             }
-        }
-        finally
-        {
-            // Withdraw the outstanding channel wait when the timer, rather than a frame, wins.
-            window.Cancel();
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutSource.IsCancellationRequested)
+            {
+                TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
+                return first;
+            }
+            catch (CanOpenTransportException)
+            {
+                if (first is not null) return first;
+                ThrowIfDisposed();
+                throw;
+            }
         }
     }
 
-    private Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
-        => DelayUntilAsync(TickMath.DueAt(_timers.TimeSource.GetTimestamp(), delay,
-            _timers.TimeSource.Frequency), cancellationToken);
-
-    private async Task DelayUntilAsync(long deadline, CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (_timers.TimeSource.GetTimestamp() >= deadline) return;
-        var elapsed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var timer = _timers.ScheduleAt(deadline, () => elapsed.TrySetResult(true));
-        using var cancelled = cancellationToken.Register(() => elapsed.TrySetCanceled());
-        await elapsed.Task.ConfigureAwait(false);
-    }
+    private Task DelayUntilAsync(long deadline, CancellationToken cancellationToken)
+        => ClockTimeout.WaitUntilAsync(_timers, deadline, cancellationToken);
 
     private static CanOpenTransportException ReaderEnded()
     {

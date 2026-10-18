@@ -1,11 +1,14 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Pro.Actor;
 
 namespace CanKit.Pro.CANopen.Lss;
 
 internal sealed partial class LssMaster
 {
+    private long _nextFastscanAt;
+
     /// <inheritdoc />
     public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
         CancellationToken cancellationToken = default)
@@ -140,14 +143,17 @@ internal sealed partial class LssMaster
     private async Task<bool> ProbeAsync(uint idNumber, byte bitCheck, byte lssSub, byte lssNext,
         CancellationToken cancellationToken)
     {
+        // Only consecutive Fastscan probes need this gap. A completed scan releases the gate
+        // immediately; another scan still observes the previous probe's gap.
+        await DelayUntilAsync(_nextFastscanAt, cancellationToken).ConfigureAwait(false);
         var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken)
             .ConfigureAwait(false);
         // Annex A.3.3: the master cycle contains the whole response timeout. A second slave's
         // 4Fh that arrives after the first must not be read as the next bit.
         var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
             Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
-        if (Options.FastscanCycleTime > TimeSpan.Zero)
-            await DelayAsync(Options.FastscanCycleTime, cancellationToken).ConfigureAwait(false);
+        _nextFastscanAt = TickMath.DueAt(_timers.TimeSource.GetTimestamp(), Options.FastscanCycleTime,
+            _timers.TimeSource.Frequency);
         return response is not null;
     }
 

@@ -985,7 +985,8 @@ part. A field can be scanned, matched (the number is already known) or skipped. 
 cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
 `KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
 Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
-extra gap after that window. Identify waits out `IdentificationTimeout` the same way, so a
+extra gap before the next Fastscan request, including the reset of a new scan. A completed scan
+returns without waiting for that gap. Identify waits out `IdentificationTimeout` the same way, so a
 later slave is not left queued for the next command. Give the slave a node-id in `1..127`
 before the next Fastscan, or the same slave is found again.
 
