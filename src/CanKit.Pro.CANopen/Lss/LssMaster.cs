@@ -166,19 +166,31 @@ internal sealed partial class LssMaster : ILssMaster
             long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
             long switchAt = TickMath.DueAt(start, delay, time.Frequency);
             long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
-            // A positive delay leaves the slave on the current rate, so waiting still reaches it.
-            // A zero delay applies the new rate inside that activate frame. Waiting has to follow
-            // this master's switch, or it goes out at the rate the slave just left.
+            bool waitingAtNewRate = returnToWaiting && delay == TimeSpan.Zero;
             if (returnToWaiting && delay > TimeSpan.Zero)
-                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
+            {
+                if (time.GetTimestamp() >= switchAt)
+                    waitingAtNewRate = true;
+                else
+                {
+                    var waiting = await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
+                    long transmitted = waiting.Transmit > 0 ? waiting.Transmit : time.GetTimestamp();
+                    waitingAtNewRate = transmitted >= switchAt;
+                }
+            }
+            if (waitingAtNewRate && (bitsPerSecond is null || Options.BitRateSwitch is null))
+                throw new CanOpenTransportException(
+                    "The waiting frame could not be verified before the old-rate deadline. A host bit-rate switch is required to return the slaves to waiting.");
             if (delay > TimeSpan.Zero)
                 await DelayUntilAsync(switchAt, ct).ConfigureAwait(false);
             if (bitsPerSecond is int rate && Options.BitRateSwitch is { } switchRate)
                 await switchRate(rate, ct).ConfigureAwait(false);
-            if (returnToWaiting && delay == TimeSpan.Zero)
+            if (waitingAtNewRate && delay == TimeSpan.Zero)
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
                 await DelayUntilAsync(resumeAt, ct).ConfigureAwait(false);
+            if (waitingAtNewRate && delay > TimeSpan.Zero)
+                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
         }, cancellationToken);
     }
 
@@ -420,6 +432,11 @@ internal sealed partial class LssMaster : ILssMaster
                     var readable = _inbound.Reader.WaitToReadAsync(window.Token).AsTask();
                     if (await Task.WhenAny(readable, expired.Task).ConfigureAwait(false) == expired.Task)
                     {
+                        // Finish the availability wait before the final drain or the next command.
+                        window.Cancel();
+                        await Task.WhenAny(readable).ConfigureAwait(false);
+                        // Expiry won; observe a concurrent reader fault without replacing that outcome.
+                        _ = readable.Exception;
                         await expired.Task.ConfigureAwait(false);
                         TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
                         return first;
@@ -503,7 +520,7 @@ internal sealed partial class LssMaster : ILssMaster
                 _ = _inbound.Writer.TryWrite(new Inbound(frameEvent.HostArrivalTimestamp, data));
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!IsFatalReadFailure(ex))
         {
             var error = new CanOpenTransportException("The LSS master reader ended before a slave answered.", ex);
             _inbound.Writer.TryComplete(error);
@@ -511,6 +528,9 @@ internal sealed partial class LssMaster : ILssMaster
             throw error;
         }
     }
+
+    private static bool IsFatalReadFailure(Exception error)
+        => error is OutOfMemoryException or StackOverflowException or AccessViolationException;
 
     private static bool InWindow(Sent sent, long arrival, long deadline)
     {
@@ -547,7 +567,7 @@ internal sealed partial class LssMaster : ILssMaster
         }
         catch (Exception ex)
         {
-            _inbound.Writer.TryComplete(new CanOpenTransportException(
+            _inbound.Writer.TryComplete(IsFatalReadFailure(ex) ? ex : new CanOpenTransportException(
                 "The LSS master reader ended before a slave answered.", ex));
             throw;
         }

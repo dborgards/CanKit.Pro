@@ -62,6 +62,7 @@ internal sealed class LssTestSubscription : ISubscription
     public Func<CanFrameEvent, bool>? Filter { get; set; }
     public bool ParkReader { get; set; }
     public Exception? ReadFailure { get; set; }
+    public Exception? WaitFailure { get; set; }
     public bool FailAfterFirstRead { get; set; }
     private bool _readOne;
     public bool Disposed { get; private set; }
@@ -91,6 +92,7 @@ internal sealed class LssTestSubscription : ISubscription
     public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
     {
         Started.TrySetResult(true);
+        if (WaitFailure is { } error) throw error;
         return ParkReader ? new ValueTask<bool>(WaitParkedAsync(cancellationToken))
             : _frames.Reader.WaitToReadAsync(cancellationToken);
     }

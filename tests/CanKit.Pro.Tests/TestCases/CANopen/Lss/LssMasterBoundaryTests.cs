@@ -144,19 +144,33 @@ public class LssMasterBoundaryTests
     public async Task Caller_Cancellation_Wins_Over_Disposal_For_A_Queued_Command()
     {
         using var rig = new ClockedLssRig();
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Service.Send = async frame =>
+        {
+            entered.TrySetResult(true);
+            await release.Task;
+            return new TxConfirmation { Confirmed = true };
+        };
         var first = rig.Master.InquireVendorIdAsync();
-        await rig.ArmedAsync(TimeSpan.FromSeconds(1));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         using var caller = new CancellationTokenSource();
         var queued = rig.Master.InquireProductCodeAsync(caller.Token);
-        // This callback runs with the caller token already cancelled. It forces disposal into
-        // the same cancellation notification that releases the queued semaphore waiter.
-        using var dispose = caller.Token.Register(rig.Master.Dispose);
-        caller.Cancel();
-
-        var queuedResult = async () => await queued.WaitAsync(TimeSpan.FromSeconds(5));
-        await queuedResult.Should().ThrowAsync<OperationCanceledException>();
-        var firstResult = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
-        await firstResult.Should().ThrowAsync<ObjectDisposedException>();
+        try
+        {
+            // Disposal runs in the caller's cancellation notification, with the active gate
+            // still held. The caller token is already cancelled before its queued wait ends.
+            using var dispose = caller.Token.Register(rig.Master.Dispose);
+            caller.Cancel();
+            var queuedResult = async () => await queued.WaitAsync(TimeSpan.FromSeconds(5));
+            await queuedResult.Should().ThrowAsync<OperationCanceledException>();
+        }
+        finally
+        {
+            release.TrySetResult(true);
+            var firstResult = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
+            await firstResult.Should().ThrowAsync<ObjectDisposedException>();
+        }
     }
 
     [Fact]
@@ -349,6 +363,156 @@ public class LssMasterBoundaryTests
         using var master = CanOpenLss.OpenMaster(service);
 
         (await master.IdentifyNonConfiguredSlavesAsync().WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task An_Unstamped_Reply_Drained_At_Expiry_Does_Not_Answer_The_Next_Identify()
+    {
+        var window = TimeSpan.FromMilliseconds(100);
+        using var rig = new ClockedLssRig(new LssMasterOptions { IdentificationTimeout = window }, parkReader: true);
+        try
+        {
+            await rig.Service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var first = rig.Master.IdentifyNonConfiguredSlavesAsync();
+            await rig.ArmedAsync(window);
+            var forwarded = rig.Service.Subscription.Enqueue(new CanFrameEvent(new CanFrameView(CanFrameType.Can20,
+                (int)CanOpenCobId.LssSlaveMessage, LssFrames.Command(LssCommand.IdentifyNonConfiguredSlave),
+                FrameFlags.None), false, TimeSpan.Zero));
+            await rig.Clock.AdvanceAsync(window);
+            (await first.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+            await forwarded.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var next = rig.Master.IdentifyNonConfiguredSlavesAsync();
+            await rig.ArmedAsync(window);
+            await rig.Clock.AdvanceAsync(window);
+            (await next.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeFalse();
+        }
+        finally
+        {
+            rig.Service.Subscription.Release.TrySetResult(true);
+            await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Theory]
+    [InlineData(150, 0, false)]
+    [InlineData(250, 0, false)]
+    [InlineData(0, 150, false)]
+    [InlineData(0, 150, true)]
+    [InlineData(0, 0, true)]
+    public async Task A_Missed_Old_Rate_Waiting_Frame_Is_Sent_After_Retuning(
+        int activationLatency, int waitingDriverLatency, bool unstampedWaiting)
+    {
+        bool retuned = false;
+        var waiting = new System.Collections.Generic.List<(TimeSpan At, bool Retuned)>();
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (_, _) => { retuned = true; return Task.CompletedTask; },
+        });
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame =>
+        {
+            bool isWaiting = frame.Data.Span[0] == LssCommand.SwitchStateGlobal;
+            if (isWaiting && waiting.Count == 0)
+                rig.Clock.Advance(TimeSpan.FromMilliseconds(waitingDriverLatency));
+            if (isWaiting)
+                waiting.Add((rig.Clock.Elapsed - TimeSpan.FromSeconds(1), retuned));
+            var confirmation = await send(frame);
+            if (!isWaiting)
+                rig.Clock.Advance(TimeSpan.FromMilliseconds(activationLatency));
+            return isWaiting && unstampedWaiting ? confirmation with { HostTransmitTimestamp = 0 } : confirmation;
+        };
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true);
+        bool missed = activationLatency >= 100 || waitingDriverLatency >= 100;
+        if (missed)
+        {
+            retuned.Should().BeTrue();
+            int remaining = 200 - Math.Max(activationLatency, waitingDriverLatency);
+            if (remaining > 0)
+            {
+                await rig.ArmedAsync(TimeSpan.FromMilliseconds(remaining));
+                await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(remaining));
+            }
+        }
+        else
+        {
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+            await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
+            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        }
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        waiting.Should().NotBeEmpty();
+        if (missed)
+        {
+            waiting[waiting.Count - 1].Retuned.Should().BeTrue();
+            waiting[waiting.Count - 1].At.Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, Math.Max(activationLatency, waitingDriverLatency))));
+        }
+        else
+        {
+            waiting.Should().ContainSingle();
+            waiting[0].Retuned.Should().BeFalse();
+        }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task A_Missed_Waiting_Window_Without_A_Host_Switch_Is_A_Transport_Error(bool rate, bool callback)
+    {
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = callback ? (_, _) => Task.CompletedTask : null,
+        });
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame =>
+        {
+            var confirmation = await send(frame);
+            rig.Clock.Advance(TimeSpan.FromMilliseconds(150));
+            return confirmation;
+        };
+
+        var activate = async () => await rig.Master.ActivateBitTimingAsync(100,
+            bitsPerSecond: rate ? 250_000 : null, returnToWaiting: true).WaitAsync(TimeSpan.FromSeconds(5));
+        await activate.Should().ThrowAsync<CanOpenTransportException>();
+        rig.Service.Commands.Should().ContainSingle().Which.Should().Be(LssCommand.ActivateBitTiming);
+    }
+
+    [Theory]
+    [InlineData(typeof(OutOfMemoryException))]
+    [InlineData(typeof(StackOverflowException))]
+    [InlineData(typeof(AccessViolationException))]
+    public async Task Fatal_Subscription_Failures_Are_Not_Converted_To_Transport_Errors(Type errorType)
+    {
+        using var service = new LssTestService();
+        var failure = (Exception)Activator.CreateInstance(errorType)!;
+        service.Subscription.ReadFailure = failure;
+        service.Send = _ => Task.FromResult(new TxConfirmation { Confirmed = true });
+        using var master = CanOpenLss.OpenMaster(service);
+
+        var inquire = async () => await master.InquireNodeIdAsync();
+        var thrown = await inquire.Should().ThrowAsync<Exception>();
+        thrown.Which.Should().BeSameAs(failure);
+    }
+
+    [Theory]
+    [InlineData(typeof(OutOfMemoryException))]
+    [InlineData(typeof(StackOverflowException))]
+    [InlineData(typeof(AccessViolationException))]
+    public async Task Fatal_Background_Read_Failures_Keep_Their_Original_Exception(Type errorType)
+    {
+        using var service = new LssTestService();
+        var failure = (Exception)Activator.CreateInstance(errorType)!;
+        service.Subscription.WaitFailure = failure;
+        service.Send = _ => Task.FromResult(new TxConfirmation { Confirmed = true });
+        using var master = CanOpenLss.OpenMaster(service);
+        await service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var inquire = async () => await master.InquireNodeIdAsync();
+        var thrown = await inquire.Should().ThrowAsync<Exception>();
+        thrown.Which.Should().BeSameAs(failure);
     }
 
 }

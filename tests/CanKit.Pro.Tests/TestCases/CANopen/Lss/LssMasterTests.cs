@@ -512,7 +512,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var master = rig.Master;
         (await rig.RunAsync(master.FastscanAsync())).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
 
-        var configured = rig.Add(SlaveA, nodeId: 7);
+        rig.Add(SlaveA, nodeId: 7);
         (await rig.RunAsync(master.FastscanAsync())).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
 
         var slave = rig.Add(SlaveA);
@@ -624,17 +624,14 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Timeout_Shorter_Than_The_Response_Misses_It()
     {
-        using var rig = Rig.Open(SlaveA);
-        var master = Rig.ReplaceOptions(rig, new LssMasterOptions
-        {
-            ResponseTimeout = TimeSpan.FromTicks(1),
-            FastscanTimeout = TimeSpan.FromMilliseconds(40),
-            FastscanCycleTime = TimeSpan.FromMilliseconds(1),
-            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
-        });
-        await master.SwitchStateGlobalAsync(LssState.Configuration);
-        await WaitUntilAsync(() => rig.Slave.State == LssState.Configuration);
-        var act = async () => await master.InquireVendorIdAsync();
+        using var rig = new ClockedLssRig(new LssMasterOptions { ResponseTimeout = TimeSpan.FromTicks(1) });
+        var slave = rig.Add(SlaveA);
+        slave.ResponseDelay = TimeSpan.FromTicks(2);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        var inquire = rig.Master.InquireVendorIdAsync();
+        await rig.ArmedAsync(TimeSpan.FromTicks(1));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
+        var act = async () => await inquire.WaitAsync(TimeSpan.FromSeconds(5));
         await act.Should().ThrowAsync<LssTimeoutException>();
     }
 
@@ -686,11 +683,17 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Activate_Can_Return_The_Slave_To_Waiting_Before_The_Switch()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 5);
-        await EnterConfigurationAsync(rig);
+        using var rig = new ClockedLssRig();
+        var slave = rig.Add(SlaveA, nodeId: 5);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
         (await rig.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
-        await rig.Master.ActivateBitTimingAsync(20, returnToWaiting: true);
-        await WaitUntilAsync(() => rig.Slave.State == LssState.Waiting);
+        var activating = rig.Master.ActivateBitTimingAsync(20, returnToWaiting: true);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(20));
+        slave.State.Should().Be(LssState.Waiting);
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(20));
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(20));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(20));
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]
@@ -781,24 +784,32 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Dispose_Completes_A_Command_Queued_On_The_Gate()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 4);
-        // The slave is in waiting, so inquire is ignored and the first call holds the gate
-        // for the whole response window. The second call is queued behind it.
-        using var master = Rig.ReplaceOptions(rig, new LssMasterOptions
+        using var rig = new ClockedLssRig();
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Service.Send = async frame =>
         {
-            ResponseTimeout = TimeSpan.FromSeconds(30),
-            FastscanTimeout = TimeSpan.FromMilliseconds(40),
-            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
-        });
-        var first = master.InquireVendorIdAsync();
-        await WaitUntilAsync(() => rig.Slave.Commands.Contains(LssCommand.InquireVendorId));
-        var second = master.InquireProductCodeAsync();
-        master.Dispose();
-
-        var firstAct = async () => await first;
-        var secondAct = async () => await second;
-        await firstAct.Should().ThrowAsync<ObjectDisposedException>();
-        await secondAct.Should().ThrowAsync<ObjectDisposedException>();
+            entered.TrySetResult(true);
+            await release.Task;
+            return new TxConfirmation { Confirmed = true };
+        };
+        var first = rig.Master.InquireVendorIdAsync();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = rig.Master.InquireProductCodeAsync();
+        try
+        {
+            // Keep the active send blocked until the queued waiter has observed disposal.
+            // Its gate cannot be released first by a competing cancellation continuation.
+            rig.Master.Dispose();
+            var secondAct = async () => await second.WaitAsync(TimeSpan.FromSeconds(5));
+            await secondAct.Should().ThrowAsync<ObjectDisposedException>();
+        }
+        finally
+        {
+            release.TrySetResult(true);
+            var firstAct = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
+            await firstAct.Should().ThrowAsync<ObjectDisposedException>();
+        }
     }
 
     [Fact]

@@ -30,12 +30,13 @@ internal sealed class ClockedLssRig : IDisposable
     public LssTestService Service { get; } = new();
     public LssMaster Master { get; }
 
-    public ClockedLssRig(LssMasterOptions? options = null)
+    public ClockedLssRig(LssMasterOptions? options = null, bool parkReader = false)
     {
         Clock.Advance(TimeSpan.FromSeconds(1)); // Zero is reserved for an absent transport stamp.
         Timers = Clock.NewActor();
         _slaveTimers = Clock.NewActor();
         Service.Send = SendAsync;
+        Service.Subscription.ParkReader = parkReader;
         Master = new LssMaster(Service, options ?? new LssMasterOptions(), ownsService: false, Timers);
     }
 
