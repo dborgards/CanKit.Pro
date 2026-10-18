@@ -11,47 +11,28 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Lss;
 public class LssMasterResponseRecoveryTests
 {
     [Theory]
-    [InlineData(0, 0, false, false)]
-    [InlineData(0, 10, false, false)]
-    [InlineData(0, 10, true, false)]
-    [InlineData(0, 10, false, true)]
-    [InlineData(1, 10, false, false)]
-    [InlineData(2, 10, false, false)]
+    [InlineData(0, false, false)]
+    [InlineData(10, false, false)]
+    [InlineData(10, true, false)]
+    [InlineData(10, false, true)]
     public async Task A_Replacement_Scan_Waits_Out_An_Abandoned_Probe_And_Ignores_Its_Reply(
-        int failure, int gapMilliseconds, bool unstamped, bool cancelSuccessor)
+        int gapMilliseconds, bool unstamped, bool cancelSuccessor)
     {
         var window = TimeSpan.FromMilliseconds(100);
         var gap = TimeSpan.FromMilliseconds(gapMilliseconds);
         using var rig = new ClockedLssRig(new LssMasterOptions { FastscanTimeout = window, FastscanCycleTime = gap });
         using var caller = new CancellationTokenSource();
         var send = rig.Service.Send;
-        if (failure != 0)
-        {
-            rig.Service.Send = _ =>
-            {
-                rig.Clock.Advance(TimeSpan.FromMilliseconds(50));
-                if (failure == 1)
-                {
-                    caller.Cancel();
-                    caller.Token.ThrowIfCancellationRequested();
-                }
-                return Task.FromResult(new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout });
-            };
-        }
-        else if (unstamped)
+        if (unstamped)
             rig.Service.Send = async frame => (await send(frame)) with { HostTransmitTimestamp = 0 };
         var scanning = rig.Master.FastscanAsync(cancellationToken: caller.Token);
-        if (failure == 0)
-        {
-            await rig.ArmedAsync(window);
-            await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
-            caller.Cancel();
-        }
+        await rig.ArmedAsync(window);
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
+        caller.Cancel();
         var scan = async () => await scanning.WaitAsync(LssTestTiming.SchedulingBudget);
-        if (failure == 2) await scan.Should().ThrowAsync<CanKit.Pro.CANopen.CanOpenTransportException>();
-        else await scan.Should().ThrowAsync<OperationCanceledException>();
+        await scan.Should().ThrowAsync<OperationCanceledException>();
         rig.Service.Send = send;
-        var remainingWindow = failure == 0 ? TimeSpan.FromMilliseconds(50) : window;
+        var remainingWindow = TimeSpan.FromMilliseconds(50);
 
         using var successor = new CancellationTokenSource();
         var next = rig.Master.FastscanAsync(cancellationToken: successor.Token);

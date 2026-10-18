@@ -75,33 +75,6 @@ public class LssMasterActivationRecoveryTests
         await CheckNextCommandAsync(rig, TimeSpan.FromMilliseconds(Math.Max(0, 100 - latency)));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task An_Unconfirmed_Activation_Reserves_Two_Periods_From_Send_Completion(bool cancel)
-    {
-        using var rig = new ClockedLssRig();
-        using var caller = new CancellationTokenSource();
-        var send = rig.Service.Send;
-        rig.Service.Send = _ =>
-        {
-            rig.Clock.Advance(TimeSpan.FromMilliseconds(150));
-            if (cancel)
-            {
-                caller.Cancel();
-                caller.Token.ThrowIfCancellationRequested();
-            }
-            return Task.FromResult(new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout });
-        };
-        var activate = async () => await rig.Master.ActivateBitTimingAsync(100, cancellationToken: caller.Token)
-            .WaitAsync(LssTestTiming.SchedulingBudget);
-        if (cancel) await activate.Should().ThrowAsync<OperationCanceledException>();
-        else await activate.Should().ThrowAsync<CanOpenTransportException>();
-        rig.Service.Send = send;
-
-        await CheckNextCommandAsync(rig, TimeSpan.FromMilliseconds(200));
-    }
-
     private static async Task CheckNextCommandAsync(ClockedLssRig rig, TimeSpan remaining)
     {
         int sent = rig.Service.Commands.Count;

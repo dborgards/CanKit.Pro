@@ -80,6 +80,7 @@ internal sealed partial class LssMaster : ILssMaster
     private int _disposed;
     // Guarded by _gate. Interrupted requests retain response-window/silence reservations.
     private long _nextCommandAt;
+    private Exception? _indeterminateSend;
 
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService, ProtocolActor? timers = null)
     {
@@ -138,8 +139,7 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveRevision, address.RevisionNumber), ct)
                 .ConfigureAwait(false);
-            var sent = await SendForReplyAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber),
-                Options.ResponseTimeout, ct)
+            var sent = await SendAsync(LssFrames.WithU32(LssCommand.SwitchSelectiveSerial, address.SerialNumber), ct)
                 .ConfigureAwait(false);
             var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.SwitchSelectiveAcknowledge,
                 Options.ResponseTimeout, ct).ConfigureAwait(false);
@@ -168,7 +168,7 @@ internal sealed partial class LssMaster : ILssMaster
         {
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
             var time = _time;
-            var sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct, delay + delay)
+            var sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct)
                 .ConfigureAwait(false);
             long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
             long switchAt = TickMath.DueAt(start, delay, time.Frequency);
@@ -244,7 +244,7 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            var sent = await SendForReplyAsync(LssFrames.Command(LssCommand.InquireNodeId), Options.ResponseTimeout, ct)
+            var sent = await SendAsync(LssFrames.Command(LssCommand.InquireNodeId), ct)
                 .ConfigureAwait(false);
             var response = await ReceiveRequiredAsync(sent, LssCommand.InquireNodeId, ct).ConfigureAwait(false);
             return response[1];
@@ -263,8 +263,7 @@ internal sealed partial class LssMaster : ILssMaster
                 .ConfigureAwait(false);
             await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialLow, range.SerialLow), ct)
                 .ConfigureAwait(false);
-            var sent = await SendForReplyAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh),
-                Options.IdentificationTimeout, ct)
+            var sent = await SendAsync(LssFrames.WithU32(LssCommand.IdentifyRemoteSerialHigh, range.SerialHigh), ct)
                 .ConfigureAwait(false);
             // The whole identification window is occupied, so a later slave is not left
             // queued for the next command.
@@ -277,8 +276,7 @@ internal sealed partial class LssMaster : ILssMaster
     public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
         => Execute(async ct =>
         {
-            var sent = await SendForReplyAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote),
-                Options.IdentificationTimeout, ct)
+            var sent = await SendAsync(LssFrames.Command(LssCommand.IdentifyNonConfiguredRemote), ct)
                 .ConfigureAwait(false);
             var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifyNonConfiguredSlave,
                 Options.IdentificationTimeout, ct, drain: true).ConfigureAwait(false);
@@ -292,7 +290,7 @@ internal sealed partial class LssMaster : ILssMaster
         var payload = LssFrames.Manufacturer(commandSpecifier, parameters.Span);
         return Execute(async ct =>
         {
-            var sent = await SendForReplyAsync(payload, Options.ResponseTimeout, ct).ConfigureAwait(false);
+            var sent = await SendAsync(payload, ct).ConfigureAwait(false);
             return await ReceiveAsync(sent, d => d.Span[0] == commandSpecifier, Options.ResponseTimeout, ct)
                 .ConfigureAwait(false);
         }, cancellationToken);
@@ -358,7 +356,7 @@ internal sealed partial class LssMaster : ILssMaster
     private Task<LssServiceResult> ConfirmedAsync(byte[] request, byte commandSpecifier, CancellationToken cancellationToken)
         => Execute(async ct =>
         {
-            var sent = await SendForReplyAsync(request, Options.ResponseTimeout, ct).ConfigureAwait(false);
+            var sent = await SendAsync(request, ct).ConfigureAwait(false);
             var response = await ReceiveRequiredAsync(sent, commandSpecifier, ct).ConfigureAwait(false);
             return new LssServiceResult(response[1], response[2]);
         }, cancellationToken);
@@ -368,7 +366,7 @@ internal sealed partial class LssMaster : ILssMaster
 
     private async Task<uint> InquireU32CoreAsync(byte commandSpecifier, CancellationToken cancellationToken)
     {
-        var sent = await SendForReplyAsync(LssFrames.Command(commandSpecifier), Options.ResponseTimeout, cancellationToken)
+        var sent = await SendAsync(LssFrames.Command(commandSpecifier), cancellationToken)
             .ConfigureAwait(false);
         var response = await ReceiveRequiredAsync(sent, commandSpecifier, cancellationToken).ConfigureAwait(false);
         return LssFrames.ReadU32(response);
@@ -384,6 +382,10 @@ internal sealed partial class LssMaster : ILssMaster
             try
             {
                 ThrowIfDisposed();
+                linked.Token.ThrowIfCancellationRequested();
+                if (_indeterminateSend is { } failure)
+                    throw new CanOpenTransportException(
+                        "The LSS master cannot continue after an indeterminate transmission. Reset the transport and re-establish a quiescent network before opening another master.", failure);
                 await DelayUntilAsync(_nextCommandAt, linked.Token).ConfigureAwait(false);
                 return await body(linked.Token).ConfigureAwait(false);
             }
@@ -413,8 +415,7 @@ internal sealed partial class LssMaster : ILssMaster
 
     private void Reserve(long until) => _nextCommandAt = Math.Max(_nextCommandAt, until);
 
-    private async Task<Sent> SendAsync(byte[] payload, CancellationToken cancellationToken,
-        TimeSpan recoveryWindow = default)
+    private async Task<Sent> SendAsync(byte[] payload, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
@@ -439,16 +440,14 @@ internal sealed partial class LssMaster : ILssMaster
             }
             return new Sent(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
         }
-        catch when (mayHaveTransmitted)
+        catch (Exception error) when (mayHaveTransmitted)
         {
-            // After entering the service, only an explicit rejection proves no frame went out.
-            Reserve(TickMath.DueAt(_time.GetTimestamp(), recoveryWindow, _time.Frequency));
+            // A timed-out/cancelled driver may still transmit arbitrarily later. No finite
+            // quiet period makes another request safe, so this master must never send again.
+            _indeterminateSend = error;
             throw;
         }
     }
-
-    private Task<Sent> SendForReplyAsync(byte[] payload, TimeSpan responseWindow, CancellationToken cancellationToken)
-        => SendAsync(payload, cancellationToken, responseWindow);
 
     private async Task<byte[]?> ReceiveAsync(Sent sent, Func<ReadOnlyMemory<byte>, bool> match, TimeSpan timeout,
         CancellationToken cancellationToken, bool drain = false)
@@ -457,8 +456,10 @@ internal sealed partial class LssMaster : ILssMaster
         long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
         long deadline = TickMath.DueAt(start, timeout, time.Frequency);
         byte[]? first = null;
-        ClockTimeout? timeoutSource = null;
-        CancellationTokenSource? window = null;
+        using var timeoutSource = _timers is { } timers
+            ? new ClockTimeout(timers, deadline)
+            : new ClockTimeout(RemainingUntil(deadline));
+        using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
         try
         {
             while (true)
@@ -467,10 +468,6 @@ internal sealed partial class LssMaster : ILssMaster
                 TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
                 if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
                     return first;
-                timeoutSource ??= _timers is { } timers
-                    ? new ClockTimeout(timers, deadline)
-                    : new ClockTimeout(RemainingUntil(deadline));
-                window ??= CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
                 try
                 {
                     if (!await _inbound.Reader.WaitToReadAsync(window.Token).ConfigureAwait(false))
@@ -500,11 +497,6 @@ internal sealed partial class LssMaster : ILssMaster
             // A later handoff cannot distinguish a delayed reply to this abandoned request.
             Reserve(deadline);
             throw;
-        }
-        finally
-        {
-            window?.Dispose();
-            timeoutSource?.Dispose();
         }
     }
 

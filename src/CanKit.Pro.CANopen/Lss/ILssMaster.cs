@@ -24,9 +24,12 @@ namespace CanKit.Pro.CANopen.Lss;
 /// <para>
 /// Cancellation returns promptly, but later commands wait out an abandoned response window
 /// so its delayed replies cannot answer a new request. A cancelled Fastscan also preserves
-/// its probe's cycle gap. Failed transmit confirmation conservatively starts the recovery
-/// window when the send ends, except for explicit driver rejection or cancellation before
-/// entering the service, which prove that no request was sent.
+/// its probe's cycle gap. If transmission fails or is cancelled after entering the send
+/// service, delivery can remain indeterminate: the driver may still transmit arbitrarily
+/// later. The master then rejects every subsequent command with a
+/// <see cref="CanOpenTransportException"/>. Dispose it, reset the transport and re-establish
+/// a quiescent network before opening another master. Explicit driver rejection and
+/// cancellation checked before entering the service leave the master usable.
 /// </para>
 /// </remarks>
 public interface ILssMaster : IDisposable, IAsyncDisposable
@@ -80,10 +83,9 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
     /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
     /// switch the master is still on the old rate and the slave will not hear the frame.
-    /// Cancellation or failure returns to the caller promptly; subsequent commands still wait
-    /// for the activation's two periods. An unconfirmed activation conservatively reserves
-    /// both periods from the failed send's completion, except for explicit driver rejection
-    /// or cancellation before entering the service.
+    /// Cancellation or failure after a confirmed send returns to the caller promptly;
+    /// subsequent commands still wait for the activation's two periods. An indeterminate
+    /// send makes the master unusable as described in the interface remarks.
     /// </summary>
     /// <exception cref="ArgumentException">A bit rate requires a switch callback. A zero delay with returnToWaiting requires both.</exception>
     /// <exception cref="CanOpenTransportException">The old-rate waiting window was missed and no host bit-rate switch is available.</exception>

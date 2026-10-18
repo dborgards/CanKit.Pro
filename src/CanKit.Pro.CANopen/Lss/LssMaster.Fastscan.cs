@@ -147,11 +147,9 @@ internal sealed partial class LssMaster
         // immediately; another scan still observes the previous probe's gap.
         await DelayUntilAsync(_nextFastscanAt, cancellationToken).ConfigureAwait(false);
         long responseUntil = 0;
-        long priorReservation = _nextCommandAt;
         try
         {
-            var sent = await SendForReplyAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext),
-                Options.FastscanTimeout, cancellationToken).ConfigureAwait(false);
+            var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken).ConfigureAwait(false);
             long start = sent.Transmit > 0 ? sent.Transmit : _time.GetTimestamp();
             responseUntil = TickMath.DueAt(start, Options.FastscanTimeout, _time.Frequency);
             // Annex A.3.3: the master cycle contains the whole response timeout. A second
@@ -162,7 +160,7 @@ internal sealed partial class LssMaster
         }
         finally
         {
-            if (responseUntil > 0 || _nextCommandAt > priorReservation)
+            if (responseUntil > 0)
             {
                 long end = Math.Max(_time.GetTimestamp(), Math.Max(responseUntil, _nextCommandAt));
                 _nextFastscanAt = TickMath.DueAt(end, Options.FastscanCycleTime, _time.Frequency);
