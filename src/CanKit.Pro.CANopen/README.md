@@ -1102,9 +1102,13 @@ generally cannot change the bit rate of an open channel; the number of frames th
 consumes depends on how many candidates precede the right one and on the adapter's close/reopen
 time (Figure 2). `LssBitRateDetectionOptions` sets the candidates and their order (500/250/125
 kbit/s first by default), the per-candidate window, the error threshold and the number of
-passes. `RequireListenOnly` may be turned off for an adapter that is silent in normal mode and
-does not report the listen-only mode; the search still opens each probe listen-only. The sample's
-`detect` verb is this call on the command line, with `--demo`.
+passes. `RequireListenOnly` only relaxes the detection's own check that each probe was opened
+listen-only; it does not change how your factory opens the bus. For an adapter that accepts
+listen-only but does not report the mode back, turning it off is enough and the factory keeps
+opening listen-only. For an adapter that rejects listen-only but is silent in normal mode, turn
+it off **and** have your factory open each probe in normal mode — which is reactive, so a wrong
+candidate may emit error frames, against §5.2.1. The sample's `detect` verb does exactly this
+under `--allow-non-listen-only`, and is otherwise this call on the command line, with `--demo`.
 
 The single-dominant-bit timing of §5.2.2, the external AND/OR-gate variant of §5.2.4 for
 controllers without a listen-only mode, and the default fallback bit rate of §5.1 are not built;
