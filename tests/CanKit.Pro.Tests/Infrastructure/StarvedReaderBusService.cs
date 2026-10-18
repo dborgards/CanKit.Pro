@@ -81,6 +81,9 @@ internal sealed class StarvedReaderBusService : ICanBusService
     /// </summary>
     public Action? OnSendConfirmed { get; set; }
 
+    /// <summary>Optional per-frame confirmation, for delayed or failed driver sends.</summary>
+    public Func<CanFrame, CancellationToken, Task<TxConfirmation>>? ConfirmSendAsync { get; set; }
+
     /// <summary>Every frame the channel put on the wire, in order.</summary>
     public List<byte[]> Sent { get; } = new();
 
@@ -89,6 +92,7 @@ internal sealed class StarvedReaderBusService : ICanBusService
     {
         lock (Sent) Sent.Add(frame.Data.ToArray());
         OnSendConfirmed?.Invoke();
+        if (ConfirmSendAsync is { } confirm) return confirm(frame, cancellationToken);
         return Task.FromResult(new TxConfirmation { Confirmed = true });
     }
 

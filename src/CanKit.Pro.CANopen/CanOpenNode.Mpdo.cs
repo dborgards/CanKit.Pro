@@ -10,9 +10,13 @@ using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
-// FR-CO-052: CiA 301 §7.2.3, §7.5.2.39/40 (SAM/DAM and scanner/dispatcher lists).
+// FR-CO-053: CiA 301 §7.2.3, §7.5.2.39/40 (SAM/DAM and scanner/dispatcher lists).
 internal sealed partial class CanOpenNode : ICanOpenPdo
 {
+    // Actor-owned snapshot; OD enumeration belongs to configuration, not reception.
+    private ulong[] _mpdoDispatcher = Array.Empty<ulong>();
+
+    private void RebuildMpdoDispatcher() => _mpdoDispatcher = MpdoListWords(0x1FD0, 0x1FFF, 8).ToArray();
     /// <inheritdoc />
     public void ConfigureMultiplexedTpdo(int pdoIndex, MpdoAddressMode mode, uint cobId)
         => ConfigureMpdo(pdoIndex, mode, cobId, isTpdo: true);
@@ -132,9 +136,8 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
 
     private void TriggerSourceMpdo(TpdoRuntime rt, HashSet<uint>? dirty = null)
     {
-        foreach (var entry in rt.Mapping)
+        foreach (var entry in rt.Mapping.Where(entry => dirty is null || dirty.Contains(CosKey(entry.Index, entry.Subindex))))
         {
-            if (dirty is not null && !dirty.Contains(CosKey(entry.Index, entry.Subindex))) continue;
             QueueMpdo(rt, BuildMpdo(false, _nodeId, entry.Index, entry.Subindex,
                 ReadMpdoSource(entry.Index, entry.Subindex)));
         }
@@ -144,9 +147,14 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
     {
         if (payload.Length != 8)
         {
-            if (_emcyValid) _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8210, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
+            if (_emcyValid && !rp.ShortFrameReported)
+            {
+                rp.ShortFrameReported = true;
+                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8210, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
+            }
             return;
         }
+        rp.ShortFrameReported = false;
         bool destination = (payload[0] & 0x80) != 0;
         byte node = (byte)(payload[0] & 0x7F);
         if (destination != (rp.MappingKind == (byte)MpdoAddressMode.Destination)) return;
@@ -157,13 +165,16 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
         {
             if (node != 0 && node != _nodeId) return;
             written = WriteMpdoTarget(index, subindex, payload);
-            if (!written && _emcyValid)
+            if (!written && _emcyValid && !rp.MpdoTargetReported)
+            {
+                rp.MpdoTargetReported = true;
                 _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8230, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
+            }
         }
         else
         {
             if (node == 0) return;
-            foreach (ulong entry in MpdoListWords(0x1FD0, 0x1FFF, 8))
+            foreach (ulong entry in _mpdoDispatcher)
             {
                 int count = Math.Max(1, (int)(entry >> 56));
                 int delta = subindex - (byte)(entry >> 8);
@@ -174,6 +185,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
             }
         }
         if (!written) return;
+        rp.MpdoTargetReported = false;
         RestartRpdoDeadline(rp);
         RaiseRpdoReceived(rp.PdoIndex, rp.CobId, payload);
     }

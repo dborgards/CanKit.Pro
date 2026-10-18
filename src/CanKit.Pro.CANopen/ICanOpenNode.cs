@@ -399,7 +399,7 @@ public interface ICanOpenNode : IDisposable
     /// <param name="pdoIndex">TPDO number 1..CanOpenNodeOptions.PdoCount (or the description's higher count).</param>
     /// <param name="mapping">The mapped objects; copied into the mapping record. Every target
     /// must exist in the OD, be PDO-mappable and readable, and have the mapped bit length (dummy
-    /// entries <c>0002h</c>–<c>0007h</c> excepted).</param>
+    /// entries <c>0001h</c>–<c>0007h</c> excepted).</param>
     /// <param name="transmission">Trigger mode; see <see cref="TpdoTransmission"/>. Cyclic
     /// "every n-th SYNC" is configured by writing the raw byte to <c>1800h:02</c> instead.</param>
     /// <param name="cobId">The <c>1800h:01</c> word: a CAN-ID plus the CiA 301 control

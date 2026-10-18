@@ -618,4 +618,19 @@ public class CanOpenForeignSrdoTests : IClassFixture<VirtualAdapterFixture>
         var ex2 = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => master.Safety().ObserveForeignSrdoAsync(Device, 0x109, new byte[8], nine, PeerFile(), new ListSink()));
         ex2.ParamName.Should().Be("frame2");
     }
+    [Fact]
+    public async Task Bit_Granular_Pdo_Mapping_Does_Not_Enable_Bit_Granular_Srdo_Mapping()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-foreign-srdo-bits");
+        using var bus = Open(session, 1);
+        using var master = OpenOnVirtualClock(bus, Master, new CanOpenNodeOptions());
+        var file = PeerFile();
+        file.Objects.Objects[0x1381].SubObjects[1].ParameterValue = "0x20000001";
+        file.Objects.Objects[0x1381].SubObjects[2].ParameterValue = "0x20000001";
+        var result = await master.Safety().ObserveForeignSrdoAsync(Device, 0x109,
+            new byte[] { 1 }, new byte[] { 0xFE }, file, new ListSink()).WithTimeoutAsync(ShortTimeout);
+        result.Observation!.Decoded.Should().BeFalse();
+        result.Observation.Reason.Should().Contain("byte");
+    }
+
 }

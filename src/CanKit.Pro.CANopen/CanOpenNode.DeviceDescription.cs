@@ -47,11 +47,8 @@ internal sealed partial class CanOpenNode
     {
         int count = 0;
         if (description is null) return count;
-        foreach (ushort index in description.Objects.Objects.Keys)
-        {
-            if (index is >= Co.RpdoComm and < Co.TpdoMap + Co.PdoCount)
-                count = Math.Max(count, ((index - Co.RpdoComm) % Co.PdoCount) + 1);
-        }
+        foreach (ushort index in description.Objects.Objects.Keys.Where(index => index is >= Co.RpdoComm and < Co.TpdoMap + Co.PdoCount))
+            count = Math.Max(count, ((index - Co.RpdoComm) % Co.PdoCount) + 1);
         return count;
     }
 
@@ -925,7 +922,7 @@ internal sealed partial class CanOpenNode
                 failed = true;
             }
         }
-        if (count > (uint)Pdo.PdoMapping.MaxEntries)
+        if (count > (uint)Pdo.PdoMapping.MaxEntries && count is not (0xFE or 0xFF))
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
                 $"a PDO mapping holds at most {Pdo.PdoMapping.MaxEntries} entries; the mapping stays disabled", sub0.Value));

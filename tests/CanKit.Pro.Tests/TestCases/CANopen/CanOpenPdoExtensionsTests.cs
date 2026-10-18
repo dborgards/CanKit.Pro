@@ -10,7 +10,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenPdoEngineTests
 {
-    // FR-CO-050: nine booleans cross a byte boundary; a U16 begins at bit nine, and a dummy
+    // FR-CO-051: nine booleans cross a byte boundary; a U16 begins at bit nine, and a dummy
     // BOOLEAN consumes one bit. Expected wire bytes are independent of the packer.
     [Fact]
     public async Task Bit_Mapping_Packs_And_Unpacks_Across_Byte_Boundaries()
@@ -47,7 +47,7 @@ public partial class CanOpenPdoEngineTests
         full.TotalBits.Should().Be(64);
     }
 
-    // FR-CO-051: receive through the real reader/demux, and distinguish frame formats even
+    // FR-CO-052: receive through the real reader/demux, and distinguish frame formats even
     // where their numeric identifiers coincide.
     [Fact]
     public async Task Additional_Pdos_And_Extended_Ids_Route_Independently()
@@ -80,7 +80,7 @@ public partial class CanOpenPdoEngineTests
         od.ReadUnsigned(0x1BFF, 0).Should().Be(1);
     }
 
-    // FR-CO-052: a DAM packet addresses one node or all consumers; unavailable objects cause
+    // FR-CO-053: a DAM packet addresses one node or all consumers; unavailable objects cause
     // EMCY 8230h, and the wire carries the target multiplexer and four padded data bytes.
     [Fact]
     public async Task Destination_Mpdo_Addresses_Local_Objects_And_Reports_Unavailable_Ones()

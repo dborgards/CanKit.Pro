@@ -34,7 +34,7 @@ every requirement of SRS §4.3.2 — the requirements this repository set itself
 FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 (`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
 scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
-(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-047 to FR-CO-052 add the PDO extensions requested on 18 October 2026. FR-CO-035 to FR-CO-046 are CANopen
+(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-048 to FR-CO-053 add the PDO extensions requested on 18 October 2026. FR-CO-035 to FR-CO-046 are CANopen
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). The SRS's "Quelle" column says for each
 of them whether a standard requires it, the architecture does, or a maintainer decision does.
@@ -463,7 +463,7 @@ scheduling; it cannot withdraw a frame already handed to the CAN driver.
 
 **RPDO deadline.** `1400h:05` is a timeout in milliseconds; 0 disables it. The next valid
 reception arms it, each later reception refreshes it, and expiry raises
-`node.Pdo().RpdoTimeout` once. A short frame does not refresh it. Reconfiguration and
+`node.Pdo().RpdoTimeout` once and emits EMCY `8250h` when its EMCY producer is enabled. A short frame does not refresh it. Reconfiguration and
 leaving Operational cancel it; re-entry waits for a reception. `1400h:03` is retained as
 an implementation-specific RPDO inhibit parameter, without suppressing reception.
 

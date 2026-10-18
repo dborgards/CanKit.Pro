@@ -101,7 +101,7 @@ public sealed class RpdoReceivedEventArgs : EventArgs
     /// <summary>RPDO index (1..512, within this node's configured count).</summary>
     public int PdoIndex { get; }
 
-    /// <summary>Raw 11-bit COB-ID the frame arrived on.</summary>
+    /// <summary>PDO routing key the frame arrived on; bit 29 identifies an extended frame.</summary>
     public uint CobId { get; }
 
     /// <summary>The full incoming RPDO payload (0..8 bytes).</summary>

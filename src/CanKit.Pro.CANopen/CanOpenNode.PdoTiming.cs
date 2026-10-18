@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Pro.Actor;
@@ -9,7 +10,7 @@ using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
-// FR-CO-047/048/049: CiA 301 §7.2.5, §7.5.2.7, §7.5.2.22, §7.5.2.35/37.
+// FR-CO-048/049/050: CiA 301 §7.2.5, §7.5.2.7, §7.5.2.22, §7.5.2.35/37.
 internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
 {
     private byte _syncCounterOverflow;
@@ -20,6 +21,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
     private long _lastSync;
     private bool _hasSync;
     private long _syncWindowGeneration;
+    private bool _syncLengthReported;
 
     /// <inheritdoc />
     public event EventHandler<RpdoTimeoutEventArgs>? RpdoTimeout;
@@ -39,49 +41,65 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         {
             _syncCounterOverflow = overflow;
             _nextSyncCounter = 1;
-            foreach (var rt in _tpdos)
+            foreach (var rt in _tpdos.Where(rt => rt is not null))
             {
-                if (rt is null) continue;
-                rt.SyncStarted = false;
+                rt!.SyncStarted = false;
                 rt.SyncCounter = 0;
             }
         }
         var window = TimeSpan.FromTicks(_od.ReadUnsigned(Co.SyncWindow, 0) * (TimeSpan.TicksPerMillisecond / 1000));
         if (window != _syncWindow) Interlocked.Increment(ref _syncWindowGeneration);
         _syncWindow = window;
+        _syncLengthReported = false;
     }
 
     private Task SendNextSync(CancellationToken cancellationToken = default, bool periodic = false)
     {
+        // There is no value in retaining missed periodic ticks: after a driver stall the
+        // next tick resumes the cadence. Manual requests still retain their send order.
+        if (periodic && !_syncSendChain.IsCompleted) return Task.CompletedTask;
         long generation = _syncProducerGeneration;
-        return _syncSendChain = SendSyncAfterAsync(_syncSendChain, periodic, generation, cancellationToken);
+        long queuedAt = _actor.TimeSource.GetTimestamp();
+        var period = _syncProducerInterval;
+        return _syncSendChain = SendSyncAfterAsync(_syncSendChain, periodic, generation, queuedAt, period, cancellationToken);
     }
 
-    private async Task SendSyncAfterAsync(Task previous, bool periodic, long generation, CancellationToken cancellationToken)
+    private async Task SendSyncAfterAsync(Task previous, bool periodic, long generation,
+        long queuedAt, TimeSpan period, CancellationToken cancellationToken)
     {
-        try { await previous.ConfigureAwait(false); }
-        catch (Exception) { /* A failed transmission must not stop subsequent SYNCs. */ }
+        // Observe a preceding failure without carrying it into the next request. The wire
+        // helper already reports transport failures; cancellation belongs to its caller.
+        await previous.ContinueWith(completed => { _ = completed.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
         try
         {
             var send = await _actor.PostAsync(() =>
             {
                 if (_disposed != 0) return Task.CompletedTask;
-                if (periodic && (generation != _syncProducerGeneration || !_syncGenerate
-                    || _state is NmtState.Stopped or NmtState.Initializing)) return Task.CompletedTask;
+                bool CanSendPeriodic()
+                {
+                    if (_disposed != 0 || !_syncGenerate) return false;
+                    if (_state is NmtState.Stopped or NmtState.Initializing) return false;
+                    if (generation != Interlocked.Read(ref _syncProducerGeneration)) return false;
+                    return TickMath.ElapsedFromTicks(_actor.TimeSource.GetTimestamp() - queuedAt, _actor.TimeSource.Frequency) < period;
+                }
+                if (periodic && !CanSendPeriodic()) return Task.CompletedTask;
                 byte[] payload = Array.Empty<byte>();
                 if (_syncCounterOverflow > 1)
                 {
                     payload = new[] { _nextSyncCounter };
                     _nextSyncCounter = _nextSyncCounter >= _syncCounterOverflow ? (byte)1 : (byte)(_nextSyncCounter + 1);
                 }
-                return SendControlFrame(_syncCobId, payload, cancellationToken, canTransmit: periodic
-                    ? () => _disposed == 0 && _state is not (NmtState.Stopped or NmtState.Initializing)
-                        && generation == Interlocked.Read(ref _syncProducerGeneration)
-                    : null);
+                return SendControlFrame(_syncCobId, payload, cancellationToken,
+                    canTransmit: periodic ? CanSendPeriodic : null);
             }, cancellationToken).ConfigureAwait(false);
             await send.ConfigureAwait(false);
         }
-        catch (ObjectDisposedException) when (_disposed != 0) { }
+        catch (ObjectDisposedException) when (_disposed != 0)
+        {
+            // Disposal retired the actor before this queued request could run.
+            return;
+        }
     }
 
     private bool IsInsideSyncWindow()
@@ -94,10 +112,14 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         int length = _syncCounterOverflow > 1 ? 1 : 0;
         if (payload.Length != length)
         {
-            if (_emcyValid)
+            if (_emcyValid && !_syncLengthReported)
+            {
+                _syncLengthReported = true;
                 _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8240, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
+            }
             return false;
         }
+        _syncLengthReported = false;
         if (length != 0)
         {
             // A consumer ignores its configured overflow value (§7.5.2.22), but reserved
@@ -135,12 +157,10 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         {
             rp.Deadline = null;
             if (_disposed != 0 || _state != NmtState.Operational || !rp.Valid) return;
+            if (_emcyValid)
+                _ = EmitEmcy(new EmcyMessage(_nodeId, 0x8250, (byte)_od.ReadUnsigned(Co.ErrorRegister, 0)));
             var args = new RpdoTimeoutEventArgs(rp.PdoIndex, rp.CobId, rp.EventTimer);
-            EnqueueEvent(() =>
-            {
-                try { DeliverToSubscribers(RpdoTimeout, args); }
-                catch (Exception ex) { RaiseBackgroundException(ex); }
-            }, critical: true, EventKey.RpdoTimeout(rp.PdoIndex), emcyProducer: -1, producer: EventKey.RpdoProducerSlot(rp.PdoIndex));
+            EnqueueEvent(() => DeliverToSubscribers(RpdoTimeout, args), critical: true, EventKey.RpdoTimeout(rp.PdoIndex), emcyProducer: -1, producer: EventKey.RpdoProducerSlot(rp.PdoIndex));
         });
     }
 }

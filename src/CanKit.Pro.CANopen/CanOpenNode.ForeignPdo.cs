@@ -130,13 +130,14 @@ internal sealed partial class CanOpenNode
         uint cobId, LiveUpload upload, CancellationToken cancellationToken)
     {
         var matches = new List<DescribedPdo>(2);
-        for (int n = 1; n <= Math.Max(4, DescribedPdoCount(description)); n++)
+        int count = Math.Max(4, DescribedPdoCount(description));
+        for (int n = 1; n <= count; n++)
         {
             var comm = (ushort)(Co.TpdoComm + n - 1);
             if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, upload, cancellationToken).ConfigureAwait(false))
                 matches.Add(new DescribedPdo(ForeignPdoKind.Tpdo, n, (ushort)(Co.TpdoMap + n - 1)));
         }
-        for (int n = 1; n <= Math.Max(4, DescribedPdoCount(description)); n++)
+        for (int n = 1; n <= count; n++)
         {
             var comm = (ushort)(Co.RpdoComm + n - 1);
             if (await CommRecordMatchesAsync(description, peerNodeId, comm, cobId, upload, cancellationToken).ConfigureAwait(false))
@@ -190,8 +191,8 @@ internal sealed partial class CanOpenNode
         return LiveCobId.FromWord(ObjectDictionary.DecodeU32(raw));
     }
 
-    /// <summary>The 11-bit CAN-ID of a described PDO communication record, or null when the file
-    /// has no usable COB-ID for it (missing, unreadable, invalid, or a 29-bit frame).</summary>
+    /// <summary>The CAN frame routing key of a described PDO communication record, or null when the file
+    /// has no usable COB-ID for it (missing, unreadable, or invalid).</summary>
     private static uint? DescribedCobId(CanOpenDeviceDescription description, byte peerNodeId, ushort commIndex)
     {
         if (!TryDescribedObject(description, commIndex, out var record)) return null;
@@ -200,10 +201,9 @@ internal sealed partial class CanOpenNode
         return UsableCanId(word);
     }
 
-    /// <summary>Bits 0–10 when the word is a classic CAN-ID with bit 31 clear and the id is one
-    /// a PDO may use. Bit 30 (no RTR) is ignored. Bit 31, bit 29, any other bit above the 11-bit
-    /// id, or a CAN-ID CiA 301 §7.3.5 restricts (<see cref="CanOpenCobId.IsRestricted"/>) is not
-    /// a match.</summary>
+    /// <summary>The valid PDO routing key, retaining bit 29 to distinguish extended frames.
+    /// Control bits 31 (invalid) and 30 (no RTR) are excluded. Base identifiers follow the
+    /// CiA 301 §7.3.5 restrictions.</summary>
     private static uint? UsableCanId(uint word)
     {
         if ((word & CanOpenCobId.InvalidBit) != 0) return null;

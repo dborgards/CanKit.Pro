@@ -1360,13 +1360,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // on purpose our own TPDO (#93); an explicitly configured consumer outranks the
             // range-based guesses below. Two valid RPDOs may share a COB-ID — the dictionary holds
             // both records and CiA 301 does not forbid it — and then each is actuated (Codex on #133).
-            if (isFd) return;
             bool consumed = false;
             for (int n = 1; n <= _pdoCount; n++)
             {
                 if (_rpdos[n] is { Valid: true } rpdo && rpdo.CobId == cobId)
                 {
-                    HandleRpdo(rpdo, data);
+                    if (!isFd) HandleRpdo(rpdo, data);
                     consumed = true;
                 }
             }
@@ -2505,7 +2504,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
         Action<CanOpenTransportException?>? onSendCompleted = null, Func<bool>? canTransmit = null)
     {
-        // Classic 11-bit CAN frame; no extended bit. We do not await SendConfirmedAsync for
+        // Classic CAN frame with the PDO frame format encoded in the COB-ID word. We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via
         // BackgroundExceptionOccurred. An SDO client request also passes onSendCompleted, which

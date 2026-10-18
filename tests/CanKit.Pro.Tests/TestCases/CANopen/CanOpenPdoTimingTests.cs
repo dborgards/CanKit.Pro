@@ -33,7 +33,7 @@ public partial class CanOpenPdoEngineTests
             .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(node, new object[] { id, payload, false }));
 
-    // FR-CO-047: the matching SYNC is the FIRST counted SYNC, not the first transmission for n>1.
+    // FR-CO-048: the matching SYNC is the FIRST counted SYNC, not the first transmission for n>1.
     [Fact]
     public async Task Sync_Start_Waits_Through_Overflow_And_Restarts_On_Operational()
     {
@@ -149,7 +149,7 @@ public partial class CanOpenPdoEngineTests
             .Should().Be((uint)CanKit.Pro.CANopen.Sdo.SdoAbortCode.SubIndexDoesNotExist);
     }
 
-    // FR-CO-048: window boundaries are measured against the same virtual clock as the actor.
+    // FR-CO-049: window boundaries are measured against the same virtual clock as the actor.
     [Fact]
     public async Task Sync_Window_Discards_Late_Rpdos_And_Reopens_On_The_Next_Sync()
     {
@@ -198,11 +198,17 @@ public partial class CanOpenPdoEngineTests
         await wire.WaitForCountAsync(CanOpenCobId.Emcy(Device), 1);
         wire.Payloads(CanOpenCobId.Emcy(Device))[0].Take(2).Should().Equal(0x40, 0x82);
         device.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(0);
+        await Inject(device, CanOpenCobId.Sync, 0);
+        await Inject(device, CanOpenCobId.Sync, 241);
+        device.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(0);
+        var received = new TaskCompletionSource<byte?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.SyncReceived += (_, e) => received.TrySetResult(e.Counter);
         await Inject(device, CanOpenCobId.Sync, 9); // consumer ignores the local overflow's value
+        (await received.Task.WithTimeoutAsync(ShortTimeout)).Should().Be(9);
         device.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(42);
     }
 
-    // FR-CO-049: no timer before first frame; a short frame does not refresh it; timeout is
+    // FR-CO-050: no timer before first frame; a short frame does not refresh it; timeout is
     // one-shot until reception, and the NMT transition cancels it.
     [Fact]
     public async Task Rpdo_Deadline_Starts_On_Reception_Refreshes_And_Stops_With_Nmt()
@@ -217,7 +223,7 @@ public partial class CanOpenPdoEngineTests
         device.ConfigureRpdo(1, new PdoMapping().Add(0x2000, 0, 16));
         od.WriteUnsigned(0x1400, 5, 100);
         var notices = new List<RpdoTimeoutEventArgs>();
-        var arrived = new SemaphoreSlim(0);
+        using var arrived = new SemaphoreSlim(0);
         device.Pdo().RpdoTimeout += (_, e) => { lock (notices) notices.Add(e); arrived.Release(); };
         await StartAsync(wire, device);
         Advance(clock, device, TimeSpan.FromSeconds(1));
@@ -233,7 +239,10 @@ public partial class CanOpenPdoEngineTests
             notices.Should().ContainSingle();
             notices[0].PdoIndex.Should().Be(1);
             notices[0].Timeout.Should().Be(TimeSpan.FromMilliseconds(100));
+            notices[0].CobId.Should().Be(Rpdo1);
         }
+        await wire.WaitForCountAsync(CanOpenCobId.Emcy(Device), 2); // short frame + deadline
+        wire.Payloads(CanOpenCobId.Emcy(Device)).Should().Contain(p => p[0] == 0x50 && p[1] == 0x82);
         Advance(clock, device, TimeSpan.FromSeconds(1));
         await Inject(device, Rpdo1, 4, 0);
         wire.SendNmt(NmtCommand.Stop, Device);
@@ -253,7 +262,7 @@ public partial class CanOpenPdoEngineTests
         using var bus = Open(session, 0);
         using var wire = new Wire(session, 2);
         var file = CanOpenDeviceDescription.Load(System.IO.Path.Combine(System.AppContext.BaseDirectory,
-            "TestCases", "CANopen", "Fixtures", "pdo-timing.dcf"));
+            System.IO.Path.Combine("TestCases", "CANopen", "Fixtures", "pdo-timing.dcf")));
         using var device = new CanOpenNode(new CanKit.Pro.RawCan.CanBusService(bus), Device,
             new CanOpenNodeOptions(), ownsService: true, new ManualTimeSource(), description: file);
         device.DeviceDescription!.IsExact.Should().BeTrue(string.Join("\n", device.DeviceDescription.Findings));

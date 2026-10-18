@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
@@ -483,10 +484,10 @@ internal sealed partial class CanOpenNode
         var ids = new HashSet<uint>();
         for (int n = 1; n <= _pdoCount; n++)
         {
-            foreach (ushort comm in new[] { (ushort)(Co.TpdoComm + n - 1), (ushort)(Co.RpdoComm + n - 1) })
-                if (_od.TryReadUnsigned(comm, 1, out var word)
-                    && (word & (CanOpenCobId.InvalidBit | CanOpenCobId.ExtendedFrameBit)) == CanOpenCobId.ExtendedFrameBit)
-                    ids.Add(word & 0x1FFF_FFFF);
+            foreach (uint word in new[] { (ushort)(Co.TpdoComm + n - 1), (ushort)(Co.RpdoComm + n - 1) }
+                .Select(comm => _od.TryReadUnsigned(comm, 1, out var word) ? word : CanOpenCobId.InvalidBit)
+                .Where(word => (word & (CanOpenCobId.InvalidBit | CanOpenCobId.ExtendedFrameBit)) == CanOpenCobId.ExtendedFrameBit))
+                ids.Add(word & 0x1FFF_FFFF);
         }
         _extendedPdoIds = ids;
     }
@@ -494,16 +495,18 @@ internal sealed partial class CanOpenNode
     // CiA 301 explicitly marks these communication entries as optionally PDO-mappable.
     // All still need their own PDOMapping flag and direction/access check.
     private static bool IsCommunicationPdoTarget(ushort index, byte subindex)
-        => (index is 0x1001 or 0x1002 or 0x1013 && subindex == 0)
-           || (index == 0x1026 && subindex is >= 1 and <= 3)
-           || (index is >= 0x1200 and <= 0x12FF && subindex is 1 or 2);
+    {
+        if (index is 0x1001 or 0x1002 or 0x1013) return subindex == 0;
+        if (index == 0x1026) return subindex is >= 1 and <= 3;
+        return index is >= 0x1200 and <= 0x12FF && subindex is 1 or 2;
+    }
 
     private static uint PdoFrameKey(uint word) => word & 0x3FFF_FFFF;
 
     private static bool IsUsablePdoCobIdWord(uint word)
     {
-        if ((word & CanOpenCobId.ExtendedFrameBit) == 0 && (word & 0x1FFF_F800) != 0) return false;
-        return !CanOpenCobId.IsRestricted(word & 0x1FFF_FFFF);
+        if ((word & CanOpenCobId.ExtendedFrameBit) != 0) return true;
+        return (word & 0x1FFF_F800) == 0 && !CanOpenCobId.IsRestricted(word & CanOpenCobId.CanIdMask);
     }
 
     private static bool IsUsableCobIdWord(uint word)
@@ -519,13 +522,20 @@ internal sealed partial class CanOpenNode
 
     private void OnOdEntryWrittenForCommunicationProfile(ushort index, byte subindex)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;
         if (index is >= 0x1FA0 and <= 0x1FCF)
         {
+            RebuildCosRelevantEntries();
             RunOnActor(() =>
             {
-                foreach (var rt in _tpdos)
-                    if (rt is not null && rt.MappingKind == (byte)MpdoAddressMode.Source) RebuildTpdo(rt.PdoIndex);
+                foreach (var rt in _tpdos.Where(rt => rt is not null && rt.MappingKind == (byte)MpdoAddressMode.Source))
+                    RebuildTpdo(rt!.PdoIndex);
             });
+            return;
+        }
+        if (index is >= 0x1FD0 and <= 0x1FFF)
+        {
+            RunOnActor(RebuildMpdoDispatcher);
             return;
         }
         if (!IsManagedCommunicationObject(index)) return;

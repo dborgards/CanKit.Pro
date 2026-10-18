@@ -238,7 +238,6 @@ internal sealed partial class CanOpenNode
             if (count == 0 || count is 0xFE or 0xFF) return OdWriteDecision.Accept; // disabled or MPDO
             // Tables 69 / 73: 41h..FDh are reserved; FEh/FFh select MPDO instead of a mapping.
             if (count > 0x40) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-            if (count > PdoMapping.MaxEntries) return OdWriteDecision.Reject(SdoAbortCode.PdoMappingLengthExceeded);
             // Step 4 of the re-mapping procedure: "If … the device detects that the mapping is
             // not valid or not possible … 0602 0000h or 0604 0042h."
             int totalBits = 0;
@@ -288,7 +287,7 @@ internal sealed partial class CanOpenNode
         if (bitLength == 0 || bitLength > 64)
             return SdoAbortCode.DataTypeLengthMismatch;
 
-        // §7.5.2.36: dummy mapping onto the static data types 0002h..0007h.
+        // §7.5.2.36: dummy mapping onto the static data types 0001h..0007h.
         if (entrySub == 0 && PdoMappingEntry.DummyBitLength(entryIndex) is var dummyBits && dummyBits != 0)
             return dummyBits == bitLength ? null : SdoAbortCode.ObjectCannotBeMapped;
 
@@ -385,6 +384,7 @@ internal sealed partial class CanOpenNode
         rp.Deadline = null;
         rp.EventTimer = TimeSpan.FromMilliseconds(_od.TryReadUnsigned(comm, 0x05, out var et) ? et : 0);
         rp.ShortFrameReported = false;
+        rp.MpdoTargetReported = false;
 
         uint word = _od.TryReadUnsigned(comm, 0x01, out var w) ? w : CanOpenCobId.InvalidBit;
         rp.Valid = (word & CanOpenCobId.InvalidBit) == 0;
@@ -393,6 +393,7 @@ internal sealed partial class CanOpenNode
         rp.MappingKind = (byte)(_od.TryReadUnsigned(map, 0, out var mode) ? mode : 0);
         rp.Mapping = ReadMappingRecord(map);
         rp.TotalBytes = rp.MappingKind >= 0xFE ? 8 : TotalBytes(rp.Mapping);
+        if (rp.MappingKind == (byte)MpdoAddressMode.Source) RebuildMpdoDispatcher();
     }
 
     private PdoMappingEntry[] ReadMappingRecord(ushort map)
@@ -596,7 +597,6 @@ internal sealed partial class CanOpenNode
             {
                 if (++rt.SyncCounter < type) continue;
                 rt.SyncCounter = 0;
-                rt.SyncStarted = false;
                 EmitTpdo(rt);
             }
             else if (type == CanOpenTransmissionType.RtrOnlySynchronous)
@@ -965,5 +965,6 @@ internal sealed partial class CanOpenNode
         public TimeSpan EventTimer { get; set; }
         public IDisposable? Deadline { get; set; }
         public bool ShortFrameReported { get; set; }
+        public bool MpdoTargetReported { get; set; }
     }
 }
