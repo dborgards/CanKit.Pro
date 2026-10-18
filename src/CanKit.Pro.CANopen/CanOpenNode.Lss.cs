@@ -46,6 +46,8 @@ internal sealed partial class CanOpenNode : ILssSlave
     private int _lssActivationGeneration;
     private IDisposable? _lssActivation;
     private int _lssSilent;
+    private Task _lssBitRateSwitch = Task.CompletedTask;
+    private bool _lssDelayElapsed;
     // Sends that passed the silence check and have not reached ReleaseTransmit. BeginLssSilence
     // waits for this to hit zero before raising the flag, still under _lssTxGate, so a frame
     // cannot be dropped or leave once the second delay has started.
@@ -136,8 +138,10 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// Silence cannot start while that slot is open, and a holdable frame that arrives once
     /// silence has started is queued rather than dropped.
     /// </summary>
-    private Task<bool>? GateTransmit(uint cobId, byte[] payload, Action<CanOpenTransportException?>? onSendCompleted)
+    private Task<bool>? GateTransmit(uint cobId, byte[] payload, Action<CanOpenTransportException?>? onSendCompleted,
+        CancellationToken cancellationToken, bool rejectSuppression = false)
     {
+        if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<bool>(cancellationToken);
         Action? reportSuppressed = null;
         Task<bool>? finished = null;
         lock (_lssTxGate)
@@ -145,7 +149,10 @@ internal sealed partial class CanOpenNode : ILssSlave
             if (IsLssSilent())
             {
                 if (HoldsAcrossLssSilence(cobId))
-                    return EnqueueHeldTransmit(cobId, payload);
+                    return EnqueueHeldTransmit(cobId, payload, cancellationToken);
+                if (rejectSuppression)
+                    return Task.FromException<bool>(new CanOpenTransportException(
+                        $"CANopen frame TX on COB-ID 0x{cobId:X3} is suppressed by the LSS bit-rate switch."));
                 reportSuppressed = () => onSendCompleted?.Invoke(null);
                 finished = Task.FromResult(true);
             }
@@ -209,13 +216,19 @@ internal sealed partial class CanOpenNode : ILssSlave
             <= (uint)(CanOpenCobId.MaxNodeId - CanOpenCobId.MinNodeId);
     }
 
-    private Task<bool> EnqueueHeldTransmit(uint cobId, byte[] payload)
+    private Task<bool> EnqueueHeldTransmit(uint cobId, byte[] payload, CancellationToken cancellationToken)
     {
         var copy = new byte[payload.Length];
         Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
         var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal));
-        return signal.Task;
+        _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal, cancellationToken));
+        return cancellationToken.CanBeCanceled ? WaitForHeldTransmit(signal, cancellationToken) : signal.Task;
+    }
+
+    private static async Task<bool> WaitForHeldTransmit(TaskCompletionSource<bool> signal, CancellationToken cancellationToken)
+    {
+        using (cancellationToken.Register(static state => ((TaskCompletionSource<bool>)state!).TrySetCanceled(), signal))
+            return await signal.Task.ConfigureAwait(false);
     }
 
     private void EndLssSilence()
@@ -244,14 +257,15 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         foreach (var item in held)
         {
+            if (item.Signal.Task.IsCanceled) continue;
             // Every outcome completes the signal. SendNmtReporting can surface a driver exception
             // that is not a CanKitException; leaving the signal unfinished would stall the
             // flying-master NMT chain, and the frames queued behind this one would stay held.
             // Through the gate again: a silence that started while this flush was in
             // progress holds what has not reached the driver yet.
             Task<bool> send = item.IsNmt
-                ? SendNmtReporting(item.Payload)
-                : SendHeldHeartbeat(item.Payload);
+                ? SendNmtReporting(item.Payload, item.CancellationToken)
+                : SendHeldHeartbeat(item.Payload, item.CancellationToken);
             await send.ContinueWith(
                 static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
                 item.Signal,
@@ -261,13 +275,13 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
     }
 
-    private async Task<bool> SendHeldHeartbeat(byte[] payload)
+    private async Task<bool> SendHeldHeartbeat(byte[] payload, CancellationToken cancellationToken)
     {
         // A reset may have changed the identity while this heartbeat or boot-up was held.
         // Like EmitHeartbeat, resolve it when reached and discard it if no identity is active.
         byte nodeId = _nodeId;
         if (!CanOpenCobId.IsActiveNodeId(nodeId)) return false;
-        await SendControlFrame(CanOpenCobId.Heartbeat(nodeId), payload).ConfigureAwait(false);
+        await SendControlFrame(CanOpenCobId.Heartbeat(nodeId), payload, cancellationToken).ConfigureAwait(false);
         return true;
     }
 
@@ -305,16 +319,18 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private readonly struct HeldTransmit
     {
-        public HeldTransmit(uint cobId, byte[] payload, TaskCompletionSource<bool> signal)
+        public HeldTransmit(uint cobId, byte[] payload, TaskCompletionSource<bool> signal, CancellationToken cancellationToken)
         {
             IsNmt = cobId == CanOpenCobId.NmtCommand;
             Payload = payload;
             Signal = signal;
+            CancellationToken = cancellationToken;
         }
 
         public bool IsNmt { get; }
         public byte[] Payload { get; }
         public TaskCompletionSource<bool> Signal { get; }
+        public CancellationToken CancellationToken { get; }
     }
 
     private void CancelLssActivation()
@@ -323,10 +339,11 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivation?.Dispose();
         _lssActivation = null;
         _lssDeferredReply = null;
+        _lssDelayElapsed = false;
         // The node may transmit again. Disposal must not put a frame on a bus that is going away.
         if (Volatile.Read(ref _disposed) != 0)
             DropHeldTransmits();
-        else
+        else if (_lssBitRateSwitch.Status == TaskStatus.RanToCompletion)
             EndLssSilence();
     }
 
@@ -478,7 +495,7 @@ internal sealed partial class CanOpenNode : ILssSlave
         CancelLssActivation();
         if (delayMilliseconds == 0)
         {
-            CommitPendingBitTiming();
+            BeginLssSilence(_lssActivationGeneration, TimeSpan.Zero);
             return;
         }
 
@@ -504,34 +521,53 @@ internal sealed partial class CanOpenNode : ILssSlave
         // In-flight sends reserved the right to touch the driver. They finish first; the
         // flag goes up under the same gate, so the next frame is held or dropped instead.
         WaitForTransmitsToDrain();
-        InvokeBitRateSwitch(_activeSelector, _activeIndex);
+        _lssDelayElapsed = false;
+        var switching = InvokeBitRateSwitch(_activeSelector, _activeIndex);
+        _ = switching.ContinueWith(
+            _ => RunOnActor(() => TryEndLssSilence(generation)),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
         _lssActivation = _actor.Schedule(delay, () => CompleteLssSilence(generation));
     }
 
-    /// <summary>Ends the switch silence when this activation is still the current one.</summary>
+    /// <summary>Records the end of the delay; an asynchronous adapter switch may still be pending.</summary>
     internal void CompleteLssSilence(int generation)
     {
         if (generation != _lssActivationGeneration) return;
+        _lssDelayElapsed = true;
+        TryEndLssSilence(generation);
+    }
+
+    private void TryEndLssSilence(int generation)
+    {
+        if (generation != _lssActivationGeneration || Volatile.Read(ref _disposed) != 0
+            || !_lssDelayElapsed || _lssBitRateSwitch.Status != TaskStatus.RanToCompletion) return;
+        _lssDelayElapsed = false;
         EndLssSilence();
     }
 
-    private void CommitPendingBitTiming()
-    {
-        _activeSelector = _pendingSelector;
-        _activeIndex = _pendingIndex;
-        InvokeBitRateSwitch(_activeSelector, _activeIndex);
-    }
-
-    private void InvokeBitRateSwitch(byte selector, byte index)
+    private Task InvokeBitRateSwitch(byte selector, byte index)
     {
         var hook = _options.Lss?.BitRateSwitch;
-        if (hook is null || !TryResolveBitRate(selector, index, out var rate)) return;
-        _ = Task.Run(() => hook(rate, CancellationToken.None)).ContinueWith(
-            static (task, state) => ((CanOpenNode)state!).RaiseBackgroundException(task.Exception!.GetBaseException()),
-            this,
+        if (hook is null || !TryResolveBitRate(selector, index, out var rate)) return _lssBitRateSwitch;
+        // Repeated activate commands must not run two adapter reconfigurations concurrently.
+        var previous = _lssBitRateSwitch;
+        var switching = Task.Run(async () =>
+        {
+            await previous.ContinueWith(static completed => { _ = completed.Exception; },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
+            await hook(rate, CancellationToken.None).ConfigureAwait(false);
+        });
+        _lssBitRateSwitch = switching;
+        _ = switching.ContinueWith(
+            task => RaiseBackgroundException(task.IsCanceled
+                ? new OperationCanceledException("The LSS bit-rate switch was cancelled.")
+                : task.Exception!.GetBaseException()),
             CancellationToken.None,
-            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskContinuationOptions.NotOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
+        return switching;
     }
 
     private bool TryResolveBitRate(byte selector, byte index, out int bitsPerSecond)

@@ -2538,7 +2538,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // Wire helpers
     // =========================================================================================
     private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
-        Action<CanOpenTransportException?>? onSendCompleted = null)
+        Action<CanOpenTransportException?>? onSendCompleted = null, bool rejectSuppression = false)
     {
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
         // NMT and heartbeat are sent when the delay ends. Anything else is dropped, and an
@@ -2547,7 +2547,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // cannot start until this frame has been handed to the driver.
         // Validate the frame before reserving: a construction failure never owns a send slot.
         var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-        if (GateTransmit(cobId, payload, onSendCompleted) is { } finished)
+        if (GateTransmit(cobId, payload, onSendCompleted, cancellationToken, rejectSuppression) is { } finished)
             return finished;
         // We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their

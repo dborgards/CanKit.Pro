@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
@@ -518,7 +519,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(period, caller);
         try
         {
-            await SendControlFrame(cobId, payload, linked.Token).ConfigureAwait(false);
+            await SendControlFrame(cobId, payload, linked.Token, rejectSuppression: true).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (period.IsCancellationRequested && !caller.IsCancellationRequested)
         {
@@ -593,21 +594,51 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// <summary>Test seam, actor only: whether a pair of SRDO <paramref name="srdoNumber"/> is in flight.</summary>
     internal bool SrdoPairInFlightForTests(int srdoNumber) => _srdoInFlight[srdoNumber];
 
-    // A failed or unconfirmed frame is reported by SendControlFrame itself and the inverted frame
-    // still follows, as it would on the controller; only a cancelled send (the service is being
-    // disposed) or the end of the Operational period the pair belongs to ends the pair early. A
-    // send cancelled by the period's own token is no failure: the pair ends quietly.
+    // Reserve the complete pair. LSS may suppress a pair before it starts, but cannot start
+    // switching between its plain and inverted frames. Notifications wait until the reservation
+    // is released, since a subscriber may synchronously query the actor that starts silence.
     private async Task SendSrdoPairAsync(SrdoPair pair, CancellationToken period)
+    {
+        if (period.IsCancellationRequested || !TryReserveTransmit()) return;
+        var failures = new List<Exception>(2);
+        try
+        {
+            if (await SendSrdoFrame(pair.CobId1, pair.Plain, period).ConfigureAwait(false) is { } first)
+                failures.Add(first);
+            if (!period.IsCancellationRequested
+                && await SendSrdoFrame(pair.CobId2, pair.Inverted, period).ConfigureAwait(false) is { } second)
+                failures.Add(second);
+        }
+        catch (OperationCanceledException ex)
+        {
+            if (!period.IsCancellationRequested)
+                failures.Add(new CanOpenTransportException("The SRDO send was cancelled before confirmation.", ex));
+        }
+        finally
+        {
+            ReleaseTransmit();
+        }
+        foreach (var failure in failures) RaiseBackgroundException(failure);
+    }
+
+    private async Task<CanOpenTransportException?> SendSrdoFrame(uint cobId, byte[] payload, CancellationToken cancellationToken)
     {
         try
         {
-            if (period.IsCancellationRequested) return;
-            await SendControlFrame(pair.CobId1, pair.Plain, period).ConfigureAwait(false);
-            if (period.IsCancellationRequested) return;
-            await SendControlFrame(pair.CobId2, pair.Inverted, period).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+            var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return confirmation.Confirmed ? null : new CanOpenTransportException(
+                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {confirmation.FailureReason}.");
         }
-        catch (OperationCanceledException) when (period.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return ex as CanOpenTransportException ?? new CanOpenTransportException(
+                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
         }
     }
 
