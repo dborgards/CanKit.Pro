@@ -552,10 +552,30 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             return SendControlFrame(cobId, frame, cancellationToken);
         };
         var link = _emcySendChain.ContinueWith(
-            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : _actor.PostAsync(transmit).Unwrap(),
+            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(transmit),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _emcySendChain = link;
         return link;
+    }
+
+    internal Task DispatchQueuedEmcy(Func<Task> transmit)
+        => DispatchQueuedEmcy(transmit, work => _actor.PostAsync(work));
+
+    internal async Task DispatchQueuedEmcy(Func<Task> transmit, Func<Func<Task>, Task<Task>> post)
+    {
+        // Callback failures belong to the inner task, even if the callback disposes the node.
+        // Only a refused or discarded actor dispatch is expected teardown.
+        Func<Task> invoke = async () => await transmit().ConfigureAwait(false);
+        Task sending;
+        try
+        {
+            sending = await post(invoke).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+        await sending.ConfigureAwait(false);
     }
 
     /// <inheritdoc />
