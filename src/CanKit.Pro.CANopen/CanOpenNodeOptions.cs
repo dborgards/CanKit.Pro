@@ -197,8 +197,30 @@ public sealed class CanOpenNodeOptions
             sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
             enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount: null, enableChangeOfStateSrdo: null);
 
+    /// <summary>The previous full signature, retained for callers compiled against it.</summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public CanOpenNodeOptions With(
+        TimeSpan? sdoTimeout,
+        TimeSpan? sdoServerTimeout,
+        TimeSpan? defaultTpdoEventTimerInterval,
+        int? eventQueueCapacity,
+        int? maxSdoTransferBytes,
+        int? sdoBlockThresholdBytes,
+        byte? sdoBlockSize,
+        bool? sdoBlockCrcSupported,
+        int? sdoBlockMaxRetransmissions,
+        bool? respondToNodeGuardingRtr,
+        bool? enableChangeOfStateTpdo,
+        bool? writableCommunicationParameters,
+        CanOpenNodeProfile? profile,
+        int? srdoCount,
+        bool? enableChangeOfStateSrdo)
+        => With(sdoTimeout, sdoServerTimeout, defaultTpdoEventTimerInterval, eventQueueCapacity, maxSdoTransferBytes,
+            sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
+            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, pdoCount: null);
+
     /// <summary>Returns a copy of this options record with the provided overrides, validated
-    /// like the options a node is opened with.</summary>
+    /// like the options a node is opened with. The optional PDO count override is 1..512.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A resulting value is out of its range.</exception>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -215,11 +237,12 @@ public sealed class CanOpenNodeOptions
         bool? writableCommunicationParameters = null,
         CanOpenNodeProfile? profile = null,
         int? srdoCount = null,
-        bool? enableChangeOfStateSrdo = null)
+        bool? enableChangeOfStateSrdo = null,
+        int? pdoCount = null)
     {
         var options = new CanOpenNodeOptions
         {
-            PdoCount = PdoCount,
+            PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,
             DefaultTpdoEventTimerInterval = defaultTpdoEventTimerInterval ?? DefaultTpdoEventTimerInterval,

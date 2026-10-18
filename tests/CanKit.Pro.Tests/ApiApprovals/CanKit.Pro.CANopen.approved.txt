@@ -109,7 +109,24 @@ namespace CanKit.Pro.CANopen
         public int SrdoCount { get; init; }
         public bool WritableCommunicationParameters { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile) { }
-        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default, CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default, int? srdoCount = default, bool? enableChangeOfStateSrdo = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile, int? srdoCount, bool? enableChangeOfStateSrdo) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(
+                    System.TimeSpan? sdoTimeout = default,
+                    System.TimeSpan? sdoServerTimeout = default,
+                    System.TimeSpan? defaultTpdoEventTimerInterval = default,
+                    int? eventQueueCapacity = default,
+                    int? maxSdoTransferBytes = default,
+                    int? sdoBlockThresholdBytes = default,
+                    byte? sdoBlockSize = default,
+                    bool? sdoBlockCrcSupported = default,
+                    int? sdoBlockMaxRetransmissions = default,
+                    bool? respondToNodeGuardingRtr = default,
+                    bool? enableChangeOfStateTpdo = default,
+                    bool? writableCommunicationParameters = default,
+                    CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default,
+                    int? srdoCount = default,
+                    bool? enableChangeOfStateSrdo = default,
+                    int? pdoCount = default) { }
     }
     public enum CanOpenNodeProfile
     {

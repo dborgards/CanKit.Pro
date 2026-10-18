@@ -453,7 +453,8 @@ od.WriteUnsigned(0x1800, 1, cob);
 node.Pdo().RpdoTimeout += (_, e) => Console.WriteLine($"RPDO{e.PdoIndex} timed out");
 ```
 
-The default is four PDOs per direction. `CanOpenNodeOptions.PdoCount` selects 1..512;
+The default is four PDOs per direction. `CanOpenNodeOptions.PdoCount` selects 1..512
+(or clone existing options with `options.With(pdoCount: 8)`);
 an EDS/DCF raises the allocation to its highest declared PDO. Only PDOs 1..4 have a
 pre-defined COB-ID: higher PDOs need an explicit identifier. Bit 29 of `cobId` selects
 an extended frame; base and extended frames with the same numeric ID route independently.

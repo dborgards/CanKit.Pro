@@ -14,6 +14,53 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenPdoEngineTests
 {
+    [Fact]
+    public void With_Overrides_The_Pdo_Count_And_Preserves_Other_Options()
+    {
+        var template = new CanOpenNodeOptions
+        {
+            SdoTimeout = TimeSpan.FromMilliseconds(123),
+            EventQueueCapacity = 321,
+            EnableChangeOfStateTpdo = false,
+            SrdoCount = 2,
+        };
+        var derived = template.With(pdoCount: 512);
+        derived.PdoCount.Should().Be(512);
+        template.PdoCount.Should().Be(4);
+        derived.SdoTimeout.Should().Be(template.SdoTimeout);
+        derived.EventQueueCapacity.Should().Be(321);
+        derived.EnableChangeOfStateTpdo.Should().BeFalse();
+        derived.SrdoCount.Should().Be(2);
+        derived.With(sdoTimeout: TimeSpan.FromMilliseconds(456)).PdoCount.Should().Be(512);
+    }
+
+    [Theory]
+    [InlineData(13)]
+    [InlineData(15)]
+    public void Existing_With_Signatures_Keep_Their_Overrides_And_Pdo_Count(int parameterCount)
+    {
+        var template = new CanOpenNodeOptions { PdoCount = 9, EventQueueCapacity = 321 };
+        var oldSignature = typeof(CanOpenNodeOptions).GetMethods()
+            .Single(m => m.Name == nameof(CanOpenNodeOptions.With) && m.GetParameters().Length == parameterCount);
+        var arguments = new object?[parameterCount];
+        arguments[0] = TimeSpan.FromMilliseconds(456);
+        if (parameterCount == 15) arguments[13] = 2;
+        var derived = (CanOpenNodeOptions)oldSignature.Invoke(template, arguments)!;
+        derived.PdoCount.Should().Be(9);
+        derived.SdoTimeout.Should().Be(TimeSpan.FromMilliseconds(456));
+        derived.EventQueueCapacity.Should().Be(321);
+        derived.SrdoCount.Should().Be(parameterCount == 15 ? 2 : 0);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(513)]
+    public void With_Rejects_An_Out_Of_Range_Pdo_Count(int pdoCount)
+    {
+        Action derive = () => new CanOpenNodeOptions().With(pdoCount: pdoCount);
+        derive.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
