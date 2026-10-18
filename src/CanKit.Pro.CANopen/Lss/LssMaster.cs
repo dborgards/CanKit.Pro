@@ -4,6 +4,7 @@ using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.Actor;
 using CanKit.Pro.RawCan;
 
@@ -91,7 +92,8 @@ internal sealed partial class LssMaster : ILssMaster
             _subscription = service.Subscribe(frame =>
             {
                 var can = frame.Frame;
-                return !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
+                return can.FrameKind == CanFrameType.Can20 && !can.IsErrorFrame && !can.IsRemoteFrame
+                    && !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
             });
         }
         catch

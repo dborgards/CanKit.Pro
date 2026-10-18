@@ -15,6 +15,32 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Lss;
 public class LssMasterBoundaryTests
 {
     [Theory]
+    [InlineData(CanFrameType.Can20, FrameFlags.None, 0x7F)]
+    [InlineData(CanFrameType.CanFd, FrameFlags.None, 0x42)]
+    [InlineData(CanFrameType.Can20, FrameFlags.Error, 0x42)]
+    [InlineData(CanFrameType.Can20, FrameFlags.Rtr, 0x42)]
+    public async Task The_Response_ID_Accepts_Only_Classical_Data_Frames(
+        CanFrameType kind, FrameFlags flags, byte expectedNodeId)
+    {
+        using var rig = new ClockedLssRig();
+        rig.Service.Send = async frame =>
+        {
+            var candidate = LssFrames.Command(LssCommand.InquireNodeId);
+            candidate[1] = 0x7F;
+            await rig.Service.Subscription.Enqueue(new CanFrameEvent(
+                new CanFrameView(kind, (int)CanOpenCobId.LssSlaveMessage, candidate, flags),
+                false, TimeSpan.Zero, rig.Clock.Elapsed.Ticks)).WaitAsync(TimeSpan.FromSeconds(5));
+            var valid = LssFrames.Command(LssCommand.InquireNodeId);
+            valid[1] = 0x42;
+            await rig.InjectAsync(valid).WaitAsync(TimeSpan.FromSeconds(5));
+            // Both frames have been handled by the subscription before confirmation returns.
+            return new TxConfirmation { Confirmed = true };
+        };
+
+        (await rig.Master.InquireNodeIdAsync().WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(expectedNodeId);
+    }
+
+    [Theory]
     [InlineData(499, false, false)] // Before handoff.
     [InlineData(500, false, true)] // At handoff.
     [InlineData(1000, false, true)] // At transmit completion.
