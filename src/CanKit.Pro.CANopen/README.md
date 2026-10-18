@@ -34,10 +34,11 @@ every requirement of SRS §4.3.2 — the requirements this repository set itself
 FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 (`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
 scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
-(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-048 to FR-CO-053 add the PDO extensions requested on 18 October 2026. FR-CO-035 to FR-CO-046 are CANopen
+(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-035 to FR-CO-046 are CANopen
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
-v3.0.0. The SRS's "Quelle" column says for each of them whether a standard requires it, the
+v3.0.0. FR-CO-048 to FR-CO-053 add the PDO extensions requested on 18 October 2026.
+The SRS's "Quelle" column says for each of them whether a standard requires it, the
 architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
@@ -46,7 +47,7 @@ architecture does, or a maintainer decision does.
 | FR-CO-002 | SDO expedited transfer (payloads ≤ 4 bytes) |
 | FR-CO-003 | SDO segmented transfer (payloads > 4 bytes, toggle-bit protocol) |
 | FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.15) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
-| FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`1603h` / `1A00h`–`1A03h`: bit-granular, up to 64 bits, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
+| FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`17FFh` / `1A00h`–`1BFFh`: bit-granular, up to 64 bits, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
 | FR-CO-006 | Event-driven, timer-driven and SYNC-triggered TPDO transmission; change-of-state emission on application OD writes (`CanOpenNodeOptions.EnableChangeOfStateTpdo`, default on; bus-originated writes never re-trigger, so no echo loops) |
 | FR-CO-007 | NMT master + slave state machine (Start / Stop / Pre-Op / Reset Node / Reset Communication) |
 | FR-CO-008 | Heartbeat producer + consumer timeout event |
@@ -54,7 +55,7 @@ architecture does, or a maintainer decision does.
 | FR-CO-010 | SYNC producer and consumer |
 | FR-CO-011 | EMCY encode/decode + structured receive event |
 | FR-CO-012 | Uses the L2 `ICanBusService` demux (subscription with COB-ID filter) |
-| FR-CO-013 | Communication-profile objects created at their CiA 301 defaults (`1000h`, `1001h`, `1018h`, `1005h`, `1006h`, `100Ch`, `100Dh`, `1010h`, `1011h`, `1014h`, `1016h`, `1017h`, `1200h`, four RPDO and four TPDO records by default); PDO records read-only on the bus unless `WritableCommunicationParameters`; sub-index `04h` of the PDO communication records absent (`0609 0011h`) |
+| FR-CO-013 | Communication-profile objects created at their CiA 301 defaults (`1000h`, `1001h`, `1018h`, `1005h`, `1006h`, `1007h`, `1019h`, `100Ch`, `100Dh`, `1010h`, `1011h`, `1014h`, `1016h`, `1017h`, `1200h`, four RPDO and four TPDO records by default); PDO records read-only on the bus unless `WritableCommunicationParameters`; sub-index `04h` of the PDO communication records absent (`0609 0011h`) |
 | FR-CO-014 | The object dictionary is the single source of truth: an accepted SDO download and a local write reach the service alike, the configuration methods are OD writes, managed objects cannot be re-declared |
 | FR-CO-015 | TPDO transmission types `00h`, `01h`–`F0h`, `FCh`, `FDh`, `FEh`/`FFh`; reserved values rejected with `0609 0030h` |
 | FR-CO-016 | Inhibit time `1800h:03` (100 µs units, minimum interval) and event timer `1800h:05` (ms, maximum interval) for event-driven TPDOs |
@@ -89,6 +90,12 @@ architecture does, or a maintainer decision does.
 | FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start, and no Start goes to node 0 while one is assigned; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
 | FR-CO-047 | LSS master (CiA 305): switch state global and selective, configure node-id and bit timing, activate with both switch delays, store, inquire identity and node-id, identify remote and non-configured slaves, Fastscan ([Layer setting services](#layer-setting-services-cia-305)) |
+| FR-CO-048 | SYNC counter (`1019h`), producer wrap/reset and one-time TPDO start gate (`1800h:06`) |
+| FR-CO-049 | Synchronous window (`1007h`) for RPDO acceptance and TPDO driver hand-off |
+| FR-CO-050 | RPDO deadline (`1400h:05`), one-shot application indication and EMCY `8250h` |
+| FR-CO-051 | Bit mapping, one-bit BOOLEAN/dummy and native 24/40/48/56-bit integer widths |
+| FR-CO-052 | Configurable PDO count up to 512 per direction and 29-bit PDO identifiers |
+| FR-CO-053 | SAM/DAM MPDO, scanner/dispatcher blocks and inhibit queue |
 
 ## Not built, and why
 
