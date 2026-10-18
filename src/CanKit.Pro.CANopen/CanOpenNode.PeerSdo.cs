@@ -215,12 +215,14 @@ internal sealed partial class CanOpenNode
         /// <summary>The pair as declared at the start; a transaction transfers the safety objects, 1018h and 1010h only.</summary>
         public bool Declares(ushort index, byte subindex) => _pairs.Contains((index, subindex));
 
-        /// <summary>CiA 319 v2.0.0 §6.2: an SRD's EDS "should include the SRVT parameter for all
-        /// supported SRDOs", so a communication record the file declares without sub-index 3 is
-        /// one whose SRVT the SRD does not implement. True for a record declared with it — and for
-        /// one the file does not declare at all, which a higher record implies
+        /// <summary>Whether the file declares sub-index 3 of the communication record of SRDO
+        /// <paramref name="srdoNumber"/> — what the file says, nothing more. CiA 319 v2.0.0 §6.2
+        /// has an SRD's EDS "include the SRVT parameter for all supported SRDOs", so a record
+        /// declared without it is one whose SRVT the SRD is taken not to implement; the peer's
+        /// own answer decides in the end. True for a record declared with it — and for one the
+        /// file does not declare at all, which a higher record implies
         /// (<see cref="IsImpliedSrdoRecordEntry"/>) and a device provides whole, at its defaults.</summary>
-        public bool ImplementsValidationTime(int srdoNumber) => !_recordsWithoutValidationTime.Contains(srdoNumber);
+        public bool DeclaresValidationTime(int srdoNumber) => !_recordsWithoutValidationTime.Contains(srdoNumber);
 
         /// <summary>A mapped object's entry as described at the start, for the pre-check.</summary>
         public bool TryGetMappedEntry(ushort index, byte subindex, out DescribedEntry entry) => _mapped.TryGetValue((index, subindex), out entry);

@@ -80,16 +80,24 @@ public interface ICanOpenSafety
     /// transaction. First the peer's identity (CiA 319 §5.2): 1018h:01, :02 and :03 are uploaded
     /// and compared with the bound description's <c>VendorNumber</c>, <c>ProductNumber</c> and
     /// <c>RevisionNumber</c>; a difference ends the call with those entries as the mismatches, and
-    /// nothing is written. Then (§5.3 step 1) it downloads 1300h, every record (deleted first,
+    /// nothing is written. §5.2 requires all three of an SRD, where CiA 301 makes :02 and :03
+    /// optional: the file must declare them (checked before the first frame) and the peer must
+    /// implement them — one that aborts an upload of them is not an SRD this procedure can
+    /// configure, and the abort propagates. A file whose three numbers are all 0 (an absent key
+    /// reads as 0) carries no identity and is refused before the first frame.
+    /// Then (§5.3 step 1) it downloads 1300h, every record (deleted first,
     /// created last) and the checksums 13FFh:n, (step 2) reads everything back and compares byte for
     /// byte, and only then (step 3) writes 13FEh = A5h and reads it back — step 4 is the peer's own
     /// check of the checksums, and a peer that found one wrong answers that readback with 0. When
     /// <see cref="PeerSafetyConfiguration.Storage"/> asks for it (step 5), the "save" signature
     /// is then downloaded to 1010h at that sub-index, so the acknowledged configuration outlasts
     /// the peer's reset. A tx SRDO whose communication record the bound description declares
-    /// without sub-index 3 has no SRVT on the peer (CiA 319 §6.2): the sub-index is neither written
-    /// nor read back, its checksum takes the default 20 ms, and the configuration must say 20 ms
-    /// there. Before the first frame, every mapping entry is checked against
+    /// without sub-index 3 is one the peer is taken not to hold an SRVT for (CiA 319 §6.2): the
+    /// configuration must say 20 ms there — the value such a peer checksums — and the sub-index is
+    /// written and read back all the same, so that a peer which does hold it ends with 20 ms rather
+    /// than a value from an earlier configuration (a delete writes sub-index 1 only); a peer that
+    /// aborts it with 0609 0011h (sub-index does not exist) does not implement it, which is
+    /// tolerated. Before the first frame, every mapping entry is checked against
     /// the peer's bound EDS/DCF (declared, mappable, of a fixed width equal to the entry's, access
     /// in the SRDO's direction), since
     /// the deletion comes first. Every transfer passes the peer-SDO gate. The peer's SDO
@@ -106,12 +114,17 @@ public interface ICanOpenSafety
     /// The peer's 13FEh is 0 once at least one parameter write has been
     /// accepted, because every such write clears it; an abort before that — for example
     /// 0800 0022h from an Operational peer, which refuses the first write — leaves it unchanged.</summary>
-    /// <exception cref="PeerSdoAccessException">No description is bound for the peer, or the
-    /// sub-index of 1010h that <see cref="PeerSafetyConfiguration.Storage"/> names is not declared by
-    /// it — refused before the first frame, as the gate would refuse the transfer.</exception>
-    /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
-    /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
-    /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
+    /// <exception cref="PeerSdoAccessException">No description is bound for the peer (the
+    /// exception names 1018h:01, the first transfer, which has nothing to be compared with), or
+    /// the bound description does not declare 1018h:01, :02 or :03, or not the sub-index of 1010h
+    /// that <see cref="PeerSafetyConfiguration.Storage"/> names — each refused before the first
+    /// frame, as the gate would refuse the transfer.</exception>
+    /// <exception cref="InvalidOperationException">The bound description's VendorNumber,
+    /// ProductNumber and RevisionNumber are all 0, so it carries no identity to verify the peer
+    /// against (CiA 319 §5.2) — refused before the first frame; or the peer's 13FFh:00 is not
+    /// exactly one byte (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not
+    /// cut to its low byte), or the count is above 64 (§8.4.2.2) — refused before any further
+    /// frame.</exception>
     /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
     /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
     /// with another width or with a type without a fixed width (a string, a domain: an SRDO maps
@@ -128,8 +141,9 @@ public interface ICanOpenSafety
     /// equal the checksum of the expected record) and the records themselves, and compares. An
     /// SRDO the expectation does not name must be deleted; its checksum is not compared, because
     /// the device checks only those of existing SRDOs (§9.5). A tx SRDO whose record the bound
-    /// description declares without sub-index 3 is compared without it, and its checksum expected
-    /// at an SRVT of 20 ms (CiA 319 §6.2). The identity of CiA 319 §5.2 is not read: it belongs to
+    /// description declares without sub-index 3 is expected at an SRVT of 20 ms, and a peer that
+    /// aborts the upload of that sub-index with 0609 0011h does not implement it, which is no
+    /// difference (CiA 319 §6.2). The identity of CiA 319 §5.2 is not read: it belongs to
     /// the configuration, and a DCF bound for the boot-up is bound for that node-id. Nothing is written. The peer's SDO
     /// channel is reserved for the whole transaction: it waits for a call to that peer already in
     /// flight, and a concurrent SDO call of this node to that peer is refused as already in flight.

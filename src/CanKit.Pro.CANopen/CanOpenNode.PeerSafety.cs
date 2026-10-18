@@ -13,8 +13,8 @@ namespace CanKit.Pro.CANopen;
 /// readback and acknowledgement (§9.2, Figure 9) and verifying them (§8.3.1 step D) — run as
 /// the configuration entity of CiA 319 v2.0.0 clause 5: the peer's identity is verified first
 /// (§5.2), the writes, the readback and the acknowledgement are steps 1–3 of §5.3, step 5 stores
-/// the configuration when asked, and a tx SRDO's SRVT the peer does not implement is checksummed
-/// at its default (§6.2). Every transfer is a client SDO through the peer gate (FR-CO-029).</summary>
+/// the configuration when asked, and the SRVT of a tx SRDO the peer does not implement is
+/// checksummed at its default (§6.2). Every transfer is a client SDO through the peer gate (FR-CO-029).</summary>
 internal sealed partial class CanOpenNode
 {
     /// <summary>Test seam: awaited between the readback and the 13FEh = A5h write of a
@@ -44,11 +44,11 @@ internal sealed partial class CanOpenNode
             // transaction.
             configuration = requested.Snapshot();
             var binding = CapturePeerDescription(peerNodeId, configuration);
-            // Without a bound description there is no identity to verify against, and the gate
-            // would refuse the first safety transfer: refused here, before any frame, as that
-            // transfer (13FFh:00) would be.
-            if (!binding.IsBound) throw PeerSdoAccessException.NoDescription(peerNodeId, SrdoRecords.Checksum, 0x00);
-            EnsureMappingsFitDescription(configuration, binding); // before the first frame
+            // Without a bound description there is no identity to compare the first frame with,
+            // and the gate would refuse every safety transfer after it: refused before any frame.
+            if (!binding.IsBound) throw NoDescriptionForSafety(peerNodeId);
+            EnsureIdentityFitsDescription(peerNodeId, binding); // before the first frame, as the three below
+            EnsureMappingsFitDescription(configuration, binding);
             EnsureValidationTimesFitDescription(configuration, binding, nameof(configuration));
             EnsureStorageFitsDescription(peerNodeId, configuration, binding);
             // CiA 319 §5.2: "Prior to the configuration of an SRD, the configuration entity shall
@@ -60,8 +60,18 @@ internal sealed partial class CanOpenNode
             var writes = SafetyWrites(configuration, peerCount, binding).ToList();
             // §9.2 "write all safety-relevant parameter incl. checksums"; CiA 319 §5.3 step 1: the
             // SRDO configuration data, then the checksums to 13FFh.
-            foreach (var (index, sub, value) in writes)
-                await SdoDownloadCoreAsync(peerNodeId, index, sub, value, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
+            foreach (var (index, sub, value, optional) in writes)
+            {
+                try
+                {
+                    await SdoDownloadCoreAsync(peerNodeId, index, sub, value, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
+                }
+                catch (SdoAbortException ex) when (optional && IsNotImplemented(ex))
+                {
+                    // The SRVT of a tx SRDO the peer does not implement (CiA 319 §6.2): it
+                    // checksums the default, which is what was being written.
+                }
+            }
             // §9.2 "read all safety-relevant parameter incl. checksums back" — "compared"; step 2.
             var mismatches = await CompareAsync(peerNodeId, writes, binding, cancellationToken).ConfigureAwait(false);
             if (mismatches.Count > 0) return new PeerSafetyResult(false, mismatches);
@@ -126,7 +136,7 @@ internal sealed partial class CanOpenNode
             if (expected is null) return null;
             ValidateSafetyTimes(expected); // before the first frame
             var binding = new PeerDescriptionBinding(description, Array.Empty<(ushort, byte)>());
-            if (binding.IsBound) EnsureValidationTimesFitDescription(expected, binding, "expected"); // before the first frame
+            EnsureValidationTimesFitDescription(expected, binding, "expected"); // before the first frame
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount);
             // 1300h is not part of step D's list (§8.3.1 D). A deleted SRDO's checksum is not
@@ -135,7 +145,7 @@ internal sealed partial class CanOpenNode
             var expectedValues = SafetyWrites(expected, peerCount, binding)
                 .Where(w => w.Index != SrdoRecords.GfcParameter)
                 .Where(w => w.Index != SrdoRecords.Checksum || expected.Srdos.ContainsKey(w.Subindex))
-                .Append((SrdoRecords.ConfigurationValid, (byte)0x00, new[] { SrdoRecords.ConfigurationValidValue }))
+                .Append((SrdoRecords.ConfigurationValid, (byte)0x00, new[] { SrdoRecords.ConfigurationValidValue }, false))
                 .ToList();
             var mismatches = await CompareAsync(peerNodeId, expectedValues, binding, cancellationToken).ConfigureAwait(false);
             return new PeerSafetyResult(mismatches.Count == 0, mismatches);
@@ -150,8 +160,11 @@ internal sealed partial class CanOpenNode
     /// are uploaded and compared with the bound description's <c>[DeviceInfo]</c>
     /// (<c>VendorNumber</c>, <c>ProductNumber</c>, <c>RevisionNumber</c>, CiA 306). All three are
     /// read; each that differs is a mismatch with the four bytes expected and the bytes the peer
-    /// returned, whatever their number. The further verifications the note of §5.2 names —
-    /// firmware, hardware, serial number, location — are the application's.</summary>
+    /// returned, whatever their number. §5.2 requires all three of an SRD, where CiA 301
+    /// §7.5.2.21 makes :02 and :03 optional: a peer that aborts one of them is not an SRD this
+    /// procedure can configure, and the abort propagates as every abort does. The further
+    /// verifications the note of §5.2 names — firmware, hardware, serial number, location — are
+    /// the application's.</summary>
     private async Task<List<PeerSafetyMismatch>> VerifyPeerIdentityAsync(byte peerNodeId, PeerDescriptionBinding binding, CancellationToken cancellationToken)
     {
         var (vendorId, productCode, revisionNumber) = binding.Identity;
@@ -164,6 +177,36 @@ internal sealed partial class CanOpenNode
                 mismatches.Add(new PeerSafetyMismatch(Co.Identity, subindex, expected, actual));
         }
         return mismatches;
+    }
+
+    /// <summary>The refusal of a configuration with no description bound for the peer, before
+    /// any frame: its first transfer would be 1018h:01, which the gate lets through without a
+    /// description — but the transaction has nothing to compare it with, and every safety object
+    /// after it would be refused.</summary>
+    private static PeerSdoAccessException NoDescriptionForSafety(byte peerNodeId)
+        => new(peerNodeId, Co.Identity, 0x01, peerDescriptionLoaded: false,
+            $"A safety configuration of node 0x{peerNodeId:X2} needs a peer EDS or DCF bound with BindPeerDeviceDescription: " +
+            "its first transfer, 1018h:01, is compared with the file's identity (CiA 319 §5.2), and every safety object after it " +
+            "passes the peer-SDO gate only with one. Nothing was sent.");
+
+    /// <summary>What CiA 319 §5.2 needs of the bound file, checked before the first frame: it
+    /// declares 1018h:01–03 — the gate would otherwise refuse the second or third entry a frame
+    /// or two in — and it carries an identity. EdsDcfNet reads an absent <c>VendorNumber</c>,
+    /// <c>ProductNumber</c> or <c>RevisionNumber</c> as 0 without a diagnostic, so a file whose
+    /// three are all 0 describes no device, and a comparison against it would prove nothing or
+    /// blame the peer for the file.</summary>
+    private static void EnsureIdentityFitsDescription(byte peerNodeId, PeerDescriptionBinding binding)
+    {
+        for (byte subindex = 0x01; subindex <= 0x03; subindex++)
+        {
+            if (!binding.Declares(Co.Identity, subindex))
+                throw PeerSdoAccessException.NotInDescription(peerNodeId, Co.Identity, subindex);
+        }
+        var (vendorId, productCode, revisionNumber) = binding.Identity;
+        if (vendorId == 0 && productCode == 0 && revisionNumber == 0)
+            throw new InvalidOperationException(
+                $"The description bound for node 0x{peerNodeId:X2} carries no identity: its [DeviceInfo] VendorNumber, ProductNumber and RevisionNumber are all 0 " +
+                "(an absent key reads as 0), so the peer's 1018h:01-03 cannot be verified against it (CiA 319 §5.2). Nothing was sent.");
     }
 
     private async Task<int> ReadPeerSrdoCountAsync(byte peerNodeId, PeerDescriptionBinding binding, CancellationToken cancellationToken)
@@ -224,29 +267,39 @@ internal sealed partial class CanOpenNode
     /// <summary>CiA 319 §6.2 on the tool: "SRVT for SRDOs with Tx transmission direction – For
     /// the calculation the default value of 20d shall be used" when the parameter is not
     /// implemented. A tx SRDO whose communication record the bound description declares without
-    /// sub-index 3 (<see cref="PeerDescriptionBinding.ImplementsValidationTime"/>) has no SRVT on
-    /// the peer: the sub-index is neither written nor read back, and the checksum is over 20 ms. A
-    /// configuration or expectation that says another value there is refused before the first
-    /// frame: written it cannot be, and a checksum over it would not be the peer's — so the
-    /// parameter that reaches the checksum says 20 ms, and nothing substitutes it.</summary>
-    private static void EnsureValidationTimesFitDescription(PeerSafetyConfiguration configuration, PeerDescriptionBinding description, string paramName)
+    /// sub-index 3 (<see cref="ValidationTimeIsOptional"/>) is one the peer is taken not to hold
+    /// an SRVT for, and such a peer checksums 20 ms. A configuration or expectation that says
+    /// another value there is refused before the first frame: whether the peer holds the
+    /// sub-index is known only once the write is answered, and a checksum over another value
+    /// would not be the peer's if it does not — so the parameter that reaches the write and the
+    /// checksum says 20 ms, and nothing substitutes it.</summary>
+    private static void EnsureValidationTimesFitDescription(PeerSafetyConfiguration configuration, PeerDescriptionBinding binding, string paramName)
     {
         foreach (var srdo in configuration.Srdos)
         {
             var parameter = srdo.Value.Parameter;
-            if (ImplementsValidationTime(description, srdo.Key, parameter.Direction)) continue;
-            if (Math.Round(parameter.ValidationTime.TotalMilliseconds) == SrdoRecords.DefaultValidationTimeMs) continue;
+            if (!ValidationTimeIsOptional(binding, srdo.Key, parameter.Direction)) continue;
+            ushort srvt = PeerSafetyConfiguration.CheckMilliseconds(srdo.Key, "validation time", parameter.ValidationTime, 1, byte.MaxValue, paramName);
+            if (srvt == SrdoRecords.DefaultValidationTimeMs) continue;
             throw new ArgumentException(
-                $"SRDO {srdo.Key}: the peer's bound description declares record {SrdoRecords.CommIndex(srdo.Key):X4}h without sub-index 03h, so the peer does not implement the SRVT of this tx SRDO and checksums it at the default of {SrdoRecords.DefaultValidationTimeMs} ms (CiA 319 §6.2); an SRVT of {parameter.ValidationTime.TotalMilliseconds} ms cannot be written there. Nothing was sent.",
+                $"SRDO {srdo.Key}: the peer's bound description declares record {SrdoRecords.CommIndex(srdo.Key):X4}h without sub-index 03h, so the peer is taken not to implement the SRVT of this tx SRDO and to checksum it at the default of {SrdoRecords.DefaultValidationTimeMs} ms (CiA 319 §6.2); an SRVT of {srvt} ms would not be its checksum. Nothing was sent.",
                 paramName);
         }
     }
 
-    /// <summary>Whether the peer holds sub-index 3 of SRDO <paramref name="srdoNumber"/>: always
-    /// for a consumer, whose SRVT is not optional; for a producer, unless the bound description
-    /// declares the record without it (CiA 319 §6.2).</summary>
-    private static bool ImplementsValidationTime(PeerDescriptionBinding description, int srdoNumber, SrdoDirection direction)
-        => direction != SrdoDirection.Transmit || !description.IsBound || description.ImplementsValidationTime(srdoNumber);
+    /// <summary>Whether sub-index 3 of SRDO <paramref name="srdoNumber"/> may be one the peer does
+    /// not hold: for a producer whose record the bound description declares without it (CiA 319
+    /// §6.2, <see cref="PeerDescriptionBinding.DeclaresValidationTime"/>). Never for a consumer,
+    /// whose SRVT is not optional, and never without a description. The file is not trusted
+    /// alone: the sub-index is written and read back anyway, and the peer's answer decides —
+    /// 0609 0011h means it does not implement it (<see cref="IsNotImplemented"/>), anything
+    /// else that it does, with the 20 ms it was given.</summary>
+    private static bool ValidationTimeIsOptional(PeerDescriptionBinding binding, int srdoNumber, SrdoDirection direction)
+        => direction == SrdoDirection.Transmit && binding.IsBound && !binding.DeclaresValidationTime(srdoNumber);
+
+    /// <summary>"Sub-index does not exist" (0609 0011h): the one abort that says a peer does not
+    /// implement an optional sub-index, rather than refusing the value.</summary>
+    private static bool IsNotImplemented(SdoAbortException abort) => abort.AbortCode == (uint)SdoAbortCode.SubIndexDoesNotExist;
 
     /// <summary>Step 5 downloads 1010h after the acknowledgement; a sub-index the peer's bound
     /// description does not declare would be refused by the gate then — the configuration
@@ -286,72 +339,88 @@ internal sealed partial class CanOpenNode
     /// list is what the readback compares. The mapping is sub-index 0 and the 2k slots of its k
     /// objects: a slot above the count is no part of the SRDO (§8.4.2.2) — the device neither
     /// uses nor checksums it (§8.4.2.2 field g) — and a peer may not implement it at all. The SRVT
-    /// of a tx SRDO the peer does not implement is left out likewise, and its checksum is over the
-    /// 20 ms the configuration says there (CiA 319 §6.2, checked before the first frame).</summary>
-    private static IEnumerable<(ushort Index, byte Subindex, byte[] Value)> SafetyWrites(PeerSafetyConfiguration configuration, int peerSrdoCount, PeerDescriptionBinding description)
+    /// of a tx SRDO whose record the file declares without it is written all the same, as
+    /// optional: the peer's abort 0609 0011h is taken as "not implemented" and tolerated, by the
+    /// write and the readback alike, and its checksum is over the 20 ms the configuration says
+    /// there (CiA 319 §6.2, checked before the first frame).</summary>
+    private static IEnumerable<(ushort Index, byte Subindex, byte[] Value, bool Optional)> SafetyWrites(PeerSafetyConfiguration configuration, int peerSrdoCount, PeerDescriptionBinding binding)
     {
         ValidateSafetyTimes(configuration);
-        return SafetyWritesCore(configuration, peerSrdoCount, description);
+        return SafetyWritesCore(configuration, peerSrdoCount, binding);
     }
 
-    private static IEnumerable<(ushort Index, byte Subindex, byte[] Value)> SafetyWritesCore(PeerSafetyConfiguration configuration, int peerSrdoCount, PeerDescriptionBinding description)
+    private static IEnumerable<(ushort Index, byte Subindex, byte[] Value, bool Optional)> SafetyWritesCore(PeerSafetyConfiguration configuration, int peerSrdoCount, PeerDescriptionBinding binding)
     {
         // Delete every SRDO first: the device refuses a COB-ID that another existing SRDO still
         // holds, so a configuration that moves ids between SRDOs needs all of them gone before any is written.
         for (int n = 1; n <= peerSrdoCount; n++)
-            yield return (SrdoRecords.CommIndex(n), 0x01, new byte[] { 0 });
+            yield return (SrdoRecords.CommIndex(n), 0x01, new byte[] { 0 }, false);
         for (int n = 1; n <= peerSrdoCount; n++)
         {
             var comm = SrdoRecords.CommIndex(n);
             var map = SrdoRecords.MapIndex(n);
             if (!configuration.Srdos.TryGetValue(n, out var srdo))
             {
-                yield return (comm, 0x01, new byte[] { 0 });
+                yield return (comm, 0x01, new byte[] { 0 }, false);
                 continue;
             }
             var (p, mapping) = srdo;
             var entries = mapping.ToArray();
-            yield return (comm, 0x01, new byte[] { 0 });
-            yield return (map, 0x00, new byte[] { 0 });
+            yield return (comm, 0x01, new byte[] { 0 }, false);
+            yield return (map, 0x00, new byte[] { 0 }, false);
             for (byte s = 1; s <= 2 * entries.Length; s++)
-                yield return (map, s, ObjectDictionary.EncodeU32(EncodeMappingEntry(entries[(s - 1) / 2])));
-            yield return (map, 0x00, new[] { (byte)(2 * entries.Length) });
+                yield return (map, s, ObjectDictionary.EncodeU32(EncodeMappingEntry(entries[(s - 1) / 2])), false);
+            yield return (map, 0x00, new[] { (byte)(2 * entries.Length) }, false);
             ushort cycle = CheckMilliseconds(n, "cycle time", p.RefreshOrSafeguardCycleTime, 1, ushort.MaxValue);
-            yield return (comm, 0x02, new[] { (byte)cycle, (byte)(cycle >> 8) });
-            if (ImplementsValidationTime(description, n, p.Direction))
-                yield return (comm, 0x03, new[] { (byte)CheckMilliseconds(n, "validation time", p.ValidationTime, 1, byte.MaxValue) });
-            yield return (comm, 0x05, ObjectDictionary.EncodeU32(p.CobId1));
-            yield return (comm, 0x06, ObjectDictionary.EncodeU32(p.CobId2));
-            yield return (comm, 0x01, new[] { (byte)p.Direction });
+            yield return (comm, 0x02, new[] { (byte)cycle, (byte)(cycle >> 8) }, false);
+            // Sub-index 3 is written for every SRDO — a delete writes sub-index 1 only, so a value
+            // from an earlier configuration would otherwise survive on a peer that does hold it.
+            // Optional for a tx SRDO whose record the file declares without it: 20 ms then, by
+            // EnsureValidationTimesFitDescription, and a peer that does not hold the sub-index
+            // aborts, which is tolerated (CiA 319 §6.2).
+            yield return (comm, 0x03, new[] { (byte)CheckMilliseconds(n, "validation time", p.ValidationTime, 1, byte.MaxValue) }, ValidationTimeIsOptional(binding, n, p.Direction));
+            yield return (comm, 0x05, ObjectDictionary.EncodeU32(p.CobId1), false);
+            yield return (comm, 0x06, ObjectDictionary.EncodeU32(p.CobId2), false);
+            yield return (comm, 0x01, new[] { (byte)p.Direction }, false);
         }
-        yield return (SrdoRecords.GfcParameter, 0x00, new[] { configuration.GlobalFailsafeCommandEnabled ? (byte)1 : (byte)0 });
+        yield return (SrdoRecords.GfcParameter, 0x00, new[] { configuration.GlobalFailsafeCommandEnabled ? (byte)1 : (byte)0 }, false);
         for (int n = 1; n <= peerSrdoCount; n++)
         {
-            // A tx SRDO without an SRVT on the peer is checksummed over 20 ms (CiA 319 §6.2): its
-            // parameter says 20 ms here, EnsureValidationTimesFitDescription refused anything else.
+            // The checksum covers the SRVT as written — for a tx SRDO without one on the peer the
+            // 20 ms the peer checksums too (CiA 319 §6.2; EnsureValidationTimesFitDescription).
             ushort crc = configuration.Srdos.TryGetValue(n, out var srdo) ? SrdoCrc.Compute(srdo.Parameter, srdo.Mapping) : (ushort)0;
-            yield return (SrdoRecords.Checksum, (byte)n, new[] { (byte)crc, (byte)(crc >> 8) });
+            yield return (SrdoRecords.Checksum, (byte)n, new[] { (byte)crc, (byte)(crc >> 8) }, false);
         }
     }
 
     /// <summary>Uploads each pair once (the last value written to a pair is the expectation) and
-    /// lists every difference.</summary>
+    /// lists every difference. An optional pair the peer answers with 0609 0011h is one it does
+    /// not implement: no difference (CiA 319 §6.2).</summary>
     private async Task<List<PeerSafetyMismatch>> CompareAsync(byte peerNodeId,
-        IReadOnlyList<(ushort Index, byte Subindex, byte[] Value)> expected, PeerDescriptionBinding binding, CancellationToken cancellationToken)
+        IReadOnlyList<(ushort Index, byte Subindex, byte[] Value, bool Optional)> expected, PeerDescriptionBinding binding, CancellationToken cancellationToken)
     {
-        var final = new Dictionary<(ushort, byte), byte[]>();
+        var final = new Dictionary<(ushort, byte), (byte[] Value, bool Optional)>();
         var order = new List<(ushort, byte)>();
-        foreach (var (index, sub, value) in expected)
+        foreach (var (index, sub, value, optional) in expected)
         {
             if (!final.ContainsKey((index, sub))) order.Add((index, sub));
-            final[(index, sub)] = value;
+            final[(index, sub)] = (value, optional);
         }
         var mismatches = new List<PeerSafetyMismatch>();
         foreach (var (index, sub) in order)
         {
-            var actual = await SdoUploadCoreAsync(peerNodeId, index, sub, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
-            if (!actual.AsSpan().SequenceEqual(final[(index, sub)]))
-                mismatches.Add(new PeerSafetyMismatch(index, sub, final[(index, sub)], actual));
+            var (value, optional) = final[(index, sub)];
+            byte[] actual;
+            try
+            {
+                actual = await SdoUploadCoreAsync(peerNodeId, index, sub, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);
+            }
+            catch (SdoAbortException ex) when (optional && IsNotImplemented(ex))
+            {
+                continue;
+            }
+            if (!actual.AsSpan().SequenceEqual(value))
+                mismatches.Add(new PeerSafetyMismatch(index, sub, value, actual));
         }
         return mismatches;
     }
