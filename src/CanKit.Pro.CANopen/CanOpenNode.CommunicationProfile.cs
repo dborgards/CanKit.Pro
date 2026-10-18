@@ -687,8 +687,13 @@ internal sealed partial class CanOpenNode
     {
         uint word = _od.ReadUnsigned(Co.SyncCobId, 0x00);
         _syncCobId = word & CanOpenCobId.CanIdMask;
+        bool wasGenerating = _syncGenerate;
         _syncGenerate = (word & CanOpenCobId.SyncGenerateBit) != 0;
         uint periodMicroseconds = _od.ReadUnsigned(Co.CyclePeriod, 0x00);
+        bool startsProducer = !wasGenerating && _syncGenerate;
+        bool startsPeriod = _configuredSyncCyclePeriod == 0 && periodMicroseconds != 0;
+        if (startsProducer || startsPeriod) ResetSyncCounter();
+        _configuredSyncCyclePeriod = periodMicroseconds;
         var interval = TimeSpan.FromTicks(periodMicroseconds * (TimeSpan.TicksPerMillisecond / 1000));
 
         if (!_syncGenerate || periodMicroseconds == 0)
@@ -756,7 +761,7 @@ internal sealed partial class CanOpenNode
         var previous = _state;
         if (target == NmtState.Stopped) _syncProducerGeneration++;
         if (previous == NmtState.Stopped && target is NmtState.PreOperational or NmtState.Operational)
-            _nextSyncCounter = 1;
+            ResetSyncCounter();
         if (target == NmtState.Operational && previous != NmtState.Operational)
         {
             // CiA DSP 304 §8.3.2.4 note 1: no safety entry is written in Operational. A direct
@@ -820,7 +825,7 @@ internal sealed partial class CanOpenNode
         // §7.2.8.3.2.1: "The toggle bit in the guarding protocol shall be reset to 0 when the NMT
         // sub-state reset communication is passed."
         _nodeGuardingProducerToggle = false;
-        _nextSyncCounter = 1;
+        ResetSyncCounter();
         _syncProducerGeneration++;
         _hasSync = false;
         ResetLifeGuardingState();

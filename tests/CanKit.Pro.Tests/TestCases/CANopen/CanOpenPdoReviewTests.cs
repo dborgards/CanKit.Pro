@@ -14,6 +14,142 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 
 public partial class CanOpenPdoEngineTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_Unsent_Sync_Does_Not_Consume_Its_Counter(bool cancel)
+    {
+        using var service = new StarvedReaderBusService();
+        using var node = new CanOpenNode(service, Device, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
+        node.ObjectDictionary.WriteUnsigned(0x1019, 0, 3);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = new System.Collections.Generic.List<byte>();
+        service.ConfirmSendAsync = async (frame, ct) =>
+        {
+            if (frame.ID != CanOpenCobId.Sync) return new CanKit.Pro.RawCan.TxConfirmation { Confirmed = true };
+            if (entered.TrySetResult(true))
+            {
+                await release.Task.ConfigureAwait(false);
+                ct.ThrowIfCancellationRequested();
+                return new CanKit.Pro.RawCan.TxConfirmation { Confirmed = false };
+            }
+            lock (accepted) accepted.Add(frame.Data.Span[0]);
+            return new CanKit.Pro.RawCan.TxConfirmation { Confirmed = true };
+        };
+        using var cancellation = new CancellationTokenSource();
+        try
+        {
+            var first = node.SendSyncAsync(cancellation.Token);
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+            if (cancel) cancellation.Cancel();
+            release.TrySetResult(true);
+            if (cancel) await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+            else await first.WithTimeoutAsync(ShortTimeout);
+            await node.SendSyncAsync();
+            await node.SendSyncAsync();
+            lock (accepted) accepted.Should().Equal(1, 2);
+        }
+        finally { release.TrySetResult(true); }
+    }
+
+    [Fact]
+    public async Task A_Stale_Periodic_Sync_Does_Not_Consume_Its_Counter()
+    {
+        using var service = new StarvedReaderBusService();
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(service, Device, new CanOpenNodeOptions(), ownsService: false, clock);
+        node.ObjectDictionary.WriteUnsigned(0x1019, 0, 3);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeControlFrameSendForTests = id => id == CanOpenCobId.Sync && entered.TrySetResult(true)
+            ? release.Task : Task.CompletedTask;
+        var accepted = new System.Collections.Generic.List<byte>();
+        service.ConfirmSendAsync = (frame, ct) =>
+        {
+            if (frame.ID == CanOpenCobId.Sync) lock (accepted) accepted.Add(frame.Data.Span[0]);
+            return Task.FromResult(new CanKit.Pro.RawCan.TxConfirmation { Confirmed = true });
+        };
+        try
+        {
+            node.StartSyncProducer(TimeSpan.FromMilliseconds(100));
+            Advance(clock, node, TimeSpan.FromMilliseconds(100));
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+            Advance(clock, node, TimeSpan.FromMilliseconds(100));
+            release.TrySetResult(true);
+            await node.SendSyncAsync();
+            lock (accepted) accepted.Should().Equal(1);
+        }
+        finally { release.TrySetResult(true); }
+    }
+
+    [Fact]
+    public async Task A_Late_Sync_Confirmation_Does_Not_Override_A_Counter_Reset()
+    {
+        using var service = new StarvedReaderBusService();
+        using var node = new CanOpenNode(service, Device, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource());
+        node.ObjectDictionary.WriteUnsigned(0x1019, 0, 3);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var accepted = new System.Collections.Generic.List<byte>();
+        service.ConfirmSendAsync = async (frame, ct) =>
+        {
+            if (frame.ID == CanOpenCobId.Sync)
+            {
+                if (entered.TrySetResult(true)) await release.Task.ConfigureAwait(false);
+                lock (accepted) accepted.Add(frame.Data.Span[0]);
+            }
+            return new CanKit.Pro.RawCan.TxConfirmation { Confirmed = true };
+        };
+        try
+        {
+            var first = node.SendSyncAsync();
+            await entered.Task.WithTimeoutAsync(ShortTimeout);
+            node.ObjectDictionary.WriteUnsigned(0x1019, 0, 8);
+            Settle(node);
+            node.ObjectDictionary.WriteUnsigned(0x1019, 0, 3);
+            Settle(node);
+            release.TrySetResult(true);
+            await first.WithTimeoutAsync(ShortTimeout);
+            await node.SendSyncAsync();
+            lock (accepted) accepted.Should().Equal(1, 1);
+        }
+        finally { release.TrySetResult(true); }
+    }
+
+    [Fact]
+    public async Task Starting_The_Sync_Producer_And_Resuming_Its_Period_Reset_The_Counter()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = OpenClocked(bus, Device, clock);
+        node.ObjectDictionary.WriteUnsigned(0x1019, 0, 3);
+        await node.SendSyncAsync();
+        await node.SendSyncAsync();
+        node.StartSyncProducer(TimeSpan.FromMilliseconds(100));
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        await wire.WaitForCountAsync(CanOpenCobId.Sync, 3);
+        wire.Payloads(CanOpenCobId.Sync)[2].Should().Equal(1);
+        node.StopSyncProducer();
+        Settle(node);
+        await node.SendSyncAsync();
+        await wire.WaitForCountAsync(CanOpenCobId.Sync, 4);
+        wire.Payloads(CanOpenCobId.Sync)[3].Should().Equal(2);
+        node.StartSyncProducer(TimeSpan.FromMilliseconds(100));
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        await wire.WaitForCountAsync(CanOpenCobId.Sync, 5);
+        wire.Payloads(CanOpenCobId.Sync)[4].Should().Equal(1);
+        node.ObjectDictionary.WriteUnsigned(0x1006, 0, 0);
+        Settle(node);
+        await node.SendSyncAsync();
+        node.ObjectDictionary.WriteUnsigned(0x1006, 0, 100000);
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        await wire.WaitForCountAsync(CanOpenCobId.Sync, 7);
+        wire.Payloads(CanOpenCobId.Sync)[6].Should().Equal(1);
+    }
+
     // FR-CO-048: start gates the initial sequence only; periods continue across overflow.
     [Theory]
     [InlineData(1)]

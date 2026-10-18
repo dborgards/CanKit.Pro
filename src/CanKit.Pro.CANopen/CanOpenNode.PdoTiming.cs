@@ -15,6 +15,8 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
 {
     private byte _syncCounterOverflow;
     private byte _nextSyncCounter = 1;
+    private long _syncCounterGeneration;
+    private uint _configuredSyncCyclePeriod;
     private Task _syncSendChain = Task.CompletedTask;
     private long _syncProducerGeneration;
     private TimeSpan _syncWindow;
@@ -40,7 +42,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         if (_syncCounterOverflow != overflow)
         {
             _syncCounterOverflow = overflow;
-            _nextSyncCounter = 1;
+            ResetSyncCounter();
             foreach (var rt in _tpdos.Where(rt => rt is not null))
             {
                 rt!.SyncStarted = false;
@@ -51,6 +53,12 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
         if (window != _syncWindow) Interlocked.Increment(ref _syncWindowGeneration);
         _syncWindow = window;
         _syncLengthReported = false;
+    }
+
+    private void ResetSyncCounter()
+    {
+        _nextSyncCounter = 1;
+        _syncCounterGeneration++;
     }
 
     private Task SendNextSync(CancellationToken cancellationToken = default, bool periodic = false)
@@ -73,9 +81,12 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
             TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
         try
         {
+            byte counter = 0;
+            byte overflow = 0;
+            long counterGeneration = 0;
             var send = await _actor.PostAsync(() =>
             {
-                if (_disposed != 0) return Task.CompletedTask;
+                if (_disposed != 0) return Task.FromResult(false);
                 bool CanSendPeriodic()
                 {
                     if (_disposed != 0 || !_syncGenerate) return false;
@@ -83,17 +94,29 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
                     if (generation != Interlocked.Read(ref _syncProducerGeneration)) return false;
                     return TickMath.ElapsedFromTicks(_actor.TimeSource.GetTimestamp() - queuedAt, _actor.TimeSource.Frequency) < period;
                 }
-                if (periodic && !CanSendPeriodic()) return Task.CompletedTask;
+                if (periodic && !CanSendPeriodic()) return Task.FromResult(false);
                 byte[] payload = Array.Empty<byte>();
                 if (_syncCounterOverflow > 1)
                 {
-                    payload = new[] { _nextSyncCounter };
-                    _nextSyncCounter = _nextSyncCounter >= _syncCounterOverflow ? (byte)1 : (byte)(_nextSyncCounter + 1);
+                    counter = _nextSyncCounter;
+                    overflow = _syncCounterOverflow;
+                    counterGeneration = _syncCounterGeneration;
+                    payload = new[] { counter };
                 }
                 return SendControlFrame(_syncCobId, payload, cancellationToken,
                     canTransmit: periodic ? CanSendPeriodic : null);
             }, cancellationToken).ConfigureAwait(false);
-            await send.ConfigureAwait(false);
+            if (await send.ConfigureAwait(false) && counter != 0)
+            {
+                // The chain does not release the next request until this actor commit. A
+                // cancelled/rejected send leaves the value available; a configuration reset
+                // retires this send's counter generation even if its confirmation arrives late.
+                await _actor.PostAsync(() =>
+                {
+                    if (counterGeneration != _syncCounterGeneration) return;
+                    _nextSyncCounter = counter >= overflow ? (byte)1 : (byte)(counter + 1);
+                }).ConfigureAwait(false);
+            }
         }
         catch (ObjectDisposedException) when (_disposed != 0)
         {

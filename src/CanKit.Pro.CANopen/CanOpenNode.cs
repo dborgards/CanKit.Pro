@@ -2501,12 +2501,15 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
-    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
+    /// <summary>Test seam for pausing a frame immediately before its final send checks.</summary>
+    internal Func<uint, Task>? BeforeControlFrameSendForTests { get; set; }
+
+    private Task<bool> SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
         Action<CanOpenTransportException?>? onSendCompleted = null, Func<bool>? canTransmit = null)
     {
-        // Classic CAN frame with the PDO frame format encoded in the COB-ID word. We do not await SendConfirmedAsync for
-        // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
-        // callers do not need per-frame confirmation. A failed send always surfaces via
+        // Classic CAN frame with the PDO frame format encoded in the COB-ID word. The result
+        // distinguishes a confirmed send from a discarded or failed attempt; SYNC awaits it
+        // before advancing its counter. Other producers can fire and forget: a failure surfaces via
         // BackgroundExceptionOccurred. An SDO client request also passes onSendCompleted, which
         // is told once how the send ended -- null when confirmed or cancelled, the failure
         // otherwise -- so the transfer can fail at once instead of by the SDO timeout (#197).
@@ -2517,7 +2520,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             CanOpenTransportException? failure = null;
             try
             {
-                if (canTransmit is not null && !canTransmit()) return;
+                if (BeforeControlFrameSendForTests is { } before) await before(cobId).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (canTransmit is not null && !canTransmit()) return false;
                 var conf = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 if (!conf.Confirmed)
@@ -2526,6 +2531,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
                     RaiseBackgroundException(failure);
                 }
+                return conf.Confirmed;
             }
             catch (OperationCanceledException oce)
             {
@@ -2552,6 +2558,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     ?? new CanOpenTransportException(
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
                 RaiseBackgroundException(failure);
+                return false;
             }
             finally
             {

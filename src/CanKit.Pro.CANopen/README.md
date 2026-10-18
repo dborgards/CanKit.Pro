@@ -469,8 +469,10 @@ their own mappability and access flags. The final byte is zero-padded. Native 24
 The existing `ReadUnsigned`/`WriteUnsigned` convenience methods remain U8/U16/U32.
 
 **SYNC counter and start value.** `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
-one-byte counter that starts at 1, wraps to 1 and resets after boot-up and on leaving
-NMT Stopped. Values 1 and 241..255 are rejected. A change while `1006h` is non-zero
+one-byte counter that starts at 1 and wraps to 1. Boot-up, leaving NMT Stopped, enabling
+the producer and resuming a zero communication period reset it to 1. Only confirmed sends
+advance it; cancellation, rejection and stale queued ticks retain the value. A late
+confirmation cannot override a configuration reset. Values 1 and 241..255 are rejected. A change while `1006h` is non-zero
 is rejected with `0800 0022h`, even with the periodic producer disabled. The consumer
 uses `1019h` to select DLC but ignores its numeric overflow value; an unexpected length
 is ignored and reports EMCY `8240h`. `SyncReceivedEventArgs.Counter` carries the counter.
