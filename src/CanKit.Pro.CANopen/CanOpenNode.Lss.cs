@@ -57,6 +57,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     // waits for this to hit zero before raising the flag, still under _lssTxGate, so a frame
     // cannot be dropped or leave once the second delay has started.
     private int _lssTxInFlight;
+    private int _lssWaitingForTransmits;
     private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
     private readonly object _lssTxGate = new();
@@ -74,6 +75,8 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     internal int LssActivationGeneration => Volatile.Read(ref _lssActivationGeneration);
     internal Task LssBitRateSwitchCompletion => _lssBitRateSwitch;
+    internal bool IsWaitingForLssTransmits => Volatile.Read(ref _lssWaitingForTransmits) != 0;
+    internal TaskScheduler LssCancellationScheduler { get; set; } = TaskScheduler.Default;
 
     /// <inheritdoc />
     LssState ILssSlave.State
@@ -215,7 +218,11 @@ internal sealed partial class CanOpenNode : ILssSlave
         lock (_lssTxGate)
         {
             while (_lssTxInFlight != 0)
+            {
+                Volatile.Write(ref _lssWaitingForTransmits, 1);
                 Monitor.Wait(_lssTxGate);
+            }
+            Volatile.Write(ref _lssWaitingForTransmits, 0);
             Volatile.Write(ref _lssSilent, 1);
         }
     }
@@ -540,8 +547,10 @@ internal sealed partial class CanOpenNode : ILssSlave
         // In-flight sends reserved the right to touch the driver. They finish first; the
         // flag goes up under the same gate, so the next frame is held or dropped instead.
         WaitForTransmitsToDrain();
+        // Disposal can begin on another thread while the actor waits for the driver.
+        if (Volatile.Read(ref _disposed) != 0) return;
         _lssDelayElapsed = false;
-        var switching = InvokeBitRateSwitch(_activeSelector, _activeIndex);
+        var switching = InvokeBitRateSwitch(_activeSelector, _activeIndex, generation);
         Action resume = () => TryEndLssSilence(generation);
         _ = switching.ContinueWith(
             _ => RunOnActor(resume),
@@ -567,21 +576,24 @@ internal sealed partial class CanOpenNode : ILssSlave
         EndLssSilence();
     }
 
-    private Task InvokeBitRateSwitch(byte selector, byte index)
+    private Task InvokeBitRateSwitch(byte selector, byte index, int generation)
     {
         var hook = _options.Lss?.BitRateSwitch;
         if (hook is null || !TryResolveBitRate(selector, index, out var rate)) return _lssBitRateSwitch;
         // Repeated activate commands must not run two adapter reconfigurations concurrently.
         var previous = _lssBitRateSwitch;
         _lssCurrentSwitchCancellation?.Cancel();
-        var cancellation = new LssSwitchCancellation(_lssBitRateLifetime.Token);
+        var cancellation = new LssSwitchCancellation(_lssBitRateLifetime.Token, LssCancellationScheduler);
         _lssCurrentSwitchCancellation = cancellation;
         var cancellationToken = cancellation.Token;
         var switching = Task.Run(async () =>
         {
             await previous.ContinueWith(static completed => { _ = completed.Exception; },
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
+            // These decisions must not wait for the asynchronous token cancellation worker.
+            if (Volatile.Read(ref _disposed) != 0 || generation != Volatile.Read(ref _lssActivationGeneration))
+                throw new OperationCanceledException("The LSS bit-rate switch is no longer current.");
+            cancellation.ThrowIfCancellationRequested();
             await hook(rate, cancellationToken).ConfigureAwait(false);
         });
         _lssBitRateSwitch = switching;
@@ -609,14 +621,27 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         private readonly CancellationTokenSource _source = new();
         private readonly CancellationTokenRegistration _lifetimeRegistration;
+        private readonly TaskScheduler _scheduler;
         private readonly object _gate = new();
         private Task? _cancellation;
         private bool _finished;
 
-        public LssSwitchCancellation(CancellationToken lifetime)
-            => _lifetimeRegistration = lifetime.Register(static state => ((LssSwitchCancellation)state!).Cancel(), this);
+        public LssSwitchCancellation(CancellationToken lifetime, TaskScheduler scheduler)
+        {
+            _scheduler = scheduler;
+            _lifetimeRegistration = lifetime.Register(static state => ((LssSwitchCancellation)state!).Cancel(), this);
+        }
 
         public CancellationToken Token => _source.Token;
+
+        public void ThrowIfCancellationRequested()
+        {
+            lock (_gate)
+            {
+                // Cancel publishes this task before returning, even if the worker has not run.
+                if (_cancellation is not null) throw new OperationCanceledException(_source.Token);
+            }
+        }
 
         public void Cancel()
         {
@@ -625,11 +650,11 @@ internal sealed partial class CanOpenNode : ILssSlave
                 if (_finished || _cancellation is not null) return;
                 // Supersession runs on the actor; disposal can race it on another thread.
                 // Neither caller may run application cancellation handlers or dispose their source.
-                _cancellation = Task.Run(() =>
+                _cancellation = Task.Factory.StartNew(() =>
                 {
                     try { _source.Cancel(); }
                     catch (AggregateException) { /* every cancellation callback was invoked */ }
-                });
+                }, CancellationToken.None, TaskCreationOptions.DenyChildAttach, _scheduler);
             }
         }
 
@@ -652,7 +677,8 @@ internal sealed partial class CanOpenNode : ILssSlave
     {
         // Application cancellation callbacks may block or throw. Never run them on the actor
         // or on the thread disposing the node.
-        _lssBitRateCancellation = Task.Run(() => _lssBitRateLifetime.Cancel());
+        _lssBitRateCancellation = Task.Factory.StartNew(() => _lssBitRateLifetime.Cancel(),
+            CancellationToken.None, TaskCreationOptions.DenyChildAttach, LssCancellationScheduler);
     }
 
     private void DisposeLssBitRateLifetime()

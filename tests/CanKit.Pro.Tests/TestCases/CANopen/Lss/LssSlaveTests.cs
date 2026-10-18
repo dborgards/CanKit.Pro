@@ -1971,13 +1971,16 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
-    [Fact]
-    public async Task A_Superseded_Queued_Adapter_Switch_Is_Skipped()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Superseded_Queued_Adapter_Switch_Is_Skipped(bool throughLssCommands)
     {
         var started = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         int calls = 0;
         using var bench = new Bench();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
         var slave = (CanOpenNode)bench.Slave(1, 5, new LssSlaveOptions
         {
             BitRateSwitch = (_, token) =>
@@ -1987,18 +1990,29 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
                 return release.Task;
             },
         });
+        var cancellationScheduler = new QueuedCancellationScheduler();
+        slave.LssCancellationScheduler = cancellationScheduler;
+        int generation = 0;
+        async Task ActivateAsync()
+        {
+            if (throughLssCommands)
+            {
+                Transmit(poke, LssFrames.ActivateBitTiming(0));
+                generation++;
+                await WaitUntilAsync(() => slave.LssActivationGeneration == generation);
+            }
+            else await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+        }
         try
         {
-            await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+            if (throughLssCommands) await EnterConfiguration(bench.Master, slave);
+            await ActivateAsync();
             var token = await started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            await ActivateAsync();
             Task skipped = Task.CompletedTask;
-            await slave.PostToActorAsync(() =>
-            {
-                slave.BeginLssSilence(0, TimeSpan.Zero);
-                skipped = slave.LssBitRateSwitchCompletion;
-                slave.BeginLssSilence(0, TimeSpan.Zero);
-            });
-            await WaitUntilAsync(() => token.IsCancellationRequested);
+            await slave.PostToActorAsync(() => skipped = slave.LssBitRateSwitchCompletion);
+            await ActivateAsync();
+            token.IsCancellationRequested.Should().BeFalse("the cancellation worker is deliberately not scheduled");
             Volatile.Read(ref calls).Should().Be(1, "cancellation cannot forcibly finish a noncooperative hook");
             skipped.IsCompleted.Should().BeFalse();
             release.TrySetResult(true);
@@ -2010,7 +2024,53 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         finally
         {
             release.TrySetResult(true);
+            cancellationScheduler.RunAll();
         }
+    }
+
+    [Fact]
+    public async Task Disposal_While_Draining_A_Driver_Send_Does_Not_Create_An_Adapter_Switch()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus), heartbeats: true);
+        int switches = 0;
+        using var slave = (CanOpenNode)CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
+            },
+        });
+        var cancellationScheduler = new QueuedCancellationScheduler();
+        slave.LssCancellationScheduler = cancellationScheduler;
+        await WaitUntilAsync(() => holding.Holding);
+        var before = slave.LssBitRateSwitchCompletion;
+        var starting = slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+        Task disposing = Task.CompletedTask;
+        try
+        {
+            await WaitUntilAsync(() => slave.IsWaitingForLssTransmits);
+            disposing = Task.Run(async () => await slave.DisposeAsync());
+            await WaitUntilAsync(() =>
+            {
+                try { slave.SendSyncAsync(new CancellationToken(canceled: true)); return false; }
+                catch (ObjectDisposedException) { return true; }
+            });
+        }
+        finally
+        {
+            holding.Release();
+            await starting.WaitAsync(LssTestTiming.SchedulingBudget);
+            await disposing.WaitAsync(LssTestTiming.SchedulingBudget);
+            cancellationScheduler.RunAll();
+        }
+        slave.LssBitRateSwitchCompletion.Should().BeSameAs(before, "no new switch may be queued after disposal began");
+        Volatile.Read(ref switches).Should().Be(0);
     }
 
     [Theory]
@@ -2178,8 +2238,10 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             .Should().ThrowAsync<OperationCanceledException>();
     }
 
-    [Fact]
-    public async Task Disposing_Does_Not_Start_A_Queued_Adapter_Switch_Or_Force_A_Noncooperative_Hook()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Disposing_Does_Not_Start_A_Queued_Adapter_Switch_Or_Force_A_Noncooperative_Hook(bool delayCancellation)
     {
         var started = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -2194,15 +2256,18 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
                 return release.Task;
             },
         });
+        var cancellationScheduler = new QueuedCancellationScheduler();
+        if (delayCancellation) slave.LssCancellationScheduler = cancellationScheduler;
         try
         {
             await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
             var token = await started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromMinutes(1)));
             await slave.DisposeAsync().AsTask().WaitAsync(LssTestTiming.SchedulingBudget);
-            await WaitUntilAsync(() => token.IsCancellationRequested);
+            if (delayCancellation) token.IsCancellationRequested.Should().BeFalse();
+            else await WaitUntilAsync(() => token.IsCancellationRequested);
             slave.LssBitRateSwitchCompletion.IsCompleted.Should().BeFalse("the first hook has not cooperated with cancellation");
-            token.WaitHandle.WaitOne(0).Should().BeTrue();
+            token.WaitHandle.WaitOne(0).Should().Be(!delayCancellation);
             release.TrySetResult(true);
             await slave.LssBitRateSwitchCompletion.Invoking(task => task.WaitAsync(LssTestTiming.SchedulingBudget))
                 .Should().ThrowAsync<OperationCanceledException>();
@@ -2211,6 +2276,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         finally
         {
             release.TrySetResult(true);
+            cancellationScheduler.RunAll();
         }
     }
 
@@ -2435,6 +2501,20 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         {
             _disposables.Add(item);
             return item;
+        }
+    }
+
+    private sealed class QueuedCancellationScheduler : TaskScheduler
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<Task> _tasks = new();
+
+        protected override IEnumerable<Task> GetScheduledTasks() => _tasks.ToArray();
+        protected override void QueueTask(Task task) => _tasks.Enqueue(task);
+        protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued) => false;
+
+        public void RunAll()
+        {
+            while (_tasks.TryDequeue(out var task)) TryExecuteTask(task);
         }
     }
 
