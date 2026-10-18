@@ -61,7 +61,8 @@ public class ClockTimeoutTests
         {
             caller.Cancel();
             var cancelled = async () => await waiting.WaitAsync(TimeSpan.FromSeconds(5));
-            await cancelled.Should().ThrowAsync<OperationCanceledException>();
+            (await cancelled.Should().ThrowAsync<OperationCanceledException>())
+                .Which.CancellationToken.Should().Be(caller.Token);
         }
         else
         {

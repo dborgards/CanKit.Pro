@@ -36,7 +36,7 @@ public class LssMasterActivationRecoveryTests
         if (cancelAt != 100)
             await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(cancelAt < 100 ? cancelAt : cancelAt - 100));
         caller.Cancel();
-        var activate = async () => await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        var activate = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         await activate.Should().ThrowAsync<OperationCanceledException>();
         var remaining = TimeSpan.FromMilliseconds(200 - cancelAt);
 
@@ -47,7 +47,7 @@ public class LssMasterActivationRecoveryTests
             rig.Service.Commands.Count.Should().Be(1);
             await rig.ArmedAsync(remaining);
             successor.Cancel();
-            var cancel = async () => await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            var cancel = async () => await pending.WaitAsync(LssTestTiming.SchedulingBudget);
             await cancel.Should().ThrowAsync<OperationCanceledException>();
         }
 
@@ -69,7 +69,7 @@ public class LssMasterActivationRecoveryTests
         await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
         // Deliver the first deadline late, then fail the callback at that clock reading.
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100 + latency));
-        var activate = async () => await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        var activate = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         (await activate.Should().ThrowAsync<InvalidOperationException>()).Which.Should().BeSameAs(failure);
 
         await CheckNextCommandAsync(rig, TimeSpan.FromMilliseconds(Math.Max(0, 100 - latency)));
@@ -91,10 +91,10 @@ public class LssMasterActivationRecoveryTests
                 caller.Cancel();
                 caller.Token.ThrowIfCancellationRequested();
             }
-            return Task.FromResult(new TxConfirmation { Confirmed = false });
+            return Task.FromResult(new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout });
         };
         var activate = async () => await rig.Master.ActivateBitTimingAsync(100, cancellationToken: caller.Token)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(LssTestTiming.SchedulingBudget);
         if (cancel) await activate.Should().ThrowAsync<OperationCanceledException>();
         else await activate.Should().ThrowAsync<CanOpenTransportException>();
         rig.Service.Send = send;
@@ -114,7 +114,7 @@ public class LssMasterActivationRecoveryTests
             rig.Service.Commands.Count.Should().Be(sent);
             await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
         }
-        await following.WaitAsync(TimeSpan.FromSeconds(5));
+        await following.WaitAsync(LssTestTiming.SchedulingBudget);
         rig.Service.Commands.Count.Should().Be(sent + 1);
     }
 }

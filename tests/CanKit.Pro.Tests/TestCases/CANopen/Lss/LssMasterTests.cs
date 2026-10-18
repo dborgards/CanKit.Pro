@@ -24,22 +24,19 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     private static readonly LssAddress SlaveA = new(1, 1, 1, 1);
     private static readonly LssAddress SlaveB = new(1, 1, 1, 2);
     private static readonly LssAddress SlaveC = new(1, 1, 1, 3);
-    // The virtual-bus integration tests allow subscription/reader/thread-pool scheduling up to
-    // five seconds. Protocol timeout boundaries are exercised on ClockedLssRig instead.
-    private static readonly TimeSpan VirtualBusSchedulingBudget = TimeSpan.FromSeconds(5);
 
     private static LssMasterOptions Quick() => new()
     {
-        ResponseTimeout = VirtualBusSchedulingBudget,
+        ResponseTimeout = LssTestTiming.SchedulingBudget,
         // Fastscan tests drive this window on a virtual clock.
         FastscanTimeout = TimeSpan.FromMilliseconds(50),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
-        IdentificationTimeout = VirtualBusSchedulingBudget,
+        IdentificationTimeout = LssTestTiming.SchedulingBudget,
     };
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        var deadline = DateTime.UtcNow + LssTestTiming.SchedulingBudget;
         while (!condition())
         {
             if (DateTime.UtcNow >= deadline)
@@ -125,8 +122,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var service = new FaultingReadService(raw, faultImmediately: false);
         await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
         {
-            ResponseTimeout = VirtualBusSchedulingBudget,
-            IdentificationTimeout = TimeSpan.FromSeconds(5),
+            ResponseTimeout = LssTestTiming.SchedulingBudget,
+            IdentificationTimeout = LssTestTiming.SchedulingBudget,
         });
 
         (await master.IdentifyNonConfiguredSlavesAsync()).Should().BeTrue();
@@ -289,7 +286,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var bus = VirtualAdapterFixture.Open(session, 0);
         await using var master = CanOpenLss.OpenMaster(bus, new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromSeconds(5),
+            ResponseTimeout = LssTestTiming.SchedulingBudget,
         });
 
         using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(40));
@@ -342,7 +339,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         switches.Should().Be(0);
         slave.ActiveTableIndex.Should().Be(2);
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
-        await slave.WaitForSilenceAsync(TimeSpan.FromSeconds(5));
+        await slave.WaitForSilenceAsync(LssTestTiming.SchedulingBudget);
         await WaitUntilAsync(() => switches == 1);
         slave.IsSilent.Should().BeTrue();
         slave.ActiveTableIndex.Should().Be(3);
@@ -356,7 +353,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         activating.IsCompleted.Should().BeFalse();
         slave.IsSilent.Should().BeTrue();
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         await WaitUntilAsync(() => !slave.IsSilent);
         (await rig.Master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
     }
@@ -374,8 +371,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         int switches = 0;
         var withSwitch = Rig.ReplaceOptions(rig, new LssMasterOptions
         {
-            ResponseTimeout = VirtualBusSchedulingBudget,
-            IdentificationTimeout = VirtualBusSchedulingBudget,
+            ResponseTimeout = LssTestTiming.SchedulingBudget,
+            IdentificationTimeout = LssTestTiming.SchedulingBudget,
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
             BitRateSwitch = (_, _) =>
             {
@@ -637,7 +634,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var inquire = rig.Master.InquireVendorIdAsync();
         await rig.ArmedAsync(TimeSpan.FromTicks(1));
         await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
-        var act = async () => await inquire.WaitAsync(TimeSpan.FromSeconds(5));
+        var act = async () => await inquire.WaitAsync(LssTestTiming.SchedulingBudget);
         await act.Should().ThrowAsync<LssTimeoutException>();
     }
 
@@ -665,9 +662,9 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
         await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
         {
-            ResponseTimeout = VirtualBusSchedulingBudget,
+            ResponseTimeout = LssTestTiming.SchedulingBudget,
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
-            IdentificationTimeout = TimeSpan.FromSeconds(5),
+            IdentificationTimeout = LssTestTiming.SchedulingBudget,
         });
         using var listenBus = VirtualAdapterFixture.Open(session, 2);
         using var listen = new CanBusService(listenBus);
@@ -680,7 +677,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         });
 
         var identify = master.IdentifyNonConfiguredSlavesAsync();
-        await answered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await answered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         service.Dispose();
 
         (await identify).Should().BeTrue();
@@ -699,7 +696,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(20));
         await rig.ArmedAsync(TimeSpan.FromMilliseconds(20));
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(20));
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
     }
 
     [Fact]
@@ -710,9 +707,9 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         bool waitingDuringSwitch = true;
         var master = Rig.ReplaceOptions(rig, new LssMasterOptions
         {
-            ResponseTimeout = VirtualBusSchedulingBudget,
+            ResponseTimeout = LssTestTiming.SchedulingBudget,
             FastscanTimeout = TimeSpan.FromMilliseconds(40),
-            IdentificationTimeout = VirtualBusSchedulingBudget,
+            IdentificationTimeout = LssTestTiming.SchedulingBudget,
             BitRateSwitch = (_, _) =>
             {
                 waitingDuringSwitch = rig.Slave.State == LssState.Waiting;
@@ -801,20 +798,20 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             return new TxConfirmation { Confirmed = true };
         };
         var first = rig.Master.InquireVendorIdAsync();
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         var second = rig.Master.InquireProductCodeAsync();
         try
         {
             // Keep the active send blocked until the queued waiter has observed disposal.
             // Its gate cannot be released first by a competing cancellation continuation.
             rig.Master.Dispose();
-            var secondAct = async () => await second.WaitAsync(TimeSpan.FromSeconds(5));
+            var secondAct = async () => await second.WaitAsync(LssTestTiming.SchedulingBudget);
             await secondAct.Should().ThrowAsync<ObjectDisposedException>();
         }
         finally
         {
             release.TrySetResult(true);
-            var firstAct = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
+            var firstAct = async () => await first.WaitAsync(LssTestTiming.SchedulingBudget);
             await firstAct.Should().ThrowAsync<ObjectDisposedException>();
         }
     }

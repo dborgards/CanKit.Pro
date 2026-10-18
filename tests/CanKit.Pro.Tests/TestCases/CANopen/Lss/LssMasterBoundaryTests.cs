@@ -29,15 +29,15 @@ public class LssMasterBoundaryTests
             candidate[1] = 0x7F;
             await rig.Service.Subscription.Enqueue(new CanFrameEvent(
                 new CanFrameView(kind, (int)CanOpenCobId.LssSlaveMessage, candidate, flags),
-                false, TimeSpan.Zero, rig.Clock.Elapsed.Ticks)).WaitAsync(TimeSpan.FromSeconds(5));
+                false, TimeSpan.Zero, rig.Clock.Elapsed.Ticks)).WaitAsync(LssTestTiming.SchedulingBudget);
             var valid = LssFrames.Command(LssCommand.InquireNodeId);
             valid[1] = 0x42;
-            await rig.InjectAsync(valid).WaitAsync(TimeSpan.FromSeconds(5));
+            await rig.InjectAsync(valid).WaitAsync(LssTestTiming.SchedulingBudget);
             // Both frames have been handled by the subscription before confirmation returns.
             return new TxConfirmation { Confirmed = true };
         };
 
-        (await rig.Master.InquireNodeIdAsync().WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(expectedNodeId);
+        (await rig.Master.InquireNodeIdAsync().WaitAsync(LssTestTiming.SchedulingBudget)).Should().Be(expectedNodeId);
     }
 
     [Theory]
@@ -62,7 +62,7 @@ public class LssMasterBoundaryTests
             reply[1] = 0x42;
             await service.Subscription.Enqueue(new CanFrameEvent(
                 new CanFrameView(CanFrameType.Can20, (int)CanOpenCobId.LssSlaveMessage, reply, FrameFlags.None),
-                isEcho: false, receiveTimestamp: TimeSpan.Zero, hostArrivalTimestamp: arrival)).WaitAsync(TimeSpan.FromSeconds(5));
+                isEcho: false, receiveTimestamp: TimeSpan.Zero, hostArrivalTimestamp: arrival)).WaitAsync(LssTestTiming.SchedulingBudget);
             // Resume the sender only after the master has buffered the reply. The absolute
             // deadline is already past, so neither acceptance nor rejection needs a timer.
             return new TxConfirmation
@@ -83,17 +83,20 @@ public class LssMasterBoundaryTests
         }
     }
 
-    [Fact]
-    public async Task Dispose_Leaves_A_Parked_Readers_Cancellation_Source_Alive()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dispose_Leaves_A_Parked_Readers_Cancellation_Source_Alive(bool asyncDispose)
     {
         using var service = new LssTestService();
         service.Subscription.ParkReader = true;
         using var master = CanOpenLss.OpenMaster(service, leaveOpen: false);
         try
         {
-            await service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await service.Subscription.Started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
 
-            master.Dispose();
+            if (asyncDispose) await master.DisposeAsync().AsTask().WaitAsync(LssTestTiming.SchedulingBudget);
+            else master.Dispose();
 
             service.Disposals.Should().Be(1);
             service.Subscription.Disposed.Should().BeTrue();
@@ -101,13 +104,13 @@ public class LssMasterBoundaryTests
             service.Subscription.Release.TrySetResult(true);
             // Accessing WaitHandle throws if Dispose tore down the source while this reader
             // was still using its token. The reader is held by a signal, not a scheduling delay.
-            (await service.Subscription.CancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(5)))
+            (await service.Subscription.CancellationObserved.Task.WaitAsync(LssTestTiming.SchedulingBudget))
                 .Should().BeTrue();
         }
         finally
         {
             service.Subscription.Release.TrySetResult(true);
-            await service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         }
     }
 
@@ -137,7 +140,7 @@ public class LssMasterBoundaryTests
     {
         using var rig = new ClockedLssRig();
         var activate = async () => await rig.Master.ActivateBitTimingAsync((ushort)delay, 500_000, returnToWaiting)
-            .WaitAsync(TimeSpan.FromSeconds(5));
+            .WaitAsync(LssTestTiming.SchedulingBudget);
 
         var error = await activate.Should().ThrowAsync<ArgumentException>();
         error.Which.ParamName.Should().Be("bitsPerSecond");
@@ -154,7 +157,7 @@ public class LssMasterBoundaryTests
 
         await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
 
-        var result = async () => await inquire.WaitAsync(TimeSpan.FromSeconds(5));
+        var result = async () => await inquire.WaitAsync(LssTestTiming.SchedulingBudget);
         await result.Should().ThrowAsync<LssTimeoutException>();
     }
 
@@ -169,7 +172,7 @@ public class LssMasterBoundaryTests
             payload[1] = 0x42;
             await service.Subscription.Enqueue(new CanFrameEvent(
                 new CanFrameView(CanFrameType.Can20, (int)CanOpenCobId.LssSlaveMessage, payload, FrameFlags.None),
-                false, TimeSpan.Zero, long.MaxValue)).WaitAsync(TimeSpan.FromSeconds(5));
+                false, TimeSpan.Zero, long.MaxValue)).WaitAsync(LssTestTiming.SchedulingBudget);
             return new TxConfirmation
             {
                 Confirmed = true,
@@ -195,7 +198,7 @@ public class LssMasterBoundaryTests
             return new TxConfirmation { Confirmed = true };
         };
         var first = rig.Master.InquireVendorIdAsync();
-        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         using var caller = new CancellationTokenSource();
         var queued = rig.Master.InquireProductCodeAsync(caller.Token);
         try
@@ -204,13 +207,13 @@ public class LssMasterBoundaryTests
             // still held. The caller token is already cancelled before its queued wait ends.
             using var dispose = caller.Token.Register(rig.Master.Dispose);
             caller.Cancel();
-            var queuedResult = async () => await queued.WaitAsync(TimeSpan.FromSeconds(5));
+            var queuedResult = async () => await queued.WaitAsync(LssTestTiming.SchedulingBudget);
             await queuedResult.Should().ThrowAsync<OperationCanceledException>();
         }
         finally
         {
             release.TrySetResult(true);
-            var firstResult = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
+            var firstResult = async () => await first.WaitAsync(LssTestTiming.SchedulingBudget);
             await firstResult.Should().ThrowAsync<ObjectDisposedException>();
         }
     }
@@ -282,7 +285,7 @@ public class LssMasterBoundaryTests
         (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(expected);
 
         // The post-scan service is not a Fastscan probe and must not pay that gap.
-        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(LssTestTiming.SchedulingBudget);
         int commands = rig.Service.Commands.Count;
         using var cancel = new CancellationTokenSource();
         var next = rig.Master.FastscanAsync(request, cancel.Token);
@@ -294,7 +297,7 @@ public class LssMasterBoundaryTests
         await rig.ArmedAsync(window);
         rig.Service.Commands.Count.Should().Be(commands + 1);
         cancel.Cancel();
-        var cancelled = async () => await next.WaitAsync(TimeSpan.FromSeconds(5));
+        var cancelled = async () => await next.WaitAsync(LssTestTiming.SchedulingBudget);
         await cancelled.Should().ThrowAsync<OperationCanceledException>();
     }
 
@@ -321,10 +324,10 @@ public class LssMasterBoundaryTests
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(9));
         switched.Task.IsCompleted.Should().BeFalse();
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
-        await switched.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await switched.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(200));
     }
 
@@ -361,7 +364,7 @@ public class LssMasterBoundaryTests
             activating.IsCompleted.Should().BeFalse();
             await rig.Clock.AdvanceAsync(remaining);
         }
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
 
         waiting.Should().HaveCount(2);
         waiting[0].Retuned.Should().BeFalse();
@@ -395,10 +398,10 @@ public class LssMasterBoundaryTests
             activating.IsCompleted.Should().BeFalse();
             await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(200 - latency));
         }
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, latency)));
         rig.Service.Send = send;
-        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(LssTestTiming.SchedulingBudget);
     }
 
     [Fact]
@@ -413,7 +416,7 @@ public class LssMasterBoundaryTests
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
         await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
     }
 
     [Theory]
@@ -444,7 +447,7 @@ public class LssMasterBoundaryTests
         using var master = CanOpenLss.OpenMaster(service);
         try
         {
-            await service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await service.Subscription.Started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             if (accepted)
                 (await master.InquireNodeIdAsync()).Should().Be(0x42);
             else
@@ -452,14 +455,33 @@ public class LssMasterBoundaryTests
                 var inquire = async () => await master.InquireNodeIdAsync();
                 await inquire.Should().ThrowAsync<LssTimeoutException>();
             }
-            await forwarded!.WaitAsync(TimeSpan.FromSeconds(5));
+            await forwarded!.WaitAsync(LssTestTiming.SchedulingBudget);
             service.Subscription.Finished.Task.IsCompleted.Should().BeFalse();
         }
         finally
         {
             service.Subscription.Release.TrySetResult(true);
-            await service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Background_Read_Error_Is_Wrapped_Only_When_Needed(bool transport)
+    {
+        using var service = new LssTestService();
+        Exception failure = transport ? new CanOpenTransportException("reader transport failed")
+            : new InvalidOperationException("reader failed");
+        service.Subscription.WaitFailure = failure;
+        service.Send = _ => Task.FromResult(new TxConfirmation { Confirmed = true });
+        using var master = CanOpenLss.OpenMaster(service);
+        await service.Subscription.Started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+
+        var inquire = async () => await master.InquireNodeIdAsync().WaitAsync(LssTestTiming.SchedulingBudget);
+        var error = await inquire.Should().ThrowAsync<CanOpenTransportException>();
+        if (transport) error.Which.Should().BeSameAs(failure);
+        else error.Which.InnerException.Should().BeSameAs(failure);
     }
 
     [Fact]
@@ -491,7 +513,7 @@ public class LssMasterBoundaryTests
         };
         using var master = CanOpenLss.OpenMaster(service);
 
-        (await master.IdentifyNonConfiguredSlavesAsync().WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
+        (await master.IdentifyNonConfiguredSlavesAsync().WaitAsync(LssTestTiming.SchedulingBudget)).Should().BeTrue();
     }
 
     [Fact]
@@ -516,7 +538,7 @@ public class LssMasterBoundaryTests
         finally
         {
             rig.Service.Subscription.Release.TrySetResult(true);
-            await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await rig.Service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         }
     }
 
@@ -527,25 +549,25 @@ public class LssMasterBoundaryTests
         using var rig = new ClockedLssRig(new LssMasterOptions { IdentificationTimeout = window }, parkReader: true);
         try
         {
-            await rig.Service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await rig.Service.Subscription.Started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             var first = rig.Master.IdentifyNonConfiguredSlavesAsync();
             await rig.ArmedAsync(window);
             var forwarded = rig.Service.Subscription.Enqueue(new CanFrameEvent(new CanFrameView(CanFrameType.Can20,
                 (int)CanOpenCobId.LssSlaveMessage, LssFrames.Command(LssCommand.IdentifyNonConfiguredSlave),
                 FrameFlags.None), false, TimeSpan.Zero));
             await rig.Clock.AdvanceAsync(window);
-            (await first.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeTrue();
-            await forwarded.WaitAsync(TimeSpan.FromSeconds(5));
+            (await first.WaitAsync(LssTestTiming.SchedulingBudget)).Should().BeTrue();
+            await forwarded.WaitAsync(LssTestTiming.SchedulingBudget);
 
             var next = rig.Master.IdentifyNonConfiguredSlavesAsync();
             await rig.ArmedAsync(window);
             await rig.Clock.AdvanceAsync(window);
-            (await next.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeFalse();
+            (await next.WaitAsync(LssTestTiming.SchedulingBudget)).Should().BeFalse();
         }
         finally
         {
             rig.Service.Subscription.Release.TrySetResult(true);
-            await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await rig.Service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         }
     }
 
@@ -567,10 +589,10 @@ public class LssMasterBoundaryTests
             CanFrameEvent Reply() => new(new CanFrameView(CanFrameType.Can20,
                 (int)CanOpenCobId.LssSlaveMessage, LssFrames.Command(command), FrameFlags.None), false, TimeSpan.Zero);
             var stale = rig.Service.Subscription.Enqueue(Reply());
-            if (!parkReader) await stale.WaitAsync(TimeSpan.FromSeconds(5));
+            if (!parkReader) await stale.WaitAsync(LssTestTiming.SchedulingBudget);
 
             (await rig.RunAsync(request())).Should().BeFalse("the queued frame predates the request");
-            await stale.WaitAsync(TimeSpan.FromSeconds(5));
+            await stale.WaitAsync(LssTestTiming.SchedulingBudget);
 
             // Missing timestamps remain supported for a fresh reply produced during the send.
             Task? delivered = null;
@@ -581,14 +603,14 @@ public class LssMasterBoundaryTests
                 return Task.FromResult(new TxConfirmation { Confirmed = true });
             };
             (await rig.RunAsync(request())).Should().BeTrue();
-            await delivered!.WaitAsync(TimeSpan.FromSeconds(5));
+            await delivered!.WaitAsync(LssTestTiming.SchedulingBudget);
         }
         finally
         {
             if (parkReader)
             {
                 rig.Service.Subscription.Release.TrySetResult(true);
-                await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await rig.Service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             }
         }
     }
@@ -641,7 +663,7 @@ public class LssMasterBoundaryTests
             await rig.ArmedAsync(TimeSpan.FromMilliseconds(100));
             await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
         }
-        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         waiting.Should().NotBeEmpty();
         if (missed)
         {
@@ -688,9 +710,9 @@ public class LssMasterBoundaryTests
         rig.Service.Commands.Count.Should().Be(sent, "the gate must stay held during the silent period");
         activating.IsCompleted.Should().BeFalse();
         await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
-        var activate = async () => await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        var activate = async () => await activating.WaitAsync(LssTestTiming.SchedulingBudget);
         await activate.Should().ThrowAsync<CanOpenTransportException>();
-        await following.WaitAsync(TimeSpan.FromSeconds(5));
+        await following.WaitAsync(LssTestTiming.SchedulingBudget);
         rig.Service.Commands.Count.Should().Be(sent + 1);
     }
 
@@ -722,7 +744,7 @@ public class LssMasterBoundaryTests
         service.Subscription.WaitFailure = failure;
         service.Send = _ => Task.FromResult(new TxConfirmation { Confirmed = true });
         using var master = CanOpenLss.OpenMaster(service);
-        await service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await service.Subscription.Started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
 
         var inquire = async () => await master.InquireNodeIdAsync();
         var thrown = await inquire.Should().ThrowAsync<Exception>();

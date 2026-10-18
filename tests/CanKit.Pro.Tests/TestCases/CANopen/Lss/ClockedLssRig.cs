@@ -50,7 +50,7 @@ internal sealed class ClockedLssRig : IDisposable
 
     public async Task<T> RunAsync<T>(Task<T> operation)
     {
-        var limit = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        var limit = DateTime.UtcNow + LssTestTiming.SchedulingBudget;
         while (!operation.IsCompleted)
         {
             if (DateTime.UtcNow >= limit) throw new TimeoutException("The clocked LSS operation did not settle.");
@@ -70,7 +70,7 @@ internal sealed class ClockedLssRig : IDisposable
     }
 
     public Task ArmedAsync(TimeSpan delay)
-        => Clock.WaitUntilTimerArmedAsync(Timers, delay, TimeSpan.FromSeconds(5));
+        => Clock.WaitUntilTimerArmedAsync(Timers, delay, LssTestTiming.SchedulingBudget);
 
     public Task InjectAsync(byte[] payload, int id = (int)CanOpenCobId.LssSlaveMessage, bool extended = false)
         => Service.Subscription.Enqueue(new CanFrameEvent(
@@ -117,7 +117,7 @@ internal sealed class ClockedLssRig : IDisposable
             pending = _deliveries.ToArray();
             _deliveries.Clear();
         }
-        await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(pending).WaitAsync(LssTestTiming.SchedulingBudget);
     }
 
     private async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)

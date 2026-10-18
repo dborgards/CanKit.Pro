@@ -23,8 +23,8 @@ public class LssMasterLifetimeTests
         });
 
         ProtocolActor.RunningLoopCount.Should().Be(loops);
-        await master.ActivateBitTimingAsync(1).WaitAsync(TimeSpan.FromSeconds(5));
-        var scan = await master.FastscanAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        await master.ActivateBitTimingAsync(1).WaitAsync(LssTestTiming.SchedulingBudget);
+        var scan = await master.FastscanAsync().WaitAsync(LssTestTiming.SchedulingBudget);
         scan.Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
         ProtocolActor.RunningLoopCount.Should().Be(loops);
     }
@@ -46,7 +46,7 @@ public class LssMasterLifetimeTests
         if (asyncDispose) await master.DisposeAsync();
         else master.Dispose();
 
-        var inquire = async () => await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        var inquire = async () => await pending.WaitAsync(LssTestTiming.SchedulingBudget);
         var error = await inquire.Should().ThrowAsync<ObjectDisposedException>();
         error.Which.ObjectName.Should().Be(nameof(LssMaster));
     }
@@ -68,7 +68,7 @@ public class LssMasterLifetimeTests
         };
         using var opened = CanOpenLss.OpenMaster(service);
         master = opened;
-        var inquire = async () => await opened.InquireNodeIdAsync(caller.Token).WaitAsync(TimeSpan.FromSeconds(5));
+        var inquire = async () => await opened.InquireNodeIdAsync(caller.Token).WaitAsync(LssTestTiming.SchedulingBudget);
 
         if (cancel)
         {
@@ -88,7 +88,7 @@ public class LssMasterLifetimeTests
     public async Task Disposal_During_The_First_Foreground_Drain_Reports_The_Master_ObjectName(bool parkReader)
     {
         using var rig = new ClockedLssRig(parkReader: parkReader);
-        await rig.Service.Subscription.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.Service.Subscription.Started.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         bool sent = false;
         rig.Service.Send = frame =>
         {
@@ -104,7 +104,7 @@ public class LssMasterLifetimeTests
         };
         try
         {
-            var inquire = async () => await rig.Master.InquireNodeIdAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            var inquire = async () => await rig.Master.InquireNodeIdAsync().WaitAsync(LssTestTiming.SchedulingBudget);
             var error = await inquire.Should().ThrowAsync<ObjectDisposedException>();
             error.Which.ObjectName.Should().Be(nameof(LssMaster));
         }
@@ -113,7 +113,7 @@ public class LssMasterLifetimeTests
             if (parkReader)
             {
                 rig.Service.Subscription.Release.TrySetResult(true);
-                await rig.Service.Subscription.Finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await rig.Service.Subscription.Finished.Task.WaitAsync(LssTestTiming.SchedulingBudget);
             }
         }
     }

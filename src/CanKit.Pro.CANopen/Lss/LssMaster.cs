@@ -58,6 +58,7 @@ public static class CanOpenLss
 /// <summary>The <see cref="ILssMaster"/> implementation.</summary>
 internal sealed partial class LssMaster : ILssMaster
 {
+    private static readonly TimeSpan ReaderShutdownTimeout = TimeSpan.FromSeconds(2);
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
     private readonly ProtocolActor? _timers;
@@ -167,47 +168,38 @@ internal sealed partial class LssMaster : ILssMaster
         {
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
             var time = _time;
-            Sent sent;
-            try
-            {
-                sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
-            }
-            finally
-            {
-                // A failed confirmation cannot prove the activate frame did not reach a slave.
-                // Reserve both periods from completion until a confirmed stamp can narrow it.
-                _nextCommandAt = TickMath.DueAt(time.GetTimestamp(), delay + delay, time.Frequency);
-            }
+            var sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct, delay + delay)
+                .ConfigureAwait(false);
             long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
             long switchAt = TickMath.DueAt(start, delay, time.Frequency);
             long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
-            _nextCommandAt = resumeAt;
-            bool waitingAtNewRate = returnToWaiting && delay == TimeSpan.Zero;
-            if (returnToWaiting && delay > TimeSpan.Zero)
+            Reserve(resumeAt);
+            var waiting = !returnToWaiting ? WaitingPhase.None
+                : delay == TimeSpan.Zero ? WaitingPhase.AfterSwitch
+                : time.GetTimestamp() >= switchAt ? WaitingPhase.AfterResume
+                : WaitingPhase.BeforeDelay;
+
+            async Task SendWaitingAtAsync(WaitingPhase phase)
             {
-                if (time.GetTimestamp() >= switchAt)
-                    waitingAtNewRate = true;
-                else
-                {
-                    await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
-                    // The transmit stamp records driver acceptance, not wire/echo completion.
-                    // Once confirmation returns too late, resend after retuning conservatively.
-                    waitingAtNewRate = time.GetTimestamp() >= switchAt;
-                }
+                if (waiting != phase) return;
+                if (phase == WaitingPhase.AfterResume && bitsPerSecond is null)
+                    throw new CanOpenTransportException(
+                        "The waiting frame could not be verified before the old-rate deadline. Both switch-delay periods have elapsed; a host bit-rate switch is required to return the slaves to waiting.");
+                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
+                // A driver stamp is not wire completion. A late confirmation needs a resend.
+                if (phase == WaitingPhase.BeforeDelay && time.GetTimestamp() >= switchAt)
+                    waiting = WaitingPhase.AfterResume;
             }
+
+            await SendWaitingAtAsync(WaitingPhase.BeforeDelay).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
                 await DelayUntilAsync(switchAt, ct).ConfigureAwait(false);
             if (bitsPerSecond is int rate)
                 await Options.BitRateSwitch!(rate, ct).ConfigureAwait(false);
-            if (waitingAtNewRate && delay == TimeSpan.Zero)
-                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
+            await SendWaitingAtAsync(WaitingPhase.AfterSwitch).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
                 await DelayUntilAsync(resumeAt, ct).ConfigureAwait(false);
-            if (waitingAtNewRate && bitsPerSecond is null)
-                throw new CanOpenTransportException(
-                    "The waiting frame could not be verified before the old-rate deadline. Both switch-delay periods have elapsed; a host bit-rate switch is required to return the slaves to waiting.");
-            if (waitingAtNewRate && delay > TimeSpan.Zero)
-                await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
+            await SendWaitingAtAsync(WaitingPhase.AfterResume).ConfigureAwait(false);
         }, cancellationToken);
     }
 
@@ -313,17 +305,13 @@ internal sealed partial class LssMaster : ILssMaster
         if (reader is null) return;
         try
         {
-            reader.Wait(TimeSpan.FromSeconds(2));
+            reader.Wait(ReaderShutdownTimeout);
         }
         catch (AggregateException)
         {
             // A faulted reader has already completed the inbound channel.
         }
-        if (_ownsService) _service.Dispose();
-        // A reader still parked after the wait must not see its token source disposed.
-        if (!reader.IsCompleted) return;
-        _readerCts.Dispose();
-        _lifetime.Dispose();
+        FinishDispose(reader);
     }
 
     /// <inheritdoc />
@@ -331,14 +319,25 @@ internal sealed partial class LssMaster : ILssMaster
     {
         var reader = BeginDispose();
         if (reader is null) return;
-        // WhenAny observes completion, including a fault. Reading Exception marks that fault
-        // observed; a catch here would hide which failure ended the reader.
-        await Task.WhenAny(reader).ConfigureAwait(false);
-        if (reader.IsFaulted)
-            _ = reader.Exception;
+        using var timeout = new CancellationTokenSource();
+        var limit = Task.Delay(ReaderShutdownTimeout, timeout.Token);
+        await Task.WhenAny(reader, limit).ConfigureAwait(false);
+        timeout.Cancel();
+        FinishDispose(reader);
+    }
+
+    private void FinishDispose(Task reader)
+    {
         if (_ownsService) _service.Dispose();
-        _readerCts.Dispose();
-        _lifetime.Dispose();
+        // A parked reader keeps its sources alive. Release them and observe any fault when
+        // it eventually exits, including when it outlasted the bounded disposal wait.
+        _ = reader.ContinueWith(static (completed, state) =>
+        {
+            var master = (LssMaster)state!;
+            _ = completed.Exception;
+            master._readerCts.Dispose();
+            master._lifetime.Dispose();
+        }, this, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>
@@ -412,8 +411,12 @@ internal sealed partial class LssMaster : ILssMaster
             return true;
         }, cancellationToken);
 
-    private async Task<Sent> SendAsync(byte[] payload, CancellationToken cancellationToken)
+    private void Reserve(long until) => _nextCommandAt = Math.Max(_nextCommandAt, until);
+
+    private async Task<Sent> SendAsync(byte[] payload, CancellationToken cancellationToken,
+        TimeSpan recoveryWindow = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage), payload, isExtendedFrame: false);
         lock (_receiveGate)
         {
@@ -422,28 +425,30 @@ internal sealed partial class LssMaster : ILssMaster
             ForwardAvailable();
             while (_inbound.Reader.TryRead(out _)) { }
         }
-        var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
-            .ConfigureAwait(false);
-        if (!confirmation.Confirmed)
-            throw new CanOpenTransportException(
-                $"LSS master frame 0x{payload[0]:X2} was not confirmed: {confirmation.FailureReason}.");
-        return new Sent(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
-    }
-
-    private async Task<Sent> SendForReplyAsync(byte[] payload, TimeSpan responseWindow, CancellationToken cancellationToken)
-    {
+        cancellationToken.ThrowIfCancellationRequested();
+        bool mayHaveTransmitted = true;
         try
         {
-            return await SendAsync(payload, cancellationToken).ConfigureAwait(false);
+            var confirmation = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            if (!confirmation.Confirmed)
+            {
+                mayHaveTransmitted = confirmation.FailureReason != TxConfirmFailureReason.Rejected;
+                throw new CanOpenTransportException(
+                    $"LSS master frame 0x{payload[0]:X2} was not confirmed: {confirmation.FailureReason}.");
+            }
+            return new Sent(confirmation.HostHandoffTimestamp, confirmation.HostTransmitTimestamp);
         }
-        catch
+        catch when (mayHaveTransmitted)
         {
-            // Failed confirmation does not prove that no slave received the request.
-            _nextCommandAt = Math.Max(_nextCommandAt,
-                TickMath.DueAt(_time.GetTimestamp(), responseWindow, _time.Frequency));
+            // After entering the service, only an explicit rejection proves no frame went out.
+            Reserve(TickMath.DueAt(_time.GetTimestamp(), recoveryWindow, _time.Frequency));
             throw;
         }
     }
+
+    private Task<Sent> SendForReplyAsync(byte[] payload, TimeSpan responseWindow, CancellationToken cancellationToken)
+        => SendAsync(payload, cancellationToken, responseWindow);
 
     private async Task<byte[]?> ReceiveAsync(Sent sent, Func<ReadOnlyMemory<byte>, bool> match, TimeSpan timeout,
         CancellationToken cancellationToken, bool drain = false)
@@ -452,6 +457,8 @@ internal sealed partial class LssMaster : ILssMaster
         long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
         long deadline = TickMath.DueAt(start, timeout, time.Frequency);
         byte[]? first = null;
+        ClockTimeout? timeoutSource = null;
+        CancellationTokenSource? window = null;
         try
         {
             while (true)
@@ -460,10 +467,10 @@ internal sealed partial class LssMaster : ILssMaster
                 TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
                 if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
                     return first;
-                using var timeoutSource = _timers is { } timers
+                timeoutSource ??= _timers is { } timers
                     ? new ClockTimeout(timers, deadline)
                     : new ClockTimeout(RemainingUntil(deadline));
-                using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
+                window ??= CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
                 try
                 {
                     if (!await _inbound.Reader.WaitToReadAsync(window.Token).ConfigureAwait(false))
@@ -475,23 +482,29 @@ internal sealed partial class LssMaster : ILssMaster
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutSource.IsCancellationRequested)
                 {
-                    // Drain and recheck the absolute deadline at the loop head. A system timer
-                    // that fires early must not shorten the window or create a pending read.
+                    // A system timer can fire early. Finish the absolute wait without spinning
+                    // on a cancelled token, then drain at the same loop head.
+                    await DelayUntilAsync(deadline, cancellationToken).ConfigureAwait(false);
                 }
             }
         }
         catch (CanOpenTransportException)
         {
             if (first is not null) return first;
-            _nextCommandAt = Math.Max(_nextCommandAt, deadline);
+            Reserve(deadline);
             ThrowIfDisposed();
             throw;
         }
         catch (OperationCanceledException)
         {
             // A later handoff cannot distinguish a delayed reply to this abandoned request.
-            _nextCommandAt = Math.Max(_nextCommandAt, deadline);
+            Reserve(deadline);
             throw;
+        }
+        finally
+        {
+            window?.Dispose();
+            timeoutSource?.Dispose();
         }
     }
 
@@ -519,9 +532,10 @@ internal sealed partial class LssMaster : ILssMaster
         return TimeSpan.FromMilliseconds(Math.Min(int.MaxValue, Math.Ceiling(remaining.TotalMilliseconds)));
     }
 
-    private static CanOpenTransportException ReaderEnded()
+    private static CanOpenTransportException ReaderEnded(Exception? inner = null)
     {
-        return new CanOpenTransportException("The LSS master reader ended before a slave answered.");
+        const string message = "The LSS master reader ended before a slave answered.";
+        return inner is null ? new CanOpenTransportException(message) : new CanOpenTransportException(message, inner);
     }
 
     private void TakeAvailable(Sent sent, long deadline, Func<ReadOnlyMemory<byte>, bool> match, ref byte[]? first,
@@ -564,7 +578,7 @@ internal sealed partial class LssMaster : ILssMaster
         }
         catch (Exception ex) when (!IsFatalReadFailure(ex))
         {
-            var error = new CanOpenTransportException("The LSS master reader ended before a slave answered.", ex);
+            var error = ReaderEnded(ex);
             _inbound.Writer.TryComplete(error);
             _readerCts.Cancel();
             throw error;
@@ -609,8 +623,9 @@ internal sealed partial class LssMaster : ILssMaster
         }
         catch (Exception ex)
         {
-            _inbound.Writer.TryComplete(IsFatalReadFailure(ex) ? ex : new CanOpenTransportException(
-                "The LSS master reader ended before a slave answered.", ex));
+            var error = ex as CanOpenTransportException ?? (IsFatalReadFailure(ex) ? ex : ReaderEnded(ex));
+            // ForwardAvailable may already have completed the channel with this same error.
+            _inbound.Writer.TryComplete(error);
             throw;
         }
         finally
@@ -624,6 +639,8 @@ internal sealed partial class LssMaster : ILssMaster
         if (Volatile.Read(ref _disposed) != 0)
             throw new ObjectDisposedException(nameof(LssMaster));
     }
+
+    private enum WaitingPhase { None, BeforeDelay, AfterSwitch, AfterResume }
 
     private readonly struct Sent
     {

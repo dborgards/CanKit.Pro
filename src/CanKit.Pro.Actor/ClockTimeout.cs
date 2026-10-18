@@ -31,7 +31,7 @@ internal sealed class ClockTimeout : IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         if (clock.TimeSource.GetTimestamp() >= deadline) return;
         var elapsed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var registration = cancellationToken.Register(() => elapsed.TrySetCanceled());
+        using var registration = cancellationToken.Register(() => elapsed.TrySetCanceled(cancellationToken));
         using var timer = clock.ScheduleAt(deadline, () => elapsed.TrySetResult(true));
         await elapsed.Task.ConfigureAwait(false);
     }

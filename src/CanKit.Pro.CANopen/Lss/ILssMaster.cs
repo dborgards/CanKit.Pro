@@ -25,7 +25,8 @@ namespace CanKit.Pro.CANopen.Lss;
 /// Cancellation returns promptly, but later commands wait out an abandoned response window
 /// so its delayed replies cannot answer a new request. A cancelled Fastscan also preserves
 /// its probe's cycle gap. Failed transmit confirmation conservatively starts the recovery
-/// window when the send ends.
+/// window when the send ends, except for explicit driver rejection or cancellation before
+/// entering the service, which prove that no request was sent.
 /// </para>
 /// </remarks>
 public interface ILssMaster : IDisposable, IAsyncDisposable
@@ -81,7 +82,8 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// switch the master is still on the old rate and the slave will not hear the frame.
     /// Cancellation or failure returns to the caller promptly; subsequent commands still wait
     /// for the activation's two periods. An unconfirmed activation conservatively reserves
-    /// both periods from the failed send's completion.
+    /// both periods from the failed send's completion, except for explicit driver rejection
+    /// or cancellation before entering the service.
     /// </summary>
     /// <exception cref="ArgumentException">A bit rate requires a switch callback. A zero delay with returnToWaiting requires both.</exception>
     /// <exception cref="CanOpenTransportException">The old-rate waiting window was missed and no host bit-rate switch is available.</exception>

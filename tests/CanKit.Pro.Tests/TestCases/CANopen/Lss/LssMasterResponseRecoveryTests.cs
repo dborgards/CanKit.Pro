@@ -35,7 +35,7 @@ public class LssMasterResponseRecoveryTests
                     caller.Cancel();
                     caller.Token.ThrowIfCancellationRequested();
                 }
-                return Task.FromResult(new TxConfirmation { Confirmed = false });
+                return Task.FromResult(new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout });
             };
         }
         else if (unstamped)
@@ -47,7 +47,7 @@ public class LssMasterResponseRecoveryTests
             await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
             caller.Cancel();
         }
-        var scan = async () => await scanning.WaitAsync(TimeSpan.FromSeconds(5));
+        var scan = async () => await scanning.WaitAsync(LssTestTiming.SchedulingBudget);
         if (failure == 2) await scan.Should().ThrowAsync<CanKit.Pro.CANopen.CanOpenTransportException>();
         else await scan.Should().ThrowAsync<OperationCanceledException>();
         rig.Service.Send = send;
@@ -61,7 +61,7 @@ public class LssMasterResponseRecoveryTests
         await rig.Clock.AdvanceAsync(half);
         // The abandoned probe's matching 4Fh arrives after cancellation. The new probe must
         // still be unsent, so its pre-send drain can discard this reply.
-        await rig.InjectAsync(LssFrames.Command(LssCommand.IdentifySlave)).WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.InjectAsync(LssFrames.Command(LssCommand.IdentifySlave)).WaitAsync(LssTestTiming.SchedulingBudget);
         await rig.Clock.AdvanceAsync(remainingWindow - half - TimeSpan.FromTicks(1));
         rig.Service.Commands.Count.Should().Be(1);
         await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
@@ -72,7 +72,7 @@ public class LssMasterResponseRecoveryTests
             if (cancelSuccessor)
             {
                 successor.Cancel();
-                var cancelled = async () => await next.WaitAsync(TimeSpan.FromSeconds(5));
+                var cancelled = async () => await next.WaitAsync(LssTestTiming.SchedulingBudget);
                 await cancelled.Should().ThrowAsync<OperationCanceledException>();
                 next = rig.Master.FastscanAsync();
                 await rig.ArmedAsync(gap);
@@ -84,7 +84,7 @@ public class LssMasterResponseRecoveryTests
         await rig.ArmedAsync(window);
         rig.Service.Commands.Count.Should().Be(2);
         await rig.Clock.AdvanceAsync(window);
-        (await next.WaitAsync(TimeSpan.FromSeconds(5))).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
+        (await next.WaitAsync(LssTestTiming.SchedulingBudget)).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
     }
 
     [Fact]
@@ -97,18 +97,18 @@ public class LssMasterResponseRecoveryTests
         await rig.ArmedAsync(window);
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
         caller.Cancel();
-        var cancel = async () => await scan.WaitAsync(TimeSpan.FromSeconds(5));
+        var cancel = async () => await scan.WaitAsync(LssTestTiming.SchedulingBudget);
         await cancel.Should().ThrowAsync<OperationCanceledException>();
 
         var identify = rig.Master.IdentifyRemoteSlavesAsync(new LssIdentityRange(1, 1, 0, 1, 0, 1));
         rig.Service.Commands.Count.Should().Be(1);
         await rig.ArmedAsync(TimeSpan.FromMilliseconds(50));
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(25));
-        await rig.InjectAsync(LssFrames.Command(LssCommand.IdentifySlave)).WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.InjectAsync(LssFrames.Command(LssCommand.IdentifySlave)).WaitAsync(LssTestTiming.SchedulingBudget);
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(25));
         await rig.ArmedAsync(window);
         await rig.Clock.AdvanceAsync(window);
-        (await identify.WaitAsync(TimeSpan.FromSeconds(5))).Should().BeFalse();
+        (await identify.WaitAsync(LssTestTiming.SchedulingBudget)).Should().BeFalse();
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public class LssMasterResponseRecoveryTests
         await rig.ArmedAsync(window);
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(50));
         caller.Cancel();
-        var cancel = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
+        var cancel = async () => await first.WaitAsync(LssTestTiming.SchedulingBudget);
         await cancel.Should().ThrowAsync<OperationCanceledException>();
 
         var second = rig.Master.InquireNodeIdAsync();
@@ -130,12 +130,12 @@ public class LssMasterResponseRecoveryTests
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(25));
         var reply = LssFrames.Command(LssCommand.InquireNodeId);
         reply[1] = 0x7F;
-        await rig.InjectAsync(reply).WaitAsync(TimeSpan.FromSeconds(5));
+        await rig.InjectAsync(reply).WaitAsync(LssTestTiming.SchedulingBudget);
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(25));
         await rig.ArmedAsync(window);
         var current = LssFrames.Command(LssCommand.InquireNodeId);
         current[1] = 0x42;
-        await rig.InjectAsync(current).WaitAsync(TimeSpan.FromSeconds(5));
-        (await second.WaitAsync(TimeSpan.FromSeconds(5))).Should().Be(0x42);
+        await rig.InjectAsync(current).WaitAsync(LssTestTiming.SchedulingBudget);
+        (await second.WaitAsync(LssTestTiming.SchedulingBudget)).Should().Be(0x42);
     }
 }
