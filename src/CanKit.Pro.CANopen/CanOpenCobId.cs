@@ -121,8 +121,8 @@ public static class CanOpenCobId
     public const uint SyncGenerateBit = 0x4000_0000;
 
     /// <summary>Bit 29 of a COB-ID object: set means the CAN-ID is a 29-bit extended identifier.
-    /// This node supports CAN base frames only and rejects the bit with SDO abort
-    /// <c>0609 0030h</c>, as CiA 301 prescribes.</summary>
+    /// PDOs support both frame formats; services that support only base frames reject
+    /// this bit with SDO abort <c>0609 0030h</c>.</summary>
     public const uint ExtendedFrameBit = 0x2000_0000;
 
     /// <summary>Mask of the 11-bit CAN-ID in a COB-ID object.</summary>
@@ -144,7 +144,7 @@ public static class CanOpenCobId
         >= 0x601 and <= 0x67F => true,
         >= 0x6E0 and <= 0x6FF => true,
         >= 0x701 and <= 0x77F => true,
-        >= 0x780 => true,
+        >= 0x780 and <= 0x7FF => true,
         _ => false,
     };
 

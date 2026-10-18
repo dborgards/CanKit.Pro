@@ -385,7 +385,7 @@ public interface ICanOpenNode : IDisposable
     // -----------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Configures (or replaces) TPDO <paramref name="pdoIndex"/> (1..4) by writing its
+    /// Configures (or replaces) TPDO <paramref name="pdoIndex"/> (1..PdoCount) by writing its
     /// communication record <c>1800h + n − 1</c> and mapping record <c>1A00h + n − 1</c>, in the
     /// CiA 301 §7.5.2.38 re-mapping order (PDO invalidated, mapping rewritten, parameters set,
     /// PDO validated). Values not provided use CiA 301 defaults: the COB-ID is the pre-defined
@@ -396,15 +396,15 @@ public interface ICanOpenNode : IDisposable
     /// the configuration applied, and neither another caller, nor an SDO download, nor a direct
     /// dictionary write interleaves with the sequence.
     /// </summary>
-    /// <param name="pdoIndex">TPDO number 1..4.</param>
+    /// <param name="pdoIndex">TPDO number 1..CanOpenNodeOptions.PdoCount (or the description's higher count).</param>
     /// <param name="mapping">The mapped objects; copied into the mapping record. Every target
     /// must exist in the OD, be PDO-mappable and readable, and have the mapped bit length (dummy
     /// entries <c>0002h</c>–<c>0007h</c> excepted).</param>
     /// <param name="transmission">Trigger mode; see <see cref="TpdoTransmission"/>. Cyclic
     /// "every n-th SYNC" is configured by writing the raw byte to <c>1800h:02</c> instead.</param>
-    /// <param name="cobId">The <c>1800h:01</c> word: an 11-bit CAN-ID plus the CiA 301 control
+    /// <param name="cobId">The <c>1800h:01</c> word: a CAN-ID plus the CiA 301 control
     /// bits — bit 31 set configures the PDO but leaves it disabled ("PDO does not exist"), bit 30
-    /// set forbids RTR on it. Bit 29 (29-bit CAN-ID) is not supported and throws.</param>
+    /// set forbids RTR on it. Bit 29 selects a 29-bit CAN-ID; PDOs above 4 require an explicit COB-ID.</param>
     /// <param name="eventTimerInterval">Event timer for <see cref="TpdoTransmission.EventTimer"/>,
     /// 1..65535 ms; ignored for the other modes.</param>
     /// <param name="inhibitTime">Minimum interval between two transmissions of an event-driven
@@ -419,12 +419,12 @@ public interface ICanOpenNode : IDisposable
         TimeSpan? inhibitTime = null);
 
     /// <summary>
-    /// Configures (or replaces) RPDO <paramref name="pdoIndex"/> (1..4) by writing its
+    /// Configures (or replaces) RPDO <paramref name="pdoIndex"/> (1..PdoCount) by writing its
     /// communication record <c>1400h + n − 1</c> and mapping record <c>1600h + n − 1</c>. Incoming
     /// frames matching the COB-ID unpack into the local OD and raise <see cref="RpdoReceived"/> —
     /// immediately, or with the next SYNC for <see cref="RpdoTransmission.Synchronous"/>.
     /// <paramref name="cobId"/> is the <c>1400h:01</c> word (bit 31 set = configured but disabled;
-    /// bit 29 is not supported and throws); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
+    /// bit 29 selects an extended CAN frame); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
     /// The writes are one transaction on the actor loop, as for <see cref="ConfigureTpdo"/>.
     /// </summary>
     /// <exception cref="ArgumentException">A value was rejected; see <see cref="ConfigureTpdo"/>.</exception>
@@ -463,21 +463,21 @@ public interface ICanOpenNode : IDisposable
     /// COB-ID is never combined with the file's mapping because a caller came in between.
     /// </para>
     /// <para>
-    /// The mapping is the live record <c>1600h</c>–<c>1603h</c> or <c>1A00h</c>–<c>1A03h</c>,
+    /// The mapping is the live record <c>1600h</c>–<c>17FFh</c> or <c>1A00h</c>–<c>1BFFh</c>,
     /// uploaded over the same SDO client. A pair the bound peer description does not allow is
     /// refused before a frame is sent and is a failed live read. An upload that aborts or times
-    /// out, or a count that is not a byte-aligned mapping of at most eight entries (MPDO
-    /// included), makes the live record unavailable and the mapping in the file is used instead.
+    /// out, or an invalid mapping exceeding 64 bits, makes the live record unavailable and the
+    /// mapping in the file is used instead. Mapping counts FEh/FFh decode an MPDO multiplexer.
     /// A record neither the device nor the file can supply is not decoded.
     /// </para>
     /// <para>
     /// The split follows the same length rule as an RPDO this node consumes: fewer bytes than
-    /// the mapping writes nothing; extra bytes are ignored; a dummy entry <c>0002h</c>–<c>0007h</c>
-    /// consumes its bytes and writes no signal.
+    /// the mapping writes nothing; extra bytes are ignored; a dummy entry <c>0001h</c>–<c>0007h</c>
+    /// consumes its bits and writes no signal.
     /// </para>
     /// </remarks>
     /// <param name="peerNodeId">The node whose PDO this payload is (1..127).</param>
-    /// <param name="cobId">The 11-bit COB-ID the payload was observed on.</param>
+    /// <param name="cobId">The observed ID, with bit 29 set for an extended frame.</param>
     /// <param name="payload">The PDO data, 0..8 bytes.</param>
     /// <param name="peerDescription">EDS or DCF of the peer. Supplies the COB-ID and the mapping
     /// when the live read of that record fails.</param>
@@ -487,7 +487,7 @@ public interface ICanOpenNode : IDisposable
     /// <exception cref="ArgumentNullException"><paramref name="peerDescription"/> or
     /// <paramref name="sink"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="peerNodeId"/> is outside
-    /// 1..127, <paramref name="cobId"/> is not an 11-bit id, or <paramref name="payload"/> is
+    /// 1..127, <paramref name="cobId"/> is not a valid base or extended PDO key, or <paramref name="payload"/> is
     /// longer than 8 bytes.</exception>
     Task<ForeignPdoObserveResult> ObserveForeignPdoAsync(byte peerNodeId, uint cobId,
         ReadOnlyMemory<byte> payload, CanOpenDeviceDescription peerDescription, IForeignPdoSink sink,

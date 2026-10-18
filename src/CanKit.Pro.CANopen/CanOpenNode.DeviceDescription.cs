@@ -43,6 +43,18 @@ internal sealed partial class CanOpenNode
 
     private static readonly ushort[] MandatoryObjects = { Co.DeviceType, Co.ErrorRegister, Co.Identity };
 
+    private static int DescribedPdoCount(CanOpenDeviceDescription? description)
+    {
+        int count = 0;
+        if (description is null) return count;
+        foreach (ushort index in description.Objects.Objects.Keys)
+        {
+            if (index is >= Co.RpdoComm and < Co.TpdoMap + Co.PdoCount)
+                count = Math.Max(count, ((index - Co.RpdoComm) % Co.PdoCount) + 1);
+        }
+        return count;
+    }
+
     private void ApplyDeviceDescription(CanOpenDeviceDescription description)
     {
         var findings = new List<DeviceDescriptionFinding>();
@@ -57,7 +69,7 @@ internal sealed partial class CanOpenNode
 
         // §7.3.3: "A CANopen device shall provide the corresponding CAN-IDs only for the
         // supported communication objects" — a PDO the description does not declare does not exist.
-        for (int n = 1; n <= Co.PdoCount; n++)
+        for (int n = 1; n <= _pdoCount; n++)
         {
             foreach (var baseIndex in new[] { Co.RpdoComm, Co.RpdoMap, Co.TpdoComm, Co.TpdoMap })
             {
@@ -266,6 +278,7 @@ internal sealed partial class CanOpenNode
 
     private static int PdoRecordRank(ushort index) => index switch
     {
+        Co.SyncCounterOverflow => -1,
         // 1F81h and 1F89h before 1F80h, and 1F90h before both: the network list, the boot
         // timeout and the times are in the dictionary when bits 0 and 5 start the election.
         Co.SlaveAssignment or Co.BootTime => -2,
@@ -349,6 +362,8 @@ internal sealed partial class CanOpenNode
                 return ApplyConsumerHeartbeatArray(entries, findings);
             case Co.SyncCobId:
             case Co.CyclePeriod:
+            case Co.SyncWindow:
+            case Co.SyncCounterOverflow:
             case Co.EmcyCobId:
             case Co.ProducerHeartbeat:
             case Co.GuardTime:
@@ -394,7 +409,7 @@ internal sealed partial class CanOpenNode
         {
             loaded += DeclareDescribedEntry(index, entry, findings) ? 1 : 0;
         }
-        if (IsCommunicationProfileArea(index) && index is not (Co.DeviceType or Co.Identity or 0x1002 or 0x1008 or 0x1009 or 0x100A))
+        if (IsCommunicationProfileArea(index) && index is not (Co.DeviceType or Co.Identity or 0x1002 or 0x1008 or 0x1009 or 0x100A or >= 0x1FA0 and <= 0x1FFF))
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.NotImplemented,
                 "created as data: the node implements no behaviour behind this communication-profile object"));
@@ -411,6 +426,8 @@ internal sealed partial class CanOpenNode
                 findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted, reason, entry.Value));
                 continue;
             }
+            if (index == Co.SdoServer && entry.Subindex is 1 or 2)
+                _od.Declare(index, entry.Subindex, ours.DataType, ours.Access, ours.GetRawValue(), entry.PdoMappable);
             // 1200h names the default server's COB-IDs; a description that puts other values
             // there promises something this node does not do, and the node says so rather than
             // exposing the file's value. The capability words of 1010h/1011h carry no promise.
@@ -582,7 +599,8 @@ internal sealed partial class CanOpenNode
                     "this object is a VAR; only sub-index 00h exists", entry.Value));
                 continue;
             }
-            od.Declare(index, 0, current.DataType, MapAccess(entry.Access), current.GetRawValue(), pdoMappable: false);
+            od.Declare(index, 0, current.DataType, MapAccess(entry.Access), current.GetRawValue(),
+                pdoMappable: entry.PdoMappable && IsCommunicationPdoTarget(index, 0));
             loaded++;
             ApplyManagedValue(od, nodeId, index, 0, current.DataType, entry, findings);
         }
@@ -636,10 +654,10 @@ internal sealed partial class CanOpenNode
         List<DeviceDescriptionFinding> findings, List<(ushort, uint, string)> pendingPdoCreates)
     {
         int n = index - baseIndex + 1;
-        if (n > Co.PdoCount)
+        if (n > _pdoCount)
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
-                $"the node implements {Co.PdoCount} {(isTpdo ? "TPDOs" : "RPDOs")}; this record is not created"));
+                $"the node implements {_pdoCount} {(isTpdo ? "TPDOs" : "RPDOs")}; this record is not created"));
             return 0;
         }
         int loaded = 0;
@@ -648,7 +666,7 @@ internal sealed partial class CanOpenNode
 
         // The sub-indices the node implements for this record; the description says which of
         // them exist on this device (sub-index 00h announces the highest one).
-        byte[] implemented = isTpdo ? new byte[] { 1, 2, 3, 5 } : new byte[] { 1, 2 };
+        byte[] implemented = isTpdo ? new byte[] { 1, 2, 3, 5, 6 } : new byte[] { 1, 2, 3, 5 };
         byte highest = 0;
         foreach (var sub in implemented)
         {
@@ -839,10 +857,10 @@ internal sealed partial class CanOpenNode
         List<DeviceDescriptionFinding> findings, HashSet<ushort> failedMappings)
     {
         int n = index - baseIndex + 1;
-        if (n > Co.PdoCount)
+        if (n > _pdoCount)
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
-                $"the node implements {Co.PdoCount} PDOs of each kind; this record is not created"));
+                $"the node implements {_pdoCount} PDOs of each kind; this record is not created"));
             return 0;
         }
         // A PDO exists only with both records (objects overview, footnote *): a mapping record
@@ -865,7 +883,7 @@ internal sealed partial class CanOpenNode
             if (entry.Subindex > Pdo.PdoMapping.MaxEntries)
             {
                 findings.Add(new DeviceDescriptionFinding(index, entry.Subindex, DeviceDescriptionOutcome.Omitted,
-                    $"a byte-aligned mapping holds at most {Pdo.PdoMapping.MaxEntries} entries; this sub-index is not created", entry.Value));
+                    $"a PDO mapping holds at most {Pdo.PdoMapping.MaxEntries} entries; this sub-index is not created", entry.Value));
                 continue;
             }
             if (!_od.TryGet(index, entry.Subindex, out var current)) continue;
@@ -889,7 +907,7 @@ internal sealed partial class CanOpenNode
             }
         }
         _od.WriteUnsigned(index, 0x00, 0);
-        for (byte s = 1; s <= Math.Min(count, (uint)Pdo.PdoMapping.MaxEntries); s++)
+        for (byte s = 1; s <= (count >= 0xFE ? 0 : Math.Min(count, (uint)Pdo.PdoMapping.MaxEntries)); s++)
         {
             if (!byIndex.TryGetValue(s, out var entry) || string.IsNullOrEmpty(entry.Value)) continue;
             var value = ParseUnsigned(entry, out var raw);
@@ -910,7 +928,7 @@ internal sealed partial class CanOpenNode
         if (count > (uint)Pdo.PdoMapping.MaxEntries)
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Corrected,
-                $"a byte-aligned mapping holds at most {Pdo.PdoMapping.MaxEntries} entries; the mapping stays disabled", sub0.Value));
+                $"a PDO mapping holds at most {Pdo.PdoMapping.MaxEntries} entries; the mapping stays disabled", sub0.Value));
             failed = true;
         }
         if (!failed && count > 0 && !_od.TryWriteRaw(index, 0x00, new[] { (byte)count }, out var countAbort))
@@ -984,7 +1002,7 @@ internal sealed partial class CanOpenNode
         }
         // Mandatory placeholders (1000h, 1018h) are replaced; everything else in the file is new.
         od.Declare(index, entry.Subindex, type.Value, MapAccess(entry.Access), value,
-            pdoMappable: entry.PdoMappable && !IsCommunicationProfileArea(index));
+            pdoMappable: entry.PdoMappable && (!IsCommunicationProfileArea(index) || IsCommunicationPdoTarget(index, entry.Subindex)));
         return true;
     }
 
@@ -1018,6 +1036,15 @@ internal sealed partial class CanOpenNode
     private static OdDataType? MapType(ushort? code) => code switch
     {
         CanOpenDataType.Boolean => OdDataType.Boolean,
+        CanOpenDataType.Integer24 => OdDataType.Integer24,
+        CanOpenDataType.Integer40 => OdDataType.Integer40,
+        CanOpenDataType.Integer48 => OdDataType.Integer48,
+        CanOpenDataType.Integer56 => OdDataType.Integer56,
+        CanOpenDataType.Unsigned24 => OdDataType.Unsigned24,
+        CanOpenDataType.Unsigned40 => OdDataType.Unsigned40,
+        CanOpenDataType.Unsigned48 => OdDataType.Unsigned48,
+        CanOpenDataType.Unsigned56 => OdDataType.Unsigned56,
+
         CanOpenDataType.Integer8 => OdDataType.Integer8,
         CanOpenDataType.Integer16 => OdDataType.Integer16,
         CanOpenDataType.Integer32 => OdDataType.Integer32,
@@ -1048,6 +1075,15 @@ internal sealed partial class CanOpenNode
         switch (type)
         {
             case OdDataType.Boolean: return new[] { (byte)((bool)value ? 1 : 0) };
+            case OdDataType.Integer24: return LittleEndian(unchecked((ulong)Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)), 3);
+            case OdDataType.Integer40: return LittleEndian(unchecked((ulong)Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)), 5);
+            case OdDataType.Integer48: return LittleEndian(unchecked((ulong)Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)), 6);
+            case OdDataType.Integer56: return LittleEndian(unchecked((ulong)Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)), 7);
+            case OdDataType.Unsigned24: return LittleEndian(Convert.ToUInt64(value, System.Globalization.CultureInfo.InvariantCulture), 3);
+            case OdDataType.Unsigned40: return LittleEndian(Convert.ToUInt64(value, System.Globalization.CultureInfo.InvariantCulture), 5);
+            case OdDataType.Unsigned48: return LittleEndian(Convert.ToUInt64(value, System.Globalization.CultureInfo.InvariantCulture), 6);
+            case OdDataType.Unsigned56: return LittleEndian(Convert.ToUInt64(value, System.Globalization.CultureInfo.InvariantCulture), 7);
+
             case OdDataType.Integer8: return new[] { unchecked((byte)(sbyte)value) };
             case OdDataType.Unsigned8: return new[] { (byte)value };
             case OdDataType.Integer16: return LittleEndian(unchecked((ulong)(short)value), 2);

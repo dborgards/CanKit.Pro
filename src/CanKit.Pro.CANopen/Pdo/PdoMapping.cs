@@ -6,31 +6,29 @@ namespace CanKit.Pro.CANopen.Pdo;
 
 /// <summary>
 /// A single entry in a PDO mapping: reference to an OD <c>(index, subindex)</c> plus the number
-/// of bits contributed to the assembled PDO payload. Bit lengths must be multiples of eight
-/// (byte-aligned mapping), which matches every profile the tests exercise and keeps the
-/// packing/unpacking loop trivially correct; bit-granular mapping is a documented omission.
+/// of bits contributed to the assembled PDO payload. Bits are packed LSB first without gaps;
+/// the final byte is zero-padded. A PDO holds at most 64 mapped bits.
 /// </summary>
 /// <remarks>
 /// Bit lengths are the same units the CiA 301 §7.5.2.38 mapping record uses (a 32-bit mapping
 /// entry is <c>index &lt;&lt; 16 | subindex &lt;&lt; 8 | bit-length</c>). The node stores every
 /// mapping in its <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c> records, whether it was
 /// configured through <c>ConfigureTpdo</c>/<c>ConfigureRpdo</c> or written over SDO.
-/// An entry whose index is one of the static data types <c>0002h</c>–<c>0007h</c> (with
+/// An entry whose index is one of the static data types <c>0001h</c>–<c>0007h</c> (with
 /// sub-index 0) is a <em>dummy mapping</em> (CiA 301 §7.5.2.36): it occupies its bytes in the
 /// PDO without touching the object dictionary, which pads an RPDO to a peer's layout.
 /// </remarks>
 public readonly struct PdoMappingEntry : IEquatable<PdoMappingEntry>
 {
     /// <summary>Constructs a new mapping entry.</summary>
-    /// <param name="index">Target OD index, or a dummy data-type index <c>0002h</c>–<c>0007h</c>.</param>
+    /// <param name="index">Target OD index, or a dummy data-type index <c>0001h</c>–<c>0007h</c>.</param>
     /// <param name="subindex">Target OD subindex (0 for a dummy entry).</param>
-    /// <param name="bitLength">Field size in bits; must be a positive multiple of eight and no
-    /// larger than 64.</param>
+    /// <param name="bitLength">Field size in bits, 1..64.</param>
     public PdoMappingEntry(ushort index, byte subindex, byte bitLength)
     {
-        if (bitLength == 0 || bitLength > 64 || bitLength % 8 != 0)
+        if (bitLength == 0 || bitLength > 64)
             throw new ArgumentOutOfRangeException(nameof(bitLength), bitLength,
-                "Mapping requires positive byte-aligned bit lengths (8/16/24/32/40/48/56/64).");
+                "Mapping requires a bit length of 1..64.");
         Index = index;
         Subindex = subindex;
         BitLength = bitLength;
@@ -42,21 +40,22 @@ public readonly struct PdoMappingEntry : IEquatable<PdoMappingEntry>
     /// <summary>OD subindex this entry references.</summary>
     public byte Subindex { get; }
 
-    /// <summary>Contribution size in bits (always a multiple of 8).</summary>
+    /// <summary>Contribution size in bits.</summary>
     public byte BitLength { get; }
 
-    /// <summary>Contribution size in bytes.</summary>
-    public int ByteLength => BitLength / 8;
+    /// <summary>Number of bytes needed to hold this field separately, rounded up.</summary>
+    public int ByteLength => (BitLength + 7) / 8;
 
-    /// <summary>Whether this is a dummy mapping (CiA 301 §7.5.2.36): index <c>0002h</c>–<c>0007h</c>,
+    /// <summary>Whether this is a dummy mapping (CiA 301 §7.5.2.36): index <c>0001h</c>–<c>0007h</c>,
     /// sub-index 0. The bytes are padding — zeros in a TPDO, ignored in an RPDO.</summary>
-    public bool IsDummy => Subindex == 0 && Index is >= 0x0002 and <= 0x0007;
+    public bool IsDummy => Subindex == 0 && Index is >= 0x0001 and <= 0x0007;
 
     /// <summary>The bit length CiA 301 assigns to the dummy data type <paramref name="index"/>
-    /// (<c>0002h</c>/<c>0005h</c> = 8, <c>0003h</c>/<c>0006h</c> = 16, <c>0004h</c>/<c>0007h</c> = 32),
+    /// (<c>0001h</c> = 1, <c>0002h</c>/<c>0005h</c> = 8, <c>0003h</c>/<c>0006h</c> = 16, <c>0004h</c>/<c>0007h</c> = 32),
     /// or 0 for any other index.</summary>
     public static byte DummyBitLength(ushort index) => index switch
     {
+        0x0001 => 1,
         0x0002 or 0x0005 => 8,
         0x0003 or 0x0006 => 16,
         0x0004 or 0x0007 => 32,
@@ -203,8 +202,8 @@ public static class CanOpenTransmissionType
 /// </summary>
 public sealed class PdoMapping
 {
-    /// <summary>Largest number of entries a byte-aligned mapping can hold within 8 bytes.</summary>
-    public const int MaxEntries = 8;
+    /// <summary>Largest number of one-bit entries a PDO can hold.</summary>
+    public const int MaxEntries = 64;
 
     private readonly List<PdoMappingEntry> _entries = new();
     private ReadOnlyCollection<PdoMappingEntry>? _view;
@@ -231,18 +230,21 @@ public sealed class PdoMapping
     /// after the PDO has been destroyed (#292).</summary>
     private static void CheckWidth(PdoMappingEntry entry, string paramName)
     {
-        if (entry.BitLength == 0 || entry.BitLength > 64 || entry.BitLength % 8 != 0)
+        if (entry.BitLength == 0 || entry.BitLength > 64)
             throw new ArgumentOutOfRangeException(paramName, entry.BitLength,
-                "Mapping requires positive byte-aligned bit lengths (8/16/24/32/40/48/56/64).");
+                "Mapping requires a bit length of 1..64.");
     }
 
     /// <summary>Total assembled payload size in bytes across every mapping entry.</summary>
-    public int TotalBytes
+    public int TotalBytes => (TotalBits + 7) / 8;
+
+    /// <summary>Sum of the mapped bit lengths, excluding final byte padding.</summary>
+    public int TotalBits
     {
         get
         {
             int total = 0;
-            foreach (var entry in _entries) total += entry.ByteLength;
+            foreach (var entry in _entries) total += entry.BitLength;
             return total;
         }
     }
@@ -288,7 +290,7 @@ public sealed class PdoMapping
         {
             _entries.RemoveAt(_entries.Count - 1);
             throw new InvalidOperationException(
-                $"PDO mapping holds at most {MaxEntries} byte-aligned entries.");
+                $"PDO mapping holds at most {MaxEntries} entries.");
         }
     }
 }

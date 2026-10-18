@@ -29,7 +29,7 @@ public enum ForeignPdoMappingOrigin
 /// <summary>
 /// One mapped object taken out of a foreign PDO payload. The bytes are the slice the mapping
 /// assigns to <see cref="Index"/>:<see cref="SubIndex"/>, little-endian, the same order a PDO
-/// carries. A dummy mapping (<c>0002h</c>–<c>0007h</c>) occupies bytes in the payload and is
+/// carries. A dummy mapping (<c>0001h</c>–<c>0007h</c>) occupies bytes in the payload and is
 /// not delivered.
 /// </summary>
 public readonly struct ForeignPdoSignal
@@ -38,6 +38,12 @@ public readonly struct ForeignPdoSignal
     /// copies the slice out of the payload before it calls the sink.</summary>
     public ForeignPdoSignal(byte peerNodeId, ForeignPdoKind kind, int pdoNumber, uint cobId,
         ushort index, byte subIndex, byte[] value, ForeignPdoMappingOrigin origin)
+        : this(peerNodeId, kind, pdoNumber, cobId, index, subIndex, value, origin, value?.Length * 8 ?? 0) { }
+
+    /// <summary>Constructs a signal with its exact mapped bit width. Bits are right-aligned
+    /// in little-endian byte order; unused high bits in the final byte are zero.</summary>
+    public ForeignPdoSignal(byte peerNodeId, ForeignPdoKind kind, int pdoNumber, uint cobId,
+        ushort index, byte subIndex, byte[] value, ForeignPdoMappingOrigin origin, int bitLength)
     {
         PeerNodeId = peerNodeId;
         Kind = kind;
@@ -47,6 +53,7 @@ public readonly struct ForeignPdoSignal
         SubIndex = subIndex;
         Value = value ?? throw new ArgumentNullException(nameof(value));
         Origin = origin;
+        BitLength = bitLength;
     }
 
     /// <summary>Node-id of the peer whose PDO this signal came from.</summary>
@@ -55,10 +62,10 @@ public readonly struct ForeignPdoSignal
     /// <summary>Whether the PDO is a TPDO or an RPDO of <see cref="PeerNodeId"/>.</summary>
     public ForeignPdoKind Kind { get; }
 
-    /// <summary>PDO number, 1..4.</summary>
+    /// <summary>PDO number, 1..512.</summary>
     public int PdoNumber { get; }
 
-    /// <summary>11-bit COB-ID the payload was observed on.</summary>
+    /// <summary>COB-ID (bit 29 set for an extended frame) the payload was observed on.</summary>
     public uint CobId { get; }
 
     /// <summary>Object index the mapping entry names.</summary>
@@ -69,6 +76,9 @@ public readonly struct ForeignPdoSignal
 
     /// <summary>The mapped bytes, little-endian.</summary>
     public byte[] Value { get; }
+
+    /// <summary>The exact mapped width, without final byte padding.</summary>
+    public int BitLength { get; }
 
     /// <summary>Whether <see cref="Value"/> was split with the live mapping record or the peer file.</summary>
     public ForeignPdoMappingOrigin Origin { get; }
@@ -103,7 +113,7 @@ public sealed class ForeignPdoObservation
     /// <summary>Whether the PDO is a TPDO or an RPDO of the peer.</summary>
     public ForeignPdoKind Kind { get; }
 
-    /// <summary>PDO number, 1..4.</summary>
+    /// <summary>PDO number, 1..512.</summary>
     public int PdoNumber { get; }
 
     /// <summary>Whether the payload was split. A short payload, and a mapping that could not be
@@ -126,8 +136,8 @@ public sealed class ForeignPdoObservation
 /// The outcome of <c>ObserveForeignPdoAsync</c> for one COB-ID. A COB-ID that no live
 /// communication record assigns — and that the peer file does not assign either, when that live
 /// read failed — has no <see cref="Observations"/> and a <see cref="Reason"/>. A COB-ID assigned
-/// to more than one PDO has one observation per PDO, in transmit-record order (TPDO 1..4) and
-/// then receive-record order (RPDO 1..4).
+/// to more than one PDO has one observation per PDO, in transmit-record order and
+/// then receive-record order.
 /// </summary>
 public sealed class ForeignPdoObserveResult
 {
@@ -138,7 +148,7 @@ public sealed class ForeignPdoObserveResult
         Reason = reason;
     }
 
-    /// <summary>The 11-bit COB-ID that was observed.</summary>
+    /// <summary>The COB-ID (bit 29 set for an extended frame) that was observed.</summary>
     public uint CobId { get; }
 
     /// <summary>One entry per PDO whose COB-ID is <see cref="CobId"/>, live record first and the

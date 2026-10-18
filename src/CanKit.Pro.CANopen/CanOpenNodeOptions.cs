@@ -150,6 +150,10 @@ public sealed class CanOpenNodeOptions
     /// </summary>
     public bool WritableCommunicationParameters { get; init; }
 
+    /// <summary>Number of PDO records per direction (1..512), default 4. An EDS/DCF
+    /// raises this to its highest declared PDO. PDOs above 4 require an explicit COB-ID.</summary>
+    public int PdoCount { get; init; } = 4;
+
     /// <summary>
     /// Device or tool. Read when <c>1F80h</c> is created: <see cref="CanOpenNodeProfile.Device"/>
     /// leaves the self-start and slave-start suppress bits clear, <see cref="CanOpenNodeProfile.Tool"/>
@@ -215,6 +219,7 @@ public sealed class CanOpenNodeOptions
     {
         var options = new CanOpenNodeOptions
         {
+            PdoCount = PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,
             DefaultTpdoEventTimerInterval = defaultTpdoEventTimerInterval ?? DefaultTpdoEventTimerInterval,
@@ -237,6 +242,8 @@ public sealed class CanOpenNodeOptions
 
     internal void Validate()
     {
+        if (PdoCount is < 1 or > 512)
+            throw new ArgumentOutOfRangeException(nameof(PdoCount), PdoCount, "PDO count must be 1..512.");
         if (SdoTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(SdoTimeout), SdoTimeout,
                 "SDO timeout must be positive.");

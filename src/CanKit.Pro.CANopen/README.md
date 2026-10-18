@@ -34,7 +34,7 @@ every requirement of SRS §4.3.2 — the requirements this repository set itself
 FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 (`docs/reviews/2026-09-15-canopen-scope.md`), FR-CO-025 to FR-CO-028 the EDS/DCF path of that
 scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
-(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-035 to FR-CO-046 are CANopen
+(`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-047 to FR-CO-052 add the PDO extensions requested on 18 October 2026. FR-CO-035 to FR-CO-046 are CANopen
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). The SRS's "Quelle" column says for each
 of them whether a standard requires it, the architecture does, or a maintainer decision does.
@@ -45,7 +45,7 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-002 | SDO expedited transfer (payloads ≤ 4 bytes) |
 | FR-CO-003 | SDO segmented transfer (payloads > 4 bytes, toggle-bit protocol) |
 | FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.15) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
-| FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`1603h` / `1A00h`–`1A03h`: byte-aligned, up to 8 bytes, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
+| FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`1603h` / `1A00h`–`1A03h`: bit-granular, up to 64 bits, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
 | FR-CO-006 | Event-driven, timer-driven and SYNC-triggered TPDO transmission; change-of-state emission on application OD writes (`CanOpenNodeOptions.EnableChangeOfStateTpdo`, default on; bus-originated writes never re-trigger, so no echo loops) |
 | FR-CO-007 | NMT master + slave state machine (Start / Stop / Pre-Op / Reset Node / Reset Communication) |
 | FR-CO-008 | Heartbeat producer + consumer timeout event |
@@ -53,14 +53,14 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-010 | SYNC producer and consumer |
 | FR-CO-011 | EMCY encode/decode + structured receive event |
 | FR-CO-012 | Uses the L2 `ICanBusService` demux (subscription with COB-ID filter) |
-| FR-CO-013 | Communication-profile objects created at their CiA 301 defaults (`1000h`, `1001h`, `1018h`, `1005h`, `1006h`, `100Ch`, `100Dh`, `1010h`, `1011h`, `1014h`, `1016h`, `1017h`, `1200h`, the four RPDO and four TPDO records); PDO records read-only on the bus unless `WritableCommunicationParameters`; sub-index `04h` of the PDO communication records absent (`0609 0011h`) |
+| FR-CO-013 | Communication-profile objects created at their CiA 301 defaults (`1000h`, `1001h`, `1018h`, `1005h`, `1006h`, `100Ch`, `100Dh`, `1010h`, `1011h`, `1014h`, `1016h`, `1017h`, `1200h`, four RPDO and four TPDO records by default); PDO records read-only on the bus unless `WritableCommunicationParameters`; sub-index `04h` of the PDO communication records absent (`0609 0011h`) |
 | FR-CO-014 | The object dictionary is the single source of truth: an accepted SDO download and a local write reach the service alike, the configuration methods are OD writes, managed objects cannot be re-declared |
 | FR-CO-015 | TPDO transmission types `00h`, `01h`–`F0h`, `FCh`, `FDh`, `FEh`/`FFh`; reserved values rejected with `0609 0030h` |
 | FR-CO-016 | Inhibit time `1800h:03` (100 µs units, minimum interval) and event timer `1800h:05` (ms, maximum interval) for event-driven TPDOs |
 | FR-CO-017 | Synchronous RPDOs (`1400h:02` = `00h`–`F0h`): received data actuated with the next SYNC |
-| FR-CO-018 | COB-ID control bits valid/RTR/frame in `1400h:01`, `1800h:01`, `1005h` and `1014h`; restricted CAN-IDs of Table 40 and 29-bit frames rejected |
+| FR-CO-018 | COB-ID control bits valid/RTR/frame in `1400h:01`, `1800h:01`, `1005h` and `1014h`; restricted CAN-IDs of Table 40 rejected; PDOs support base and extended frames |
 | FR-CO-019 | Reset Node / Reset Communication restore the power-on values; `1010h:01` "save" and `1011h:01` "load" (in-memory); wrong signature `0800 0020h` |
-| FR-CO-020 | Mapping validation: existence, mappability, direction, width, byte alignment, 8-byte limit, sub-index position, `sub0` as UNSIGNED8, dummy mapping `0002h`–`0007h` |
+| FR-CO-020 | Mapping validation: existence, mappability, direction, width, bit lengths, 64-bit limit, sub-index position, `sub0` as UNSIGNED8, dummy mapping `0001h`–`0007h` |
 | FR-CO-021 | Producer-side life guarding from `100Ch`/`100Dh` with `LifeGuardingEvent` (occurred / resolved); heartbeat takes precedence |
 | FR-CO-022 | NMT state semantics of Table 37: no SDO, SYNC or EMCY in Stopped, PDO only in Operational, state-change heartbeat only with the producer on, guarding toggle reset on reset |
 | FR-CO-023 | Heartbeat consumer and producer from `1016h`/`1017h`; `1016h` grows per consumer; duplicate node-id `0604 0043h` |
@@ -92,16 +92,7 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 
 Deliberate omissions, each checked against the norm text:
 
-* **TIME (`1012h`) and synchronous window length (`1007h`)** — both `Category: Optional` (scope
-  item 10). A synchronous TPDO is transmitted at the SYNC and is never suppressed for a closed
-  window, because there is no window.
-* **Bit-granular PDO mapping** — bit lengths must be multiples of 8. Over SDO another length is
-  rejected with `0607 0010h`; `PdoMappingEntry` refuses it in its constructor, and
-  `PdoMapping.Add(entry)` and the collection constructor refuse an entry that never passed it —
-  `default(PdoMappingEntry)`, a struct with 0 bits — before anything reaches the node, so a
-  configured PDO is not destroyed by an attempt with such a mapping (#292).
-* **MPDO** (`sub0` = `FEh`/`FFh` of a mapping record) — rejected with `0609 0030h`, like every
-  count above `40h`.
+* **TIME (`1012h`)** — `Category: Optional`; no clock service is implemented behind it.
 * **SRDO mapping of objects without a fixed width** — a `VISIBLE_STRING`, `OCTET_STRING`,
   `UNICODE_STRING` or `DOMAIN` cannot be mapped into an SRDO (`0604 0041h`; a finding for a
   device description; refused before the first frame of a peer configuration). DSP 304 has no
@@ -110,9 +101,8 @@ Deliberate omissions, each checked against the norm text:
 * **Non-volatile storage behind `1010h`** — "save" takes the current communication parameters
   as the power-on values a reset restores, for the lifetime of the process. A device whose
   configuration must survive a restart persists it itself and replays it after `OpenNode`.
-* **29-bit COB-IDs** — the node sends and receives CAN base frames only; bit 29 of any COB-ID
-  word is rejected with `0609 0030h`, as CiA 301 prescribes for such devices, and
-  `ConfigureTpdo`/`ConfigureRpdo` throw for it.
+* **29-bit SYNC, EMCY and SRDO COB-IDs** — these services remain base-frame-only;
+  PDO communication records support extended identifiers through bit 29.
 * **The DLC-1 guarding RTR** — CiA 301 Figure 44 draws the node-guarding request with DLC 1.
   CanKit derives a frame's DLC from its data and refuses data on a remote frame, so the RTR this
   node sends carries DLC 0 (#59). Producers answer a guarding RTR by CAN-ID; what the consumer
@@ -132,11 +122,11 @@ Deliberate omissions, each checked against the norm text:
   MSB-first here) and the `ro`/`rw` conflict of `13FFh` (`rw` here, as the records are: always
   locally, on the bus with `WritableCommunicationParameters` or a file that declares it `rw`;
   §9.2 needs the tool to write it). To be reconciled against EN 50325-5:2010 in #289.
-* **Bit-granular SRDO mapping, more than 8 objects per SRDO, 29-bit SRDO COB-IDs** — as for PDOs.
+* **Bit-granular SRDO mapping and more than 8 objects per SRDO** — the safety mapping retains its own narrower limits; the PDO extensions do not widen them.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
 
-What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
+What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
 with such an entry instead of ignoring it.
 
@@ -152,8 +142,8 @@ vendor-id 0 = "no vendor-ID assigned"), `1005h`/`1006h` (SYNC on `080h`, not gen
 constant) and four RPDO plus four TPDO records (`1400h`–`1403h`, `1600h`–`1603h`,
 `1800h`–`1803h`, `1A00h`–`1A03h`) at their pre-defined connection set CAN-IDs, "not valid" until
 configured. `1000h` and `1018h` are placeholders the application replaces with `AddU32` — they
-stay outside the PDOs: the communication profile area is never a mapping target, whatever an
-entry's mappability flag says. The other objects are managed by the node and take values, not
+stay outside the PDOs: those objects are not mapping targets, whatever an entry's flag says.
+Other communication objects are mappable where CiA 301 explicitly permits it, as described below. The other objects are managed by the node and take values, not
 re-declarations — an `Add*` on one
 of them throws `InvalidOperationException`, whether it would replace a sub-index or add one the
 node does not implement (`1016h` grows through `AddHeartbeatConsumer`, not by hand).
@@ -180,10 +170,10 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0604 0041h` | Target not PDO-mappable, not accessible in the PDO's direction, or of another width than mapped; dummy entry with the wrong width |
 | `0604 0042h` | Mapping longer than 8 bytes |
 | `0604 0043h` | Second `1016h` entry for a node-id already monitored |
-| `0607 0010h` | Mapping bit length 0, above 64 or not a multiple of 8 |
+| `0607 0010h` | Mapping bit length 0 or above 64 |
 | `0607 0012h` / `0607 0013h` | Download of the wrong width for the object — `sub0` of a mapping record is UNSIGNED8 |
 | `0609 0011h` | Sub-index `04h` of a PDO communication record, or any other absent sub-index |
-| `0609 0030h` | Reserved transmission type; bit 29 (frame) set; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time changed while the PDO is valid; mapping count above `40h`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
+| `0609 0030h` | Reserved transmission type; bit 29 set on SYNC/EMCY; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time or SYNC start changed while the PDO is valid; reserved mapping count `41h`–`FDh`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
 | `0800 0020h` | Wrong signature written to `1010h:01` / `1011h:01` |
 | `0800 0022h` | SDO server session open when the node entered Stopped or was reset; `1F82h` written while this node is not the active NMT master |
 
@@ -253,9 +243,9 @@ its abort code:
 
 | Outcome | Meaning |
 | --- | --- |
-| `Omitted` | Not created: a data type the dictionary does not represent (24/40/48/56-bit integers), a fifth PDO, an unparsable value, a sub-index of a fixed record the node does not implement |
+| `Omitted` | Not created: a data type the dictionary does not represent, an unparsable value, a sub-index of a fixed record the node does not implement |
 | `Corrected` | Created with the CiA 301 default instead of the described value, which the rule an SDO download hits rejected (a reserved transmission type, a second `1016h` entry for one producer) |
-| `PdoDisabled` | The PDO stays destroyed (bit 31 set) because its communication record or its mapping could not be applied — a 29-bit COB-ID, a mapping onto an object the file does not declare |
+| `PdoDisabled` | The PDO stays destroyed (bit 31 set) because its communication record or its mapping could not be applied — an invalid COB-ID, a mapping onto an object the file does not declare |
 | `NotImplemented` | Created with the described value as data, with no behaviour behind it: `1012h` (TIME), a `1200h` that differs from the default SDO server |
 | `SuppliedDefault` | A mandatory object (`1000h`, `1001h`, `1018h`) the file does not declare; the node keeps its placeholder |
 
@@ -361,13 +351,13 @@ by the peer-SDO gate, or does not return a word.
 
 The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
 the peer description bound for that node applies. A read that aborts, times out, is refused by
-that gate, or is not a mapping of at most eight byte-aligned entries uses the mapping in the
+that gate, or is not a mapping of at most 64 bits uses the mapping in the
 file passed to the call — and so does a value of another width than its type: sub-index `00h` must
 be exactly one byte (UNSIGNED8) and each entry exactly four (UNSIGNED32); a longer one is not cut
 to its low bytes. The SRDO observer reads its live mapping the same way. Observations of one peer run one after another. A CAN-ID CiA 301
 restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
-A payload shorter than the mapping writes nothing; a dummy entry `0002h`–`0007h` consumes its
-bytes and writes no signal.
+A payload shorter than the mapping writes nothing; a dummy entry `0001h`–`0007h` consumes its
+bits and writes no signal.
 
 The live reads of one observation — COB-IDs, mapping — are one snapshot of the peer: the observer
 takes the peer's SDO channel, without waiting, and holds it to the end, so a safety transaction
@@ -423,6 +413,80 @@ Opening the client transmits its boot-up, which is one reason the scan is not th
 
 ## PDO engine
 
+```csharp
+using CanKit.Pro.CANopen.Pdo;
+
+node.ObjectDictionary.WriteUnsigned(0x1019, 0, 12); // set before a non-zero 1006h
+node.ConfigureTpdo(1, mapping, TpdoTransmission.Synchronous);
+var od = node.ObjectDictionary;
+uint cob = od.ReadUnsigned(0x1800, 1);
+od.WriteUnsigned(0x1800, 1, cob | CanOpenCobId.InvalidBit);
+od.WriteUnsigned(0x1800, 2, CanOpenTransmissionType.SynchronousEveryNthSync(3));
+od.WriteUnsigned(0x1800, 6, 5); // count first SYNC at 5, transmit at 7, 10, 1, ...
+od.WriteUnsigned(0x1800, 1, cob);
+
+node.Pdo().RpdoTimeout += (_, e) => Console.WriteLine($"RPDO{e.PdoIndex} timed out");
+```
+
+The default is four PDOs per direction. `CanOpenNodeOptions.PdoCount` selects 1..512;
+an EDS/DCF raises the allocation to its highest declared PDO. Only PDOs 1..4 have a
+pre-defined COB-ID: higher PDOs need an explicit identifier. Bit 29 of `cobId` selects
+an extended frame; base and extended frames with the same numeric ID route independently.
+SYNC, EMCY and the safety services keep their existing frame-format limits.
+
+Mappings contain up to 64 bits in sub-index order, LSB first across byte boundaries.
+`BOOLEAN` may use one bit (the existing eight-bit form is also accepted); fixed-width
+integers must use their full declared width. Dummy `0001h:00` consumes one bit.
+Communication targets are allowed where CiA 301 marks them optionally mappable
+(`1001h`/`1002h`/`1013h:00`, `1026h:01`–`03`, `1200h`–`12FFh:01`–`02`), subject to
+their own mappability and access flags. The final byte is zero-padded. Native 24/40/48/56-bit integers are available through
+`ObjectDictionary.AddRaw` and EDS/DCF loading; `ReadRaw`/`WriteRaw` retain their exact widths.
+The existing `ReadUnsigned`/`WriteUnsigned` convenience methods remain U8/U16/U32.
+
+**SYNC counter and start value.** `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
+one-byte counter that starts at 1, wraps to 1 and resets after boot-up and on leaving
+NMT Stopped. Values 1 and 241..255 are rejected. A change while `1006h` is non-zero
+is rejected with `0800 0022h`, even with the periodic producer disabled. The consumer
+uses `1019h` to select DLC but ignores its numeric overflow value; an unexpected length
+is ignored and reports EMCY `8240h`. `SyncReceivedEventArgs.Counter` carries the counter.
+TPDO `1800h:06` = 1..240 waits for that counter after entering Operational; the matching
+SYNC is the **first counted SYNC**, so type 3 with start 5 first transmits on counter 7.
+Start 0, or a disabled counter, preserves ordinary counting. The start value cannot
+change while the PDO is valid. RPDO sub-index 6 remains absent as the specification requires.
+
+**Synchronous window.** `1007h:00` is the window length in microseconds; 0 disables it.
+With a window enabled, synchronous RPDOs outside it are discarded, including before the
+first SYNC. Data accepted inside the window is applied at the next SYNC. Synchronous
+TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
+outlived its window or was superseded by another SYNC is discarded. This is software
+scheduling; it cannot withdraw a frame already handed to the CAN driver.
+
+**RPDO deadline.** `1400h:05` is a timeout in milliseconds; 0 disables it. The next valid
+reception arms it, each later reception refreshes it, and expiry raises
+`node.Pdo().RpdoTimeout` once. A short frame does not refresh it. Reconfiguration and
+leaving Operational cancel it; re-entry waits for a reception. `1400h:03` is retained as
+an implementation-specific RPDO inhibit parameter, without suppressing reception.
+
+**MPDO.** `node.Pdo()` exposes `ConfigureMultiplexedTpdo`/`ConfigureMultiplexedRpdo`
+with `MpdoAddressMode.Source` (`FEh` in the mapping count) or `Destination` (`FFh`).
+These are event-driven only: no SYNC, RTR or TPDO event timer, and at most one valid
+SAM producer per node. `SendSourceMpdoAsync` reads a local object; `SendDestinationMpdoAsync`
+takes the remote node-id (0 = broadcast), multiplexer and 1..4 data bytes. Values are
+padded to the four-byte MPDO data field. Both follow NMT Operational and the inhibit time.
+DAM consumers write the addressed local object, or report EMCY `8230h` when it is unavailable.
+SAM consumers use the object dispatching arrays `1FD0h`–`1FFFh`, including consecutive
+sub-index blocks. SAM producers use the scanner arrays `1FA0h`–`1FCFh`: an application
+write emits that scanned object; `TriggerTpdoAsync` scans the whole configured list.
+Declare these optional arrays before enabling the MPDO, either in the EDS/DCF or with
+`AddRaw`/`AddU32` and a UNSIGNED8 sub0 announcing the highest supported slot (1..254).
+Scanner slots are UNSIGNED32, dispatcher slots UNSIGNED64, in the §7.5.2.39/40 layout;
+writing existing scanner slots refreshes the producer. Mapping/communication records
+are writable over SDO under the same access rules as ordinary PDOs.
+
+`ObserveForeignPdoAsync` also accepts extended PDO keys (bit 29 set) and bit mappings;
+`ForeignPdoSignal.BitLength` reports the exact width. For MPDO it returns the transmitted
+multiplexer and four data bytes, rather than applying the observed peer's dispatcher.
+
 Every TPDO and RPDO is rebuilt from its communication and mapping records whenever one of them
 changes. The transmission type byte in `1800h:02` decides how a TPDO fires:
 
@@ -469,9 +533,9 @@ EMCY `8210h` (if `1014h` is valid); a longer one is read up to the mapped length
 **Mapping validation** runs on every entry, whether it arrives over SDO or through
 `ConfigureTpdo`/`ConfigureRpdo`: the target must exist, be PDO-mappable (`pdoMappable` on the
 `Add*` methods — default `true` for application objects, `false` for the communication
-profile), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
-must fit 8 bytes; entries occupy the payload in sub-index order. A **dummy entry** — index
-`0002h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
+profile, except entries CiA 301 marks optionally mappable), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
+must fit 64 bits; entries occupy the payload in sub-index order. A **dummy entry** — index
+`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
 without touching the dictionary, which pads an RPDO to a peer's layout. `ConfigureTpdo` and
 `ConfigureRpdo` copy the `PdoMapping` into the record; mutating the instance afterwards changes
 nothing. A rejection throws `ArgumentException` naming the abort code and leaves the PDO

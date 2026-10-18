@@ -13,6 +13,31 @@ public enum OdDataType : byte
     /// <summary>1-byte boolean (CiA 301 <c>BOOLEAN</c>, 0 = false).</summary>
     Boolean = 0x01,
 
+    /// <summary>3-byte signed integer, little-endian.</summary>
+    Integer24 = 0x10,
+
+    /// <summary>5-byte signed integer, little-endian.</summary>
+    Integer40 = 0x12,
+
+    /// <summary>6-byte signed integer, little-endian.</summary>
+    Integer48 = 0x13,
+
+    /// <summary>7-byte signed integer, little-endian.</summary>
+    Integer56 = 0x14,
+
+    /// <summary>3-byte unsigned integer, little-endian.</summary>
+    Unsigned24 = 0x16,
+
+    /// <summary>5-byte unsigned integer, little-endian.</summary>
+    Unsigned40 = 0x18,
+
+    /// <summary>6-byte unsigned integer, little-endian.</summary>
+    Unsigned48 = 0x19,
+
+    /// <summary>7-byte unsigned integer, little-endian.</summary>
+    Unsigned56 = 0x1A,
+
+
     /// <summary>1-byte unsigned integer (CiA 301 <c>UNSIGNED8</c>).</summary>
     Unsigned8 = 0x05,
 
@@ -111,7 +136,7 @@ public sealed class OdEntry
     /// <summary>
     /// Whether the entry may be mapped into a PDO — the <c>PDOMapping</c> attribute of a
     /// CiA 306 device description. Communication-profile objects (<c>1000h</c>–<c>1FFFh</c>)
-    /// are not mappable per CiA 301; application objects default to mappable. A mapping
+    /// are mappable only where CiA 301 permits it (for example 1001h/1002h); application objects default to mappable. A mapping
     /// entry that references a non-mappable object is rejected with SDO abort
     /// <c>0604 0041h</c> (CiA 301 §7.5.2.36 / §7.5.2.38).
     /// </summary>
@@ -159,6 +184,15 @@ internal static class OdEntryLayout
     internal static int FixedSize(OdDataType type) => type switch
     {
         OdDataType.Boolean => 1,
+        OdDataType.Integer24 => 3,
+        OdDataType.Integer40 => 5,
+        OdDataType.Integer48 => 6,
+        OdDataType.Integer56 => 7,
+        OdDataType.Unsigned24 => 3,
+        OdDataType.Unsigned40 => 5,
+        OdDataType.Unsigned48 => 6,
+        OdDataType.Unsigned56 => 7,
+
         OdDataType.Unsigned8 => 1,
         OdDataType.Integer8 => 1,
         OdDataType.Unsigned16 => 2,

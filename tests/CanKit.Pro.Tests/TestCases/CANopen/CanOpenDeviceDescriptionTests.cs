@@ -268,11 +268,9 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         od.ReadUnsigned(0x1800, 0x02).Should().Be(254u);
         od.ReadUnsigned(0x1800, 0x01).Should().Be(0x180u + Device, "TPDO1 itself is created; only its transmission type was corrected");
 
-        // A 29-bit COB-ID: the PDO stays destroyed.
-        var extended = Finding(0x1801, 0x01);
-        extended.Outcome.Should().Be(DeviceDescriptionOutcome.PdoDisabled);
-        extended.AbortCode.Should().Be(SdoAbortCode.ValueRangeExceeded);
-        (od.ReadUnsigned(0x1801, 0x01) & CanOpenCobId.InvalidBit).Should().Be(CanOpenCobId.InvalidBit);
+        // Extended PDO identifiers are now implemented, and are kept as described.
+        od.ReadUnsigned(0x1801, 0x01).Should().Be(0x20000281);
+        report.Findings.Should().NotContain(f => f.Index == 0x1801 && f.Subindex == 1);
 
         // A mapping onto an object that does not exist: the mapping stays disabled, the PDO destroyed.
         Finding(0x1A02, 0x01).AbortCode.Should().Be(SdoAbortCode.ObjectDoesNotExist);
@@ -280,18 +278,19 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         od.ReadUnsigned(0x1A02, 0x00).Should().Be(0u);
         (od.ReadUnsigned(0x1802, 0x01) & CanOpenCobId.InvalidBit).Should().Be(CanOpenCobId.InvalidBit);
 
-        // A fifth TPDO: not created.
-        Finding(0x1804, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
-        Finding(0x1A04, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
-        od.ContainsIndex(0x1804).Should().BeFalse();
+        // The highest declared PDO raises the runtime allocation; a disabled fifth exists.
+        od.ContainsIndex(0x1804).Should().BeTrue();
+        od.ContainsIndex(0x1A04).Should().BeTrue();
+        od.ReadUnsigned(0x1804, 1).Should().Be(0x80000181);
 
         // TIME: created as data, reported as behaviourless.
         Finding(0x1012, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.NotImplemented);
         od.ReadUnsigned(0x1012, 0x00).Should().Be(0x100u);
 
-        // A 24-bit integer: not a type the dictionary represents.
-        Finding(0x2003, 0x00).Outcome.Should().Be(DeviceDescriptionOutcome.Omitted);
-        od.ContainsIndex(0x2003).Should().BeFalse();
+        // Native 24-bit values are represented at their exact width.
+        od.ReadRaw(0x2003, 0).Should().Equal(0x56, 0x34, 0x12);
+        od.TryGet(0x2003, 0, out var integer24).Should().BeTrue();
+        integer24.DataType.Should().Be(OdDataType.Integer24);
 
         // A second consumer entry for the same producer: 0604 0043h, the slot stays unused.
         var duplicate = Finding(0x1016, 0x02);
