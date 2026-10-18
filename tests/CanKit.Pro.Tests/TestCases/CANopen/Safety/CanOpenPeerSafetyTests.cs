@@ -741,6 +741,21 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
     }
 
+    /// <summary>A verification reads no identity, so without a bound description it is the gate
+    /// that refuses its first transfer, 13FFh:00, before any frame — not a pre-check reading the
+    /// absent file as a description of zero SRDO records.</summary>
+    [Fact]
+    public async Task Verify_Is_Refused_Without_A_Bound_Description()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x13FF, (byte)0x00, false), "the first transfer of a verification");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
     [Fact]
     public async Task Configure_Aborts_When_The_Peer_Is_Operational()
     {
@@ -1020,6 +1035,34 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         ex.ParamName.Should().Be(verify ? "expected" : "configuration", "the public method's own parameter, whichever pre-check refuses");
         device.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u, "nothing was sent");
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+    }
+
+    /// <summary>The file may declare more SRDO records than the peer reports in 13FFh:00. An SRDO
+    /// the file has a record for but the peer has not is refused once the count is read, before
+    /// any further frame — the peer could never hold it, and writing the others would report a
+    /// configuration with that SRDO missing.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_Srdo_Within_The_Files_Records_But_Above_The_Peers_Count_Is_Refused_After_The_Count(bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: 1);
+        master.BindPeerDeviceDescription(Device, PeerFile()); // declares records 1301h and 1302h
+        List<(ushort, byte)> seeded;
+        lock (fake.Written) seeded = fake.Written.Keys.ToList();
+        var second = Configuration()
+            .Add(2, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x10B, 0x10C),
+                new SrdoMapping().Add(0x2001, 0x00, 8));
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, second).WithTimeoutAsync(ShortTimeout)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, second).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("SRDO 2").And.Contain("only 1 SRDO").And.Contain("13FFh:00");
+        ex.ParamName.Should().Be(verify ? "expected" : "configuration");
+        lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify), "nothing after the count");
+        lock (fake.Written) fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
     }
 
     /// <summary>13FFh:00 is the number of SRDOs, at most 64 (§8.4.2.2). A peer reporting more is
