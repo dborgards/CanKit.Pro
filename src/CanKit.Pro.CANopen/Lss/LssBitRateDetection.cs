@@ -277,9 +277,15 @@ public static class LssBitRateDetection
             // the probe is finished on the awaiting side.
             EventHandler<CanReceiveDataView> onFrame = (_, e) =>
             {
-                // An echo is this host's own transmission, not the bus's traffic; the search sends
-                // nothing, so none is expected, and one from a double must not count as reception.
-                if (!e.IsEcho) decided.TrySetResult(LssBitRateProbeOutcome.Detected);
+                // Only a genuine received data frame confirms the rate. An echo is this host's own
+                // transmission (the search sends nothing, so one from a double must not count), and
+                // an error frame carried on the RX stream is a wrong-rate symptom, not a reception:
+                // adapters surface error frames that way too (docs/getting-started.md subscribes to
+                // e.Frame.IsErrorFrame), and at a wrong rate one could otherwise win the race and be
+                // reported as the bus's rate. Rejection stays on ErrorFrameReceived alone, so an
+                // error reported through both channels is not counted twice against the threshold.
+                if (!e.IsEcho && !e.CanFrame.IsErrorFrame)
+                    decided.TrySetResult(LssBitRateProbeOutcome.Detected);
             };
             EventHandler<ICanErrorInfo> onError = (_, _) =>
             {

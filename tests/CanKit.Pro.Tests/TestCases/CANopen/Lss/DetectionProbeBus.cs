@@ -72,10 +72,15 @@ internal sealed class DetectionProbeBus : ICanBus
         };
     }
 
-    /// <summary>Raises <see cref="FrameObserved"/> once, as a received (non-echo) frame unless asked.</summary>
-    public void RaiseFrame(bool isEcho = false)
+    /// <summary>
+    /// Raises <see cref="FrameObserved"/> once: a received (non-echo) data frame by default, an
+    /// echo when <paramref name="isEcho"/> is set, or an error frame carried on the RX stream when
+    /// <paramref name="isError"/> is set (the error flag some adapters surface through this stream).
+    /// </summary>
+    public void RaiseFrame(bool isEcho = false, bool isError = false)
     {
-        using var frame = CanFrame.Classic(0x123, new byte[] { 0x01 });
+        using var frame = CanFrame.Classic(0x123,
+            isError ? ReadOnlyMemory<byte>.Empty : new byte[] { 0x01 }, isErrorFrame: isError);
         FrameObserved?.Invoke(this, new CanReceiveDataView(new CanReceiveData(frame) { IsEcho = isEcho }));
     }
 

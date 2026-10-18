@@ -46,6 +46,7 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     private static Action<DetectionProbeBus> Frame(bool echo = false) => bus => bus.RaiseFrame(echo);
+    private static Action<DetectionProbeBus> ErrorFrame() => bus => bus.RaiseFrame(isError: true);
     private static Action<DetectionProbeBus> Errors(int count) => bus => bus.RaiseErrors(count);
     private static Action<DetectionProbeBus> State(BusState state) => bus => bus.BusState = state;
     private static readonly Action<DetectionProbeBus> Silent = _ => { };
@@ -77,6 +78,20 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
             new Action<DetectionProbeBus>[] { bus => { bus.RaiseFrame(isEcho: true); bus.RaiseFrame(); } });
 
         result.BitsPerSecond.Should().Be(500_000, "the host's own echo is not the bus's traffic, but the frame after it is");
+    }
+
+    [Fact]
+    public async Task An_Error_Frame_On_The_Rx_Stream_Is_Not_A_Reception()
+    {
+        // Some adapters surface error frames through FrameObserved too, flagged IsErrorFrame. At a
+        // wrong rate such a frame must not be read as a confirmed reception.
+        var opened = new List<DetectionProbeBus>();
+        var options = new LssBitRateDetectionOptions { Candidates = new[] { 500_000 } };
+        var result = await DetectAsync(DetectionProbeBus.Factory(NewSession(), opened), options,
+            new[] { ErrorFrame() });
+
+        result.Detected.Should().BeFalse("an error frame is a wrong-rate symptom, not the bus's traffic");
+        result.Probes[0].Outcome.Should().Be(LssBitRateProbeOutcome.Inconclusive);
     }
 
     [Fact]
