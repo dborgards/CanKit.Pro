@@ -46,6 +46,10 @@ internal sealed partial class CanOpenNode : ILssSlave
     private int _lssActivationGeneration;
     private IDisposable? _lssActivation;
     private int _lssSilent;
+    // Sends that passed the silence check and have not reached ReleaseTransmit. BeginLssSilence
+    // waits for this to hit zero before raising the flag, still under _lssTxGate, so a frame
+    // cannot be dropped or leave once the second delay has started.
+    private int _lssTxInFlight;
     private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
     private readonly object _lssTxGate = new();
@@ -126,16 +130,68 @@ internal sealed partial class CanOpenNode : ILssSlave
     private bool IsLssSilent() => Volatile.Read(ref _lssSilent) != 0;
 
     /// <summary>
-    /// CiA 305 §6.5. Every transmit path asks this before it touches the driver: during the
-    /// second switch delay the frame is not sent. An in-flight SDO send is reported confirmed
-    /// so its timeout can still decide it. NMT and heartbeat are not dropped that way; they
-    /// are held until the delay ends.
+    /// One decision for this frame, under <see cref="_lssTxGate"/>. A held or suppressed frame
+    /// comes back as the task the caller waits on. A frame that may leave now reserves an
+    /// in-flight slot and comes back as null: the caller sends, then <see cref="ReleaseTransmit"/>.
+    /// Silence cannot start while that slot is open, and a holdable frame that arrives once
+    /// silence has started is queued rather than dropped.
     /// </summary>
-    private bool LssTransmitSuppressed(Action<CanOpenTransportException?>? onSendCompleted = null)
+    private Task? GateTransmit(uint cobId, byte[] payload, Action<CanOpenTransportException?>? onSendCompleted)
     {
-        if (!IsLssSilent()) return false;
-        onSendCompleted?.Invoke(null);
-        return true;
+        Action? reportSuppressed = null;
+        Task? finished = null;
+        lock (_lssTxGate)
+        {
+            if (IsLssSilent())
+            {
+                if (HoldsAcrossLssSilence(cobId))
+                    return EnqueueHeldTransmit(cobId, payload);
+                reportSuppressed = () => onSendCompleted?.Invoke(null);
+                finished = Task.CompletedTask;
+            }
+            else
+            {
+                _lssTxInFlight++;
+            }
+        }
+
+        reportSuppressed?.Invoke();
+        return finished;
+    }
+
+    /// <summary>
+    /// Reserves a send that is dropped, not held, when the slave is silent (SDO, PDO, RTR).
+    /// False means the frame is suppressed. True means the caller sends and then
+    /// <see cref="ReleaseTransmit"/>.
+    /// </summary>
+    private bool TryReserveTransmit()
+    {
+        lock (_lssTxGate)
+        {
+            if (IsLssSilent()) return false;
+            _lssTxInFlight++;
+            return true;
+        }
+    }
+
+    private void ReleaseTransmit()
+    {
+        lock (_lssTxGate)
+        {
+            _lssTxInFlight--;
+            if (_lssTxInFlight == 0)
+                Monitor.PulseAll(_lssTxGate);
+        }
+    }
+
+    private void WaitForTransmitsToDrain()
+    {
+        lock (_lssTxGate)
+        {
+            while (_lssTxInFlight != 0)
+                Monitor.Wait(_lssTxGate);
+            Volatile.Write(ref _lssSilent, 1);
+        }
     }
 
     /// <summary>
@@ -153,23 +209,13 @@ internal sealed partial class CanOpenNode : ILssSlave
             <= (uint)(CanOpenCobId.MaxNodeId - CanOpenCobId.MinNodeId);
     }
 
-    private bool TryHoldThroughSilence(uint cobId, byte[] payload, out Task<bool> held)
+    private Task<bool> EnqueueHeldTransmit(uint cobId, byte[] payload)
     {
-        lock (_lssTxGate)
-        {
-            if (!IsLssSilent())
-            {
-                held = Task.FromResult(false);
-                return false;
-            }
-
-            var copy = new byte[payload.Length];
-            Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
-            var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal));
-            held = signal.Task;
-            return true;
-        }
+        var copy = new byte[payload.Length];
+        Buffer.BlockCopy(payload, 0, copy, 0, payload.Length);
+        var signal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _lssHeldTx.Enqueue(new HeldTransmit(cobId, copy, signal));
+        return signal.Task;
     }
 
     private void EndLssSilence()
@@ -201,8 +247,10 @@ internal sealed partial class CanOpenNode : ILssSlave
             // Every outcome completes the signal. SendNmtPayload can surface a driver exception
             // that is not a CanKitException; leaving the signal unfinished would stall the
             // flying-master NMT chain, and the frames queued behind this one would stay held.
+            // Through the gate again: a silence that started while this flush was in
+            // progress holds what has not reached the driver yet.
             Task<bool> send = item.CobId == CanOpenCobId.NmtCommand
-                ? SendNmtPayload(item.Payload)
+                ? SendNmtReporting(item.Payload)
                 : SendHeldControl(item.CobId, item.Payload);
             await send.ContinueWith(
                 static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
@@ -447,7 +495,11 @@ internal sealed partial class CanOpenNode : ILssSlave
         _activeIndex = _pendingIndex;
         // Silence is the actor's second delay, not a wall-clock window: a late actor
         // keeps the slave quiet until that callback, which is the clock Schedule uses.
-        Volatile.Write(ref _lssSilent, 1);
+        // The flag is read under this gate by a transmit on another thread, and cleared
+        // under it, so the write that starts the silence takes the same gate.
+        // In-flight sends reserved the right to touch the driver. They finish first; the
+        // flag goes up under the same gate, so the next frame is held or dropped instead.
+        WaitForTransmitsToDrain();
         InvokeBitRateSwitch(_activeSelector, _activeIndex);
         _lssActivation = _actor.Schedule(delay, () => CompleteLssSilence(generation));
     }
@@ -647,6 +699,10 @@ internal sealed partial class CanOpenNode : ILssSlave
             _profileCobIdNodeId = nodeId;
             _sdoCobIdNodeId = nodeId;
             _nodeId = nodeId;
+            // 1014h is rewritten only when the id changed. Assigning the same id again, after a
+            // reset cleared the cached producer, must still follow the record or EMCY goes out
+            // on 000h.
+            ApplyEmcyConfiguration();
         });
     }
 

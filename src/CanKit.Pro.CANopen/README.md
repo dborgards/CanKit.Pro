@@ -155,8 +155,11 @@ Deliberate omissions, each checked against the norm text:
   `LssBitRateDetection` is the listen-only method of §5.2.3 only.
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
   periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
-  that callback between them. The adapter is not reconfigured. Most adapters cannot change rate
-  while the channel is open; reopen it in the callback or after the call returns.
+  that callback between them. The callback must retune the channel this master is already
+  reading; it must not dispose that bus. The second delay, and a waiting frame after a zero
+  delay, still go out on it. An adapter that cannot change rate while open is left alone:
+  omit `returnToWaiting`, dispose this master after the call returns, and send switch state
+  global from a new master on the new bus.
 
 What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
@@ -975,8 +978,8 @@ if (found.Succeeded)
     await master.SwitchStateGlobalAsync(LssState.Waiting);
 }
 
-// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here; BitRateSwitch, when
-// set, runs between them so this master's adapter can follow the slaves.
+// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here. BitRateSwitch, when
+// set, runs between them and retunes the channel this master is already reading.
 await master.SwitchStateGlobalAsync(LssState.Configuration);
 await master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, tableIndex: 2);
 await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100, bitsPerSecond: 500_000);
@@ -993,7 +996,10 @@ the slave found is the numerically smallest address among the unconfigured slave
 part. A field can be scanned, matched (the number is already known) or skipped. The vendor-id
 cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
 `KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
-Give the slave a node-id in `1..127` before the next Fastscan, or the same slave is found again.
+Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
+extra gap after that window. Identify waits out `IdentificationTimeout` the same way, so a
+later slave is not left queued for the next command. Give the slave a node-id in `1..127`
+before the next Fastscan, or the same slave is found again.
 
 ### The slave
 
@@ -1033,15 +1039,19 @@ using var node = CanOpen.OpenNode(bus, nodeId: 0xFF, new CanOpenNodeOptions
 `LssCommissioning` (FR-CO-049) runs the master as a commissioning sequence. A scan without a
 node-id parks each unconfigured slave in configuration so Fastscan does not return it twice,
 then switches every slave back to waiting. A scan that assigns node-ids switches every slave
-to waiting first, then configures only the slave Fastscan left in configuration. When Fastscan
-read the whole address, that slave is selected again, so a slave that was already in
-configuration does not take the same node-id. A skipped LSS number is not part of the address,
-so that slave is configured where Fastscan left it. The scan switches back to waiting after
-each slave. Bit timing
-is activated during a scan only when `Limit` is 1. A scan that can select more than one slave
-configures the table and leaves the rate unchanged, so a slave that already has a node-id stays
-on the bitrate the next Fastscan still uses. A slave that rejects a service stops the batch;
-its result carries the code.
+to waiting first, then configures the slave Fastscan left in configuration. Switch state
+selective is not repeated after Fastscan. The scan switches back to waiting after each slave,
+unless activation already sent that frame before the switch delay. Bit timing is activated
+during a scan only when `Limit` is 1. A scan that can select more than one slave configures
+the table and leaves the rate unchanged, so a slave that already has a node-id stays on the
+bitrate the next Fastscan still uses. Activating one selectively switched slave is valid when
+it is the only LSS slave, or every other node already runs the new rate. A slave that rejects
+a service stops the batch; its result carries the code. Slaves configured earlier keep the
+pending bit rate, and the stored rate when store already succeeded. This tool does not roll
+them back to the rate the network is still using; the caller does that before a power cycle.
+A confirmed service that times out stops the scan and returns the slaves that already received
+a node-id, including the slave whose configure node-id succeeded before a later service timed out. Configure node-id writes the pending node-id. On a slave that already has an active
+node-id it takes effect at the next NMT reset communication, which this tool does not send.
 
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
 from a node that has already booted. A missing later sub-index is 0. A timeout or any other

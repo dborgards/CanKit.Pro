@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -63,6 +64,10 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         identify.Should().Throw<ArgumentOutOfRangeException>();
         var fastscan = () => CanOpenLss.OpenMaster(real, new LssMasterOptions { FastscanTimeout = TimeSpan.Zero });
         fastscan.Should().Throw<ArgumentOutOfRangeException>();
+        var huge = () => CanOpenLss.OpenMaster(real, new LssMasterOptions { ResponseTimeout = TimeSpan.MaxValue });
+        huge.Should().Throw<ArgumentOutOfRangeException>();
+        var hugeGap = () => CanOpenLss.OpenMaster(real, new LssMasterOptions { FastscanCycleTime = TimeSpan.MaxValue });
+        hugeGap.Should().Throw<ArgumentOutOfRangeException>();
 
         using var defaults = CanOpenLss.OpenMaster(real);
         defaults.Options.ResponseTimeout.Should().Be(TimeSpan.FromSeconds(1));
@@ -70,6 +75,60 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         using var sharedService = new CanBusService(real);
         using var shared = CanOpenLss.OpenMaster(sharedService);
         shared.Options.IdentificationTimeout.Should().Be(TimeSpan.FromMilliseconds(100));
+    }
+
+    [Fact]
+    public void A_Subscribe_Failure_Disposes_An_Owned_Service_And_Not_A_Shared_One()
+    {
+        var owned = new RejectingSubscribeService();
+        var openOwned = () => CanOpenLss.OpenMaster(owned, Quick(), leaveOpen: false);
+        openOwned.Should().Throw<InvalidOperationException>();
+        owned.Disposals.Should().Be(1);
+
+        var shared = new RejectingSubscribeService();
+        var openShared = () => CanOpenLss.OpenMaster(shared, Quick());
+        openShared.Should().Throw<InvalidOperationException>();
+        shared.Disposals.Should().Be(0);
+    }
+
+    [Fact]
+    public void CapCancelDelay_Clamps_A_Delay_CancelAfter_Cannot_Express()
+    {
+        LssMaster.CapCancelDelay(TimeSpan.FromMilliseconds(10)).Should().Be(TimeSpan.FromMilliseconds(10));
+        var huge = TimeSpan.FromMilliseconds((double)int.MaxValue + 1000);
+        LssMaster.CapCancelDelay(huge).Should().Be(TimeSpan.FromMilliseconds(int.MaxValue));
+    }
+
+    [Fact]
+    public async Task Dispose_Observes_A_Reader_That_Fails_Immediately()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-fault");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var raw = new CanBusService(bus);
+        var service = new FaultingReadService(raw, faultImmediately: true);
+        using var master = CanOpenLss.OpenMaster(service, Quick());
+        await WaitUntilAsync(() => service.FramesOpened > 0);
+        master.Dispose();
+        await using var asyncMaster = CanOpenLss.OpenMaster(service, Quick());
+        await WaitUntilAsync(() => service.FramesOpened > 1);
+    }
+
+    [Fact]
+    public async Task A_Drained_Identify_Keeps_The_Match_When_The_Reader_Fails()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-fault-match");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var raw = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
+        var service = new FaultingReadService(raw, faultImmediately: false);
+        await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            FastscanTimeout = TimeSpan.FromMilliseconds(120),
+            IdentificationTimeout = TimeSpan.FromSeconds(5),
+        });
+
+        (await master.IdentifyNonConfiguredSlavesAsync()).Should().BeTrue();
     }
 
     [Fact]
@@ -416,6 +475,41 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task Fastscan_Waits_Out_The_Window_So_A_Late_Reply_Is_Not_The_Next_Bit()
+    {
+        // Both slaves have vendor-id 1, so bit 0 is 1 and the step must hear silence. The
+        // second slave answers after the cycle gap and inside the timeout. Without draining
+        // the window, that late 4Fh is taken as "bit 0 is 0" and the vendor comes back 0.
+        var session = VirtualAdapterFixture.NewSession("lss-drain");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var master = CanOpenLss.OpenMaster(bus, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            FastscanTimeout = TimeSpan.FromMilliseconds(100),
+            FastscanCycleTime = TimeSpan.FromMilliseconds(1),
+            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        using var first = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), new LssAddress(1, 0, 0, 0));
+        using var second = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 2), new LssAddress(1, 0, 0, 0))
+        {
+            ResponseDelay = TimeSpan.FromMilliseconds(40),
+        };
+
+        var found = await master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { KnownHighBitCount = 30, Value = 0 },
+            ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
+        });
+
+        found.Status.Should().Be(LssFastscanStatus.Found);
+        found.Address.VendorId.Should().Be(1u);
+        first.State.Should().Be(LssState.Configuration);
+        second.State.Should().Be(LssState.Configuration);
+    }
+
+    [Fact]
     public async Task Fastscan_Reports_No_Slave_And_No_Match()
     {
         var session = VirtualAdapterFixture.NewSession("lss-none");
@@ -548,12 +642,43 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         var session = VirtualAdapterFixture.NewSession("lss-close");
         using var bus = VirtualAdapterFixture.Open(session, 0);
         using var service = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
         await using var master = CanOpenLss.OpenMaster(service, Quick());
         var inquire = master.InquireVendorIdAsync();
-        await Task.Delay(50);
+        await WaitUntilAsync(() => slave.Commands.Contains(LssCommand.InquireVendorId));
         service.Dispose();
         var act = async () => await inquire;
-        await act.Should().ThrowAsync<LssTimeoutException>();
+        await act.Should().ThrowAsync<CanOpenTransportException>();
+    }
+
+    [Fact]
+    public async Task A_Drained_Identify_Keeps_The_Match_When_The_Reader_Ends()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-drain");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var service = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
+        await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromMilliseconds(300),
+            FastscanTimeout = TimeSpan.FromMilliseconds(40),
+            IdentificationTimeout = TimeSpan.FromSeconds(5),
+        });
+        using var listenBus = VirtualAdapterFixture.Open(session, 2);
+        using var listen = new CanBusService(listenBus);
+        var answered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var subscription = listen.Subscribe(frame =>
+        {
+            if (!frame.Frame.IsExtendedFrame && (uint)frame.Frame.ID == CanOpenCobId.LssSlaveMessage)
+                answered.TrySetResult(true);
+            return false;
+        });
+
+        var identify = master.IdentifyNonConfiguredSlavesAsync();
+        await answered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        service.Dispose();
+
+        (await identify).Should().BeTrue();
     }
 
     [Fact]
@@ -563,7 +688,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         await EnterConfigurationAsync(rig);
         (await rig.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
         await rig.Master.ActivateBitTimingAsync(20, returnToWaiting: true);
-        rig.Slave.State.Should().Be(LssState.Waiting);
+        await WaitUntilAsync(() => rig.Slave.State == LssState.Waiting);
     }
 
     [Fact]
@@ -656,16 +781,47 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     {
         using var rig = Rig.Open(SlaveA, nodeId: 4);
         // The slave is in waiting, so inquire is ignored and the first call holds the gate
-        // until it times out. The second call is queued behind it.
-        var first = rig.Master.InquireVendorIdAsync();
-        var second = rig.Master.InquireProductCodeAsync();
-        await Task.Delay(30);
-        rig.Master.Dispose();
+        // for the whole response window. The second call is queued behind it.
+        using var master = Rig.ReplaceOptions(rig, new LssMasterOptions
+        {
+            ResponseTimeout = TimeSpan.FromSeconds(30),
+            FastscanTimeout = TimeSpan.FromMilliseconds(40),
+            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        });
+        var first = master.InquireVendorIdAsync();
+        await WaitUntilAsync(() => rig.Slave.Commands.Contains(LssCommand.InquireVendorId));
+        var second = master.InquireProductCodeAsync();
+        master.Dispose();
 
         var firstAct = async () => await first;
         var secondAct = async () => await second;
         await firstAct.Should().ThrowAsync<ObjectDisposedException>();
         await secondAct.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Dispose_Cancels_An_Activate_That_Is_Still_Waiting()
+    {
+        using var rig = Rig.Open(SlaveA, nodeId: 5);
+        await EnterConfigurationAsync(rig);
+        var pending = rig.Master.ActivateBitTimingAsync(60_000);
+        await WaitUntilAsync(() => rig.Slave.Commands.Contains(LssCommand.ActivateBitTiming));
+        rig.Master.Dispose();
+        var act = async () => await pending;
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task A_Confirmation_Without_Timestamps_Still_Waits_For_The_Slave()
+    {
+        var session = VirtualAdapterFixture.NewSession("lss-stamp");
+        using var bus = VirtualAdapterFixture.Open(session, 0);
+        using var service = new CanBusService(bus);
+        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA, persistentNodeId: 5);
+        await using var master = CanOpenLss.OpenMaster(new UnstampedSendService(service), Quick());
+        await master.SwitchStateGlobalAsync(LssState.Configuration);
+        await WaitUntilAsync(() => slave.State == LssState.Configuration);
+        (await master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
     }
 
     [Fact]
@@ -760,5 +916,161 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             });
 
         public void Dispose() => _inner.Dispose();
+    }
+
+    private sealed class UnstampedSendService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+
+        public UnstampedSendService(ICanBusService inner) => _inner = inner;
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+        {
+            var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+            return confirmation with { HostHandoffTimestamp = 0, HostTransmitTimestamp = 0 };
+        }
+
+        public void Dispose() => _inner.Dispose();
+    }
+
+    /// <summary>Subscribe fails, so opening the master never starts a reader.</summary>
+    private sealed class RejectingSubscribeService : ICanBusService
+    {
+        public int Disposals { get; private set; }
+
+        public ICanBus Bus => throw new NotSupportedException();
+
+        public int SubscriptionCount => 0;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add { }
+            remove { }
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => throw new InvalidOperationException("subscribe failed");
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => throw new InvalidOperationException("subscribe failed");
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => Array.Empty<FilterOverlap>();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public void Dispose() => Disposals++;
+    }
+
+    /// <summary>
+    /// The reader's frame stream fails. Immediately, so disposal observes a faulted reader, or
+    /// after the first frame, so a drain that already matched can still return that match.
+    /// </summary>
+    private sealed class FaultingReadService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly bool _faultImmediately;
+        private int _framesOpened;
+
+        public FaultingReadService(ICanBusService inner, bool faultImmediately)
+        {
+            _inner = inner;
+            _faultImmediately = faultImmediately;
+        }
+
+        public int FramesOpened => Volatile.Read(ref _framesOpened);
+
+        public ICanBus Bus => _inner.Bus;
+
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
+            bool includeEcho = false)
+            => new FaultingSubscription(_inner.Subscribe(predicate, bufferCapacity, includeEcho), this);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => new FaultingSubscription(_inner.Subscribe(filter, bufferCapacity, includeEcho), this);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
+            CancellationToken cancellationToken = default)
+            => _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+
+        public void Dispose() => _inner.Dispose();
+
+        private void Opened() => Interlocked.Increment(ref _framesOpened);
+
+        private sealed class FaultingSubscription : ISubscription
+        {
+            private readonly ISubscription _inner;
+            private readonly FaultingReadService _owner;
+
+            public FaultingSubscription(ISubscription inner, FaultingReadService owner)
+            {
+                _inner = inner;
+                _owner = owner;
+            }
+
+            public IAsyncEnumerable<CanFrameEvent> Frames
+            {
+                get
+                {
+                    _owner.Opened();
+                    if (_owner._faultImmediately)
+                        throw new InvalidOperationException("reader failed");
+                    return FaultAfter(_inner.Frames);
+                }
+            }
+
+            public bool TryRead(out CanFrameEvent frameEvent) => _inner.TryRead(out frameEvent);
+
+            public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
+                => _inner.WaitToReadAsync(cancellationToken);
+
+            public void Reconfigure(CanIdFilter filter) => _inner.Reconfigure(filter);
+
+            public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => _inner.Reconfigure(predicate);
+
+            public void Dispose() => _inner.Dispose();
+
+            private static async IAsyncEnumerable<CanFrameEvent> FaultAfter(IAsyncEnumerable<CanFrameEvent> frames)
+            {
+                await foreach (var frame in frames.ConfigureAwait(false))
+                {
+                    yield return frame;
+                    throw new InvalidOperationException("reader failed");
+                }
+            }
+        }
     }
 }

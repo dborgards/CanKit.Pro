@@ -106,7 +106,6 @@ internal sealed partial class CanOpenNode
 
     private void SendNodeGuardingRtr(byte producerNodeId)
     {
-        if (LssTransmitSuppressed()) return;
         // RTR (remote transmission request) on 0x700 + producer. CiA 301 §7.2.8.3.2.1 Figure 44
         // draws the request with DLC 1, the length of the response it asks for. CanKit derives a
         // frame's DLC from its data length and refuses data on a remote frame
@@ -121,8 +120,11 @@ internal sealed partial class CanOpenNode
             ReadOnlyMemory<byte>.Empty,
             isExtendedFrame: false,
             isRemoteFrame: true);
+        // A guarding poll is dropped for the delay, not held. Reserving the send keeps it
+        // from leaving after silence has been asked to start.
+        if (!TryReserveTransmit()) return;
         var svc = _service;
-        _ = System.Threading.Tasks.Task.Run(async () =>
+        var send = System.Threading.Tasks.Task.Run(async () =>
         {
             try
             {
@@ -135,6 +137,12 @@ internal sealed partial class CanOpenNode
             }
             catch (Exception ex) { RaiseBackgroundException(ex); }
         });
+        _ = send.ContinueWith(
+            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
+            this,
+            System.Threading.CancellationToken.None,
+            System.Threading.Tasks.TaskContinuationOptions.None,
+            System.Threading.Tasks.TaskScheduler.Default);
     }
 
     private void OnNodeGuardingTimeout(byte producerNodeId)

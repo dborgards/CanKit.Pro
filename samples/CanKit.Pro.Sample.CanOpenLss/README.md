@@ -29,12 +29,15 @@ dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- assign \
 
 `--selector` and `--index` are the LSS bit-timing table. Selector 0 is the CiA 301 table
 (index 2 is 500 kbit/s, index 3 is 250 kbit/s). `--store` asks the slave to keep the pending
-node-id and bit timing. The demo slaves keep that only in memory.
+node-id and bit timing. The demo slaves keep that only in memory. `--node-id` writes the
+pending node-id. A slave that already has an active node-id keeps it until NMT reset
+communication; this tool does not send that reset.
 
 `scan` without `--all` lists unconfigured slaves and leaves the network in LSS waiting.
 `--all` listens for heartbeats and boot-up (`--heartbeat-ms`, default 400) and reads
 `1018h:01`–`04` of those nodes through `--client-node`, which must be unused. `--probe-all`
-reads every node-id from 1 to 127 instead. `assign` selects one slave. `assign-unconfigured`
+asks every node-id from 1 to 127 at once and then reads `1018h` of the nodes that answer.
+`assign` selects one slave. `assign-unconfigured`
 gives each unconfigured slave the next node-id, starting at `--first-node-id`.
 `--activate-ms` is accepted only together with `--count 1`, so one slave does not change rate
 before the next is found.

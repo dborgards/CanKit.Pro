@@ -79,8 +79,10 @@ internal sealed partial class CanOpenNode
     // Actor-confined runtime configuration derived from the OD.
     private volatile uint _syncCobId = CanOpenCobId.Sync;
     private bool _syncGenerate;
-    private uint _emcyCobId;
-    private bool _emcyValid = true;
+    // Read again when the frame is sent. A heartbeat or EMCY queued behind a transmit still
+    // in flight must follow a node-id change that lands before that transmit finishes.
+    private volatile uint _emcyCobId;
+    private volatile bool _emcyValid = true;
     private EmcyMessage? _pendingEmcy;
     private TimeSpan _guardTime;
     private byte _lifeTimeFactor;

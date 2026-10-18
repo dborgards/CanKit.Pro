@@ -204,11 +204,11 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var first = bench.Unconfigured(First, Second)[0];
         var tool = new LssCommissioning(bench.Master);
         using var cancel = new CancellationTokenSource();
-        // Vendor, product and revision are known, so only the serial is scanned. A full
-        // four-field scan can miss the configuration window when the suite is loaded.
+        // Vendor, product and revision are known, so only the serial is scanned. Every
+        // Fastscan step occupies FastscanTimeout, so the answering bits take the whole window.
         var scan = tool.ScanUnconfiguredAsync(
             new LssUnconfiguredScan { Fastscan = KnownVendor() }, cancel.Token);
-        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 30);
         cancel.Cancel();
         var act = async () => await scan;
         await act.Should().ThrowAsync<OperationCanceledException>();
@@ -552,21 +552,86 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task An_Assigning_Scan_Stops_When_The_Found_Slave_Cannot_Be_Selected_Again()
+    public async Task An_Assigning_Scan_Configures_The_Slave_Fastscan_Left_In_Configuration()
     {
         var master = new FoundMaster { SelectiveHit = false };
         var scan = await new LssCommissioning(master).ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             AssignFromNodeId = 0x10,
             Limit = 1,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 20,
         });
 
-        scan.Stop.Should().Be(LssScanStop.SlaveRejected);
+        scan.Stop.Should().Be(LssScanStop.LimitReached);
         scan.Slaves.Should().ContainSingle();
-        scan.Slaves[0].Selected.Should().BeFalse();
-        scan.Slaves[0].Address.Should().Be(First);
+        scan.Slaves[0].Selected.Should().BeTrue();
+        scan.Slaves[0].Succeeded.Should().BeTrue();
+        scan.Slaves[0].NodeId.Should().Be(0x10);
+        master.SelectiveCalls.Should().Be(0);
+        master.ConfigureCalls.Should().Be(1);
+        master.GlobalSwitches.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task A_Timeout_Keeps_The_Slaves_Already_Given_A_Node_Id()
+    {
+        var master = new FoundMaster { ThrowOnSecondConfigure = true };
+        var scan = await new LssCommissioning(master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            Limit = 2,
+        });
+
+        scan.Stop.Should().Be(LssScanStop.TimedOut);
+        scan.Slaves.Should().ContainSingle();
+        scan.Slaves[0].NodeId.Should().Be(0x10);
+        scan.Slaves[0].Succeeded.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_Timeout_After_A_Confirmed_Node_Id_Keeps_That_Id()
+    {
+        var master = new FoundMaster { ThrowOnBitTiming = true };
+        var scan = await new LssCommissioning(master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            Limit = 2,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+        });
+
+        scan.Stop.Should().Be(LssScanStop.TimedOut);
+        scan.Slaves.Should().ContainSingle();
+        scan.Slaves[0].NodeId.Should().Be(0x10);
+        scan.Slaves[0].NodeIdResult!.Value.Succeeded.Should().BeTrue();
+        scan.Slaves[0].BitTimingResult.Should().BeNull();
+        master.ConfigureCalls.Should().Be(1);
+
+        var again = async () => await new LssCommissioning(master).ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            NodeId = 0x11,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+        });
+        await again.Should().ThrowAsync<LssTimeoutException>();
+    }
+
+    [Fact]
+    public async Task Configure_Does_Not_Send_A_Second_Waiting_Frame_After_Activation()
+    {
+        var master = new FoundMaster();
+        var configured = await new LssCommissioning(master).ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = 20,
+        });
+
+        configured.Succeeded.Should().BeTrue();
         master.SelectiveCalls.Should().Be(1);
-        master.ConfigureCalls.Should().Be(0);
+        master.GlobalSwitches.Should().Be(1);
     }
 
     [Fact]
@@ -652,7 +717,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         using var cancel = new CancellationTokenSource();
         var scan = tool.ScanUnconfiguredAsync(
             new LssUnconfiguredScan { Fastscan = KnownVendor() }, cancel.Token);
-        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 10);
+        await WaitUntilAsync(() => first.LssState() == LssState.Configuration, seconds: 30);
         bench.Master.Dispose();
         cancel.Cancel();
         var act = async () => await scan;
@@ -739,7 +804,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             => Task.FromResult(Timing);
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
         {
             ActivateCalled = true;
             return Task.CompletedTask;
@@ -794,10 +859,19 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public int ConfigureCalls { get; private set; }
 
+        public int GlobalSwitches { get; private set; }
+
+        public bool ThrowOnSecondConfigure { get; init; }
+
+        public bool ThrowOnBitTiming { get; init; }
+
         public LssMasterOptions Options { get; } = new();
 
         public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
-            => Task.CompletedTask;
+        {
+            GlobalSwitches++;
+            return Task.CompletedTask;
+        }
 
         public Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
         {
@@ -808,15 +882,21 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         public Task<LssServiceResult> ConfigureNodeIdAsync(byte nodeId, CancellationToken cancellationToken = default)
         {
             ConfigureCalls++;
+            if (ThrowOnSecondConfigure && ConfigureCalls == 2)
+                throw new LssTimeoutException(LssCommand.ConfigureNodeId, TimeSpan.FromMilliseconds(300));
             return Task.FromResult(LssServiceResult.Success);
         }
 
         public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
             CancellationToken cancellationToken = default)
-            => Task.FromResult(LssServiceResult.Success);
+        {
+            if (ThrowOnBitTiming)
+                throw new LssTimeoutException(LssCommand.ConfigureBitTiming, TimeSpan.FromMilliseconds(300));
+            return Task.FromResult(LssServiceResult.Success);
+        }
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
             => Task.CompletedTask;
 
         public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
@@ -883,7 +963,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             => throw new NotSupportedException();
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
-            CancellationToken cancellationToken = default, bool returnToWaiting = false)
+            bool returnToWaiting = false, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
         public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)

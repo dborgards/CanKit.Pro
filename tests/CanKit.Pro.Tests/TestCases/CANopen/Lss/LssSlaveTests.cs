@@ -1310,7 +1310,176 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task The_Second_Delay_Drops_The_Flying_Master_Nmt_Frame()
+    public async Task Assigning_The_Same_Node_Id_Again_Sends_Emcy_On_That_Id()
+    {
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions { Store = new MemoryStore() });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        (await bench.Master.StoreConfigurationAsync()).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetNode, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId
+            && slave.State == NmtState.Initializing);
+
+        (await bench.Master.ConfigureNodeIdAsync(5)).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slave.NodeId == 5 && slave.State == NmtState.PreOperational);
+
+        int before = heard.Ids.Count;
+        await slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => heard.Ids.Count > before);
+        var sent = heard.Ids.Skip(before).ToArray();
+        sent.Should().NotContain(CanOpenCobId.NmtCommand);
+        sent.Should().Contain(CanOpenCobId.Emcy(5));
+    }
+
+    [Fact]
+    public async Task An_Emcy_Queued_Before_The_Node_Id_Changes_Uses_The_New_Cob_Id()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus));
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(6)).Succeeded.Should().BeTrue();
+        slave.NodeId.Should().Be(5);
+
+        // The first emergency occupies the send chain. The second is queued behind it, and the
+        // node-id changes before that queued frame is reached.
+        var first = slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => holding.Holding);
+        var second = slave.SendEmcyAsync(0x2000, 0x02);
+        _ = slave.State;
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == 6 && slave.State == NmtState.PreOperational);
+        holding.Release();
+        await first;
+        await second;
+
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Emcy(6)));
+        heard.Ids.Where(id => id == CanOpenCobId.Emcy(5) || id == CanOpenCobId.Emcy(6))
+            .Should().Equal(CanOpenCobId.Emcy(5), CanOpenCobId.Emcy(6));
+    }
+
+    [Fact]
+    public async Task A_Heartbeat_Queued_Before_The_Node_Becomes_Unconfigured_Is_Dropped()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus), heartbeats: true);
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => holding.Holding);
+        slave.StartHeartbeatProducer(TimeSpan.FromSeconds(30));
+        await peer.SendNmtCommandAsync(NmtCommand.Start, 5);
+        await WaitUntilAsync(() => slave.State == NmtState.Operational);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
+        holding.Release();
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Heartbeat(5)));
+        await Task.Delay(50);
+        heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_Emcy_Queued_Before_The_Producer_Is_Disabled_Is_Not_Sent()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus));
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational);
+        var first = slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => holding.Holding);
+        var second = slave.SendEmcyAsync(0x2000, 0x02);
+        _ = slave.State;
+        slave.ObjectDictionary.WriteUnsigned(0x1014, 0x00, CanOpenCobId.InvalidBit | CanOpenCobId.Emcy(5));
+        _ = slave.State;
+        holding.Release();
+        await first;
+        await second;
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Emcy(5)));
+        await Task.Delay(50);
+        heard.Ids.Count(id => id == CanOpenCobId.Emcy(5)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task An_Emcy_Queued_Before_The_Producer_Is_Cleared_Is_Not_Sent()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus));
+        using var slave = CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        var peer = bench.Slave(2, 2, new LssSlaveOptions { Enabled = false });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational);
+        var first = slave.SendEmcyAsync(0x1000, 0x01);
+        await WaitUntilAsync(() => holding.Holding);
+        var second = slave.SendEmcyAsync(0x2000, 0x02);
+        _ = slave.State;
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId)).Succeeded.Should().BeTrue();
+        await peer.SendNmtCommandAsync(NmtCommand.ResetCommunication, 5);
+        await WaitUntilAsync(() => slave.NodeId == CanOpenCobId.UnconfiguredNodeId);
+        holding.Release();
+        await first;
+        await second;
+        await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.Emcy(5)));
+        await Task.Delay(50);
+        heard.Ids.Count(id => id == CanOpenCobId.Emcy(5)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Silence_Starts_After_A_Send_Already_In_The_Driver_And_Holds_The_Next_Heartbeat()
+    {
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var holding = new HoldingService(new CanBusService(bus), heartbeats: true);
+        using var slave = (CanOpenNode)CanOpen.OpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions(),
+        });
+        using var heard = bench.Listen();
+        await WaitUntilAsync(() => holding.Holding);
+
+        // The boot-up is inside the driver. Silence must not start, and must not drop it,
+        // until that send returns.
+        var starting = slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.FromSeconds(5)));
+        await Task.Delay(50);
+        starting.IsCompleted.Should().BeFalse();
+        holding.Release();
+        await starting.WaitAsync(TimeSpan.FromSeconds(2));
+
+        slave.StartHeartbeatProducer(TimeSpan.FromMilliseconds(30));
+        await Task.Delay(80);
+        heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)).Should().Be(1);
+        slave.CompleteLssSilence(0);
+        await WaitUntilAsync(() => heard.Ids.Count(id => id == CanOpenCobId.Heartbeat(5)) >= 2);
+    }
+
+    [Fact]
+    public async Task Starting_The_Flying_Master_During_The_First_Switch_Delay_Keeps_The_Node_Id()
     {
         using var bench = new Bench();
         var slave = bench.Slave(1, 5, new LssSlaveOptions
@@ -1530,6 +1699,61 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         {
             _disposables.Add(item);
             return item;
+        }
+    }
+
+    /// <summary>Holds the first emergency so a later one stays queued on the send chain.</summary>
+    private sealed class HoldingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly bool _heartbeats;
+        private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _held;
+
+        public HoldingService(ICanBusService inner, bool heartbeats = false)
+        {
+            _inner = inner;
+            _heartbeats = heartbeats;
+        }
+
+        public bool Holding => Volatile.Read(ref _held) != 0;
+
+        public void Release() => _release.TrySetResult(true);
+
+        public ICanBus Bus => _inner.Bus;
+
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            int id = frame.ID;
+            bool hold = _heartbeats ? id is >= 0x701 and <= 0x77F : id is >= 0x081 and <= 0x0FF;
+            if (hold && Interlocked.Exchange(ref _held, 1) == 0)
+                return HoldAsync(frame, timeout, cancellationToken);
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+
+        public void Dispose() => _inner.Dispose();
+
+        private async Task<TxConfirmation> HoldAsync(CanFrame frame, TimeSpan? timeout, CancellationToken cancellationToken)
+        {
+            await _release.Task.ConfigureAwait(false);
+            return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
         }
     }
 
