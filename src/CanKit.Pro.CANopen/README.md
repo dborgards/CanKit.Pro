@@ -824,10 +824,16 @@ identity (§5.2): `1018h:01` (vendor-ID), `:02` (product code) and `:03` (revisi
 uploaded and compared with the `VendorNumber`, `ProductNumber` and `RevisionNumber` of the bound
 EDS/DCF's `[DeviceInfo]`. All three are read; a peer that is not the device the file describes
 ends the call with those entries as its `Mismatches` — the four bytes the file encodes to, the
-bytes the peer returned, whatever their number — and nothing written. The three entries pass the
-peer-SDO gate like every other transfer, so the file must declare them; without a bound
-description the call is refused before any frame. The further checks the note of §5.2 names
-(firmware and hardware version, serial number, physical location) are the application's.
+bytes the peer returned, whatever their number — and nothing written. §5.2 requires all three
+of an SRD, where CiA 301 makes `:02` and `:03` optional: the bound file must declare them — one
+that leaves an entry out is refused before the first frame, as the gate would refuse that upload
+— and the peer must implement them; one that aborts an upload of them is not an SRD this
+procedure can configure, and the abort propagates. A file whose three numbers are all 0 (an
+absent `[DeviceInfo]` key reads as 0) carries no identity and is refused before the first frame
+(`InvalidOperationException`). Without a bound description the call is refused before any frame,
+naming `1018h:01` — the first transfer, which would have nothing to be compared with. The further
+checks the note of §5.2 names (firmware and hardware version, serial number, physical location)
+are the application's.
 
 Then the call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
 above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` is not exactly one
@@ -867,14 +873,19 @@ which the peer then holds unstored.
 
 An SRD need not implement the SRVT of a tx SRDO, and its EDS "should include the SRVT parameter
 for all supported SRDOs" (CiA 319 §6.2): a tx SRDO whose communication record the bound file
-declares *without* sub-index `03h` has none on the peer. The call neither writes nor reads that
-sub-index back, and the checksum it writes is the one over 20 ms — the value §6.2 prescribes for
-the calculation, and what a peer without an SRVT of its own computes. The configuration must say
-20 ms for such an SRDO; another value is refused before the first frame (`ArgumentException`),
-because it cannot be written and a checksum over it would not be the peer's. A consumer's SRVT is
-not optional and is written whatever the file declares; a record the file does not declare at all,
-implied by a higher one, counts as whole, as a device provides it. The verification applies the
-same rule, so a DCF without the sub-index verifies against what the device holds.
+declares *without* sub-index `03h` is one the peer is taken not to hold an SRVT for. The
+configuration must say 20 ms for such an SRDO — the value §6.2 prescribes for the calculation,
+and what a peer without an SRVT of its own computes; another value is refused before the first
+frame (`ArgumentException`), because whether the peer holds the sub-index is known only once the
+write is answered, and a checksum over another value would not be the peer's if it does not. The
+file is not trusted alone: the sub-index is written and read back all the same (the gate lets it
+through as an implied record entry), so that a peer which does hold it ends with 20 ms rather
+than with a value from an earlier configuration — a delete writes sub-index `01h` only — and a
+peer that aborts the write or the readback with `0609 0011h` (sub-index does not exist) does not
+implement it, which is tolerated. A consumer's SRVT is not optional, and neither is one the file
+declares: their aborts propagate. A record the file does not declare at all, implied by a higher
+one, counts as whole, as a device provides it. The verification applies the same rule, so a DCF
+without the sub-index verifies against what the device holds.
 
 `PeerSafetyResult.Succeeded` means acknowledged. Otherwise `Mismatches` lists each
 (index, sub-index) with the bytes written and the bytes read — or, for `1018h`, the bytes the
@@ -895,8 +906,9 @@ of the expected record) and the records, and compares them with what a configura
 `expected` would have written (`1300h` aside, which step D does not list). An SRDO the
 expectation does not name must be deleted (sub-index `01h` = 0); its checksum is not compared,
 because the device checks the checksums of existing SRDOs only (§9.5). A tx SRDO whose record the
-bound file declares without sub-index `03h` is compared without it and expected at the checksum
-over 20 ms (CiA 319 §6.2, as for a configuration). The identity of CiA 319 §5.2 is not read: it
+bound file declares without sub-index `03h` is expected at the checksum over 20 ms, and a peer
+that aborts the upload of that sub-index with `0609 0011h` does not implement it — no difference
+(CiA 319 §6.2, as for a configuration). The identity of CiA 319 §5.2 is not read: it
 belongs to the configuration, and the boot-up binds a DCF for a node-id.
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
@@ -1271,11 +1283,12 @@ Each item names what a caller does about it.
 
 * **`ConfigurePeerSafetyAsync` is the configuration entity of CiA 319 v2.0.0** (FR-CO-047): it
   reads the peer's `1018h:01`–`03` first and compares them with the bound file's `[DeviceInfo]`,
-  so a file that leaves them out now refuses the call at the gate, and a peer that is another
-  device ends it with those entries as mismatches; `PeerSafetyConfiguration.Storage` asks for the
-  step-5 store through `1010h`, reported in `PeerSafetyResult.Stored`; and a tx SRDO whose record
-  the file declares without sub-index `03h` is configured and verified without it, at the §6.2
-  default of 20 ms.
+  so a file that leaves them out, or whose three numbers are all 0, is refused before the first
+  frame, and a peer that is another device ends the call with those entries as mismatches;
+  `PeerSafetyConfiguration.Storage` asks for the step-5 store through `1010h`, reported in
+  `PeerSafetyResult.Stored`; and a tx SRDO whose record the file declares without sub-index `03h`
+  must say 20 ms, which is written as optional — a peer's `0609 0011h` is tolerated — and
+  checksummed (§6.2).
 * **`CanOpenNodeOptions.With(...)` validates the copy it returns**, as the node does when it is
   opened: an out-of-range value now throws `ArgumentOutOfRangeException` from `With` rather than
   from `OpenNode`. It gained `srdoCount` and `enableChangeOfStateSrdo`; the 1.3.0 signature is
