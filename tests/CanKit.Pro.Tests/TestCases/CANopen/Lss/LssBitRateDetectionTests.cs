@@ -311,6 +311,16 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public void The_Default_Candidates_Cannot_Be_Mutated_Through_A_Downcast()
+    {
+        // They are the default of every options instance's Candidates, so a caller must not be
+        // able to cast them back to the backing array and reorder or corrupt the shared list.
+        (LssBitRateDetectionOptions.DefaultCandidates as int[]).Should().BeNull();
+        ((System.Collections.Generic.ICollection<int>)LssBitRateDetectionOptions.DefaultCandidates)
+            .IsReadOnly.Should().BeTrue();
+    }
+
+    [Fact]
     public void Options_Reject_An_Empty_Duplicate_Or_Non_Positive_Candidate_List()
     {
         new Action(() => new LssBitRateDetectionOptions { Candidates = Array.Empty<int>() }.Validate())

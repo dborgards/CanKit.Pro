@@ -100,10 +100,14 @@ public sealed class LssBitRateDetectionOptions
     /// networks use one of the three, so trying them first finds the rate in fewer frames
     /// (CiA 801 §6). The rest follow in table order.
     /// </summary>
-    public static IReadOnlyList<int> DefaultCandidates { get; } = new[]
+    // Array.AsReadOnly, not the bare array: the property is the default of every options
+    // instance's Candidates, so a caller who cast it back to int[] could reorder the rates or
+    // inject invalid ones for every later detection. A ReadOnlyCollection cannot be cast to the
+    // backing array.
+    public static IReadOnlyList<int> DefaultCandidates { get; } = Array.AsReadOnly(new[]
     {
         500_000, 250_000, 125_000, 1_000_000, 800_000, 50_000, 20_000, 10_000,
-    };
+    });
 
     /// <summary>The listen window per candidate when none is chosen: 2 seconds.</summary>
     public static TimeSpan DefaultListenWindow { get; } = TimeSpan.FromSeconds(2);
