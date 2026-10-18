@@ -1,10 +1,10 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Pro.Actor;
 using CanKit.Pro.RawCan;
 
 namespace CanKit.Pro.CANopen.Lss;
@@ -23,7 +23,7 @@ public static class CanOpenLss
         resolved.Validate();
         var service = new CanBusService(bus);
         // leaveOpen false: a failure while the master is constructed disposes this private service.
-        return OpenMaster(service, resolved, leaveOpen: false);
+        return OpenValidated(service, resolved, leaveOpen: false);
     }
 
     /// <summary>
@@ -36,9 +36,14 @@ public static class CanOpenLss
         if (service is null) throw new ArgumentNullException(nameof(service));
         var resolved = options ?? new LssMasterOptions();
         resolved.Validate();
+        return OpenValidated(service, resolved, leaveOpen);
+    }
+
+    private static ILssMaster OpenValidated(ICanBusService service, LssMasterOptions options, bool leaveOpen)
+    {
         try
         {
-            return new LssMaster(service, resolved, ownsService: !leaveOpen);
+            return new LssMaster(service, options, ownsService: !leaveOpen);
         }
         catch
         {
@@ -54,6 +59,8 @@ internal sealed partial class LssMaster : ILssMaster
 {
     private readonly ICanBusService _service;
     private readonly bool _ownsService;
+    private readonly ProtocolActor _timers;
+    private readonly bool _ownsTimers;
     private readonly ISubscription _subscription;
     private readonly CancellationTokenSource _readerCts = new();
     private readonly Task _readerTask;
@@ -69,12 +76,15 @@ internal sealed partial class LssMaster : ILssMaster
 
     private int _disposed;
 
-    internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService)
+    internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService, ProtocolActor? timers = null)
     {
         _service = service;
         Options = options;
-        options.Validate();
         _ownsService = ownsService;
+        // Production transport stamps and the scheduler share Stopwatch's monotonic counter.
+        // An injected actor must share its clock with the test transport's stamps as well.
+        _timers = timers ?? new ProtocolActor();
+        _ownsTimers = timers is null;
         try
         {
             _subscription = service.Subscribe(frame =>
@@ -87,6 +97,7 @@ internal sealed partial class LssMaster : ILssMaster
         {
             // Subscribe failed before the reader task existed. Cancel and dispose what this
             // constructor already created so the caller can open again on the same service.
+            if (_ownsTimers) _timers.Dispose();
             _lifetime.Cancel();
             _readerCts.Cancel();
             _inbound.Writer.TryComplete();
@@ -142,7 +153,11 @@ internal sealed partial class LssMaster : ILssMaster
     /// <inheritdoc />
     public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
         bool returnToWaiting = false, CancellationToken cancellationToken = default)
-        => Execute(async ct =>
+    {
+        if (switchDelayMilliseconds == 0 && returnToWaiting
+            && (bitsPerSecond is null || Options.BitRateSwitch is null))
+            throw new ArgumentException("Returning to waiting after a zero delay requires a bit rate and BitRateSwitch callback.");
+        return Execute(async ct =>
         {
             await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
@@ -152,14 +167,15 @@ internal sealed partial class LssMaster : ILssMaster
             if (returnToWaiting && delay > TimeSpan.Zero)
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
-                await Task.Delay(delay, ct).ConfigureAwait(false);
+                await DelayAsync(delay, ct).ConfigureAwait(false);
             if (bitsPerSecond is int rate && Options.BitRateSwitch is { } switchRate)
                 await switchRate(rate, ct).ConfigureAwait(false);
             if (returnToWaiting && delay == TimeSpan.Zero)
                 await SendAsync(LssFrames.SwitchGlobal(LssState.Waiting), ct).ConfigureAwait(false);
             if (delay > TimeSpan.Zero)
-                await Task.Delay(delay, ct).ConfigureAwait(false);
+                await DelayAsync(delay, ct).ConfigureAwait(false);
         }, cancellationToken);
+    }
 
     /// <inheritdoc />
     public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
@@ -267,6 +283,7 @@ internal sealed partial class LssMaster : ILssMaster
             // A faulted reader has already completed the inbound channel.
         }
         if (_ownsService) _service.Dispose();
+        if (_ownsTimers) _timers.Dispose();
         // A reader still parked after the wait must not see its token source disposed.
         if (!reader.IsCompleted) return;
         _readerCts.Dispose();
@@ -284,6 +301,7 @@ internal sealed partial class LssMaster : ILssMaster
         if (reader.IsFaulted)
             _ = reader.Exception;
         if (_ownsService) _service.Dispose();
+        if (_ownsTimers) _timers.Dispose();
         _readerCts.Dispose();
         _lifetime.Dispose();
     }
@@ -329,7 +347,8 @@ internal sealed partial class LssMaster : ILssMaster
         {
             await _gate.WaitAsync(linked.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (Volatile.Read(ref _disposed) != 0)
+        catch (OperationCanceledException) when (Volatile.Read(ref _disposed) != 0
+                                                  && !cancellationToken.IsCancellationRequested)
         {
             throw new ObjectDisposedException(nameof(LssMaster));
         }
@@ -371,61 +390,64 @@ internal sealed partial class LssMaster : ILssMaster
     private async Task<byte[]?> ReceiveAsync(Sent sent, Func<ReadOnlyMemory<byte>, bool> match, TimeSpan timeout,
         CancellationToken cancellationToken, bool drain = false)
     {
-        // The deadline starts when the frame was handed to the driver, not when this wait
-        // begins: a response already queued can still be late (TxConfirmation.HostTransmitTimestamp).
-        // A confirmation that carries no stamp is not an instant of zero: the wait starts now.
-        // A drain keeps the first match and stays until the deadline, which is how Fastscan and
-        // identify consume every slave that answered this request before the next one is sent.
-        long start = sent.Transmit > 0 ? sent.Transmit : Stopwatch.GetTimestamp();
-        long deadline = start + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
+        var time = _timers.TimeSource;
+        long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
+        long deadline = TickMath.DueAt(start, timeout, time.Frequency);
         byte[]? first = null;
-        while (true)
+        cancellationToken.ThrowIfCancellationRequested();
+        TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
+        if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
+            return first;
+        var expired = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timer = _timers.ScheduleAt(deadline, () => expired.TrySetResult(true));
+        using var cancelled = cancellationToken.Register(() => expired.TrySetCanceled());
+        using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
         {
-            TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
-            if (!drain && first is not null)
-                return first;
-
-            long left = deadline - Stopwatch.GetTimestamp();
-            if (left <= 0)
-                return first;
-            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var remaining = CapCancelDelay(TimeSpan.FromSeconds((double)left / Stopwatch.Frequency));
-            timeoutSource.CancelAfter(remaining);
-            try
+            while (true)
             {
-                if (!await _inbound.Reader.WaitToReadAsync(timeoutSource.Token).ConfigureAwait(false))
+                cancellationToken.ThrowIfCancellationRequested();
+                TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
+                if ((!drain && first is not null) || time.GetTimestamp() >= deadline)
+                    return first;
+                try
                 {
-                    // The window can already hold a match. Ending the reader must not drop it.
-                    if (first is not null)
+                    var readable = _inbound.Reader.WaitToReadAsync(window.Token).AsTask();
+                    if (await Task.WhenAny(readable, expired.Task).ConfigureAwait(false) == expired.Task)
+                    {
+                        await expired.Task.ConfigureAwait(false);
+                        TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
                         return first;
+                    }
+                    if (!await readable.ConfigureAwait(false))
+                    {
+                        if (first is not null) return first;
+                        ThrowIfDisposed();
+                        throw ReaderEnded();
+                    }
+                }
+                catch (CanOpenTransportException)
+                {
+                    if (first is not null) return first;
                     ThrowIfDisposed();
-                    throw ReaderEnded();
+                    throw;
                 }
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                TakeAvailable(sent, deadline, match, ref first, stopAtFirst: !drain);
-                // The next iteration returns the match, or the deadline when it has passed.
-            }
-            catch (CanOpenTransportException)
-            {
-                if (first is not null)
-                    return first;
-                ThrowIfDisposed();
-                throw;
-            }
+        }
+        finally
+        {
+            // Withdraw the outstanding channel wait when the timer, rather than a frame, wins.
+            window.Cancel();
         }
     }
 
-    /// <summary>
-    /// <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/> rejects a delay above
-    /// <see cref="int.MaxValue"/> milliseconds. A double conversion of a full-size window can
-    /// land just past that, so the delay is capped.
-    /// </summary>
-    internal static TimeSpan CapCancelDelay(TimeSpan remaining)
+    private async Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
     {
-        var max = TimeSpan.FromMilliseconds(int.MaxValue);
-        return remaining > max ? max : remaining;
+        cancellationToken.ThrowIfCancellationRequested();
+        var elapsed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timer = _timers.Schedule(delay, () => elapsed.TrySetResult(true));
+        using var cancelled = cancellationToken.Register(() => elapsed.TrySetCanceled());
+        await elapsed.Task.ConfigureAwait(false);
     }
 
     private static CanOpenTransportException ReaderEnded()

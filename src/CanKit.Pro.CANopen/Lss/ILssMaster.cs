@@ -70,6 +70,7 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
     /// switch the master is still on the old rate and the slave will not hear the frame.
     /// </summary>
+    /// <exception cref="ArgumentException">A zero delay with returnToWaiting requires both a bit rate and a switch callback.</exception>
     Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
         bool returnToWaiting = false, CancellationToken cancellationToken = default);
 

@@ -63,7 +63,6 @@ internal sealed partial class LssMaster
                 .ConfigureAwait(false);
             if (!scanned.Matched)
                 return LssFastscanResult.NoMatch(AddressFrom(found));
-            found[index] = scanned.Id;
             // Bit 0 already carried this field's confirmation LSSNext (annex A.3.5). A slave
             // that answered has stored that LSSNext as its position, or has switched into
             // configuration when the value was 0, and will not answer the same frame again.
@@ -72,6 +71,7 @@ internal sealed partial class LssMaster
             if (!scanned.Bit0Acknowledged
                 && !await ProbeAsync(scanned.Id, 0, (byte)index, lssNext, cancellationToken).ConfigureAwait(false))
                 return LssFastscanResult.NoMatch(AddressFrom(found));
+            found[index] = scanned.Id;
             if (lssNext == 0)
                 return LssFastscanResult.Found(AddressFrom(found));
             index = next;
@@ -147,7 +147,7 @@ internal sealed partial class LssMaster
         var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
             Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
         if (Options.FastscanCycleTime > TimeSpan.Zero)
-            await Task.Delay(Options.FastscanCycleTime, cancellationToken).ConfigureAwait(false);
+            await DelayAsync(Options.FastscanCycleTime, cancellationToken).ConfigureAwait(false);
         return response is not null;
     }
 

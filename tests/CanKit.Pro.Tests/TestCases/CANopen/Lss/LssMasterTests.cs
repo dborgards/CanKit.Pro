@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
+using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Lss;
 using CanKit.Pro.RawCan;
@@ -27,9 +28,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     private static LssMasterOptions Quick() => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        // A zero bit is a missing reply. 40ms loses that reply on a busy runner and the
-        // next check then accepts the late frame as its own.
-        FastscanTimeout = TimeSpan.FromMilliseconds(120),
+        // Fastscan tests drive this window on a virtual clock.
+        FastscanTimeout = TimeSpan.FromMilliseconds(50),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
     };
@@ -78,25 +78,24 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public void A_Subscribe_Failure_Disposes_An_Owned_Service_And_Not_A_Shared_One()
+    public async Task A_Subscribe_Failure_Disposes_An_Owned_Service_And_Not_A_Shared_One()
     {
+        int loops = ProtocolActor.RunningLoopCount;
         var owned = new RejectingSubscribeService();
         var openOwned = () => CanOpenLss.OpenMaster(owned, Quick(), leaveOpen: false);
         openOwned.Should().Throw<InvalidOperationException>();
         owned.Disposals.Should().Be(1);
+        ProtocolActor.RunningLoopCount.Should().Be(loops);
 
         var shared = new RejectingSubscribeService();
         var openShared = () => CanOpenLss.OpenMaster(shared, Quick());
         openShared.Should().Throw<InvalidOperationException>();
         shared.Disposals.Should().Be(0);
-    }
-
-    [Fact]
-    public void CapCancelDelay_Clamps_A_Delay_CancelAfter_Cannot_Express()
-    {
-        LssMaster.CapCancelDelay(TimeSpan.FromMilliseconds(10)).Should().Be(TimeSpan.FromMilliseconds(10));
-        var huge = TimeSpan.FromMilliseconds((double)int.MaxValue + 1000);
-        LssMaster.CapCancelDelay(huge).Should().Be(TimeSpan.FromMilliseconds(int.MaxValue));
+        using var clock = new VirtualClock();
+        var timers = clock.NewActor();
+        var injected = () => new LssMaster(shared, Quick(), ownsService: false, timers);
+        injected.Should().Throw<InvalidOperationException>();
+        (await timers.PostAsync(() => true)).Should().BeTrue();
     }
 
     [Fact]
@@ -124,7 +123,6 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         await using var master = CanOpenLss.OpenMaster(service, new LssMasterOptions
         {
             ResponseTimeout = TimeSpan.FromMilliseconds(300),
-            FastscanTimeout = TimeSpan.FromMilliseconds(120),
             IdentificationTimeout = TimeSpan.FromSeconds(5),
         });
 
@@ -315,17 +313,9 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Activate_Waits_Both_Delays_And_The_Slave_Stays_Silent_For_The_Second()
     {
-        using var rig = Rig.Open(SlaveA, nodeId: 4);
-        await EnterConfigurationAsync(rig);
-        (await rig.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
-
         int switches = 0;
-        var withSwitch = Rig.ReplaceOptions(rig, new LssMasterOptions
+        using var rig = new ClockedLssRig(new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromMilliseconds(300),
-            FastscanTimeout = TimeSpan.FromMilliseconds(40),
-            FastscanCycleTime = TimeSpan.FromMilliseconds(1),
-            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
             BitRateSwitch = (rate, _) =>
             {
                 switches++;
@@ -333,24 +323,35 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
                 return Task.CompletedTask;
             },
         });
+        var slave = rig.Add(SlaveA, nodeId: 4);
+        await rig.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        (await rig.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
 
-        var activating = withSwitch.ActivateBitTimingAsync(80, 250_000);
-        await rig.Slave.WaitForSilenceAsync(TimeSpan.FromSeconds(2));
-        rig.Slave.IsSilent.Should().BeTrue();
+        var activating = rig.Master.ActivateBitTimingAsync(80, 250_000);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(80));
+        switches.Should().Be(0);
+        activating.IsCompleted.Should().BeFalse();
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(79));
+        switches.Should().Be(0);
+        slave.ActiveTableIndex.Should().Be(2);
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        await slave.WaitForSilenceAsync(TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(() => switches == 1);
+        slave.IsSilent.Should().BeTrue();
+        slave.ActiveTableIndex.Should().Be(3);
 
-        using var poke = VirtualAdapterFixture.Open(rig.Session, 3);
-        using var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.LssMasterMessage),
-            LssFrames.Command(LssCommand.InquireVendorId), isExtendedFrame: false);
-        poke.Transmit(frame);
-        await WaitUntilAsync(() => rig.Slave.SuppressedResponses > 0);
-
-        await activating;
-        await WaitUntilAsync(() => !rig.Slave.IsSilent);
-        switches.Should().Be(1);
-        rig.Slave.IsSilent.Should().BeFalse();
-        rig.Slave.ActiveTableIndex.Should().Be(3);
-        rig.Slave.SuppressedResponses.Should().BeGreaterThan(0);
-        (await withSwitch.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
+        // The clock is frozen inside d2: no host scheduling delay can move this poke out of it.
+        var poke = slave.Process(LssFrames.Command(LssCommand.InquireVendorId));
+        poke.Should().BeNull();
+        slave.SuppressedResponses.Should().Be(1);
+        await rig.ArmedAsync(TimeSpan.FromMilliseconds(80));
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(79));
+        activating.IsCompleted.Should().BeFalse();
+        slave.IsSilent.Should().BeTrue();
+        await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(1));
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitUntilAsync(() => !slave.IsSilent);
+        (await rig.Master.InquireVendorIdAsync()).Should().Be(SlaveA.VendorId);
     }
 
     [Fact]
@@ -401,12 +402,11 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Fastscan_Finds_The_Smallest_Unconfigured_Slave_Then_The_Next()
     {
-        var session = VirtualAdapterFixture.NewSession("lss-fs");
-        using var masterBus = VirtualAdapterFixture.Open(session, 0);
-        using var master = CanOpenLss.OpenMaster(masterBus, Quick());
-        using var a = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA);
-        using var b = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 2), SlaveB);
-        using var c = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 3), SlaveC);
+        using var rig = new ClockedLssRig(Quick());
+        var master = rig.Master;
+        var a = rig.Add(SlaveA);
+        var b = rig.Add(SlaveB);
+        var c = rig.Add(SlaveC);
 
         var request = new LssFastscanRequest
         {
@@ -414,7 +414,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
         };
-        var first = await master.FastscanAsync(request);
+        var first = await rig.RunAsync(master.FastscanAsync(request));
         first.Succeeded.Should().BeTrue();
         first.Address.Should().Be(SlaveA);
         a.State.Should().Be(LssState.Configuration);
@@ -423,54 +423,55 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         await master.SwitchStateGlobalAsync(LssState.Waiting);
         await WaitUntilAsync(() => a.State == LssState.Waiting);
 
-        var second = await master.FastscanAsync(request);
+        var second = await rig.RunAsync(master.FastscanAsync(request));
         second.Address.SerialNumber.Should().Be(2);
         (await master.ConfigureNodeIdAsync(0x22)).Succeeded.Should().BeTrue();
         await master.SwitchStateGlobalAsync(LssState.Waiting);
         await WaitUntilAsync(() => b.State == LssState.Waiting);
 
-        var third = await master.FastscanAsync(request);
+        var third = await rig.RunAsync(master.FastscanAsync(request));
         third.Address.Should().Be(SlaveC);
         (await master.ConfigureNodeIdAsync(0x23)).Succeeded.Should().BeTrue();
         await master.SwitchStateGlobalAsync(LssState.Waiting);
 
-        (await master.FastscanAsync(request)).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
+        (await rig.RunAsync(master.FastscanAsync(request))).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
         c.ActiveNodeId.Should().Be(0x23);
     }
 
     [Fact]
     public async Task Fastscan_Scans_Every_Bit_And_Honours_Skip_And_A_Known_Prefix()
     {
-        using var rig = Rig.Open(new LssAddress(1, 0, 0, 1));
-        var full = await rig.Master.FastscanAsync();
+        using var rig = new ClockedLssRig(Quick());
+        var slave = rig.Add(new LssAddress(1, 0, 0, 1));
+        var full = await rig.RunAsync(rig.Master.FastscanAsync());
         full.Succeeded.Should().BeTrue();
         full.Address.Should().Be(new LssAddress(1, 0, 0, 1));
 
         await rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
-        await WaitUntilAsync(() => rig.Slave.State == LssState.Waiting);
+        await WaitUntilAsync(() => slave.State == LssState.Waiting);
         // The scan above gave it no node-id, so it is in configuration and not unconfigured
         // until it is back in waiting. It is still unconfigured: pending is FFh.
-        rig.Slave.PendingNodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        slave.PendingNodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
 
-        var skipped = await rig.Master.FastscanAsync(new LssFastscanRequest
+        var skipped = await rig.RunAsync(rig.Master.FastscanAsync(new LssFastscanRequest
         {
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
-        });
+        }));
         skipped.Succeeded.Should().BeTrue();
         skipped.Address.VendorId.Should().Be(1);
         skipped.Address.ProductCode.Should().Be(0);
         skipped.Address.SerialNumber.Should().Be(1);
 
         await rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
-        await WaitUntilAsync(() => rig.Slave.State == LssState.Waiting);
-        var prefixed = await rig.Master.FastscanAsync(new LssFastscanRequest
+        await WaitUntilAsync(() => slave.State == LssState.Waiting);
+        var prefixed = await rig.RunAsync(rig.Master.FastscanAsync(new LssFastscanRequest
         {
             VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
             SerialNumber = new LssFastscanField { KnownHighBitCount = 31, Value = 0 },
-        });
+        }));
         prefixed.Address.SerialNumber.Should().Be(1);
     }
 
@@ -480,28 +481,23 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
         // Both slaves have vendor-id 1, so bit 0 is 1 and the step must hear silence. The
         // second slave answers after the cycle gap and inside the timeout. Without draining
         // the window, that late 4Fh is taken as "bit 0 is 0" and the vendor comes back 0.
-        var session = VirtualAdapterFixture.NewSession("lss-drain");
-        using var bus = VirtualAdapterFixture.Open(session, 0);
-        using var master = CanOpenLss.OpenMaster(bus, new LssMasterOptions
+        using var rig = new ClockedLssRig(new LssMasterOptions
         {
-            ResponseTimeout = TimeSpan.FromMilliseconds(300),
             FastscanTimeout = TimeSpan.FromMilliseconds(100),
             FastscanCycleTime = TimeSpan.FromMilliseconds(1),
-            IdentificationTimeout = TimeSpan.FromMilliseconds(80),
         });
-        using var first = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), new LssAddress(1, 0, 0, 0));
-        using var second = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 2), new LssAddress(1, 0, 0, 0))
-        {
-            ResponseDelay = TimeSpan.FromMilliseconds(40),
-        };
+        var master = rig.Master;
+        var first = rig.Add(new LssAddress(1, 0, 0, 0));
+        var second = rig.Add(new LssAddress(1, 0, 0, 0));
+        second.ResponseDelay = TimeSpan.FromMilliseconds(40);
 
-        var found = await master.FastscanAsync(new LssFastscanRequest
+        var found = await rig.RunAsync(master.FastscanAsync(new LssFastscanRequest
         {
             VendorId = new LssFastscanField { KnownHighBitCount = 30, Value = 0 },
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
             SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
-        });
+        }));
 
         found.Status.Should().Be(LssFastscanStatus.Found);
         found.Address.VendorId.Should().Be(1u);
@@ -512,37 +508,45 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Fastscan_Reports_No_Slave_And_No_Match()
     {
-        var session = VirtualAdapterFixture.NewSession("lss-none");
-        using var bus = VirtualAdapterFixture.Open(session, 0);
-        using var master = CanOpenLss.OpenMaster(bus, Quick());
-        (await master.FastscanAsync()).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
+        using var rig = new ClockedLssRig(Quick());
+        var master = rig.Master;
+        (await rig.RunAsync(master.FastscanAsync())).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
 
-        using var configured = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 1), SlaveA, persistentNodeId: 7);
-        (await master.FastscanAsync()).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
+        var configured = rig.Add(SlaveA, nodeId: 7);
+        (await rig.RunAsync(master.FastscanAsync())).Status.Should().Be(LssFastscanStatus.NoUnconfiguredSlave);
 
-        using var slave = new ScriptedLssSlave(VirtualAdapterFixture.Open(session, 2), SlaveA);
-        var missed = await master.FastscanAsync(new LssFastscanRequest
+        var slave = rig.Add(SlaveA);
+        var missed = await rig.RunAsync(master.FastscanAsync(new LssFastscanRequest
         {
             VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 99 },
-        });
+        }));
         missed.Status.Should().Be(LssFastscanStatus.NoMatch);
+        missed.Address.Should().Be(default(LssAddress));
         slave.State.Should().Be(LssState.Waiting);
 
+        var productMiss = await rig.RunAsync(master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+            ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 99 },
+        }));
+        productMiss.Status.Should().Be(LssFastscanStatus.NoMatch);
+        productMiss.Address.Should().Be(new LssAddress(1, 0, 0, 0));
+
         // A known prefix the slave does not have ends the scan before any later bit.
-        var prefixMiss = await master.FastscanAsync(new LssFastscanRequest
+        var prefixMiss = await rig.RunAsync(master.FastscanAsync(new LssFastscanRequest
         {
             VendorId = new LssFastscanField { KnownHighBitCount = 8, Value = 0xFF00_0000 },
-        });
+        }));
         prefixMiss.Status.Should().Be(LssFastscanStatus.NoMatch);
         slave.State.Should().Be(LssState.Waiting);
 
-        var known = await master.FastscanAsync(new LssFastscanRequest
+        var known = await rig.RunAsync(master.FastscanAsync(new LssFastscanRequest
         {
             VendorId = new LssFastscanField { KnownHighBitCount = 32, Value = SlaveA.VendorId },
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = SlaveA.ProductCode },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = SlaveA.RevisionNumber },
             SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = SlaveA.SerialNumber },
-        });
+        }));
         known.Status.Should().Be(LssFastscanStatus.Found);
         known.Address.Should().Be(SlaveA);
     }
@@ -550,7 +554,8 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Fastscan_Rejects_A_Selection_That_Cannot_Be_Unique()
     {
-        using var rig = Rig.Open(SlaveA);
+        using var rig = new ClockedLssRig(Quick());
+        rig.Add(SlaveA);
         var skipVendor = async () => await rig.Master.FastscanAsync(new LssFastscanRequest
         {
             VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
@@ -590,15 +595,12 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Short_Frame_And_An_Extended_Frame_Are_Not_An_Lss_Response()
     {
-        using var rig = Rig.Open(SlaveA);
-        using (var shortFrame = CanFrame.Classic(
-            unchecked((int)CanOpenCobId.LssSlaveMessage), new byte[] { 1, 2 }, isExtendedFrame: false))
-            rig.MasterBus.Transmit(shortFrame);
-        using (var extended = CanFrame.Classic(
-            unchecked((int)CanOpenCobId.LssSlaveMessage), new byte[LssFrames.Length], isExtendedFrame: true))
-            rig.MasterBus.Transmit(extended);
+        using var rig = new ClockedLssRig(Quick());
+        rig.Add(SlaveA);
+        await rig.InjectAsync(new byte[] { 1, 2 });
+        await rig.InjectAsync(new byte[LssFrames.Length], extended: true);
 
-        var found = await rig.Master.FastscanAsync();
+        var found = await rig.RunAsync(rig.Master.FastscanAsync());
         found.Succeeded.Should().BeTrue();
         found.Address.Should().Be(SlaveA);
     }
@@ -829,11 +831,12 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
     {
         // BitCheck 0 and LSSNext 0 is the switch into configuration. The vendor-id's own bit 0
         // must not be probed with that pair, including when every field really is zero.
-        using var rig = Rig.Open(new LssAddress(0, 0, 0, 0));
-        var found = await rig.Master.FastscanAsync();
+        using var rig = new ClockedLssRig(Quick());
+        var slave = rig.Add(new LssAddress(0, 0, 0, 0));
+        var found = await rig.RunAsync(rig.Master.FastscanAsync());
         found.Succeeded.Should().BeTrue();
         found.Address.Should().Be(new LssAddress(0, 0, 0, 0));
-        rig.Slave.State.Should().Be(LssState.Configuration);
+        slave.State.Should().Be(LssState.Configuration);
     }
 
     private static async Task EnterConfigurationAsync(Rig rig)

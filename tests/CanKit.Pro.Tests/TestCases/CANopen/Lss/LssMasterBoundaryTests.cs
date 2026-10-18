@@ -1,12 +1,8 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using System.Threading;
-using System.Threading.Channels;
 using System.Threading.Tasks;
 using AwesomeAssertions;
-using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
 using CanKit.Pro.CANopen;
@@ -29,7 +25,7 @@ public class LssMasterBoundaryTests
     public async Task Inquire_Filters_Queued_Replies_By_Their_Arrival_Timestamp(
         long timestamp, bool relativeToDeadline, bool accepted)
     {
-        using var service = new ControlledService();
+        using var service = new LssTestService();
         var timeout = TimeSpan.FromSeconds(1);
         long deadline = 1000 + (long)(timeout.TotalSeconds * Stopwatch.Frequency);
         long arrival = relativeToDeadline ? deadline + timestamp : timestamp;
@@ -38,12 +34,11 @@ public class LssMasterBoundaryTests
             var reply = new byte[LssFrames.Length];
             reply[0] = frame.Data.Span[0];
             reply[1] = 0x42;
-            service.Subscription.Enqueue(new CanFrameEvent(
+            await service.Subscription.Enqueue(new CanFrameEvent(
                 new CanFrameView(CanFrameType.Can20, (int)CanOpenCobId.LssSlaveMessage, reply, FrameFlags.None),
-                isEcho: false, receiveTimestamp: TimeSpan.Zero, hostArrivalTimestamp: arrival));
+                isEcho: false, receiveTimestamp: TimeSpan.Zero, hostArrivalTimestamp: arrival)).WaitAsync(TimeSpan.FromSeconds(5));
             // Resume the sender only after the master has buffered the reply. The absolute
             // deadline is already past, so neither acceptance nor rejection needs a timer.
-            await service.Subscription.Delivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             return new TxConfirmation
             {
                 Confirmed = true,
@@ -65,7 +60,7 @@ public class LssMasterBoundaryTests
     [Fact]
     public async Task Dispose_Leaves_A_Parked_Readers_Cancellation_Source_Alive()
     {
-        using var service = new ControlledService();
+        using var service = new LssTestService();
         service.Subscription.ParkReader = true;
         using var master = CanOpenLss.OpenMaster(service, leaveOpen: false);
         try
@@ -90,96 +85,117 @@ public class LssMasterBoundaryTests
         }
     }
 
-    private sealed class ControlledService : ICanBusService
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task A_Zero_Delay_Return_To_Waiting_Requires_A_Rate_And_A_Switch(bool rate, bool callback)
     {
-        public ControlledSubscription Subscription { get; } = new();
-        public Func<CanFrame, Task<TxConfirmation>> Send { get; set; } = _ => throw new NotSupportedException();
-        public int Disposals { get; private set; }
-        public ICanBus Bus => throw new NotSupportedException();
-        public int SubscriptionCount => Subscription.Disposed ? 0 : 1;
-
-        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        using var rig = new ClockedLssRig(new LssMasterOptions
         {
-            add { }
-            remove { }
-        }
+            BitRateSwitch = callback ? (_, _) => Task.CompletedTask : null,
+        });
+        var activate = async () => await rig.Master.ActivateBitTimingAsync(0,
+            bitsPerSecond: rate ? 250_000 : null, returnToWaiting: true);
 
-        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null,
-            bool includeEcho = false) => Subscription;
-
-        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
-            => Subscription;
-
-        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => Array.Empty<FilterOverlap>();
-
-        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
-            CancellationToken cancellationToken = default) => Send(frame);
-
-        public void Dispose()
-        {
-            Disposals++;
-            Subscription.Dispose();
-        }
+        await activate.Should().ThrowAsync<ArgumentException>();
+        rig.Service.Commands.Should().BeEmpty("validation must happen before the slave changes rate");
     }
 
-    private sealed class ControlledSubscription : ISubscription
+    [Fact]
+    public async Task A_Submillisecond_Response_Window_Ends_Only_When_The_Clock_Reaches_It()
     {
-        private readonly Channel<CanFrameEvent> _frames = Channel.CreateUnbounded<CanFrameEvent>();
-        public TaskCompletionSource<bool> Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<bool> Delivered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<bool> Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<bool> Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public TaskCompletionSource<bool> CancellationObserved { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public bool ParkReader { get; set; }
-        public bool Disposed { get; private set; }
-        public IAsyncEnumerable<CanFrameEvent> Frames => ReadFramesAsync();
+        using var rig = new ClockedLssRig(new LssMasterOptions { ResponseTimeout = TimeSpan.FromTicks(1) });
+        var inquire = rig.Master.InquireNodeIdAsync();
+        await rig.ArmedAsync(TimeSpan.FromTicks(1));
+        inquire.IsCompleted.Should().BeFalse();
 
-        public void Enqueue(CanFrameEvent frame) => _frames.Writer.TryWrite(frame).Should().BeTrue();
-        public bool TryRead(out CanFrameEvent frameEvent) => _frames.Reader.TryRead(out frameEvent);
-        public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
-            => _frames.Reader.WaitToReadAsync(cancellationToken);
-        public void Reconfigure(CanIdFilter filter) => throw new NotSupportedException();
-        public void Reconfigure(Func<CanFrameEvent, bool>? predicate) => throw new NotSupportedException();
+        await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
 
-        public void Dispose()
-        {
-            Disposed = true;
-            _frames.Writer.TryComplete();
-        }
-
-        private async IAsyncEnumerable<CanFrameEvent> ReadFramesAsync(
-            [EnumeratorCancellation] CancellationToken cancellationToken = default)
-        {
-            Started.TrySetResult(true);
-            try
-            {
-                if (ParkReader)
-                {
-                    // Deliberately emulate a subscription that cannot finish during Dispose's
-                    // bounded wait. Release is always signalled by the test's finally block.
-                    await Release.Task;
-                    try
-                    {
-                        using var handle = cancellationToken.WaitHandle;
-                        CancellationObserved.TrySetResult(handle.WaitOne(0));
-                    }
-                    catch (ObjectDisposedException ex)
-                    {
-                        CancellationObserved.TrySetException(ex);
-                    }
-                    yield break;
-                }
-
-                await foreach (var frame in _frames.Reader.ReadAllAsync(cancellationToken))
-                {
-                    yield return frame;
-                    Delivered.TrySetResult(true);
-                }
-            }
-            finally
-            {
-                Finished.TrySetResult(true);
-            }
-        }
+        var result = async () => await inquire.WaitAsync(TimeSpan.FromSeconds(5));
+        await result.Should().ThrowAsync<LssTimeoutException>();
     }
+
+    [Fact]
+    public async Task A_Deadline_Near_The_Counter_Limit_Saturates_Instead_Of_Wrapping()
+    {
+        using var service = new LssTestService();
+        service.Send = async frame =>
+        {
+            var payload = new byte[LssFrames.Length];
+            payload[0] = frame.Data.Span[0];
+            payload[1] = 0x42;
+            await service.Subscription.Enqueue(new CanFrameEvent(
+                new CanFrameView(CanFrameType.Can20, (int)CanOpenCobId.LssSlaveMessage, payload, FrameFlags.None),
+                false, TimeSpan.Zero, long.MaxValue)).WaitAsync(TimeSpan.FromSeconds(5));
+            return new TxConfirmation
+            {
+                Confirmed = true,
+                HostHandoffTimestamp = long.MaxValue - 1,
+                HostTransmitTimestamp = long.MaxValue - 1,
+            };
+        };
+        using var master = CanOpenLss.OpenMaster(service);
+
+        (await master.InquireNodeIdAsync()).Should().Be(0x42);
+    }
+
+    [Fact]
+    public async Task Caller_Cancellation_Wins_Over_Disposal_For_A_Queued_Command()
+    {
+        using var rig = new ClockedLssRig();
+        var first = rig.Master.InquireVendorIdAsync();
+        await rig.ArmedAsync(TimeSpan.FromSeconds(1));
+        using var caller = new CancellationTokenSource();
+        var queued = rig.Master.InquireProductCodeAsync(caller.Token);
+        // This callback runs with the caller token already cancelled. It forces disposal into
+        // the same cancellation notification that releases the queued semaphore waiter.
+        using var dispose = caller.Token.Register(rig.Master.Dispose);
+        caller.Cancel();
+
+        var queuedResult = async () => await queued.WaitAsync(TimeSpan.FromSeconds(5));
+        await queuedResult.Should().ThrowAsync<OperationCanceledException>();
+        var firstResult = async () => await first.WaitAsync(TimeSpan.FromSeconds(5));
+        await firstResult.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Async_Disposal_Does_Not_Take_An_Injected_Timer_Actor()
+    {
+        using var rig = new ClockedLssRig();
+        await rig.Master.DisposeAsync();
+
+        (await rig.Timers.PostAsync(() => true)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Fastscan_Does_Not_Send_The_Next_Probe_Before_The_Cycle_Gap_Ends()
+    {
+        var window = TimeSpan.FromMilliseconds(100);
+        var gap = TimeSpan.FromMilliseconds(1);
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            FastscanTimeout = window,
+            FastscanCycleTime = gap,
+        });
+        rig.Add(new LssAddress(1, 0, 0, 0));
+        var scan = rig.Master.FastscanAsync(new LssFastscanRequest
+        {
+            VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 1 },
+            ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
+            SerialNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 0 },
+        });
+        await rig.ArmedAsync(window);
+        rig.Service.Commands.Count.Should().Be(1);
+        await rig.Clock.AdvanceAsync(window);
+        await rig.ArmedAsync(gap);
+        rig.Service.Commands.Count.Should().Be(1);
+        await rig.Clock.AdvanceAsync(gap - TimeSpan.FromTicks(1));
+        rig.Service.Commands.Count.Should().Be(1);
+        await rig.Clock.AdvanceAsync(TimeSpan.FromTicks(1));
+
+        (await rig.RunAsync(scan)).Succeeded.Should().BeTrue();
+    }
+
 }

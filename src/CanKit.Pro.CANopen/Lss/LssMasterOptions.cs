@@ -50,8 +50,8 @@ public sealed class LssMasterOptions
 
     internal void Validate()
     {
-        // CancelAfter rejects a delay above Int32.MaxValue milliseconds, and a longer span
-        // overflows the tick multiply that builds a receive deadline.
+        // Keep the service's timing bounds stable independently of the scheduler's
+        // representation of absolute deadlines.
         RequireBounded(ResponseTimeout, nameof(ResponseTimeout), allowZero: false);
         RequireBounded(FastscanTimeout, nameof(FastscanTimeout), allowZero: false);
         RequireBounded(FastscanCycleTime, nameof(FastscanCycleTime), allowZero: true);
