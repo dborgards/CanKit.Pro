@@ -297,29 +297,29 @@ public static class LssBitRateDetection
             {
                 using var window = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var elapsed = delay(options.ListenWindow, window.Token);
-                var first = await Task.WhenAny(decided.Task, elapsed).ConfigureAwait(false);
-                if (first == decided.Task)
+                await Task.WhenAny(decided.Task, elapsed).ConfigureAwait(false);
+
+                // The probe's outcome is always the single value `decided` resolves to, never one
+                // computed beside it: that is what closes the window-edge race. When the window
+                // wins, the window's own outcome is offered to the same source, so a frame or a
+                // fault that completed it first still wins (TrySetResult then no-ops), and a frame
+                // arriving after is simply too late rather than silently dropped.
+                if (!decided.Task.IsCompleted)
                 {
-                    // Releases the window's timer; the delay task is not awaited.
+                    // A window that ended because the caller cancelled surfaces that, not a result.
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var state = bus.BusState;
+                    var degraded = state is BusState.ErrWarning or BusState.ErrPassive or BusState.BusOff;
+                    decided.TrySetResult(degraded ? LssBitRateProbeOutcome.Rejected : LssBitRateProbeOutcome.Inconclusive);
+                }
+                else
+                {
+                    // A result arrived before the window closed; release its timer.
                     window.Cancel();
-                    var outcome = await decided.Task.ConfigureAwait(false);
-                    return new LssBitRateProbe(candidate, outcome, Volatile.Read(ref errorFrames), bus.BusState);
                 }
 
-                // Lets a cancellation of the caller's token surface; a completed window returns.
-                await elapsed.ConfigureAwait(false);
-                // A frame or the threshold may have arrived as the window closed.
-                if (decided.Task.IsCompleted)
-                {
-                    var late = await decided.Task.ConfigureAwait(false);
-                    return new LssBitRateProbe(candidate, late, Volatile.Read(ref errorFrames), bus.BusState);
-                }
-
-                var state = bus.BusState;
-                var degraded = state is BusState.ErrWarning or BusState.ErrPassive or BusState.BusOff;
-                return new LssBitRateProbe(candidate,
-                    degraded ? LssBitRateProbeOutcome.Rejected : LssBitRateProbeOutcome.Inconclusive,
-                    Volatile.Read(ref errorFrames), state);
+                var outcome = await decided.Task.ConfigureAwait(false);
+                return new LssBitRateProbe(candidate, outcome, Volatile.Read(ref errorFrames), bus.BusState);
             }
             finally
             {

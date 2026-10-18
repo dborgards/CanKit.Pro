@@ -46,7 +46,7 @@ listen-only mode and reports the first that receives a frame, so it needs traffi
 ```bash
 dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- detect --demo
 dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- detect \
-  --endpoint socketcan://can0 --candidates 500000,250000,125000 --window-ms 2000
+  --endpoint socketcan://can0#netlink --candidates 500000,250000,125000 --window-ms 2000
 ```
 
 `--candidates` is a comma-separated list in try order (default 500/250/125 kbit/s first, then
@@ -54,3 +54,11 @@ the rest of the CiA 301 table). `--window-ms` is the listen time per candidate, 
 how many errors rule a rate out (default 2), `--passes` how many times to walk the list. On the
 demo bus the loopback ignores the configured rate, so the first candidate wins; on real hardware
 the reported rate is the one the bus actually runs. Reopen the adapter at that rate afterwards.
+
+The adapter has to actually apply each candidate rate, or every probe listens at the interface's
+existing rate and the first one with traffic is reported regardless of its value. On SocketCAN
+that means the `#netlink` endpoint, as above: CanKit sets the bit rate and listen-only mode only
+when netlink is enabled (it reconfigures the interface, which needs the privilege to bring it
+down and up), otherwise the interface must already be at the right rate — at which point there is
+nothing to detect. Adapters whose `Baud(...)` takes effect on open (PCAN, Kvaser, Vector) need no
+such suffix.

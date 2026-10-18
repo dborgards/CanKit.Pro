@@ -168,18 +168,29 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public async Task Cancellation_Stops_The_Search_And_Disposes_The_Probe_In_Progress()
+    public async Task Cancellation_Interrupts_The_Open_Window_And_Disposes_The_Probe_In_Progress()
     {
         var opened = new List<DetectionProbeBus>();
-        var options = new LssBitRateDetectionOptions { Candidates = new[] { 500_000, 250_000 } };
+        // One candidate on purpose: with only the single probe, an OperationCanceledException can
+        // come from nowhere but the window path. A second candidate would let the next-candidate
+        // guard throw instead, which is not what this test is for.
+        var options = new LssBitRateDetectionOptions { Candidates = new[] { 500_000 } };
+        options.Validate();
         using var cancellation = new CancellationTokenSource();
 
-        var detect = () => DetectAsync(DetectionProbeBus.Factory(NewSession(), opened), options,
-            new Action<DetectionProbeBus>[] { _ => cancellation.Cancel() }, cancellation.Token);
+        // The window honours its token, so cancelling it interrupts the probe in progress: the
+        // delay is the production wait, linked to the caller's token, and the probe surfaces the
+        // cancellation from the window itself rather than returning an inconclusive result.
+        Func<TimeSpan, CancellationToken, Task> delay = (_, token) =>
+        {
+            cancellation.Cancel();
+            return Task.Delay(Timeout.InfiniteTimeSpan, token);
+        };
+        var detect = () => LssBitRateDetection.DetectCoreAsync(
+            DetectionProbeBus.Factory(NewSession(), opened), options, delay, cancellation.Token);
 
         await detect.Should().ThrowAsync<OperationCanceledException>();
-        opened.Should().ContainSingle("the loop stops before the second candidate is opened")
-            .Which.IsDisposed.Should().BeTrue();
+        opened.Should().ContainSingle().Which.IsDisposed.Should().BeTrue();
     }
 
     [Fact]
@@ -307,9 +318,9 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
-    public void DetectAsync_Rejects_A_Null_Factory()
+    public async Task DetectAsync_Rejects_A_Null_Factory()
     {
-        new Func<Task>(() => LssBitRateDetection.DetectAsync(null!))
+        await new Func<Task>(() => LssBitRateDetection.DetectAsync(null!))
             .Should().ThrowAsync<ArgumentNullException>();
     }
 
