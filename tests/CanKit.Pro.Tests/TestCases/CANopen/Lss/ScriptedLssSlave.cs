@@ -25,6 +25,7 @@ internal sealed class ScriptedLssSlave : IDisposable
     private readonly ISubscription _subscription;
     private readonly CancellationTokenSource _readerCts = new();
     private readonly Task _reader;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
     private readonly List<byte> _commands = new();
     private CancellationTokenSource? _activation;
     private TaskCompletionSource<bool>? _silenceEntered;
@@ -48,8 +49,15 @@ internal sealed class ScriptedLssSlave : IDisposable
 
     public ScriptedLssSlave(ICanBus bus, LssAddress address, byte persistentNodeId = CanOpenCobId.UnconfiguredNodeId,
         bool ownsBus = true)
+        : this(new CanBusService(bus ?? throw new ArgumentNullException(nameof(bus))), address, persistentNodeId,
+            ownsBus: ownsBus)
     {
-        if (bus is null) throw new ArgumentNullException(nameof(bus));
+    }
+
+    internal ScriptedLssSlave(ICanBusService service, LssAddress address,
+        byte persistentNodeId = CanOpenCobId.UnconfiguredNodeId, bool ownsBus = false,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
+    {
         Address = address;
         _ownsBus = ownsBus;
         _persistentNodeId = persistentNodeId;
@@ -59,7 +67,8 @@ internal sealed class ScriptedLssSlave : IDisposable
         _persistentIndex = 2;
         _pendingIndex = 2;
         _activeIndex = 2;
-        _service = new CanBusService(bus);
+        _service = service;
+        _delay = delay ?? Task.Delay;
         _subscription = _service.Subscribe(frame =>
         {
             var can = frame.Frame;
@@ -156,7 +165,7 @@ internal sealed class ScriptedLssSlave : IDisposable
         _subscription.Dispose();
         try
         {
-            _reader.Wait(TimeSpan.FromSeconds(2));
+            _reader.Wait(LssTestTiming.SchedulingBudget);
         }
         catch (AggregateException)
         {
@@ -176,30 +185,34 @@ internal sealed class ScriptedLssSlave : IDisposable
             {
                 var data = frameEvent.Frame.Data;
                 if (data.Length != LssFrames.Length) continue;
-                var copy = data.ToArray();
-                byte[]? response;
-                var length = LssFrames.Length;
-                lock (_gate)
-                {
-                    response = Handle(copy);
-                    if (response is not null && IsSilent)
-                    {
-                        SuppressedResponses++;
-                        response = null;
-                    }
-                    else if (response is not null)
-                    {
-                        length = _nextResponseLength;
-                        _nextResponseLength = LssFrames.Length;
-                    }
-                }
+                var response = Process(data.ToArray());
                 if (response is null) continue;
-                await SendAsync(response, length).ConfigureAwait(false);
+                await SendAsync(response, response.Length).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
         {
             // Dispose.
+        }
+    }
+
+    internal byte[]? Process(byte[] data)
+    {
+        lock (_gate)
+        {
+            var response = Handle(data);
+            if (response is null) return null;
+            if (IsSilent)
+            {
+                SuppressedResponses++;
+                return null;
+            }
+            int length = _nextResponseLength;
+            _nextResponseLength = LssFrames.Length;
+            if (length == response.Length) return response;
+            var resized = new byte[length];
+            Array.Copy(response, resized, Math.Min(length, response.Length));
+            return resized;
         }
     }
 
@@ -296,19 +309,23 @@ internal sealed class ScriptedLssSlave : IDisposable
         }
         _silenceEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = _silenceEntered;
-        _ = Task.Run(async () =>
+        _ = CompleteActivationAsync();
+        return null;
+
+        async Task CompleteActivationAsync()
         {
             try
             {
-                await Task.Delay(delay, token).ConfigureAwait(false);
+                await _delay(TimeSpan.FromMilliseconds(delay), token).ConfigureAwait(false);
                 lock (_gate)
                 {
                     _activeSelector = selector;
                     _activeIndex = index;
                     IsSilent = true;
                 }
+                var second = _delay(TimeSpan.FromMilliseconds(delay), token);
                 entered.TrySetResult(true);
-                await Task.Delay(delay, token).ConfigureAwait(false);
+                await second.ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -318,8 +335,7 @@ internal sealed class ScriptedLssSlave : IDisposable
             {
                 lock (_gate) IsSilent = false;
             }
-        }, token);
-        return null;
+        }
     }
 
     private byte[]? Inquire(byte commandSpecifier)
@@ -436,7 +452,7 @@ internal sealed class ScriptedLssSlave : IDisposable
     private async Task SendAsync(byte[] payload, int length)
     {
         if (ResponseDelay > TimeSpan.Zero)
-            await Task.Delay(ResponseDelay).ConfigureAwait(false);
+            await _delay(ResponseDelay, _readerCts.Token).ConfigureAwait(false);
         if (length != payload.Length)
         {
             var sized = new byte[length];
