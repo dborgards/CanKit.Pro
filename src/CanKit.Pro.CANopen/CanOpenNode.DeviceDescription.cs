@@ -1030,7 +1030,7 @@ internal sealed partial class CanOpenNode
     private uint? ParseUnsigned(DescribedEntry entry, out string? raw) => ParseUnsigned(_nodeId, entry, out raw);
 
     private static bool IsNodeIdFormula(string? value)
-        => value is not null && value.IndexOf("$NODEID", StringComparison.OrdinalIgnoreCase) >= 0;
+        => !string.IsNullOrEmpty(value) && value!.IndexOf("$NODEID", StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static uint? ParseUnsigned(byte nodeId, DescribedEntry entry, out string? raw)
     {

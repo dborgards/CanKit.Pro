@@ -77,9 +77,9 @@ internal sealed partial class CanOpenNode
             // §9.2 "write all safety-relevant parameter incl. checksums"; CiA 319 §5.3 step 1: the
             // SRDO configuration data, then the checksums to 13FFh.
             var declined = new HashSet<(ushort, byte)>(); // optional writes the peer does not implement
-            foreach (var write in writes)
+            // A ReadbackOnly write — the file declares it read-only — is read back, not written.
+            foreach (var write in writes.Where(w => w.Kind != SafetyTransfer.ReadbackOnly))
             {
-                if (write.Kind == SafetyTransfer.ReadbackOnly) continue; // the file declares it read-only: read back, not written
                 try
                 {
                     await SdoDownloadCoreAsync(peerNodeId, write.Index, write.Subindex, write.Value, SdoTransferMode.Auto, cancellationToken, transaction: binding).ConfigureAwait(false);

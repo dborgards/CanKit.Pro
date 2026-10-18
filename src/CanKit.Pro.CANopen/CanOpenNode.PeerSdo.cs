@@ -233,11 +233,8 @@ internal sealed partial class CanOpenNode
 
         private static SrvtDeclaration SrvtDeclarationOf(List<DescribedEntry> entries)
         {
-            foreach (var entry in entries)
-            {
-                if (entry.Subindex != 0x03) continue;
+            foreach (var entry in entries.Where(e => e.Subindex == 0x03))
                 return (MapAccess(entry.Access) & OdAccess.WriteOnly) != 0 ? SrvtDeclaration.Writable : SrvtDeclaration.ReadOnly;
-            }
             return SrvtDeclaration.Undeclared;
         }
 
