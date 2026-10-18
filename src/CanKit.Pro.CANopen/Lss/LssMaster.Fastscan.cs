@@ -152,8 +152,7 @@ internal sealed partial class LssMaster
         // 4Fh that arrives after the first must not be read as the next bit.
         var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
             Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
-        _nextFastscanAt = TickMath.DueAt(_timers.TimeSource.GetTimestamp(), Options.FastscanCycleTime,
-            _timers.TimeSource.Frequency);
+        _nextFastscanAt = TickMath.DueAt(_time.GetTimestamp(), Options.FastscanCycleTime, _time.Frequency);
         return response is not null;
     }
 

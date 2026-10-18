@@ -966,12 +966,17 @@ if (found.Succeeded)
     await master.SwitchStateGlobalAsync(LssState.Waiting);
 }
 
-// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here. BitRateSwitch, when
-// set, runs between them and retunes the channel this master is already reading.
+// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here.
+// No host-switch callback is configured in this example, so omit the per-call bit rate.
 await master.SwitchStateGlobalAsync(LssState.Configuration);
 await master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, tableIndex: 2);
-await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100, bitsPerSecond: 500_000);
+await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100);
 ```
+
+Before sending further commands, dispose this master and reopen the adapter at 500 kbit/s.
+To retune the already-open channel between the two periods instead, configure `BitRateSwitch`
+and pass `bitsPerSecond` to `ActivateBitTimingAsync`. A supplied rate requires that callback
+on every activation path; a missing callback is rejected before any frame is sent.
 
 `ConfigureNodeIdAsync` sends the value it is given, including values the protocol rejects, so
 the slave's error code (`LssCommand.NodeIdOutOfRange`, or `LssCommand.ManufacturerSpecific`

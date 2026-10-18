@@ -43,7 +43,8 @@ public sealed class LssMasterOptions
     /// Called from <see cref="ILssMaster.ActivateBitTimingAsync"/> after the first switch-delay
     /// period, with the bit rate the caller named. The callback retunes the channel this master
     /// is already reading. It must not dispose that bus: the second delay, and a waiting frame
-    /// sent after a zero delay, still use it. Null leaves the adapter alone. A caller whose
+    /// sent after a zero delay, still use it. Specifying a bit rate on the call requires this
+    /// callback. Leave both unset to leave the adapter alone. A caller whose
     /// adapter cannot change rate while open omits <c>returnToWaiting</c>, disposes this master
     /// after the call returns, and sends switch state global from a new master on the new bus.
     /// </summary>
@@ -61,8 +62,8 @@ public sealed class LssMasterOptions
 
     private static void RequireBounded(TimeSpan value, string name, bool allowZero)
     {
-        var above = allowZero ? value < TimeSpan.Zero : value <= TimeSpan.Zero;
-        if (!above && value <= TimeSpan.FromMilliseconds(int.MaxValue)) return;
+        var belowMinimum = allowZero ? value < TimeSpan.Zero : value <= TimeSpan.Zero;
+        if (!belowMinimum && value <= TimeSpan.FromMilliseconds(int.MaxValue)) return;
         var message = allowZero
             ? "Must not be negative and no longer than 2147483647 milliseconds."
             : "Must be positive and no longer than 2147483647 milliseconds.";

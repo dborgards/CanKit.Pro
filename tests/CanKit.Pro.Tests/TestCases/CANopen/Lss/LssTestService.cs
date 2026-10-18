@@ -62,6 +62,7 @@ internal sealed class LssTestSubscription : ISubscription
     public Func<CanFrameEvent, bool>? Filter { get; set; }
     public bool ParkReader { get; set; }
     public Exception? ReadFailure { get; set; }
+    public Action? BeforeRead { get; set; }
     public Exception? WaitFailure { get; set; }
     public bool FailAfterFirstRead { get; set; }
     private bool _readOne;
@@ -78,6 +79,7 @@ internal sealed class LssTestSubscription : ISubscription
 
     public bool TryRead(out CanFrameEvent frameEvent)
     {
+        BeforeRead?.Invoke();
         if (ReadFailure is { } error && (!FailAfterFirstRead || _readOne)) throw error;
         if (_frames.Reader.TryRead(out var item))
         {

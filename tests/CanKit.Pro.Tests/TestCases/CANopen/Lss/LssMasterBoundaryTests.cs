@@ -102,6 +102,22 @@ public class LssMasterBoundaryTests
         rig.Service.Commands.Should().BeEmpty("validation must happen before the slave changes rate");
     }
 
+    [Theory]
+    [InlineData(0, false)]
+    [InlineData(0, true)]
+    [InlineData(100, false)]
+    [InlineData(100, true)]
+    public async Task A_Supplied_Bit_Rate_Requires_A_Callback_Before_Any_Activation(int delay, bool returnToWaiting)
+    {
+        using var rig = new ClockedLssRig();
+        var activate = async () => await rig.Master.ActivateBitTimingAsync((ushort)delay, 500_000, returnToWaiting)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        var error = await activate.Should().ThrowAsync<ArgumentException>();
+        error.Which.ParamName.Should().Be("bitsPerSecond");
+        rig.Service.Commands.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task A_Submillisecond_Response_Window_Ends_Only_When_The_Clock_Reaches_It()
     {
@@ -284,6 +300,47 @@ public class LssMasterBoundaryTests
         await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
         await activating.WaitAsync(TimeSpan.FromSeconds(5));
         (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(200));
+    }
+
+    [Theory]
+    [InlineData(100)]
+    [InlineData(150)]
+    [InlineData(250)]
+    public async Task A_Late_Waiting_Confirmation_Resends_At_The_New_Rate_Despite_An_Early_Transmit_Stamp(int latency)
+    {
+        bool retuned = false;
+        var waiting = new System.Collections.Generic.List<(TimeSpan At, bool Retuned)>();
+        using var rig = new ClockedLssRig(new LssMasterOptions
+        {
+            BitRateSwitch = (_, _) => { retuned = true; return Task.CompletedTask; },
+        });
+        var send = rig.Service.Send;
+        rig.Service.Send = async frame =>
+        {
+            bool isWaiting = frame.Data.Span[0] == LssCommand.SwitchStateGlobal;
+            if (isWaiting) waiting.Add((rig.Clock.Elapsed - TimeSpan.FromSeconds(1), retuned));
+            var confirmation = await send(frame);
+            // The driver's early stamp remains unchanged while confirmation arrives later.
+            if (isWaiting && waiting.Count == 1)
+                rig.Clock.Advance(TimeSpan.FromMilliseconds(latency));
+            return confirmation;
+        };
+
+        var activating = rig.Master.ActivateBitTimingAsync(100, 250_000, returnToWaiting: true);
+        retuned.Should().BeTrue();
+        if (latency < 200)
+        {
+            var remaining = TimeSpan.FromMilliseconds(200 - latency);
+            await rig.ArmedAsync(remaining);
+            activating.IsCompleted.Should().BeFalse();
+            await rig.Clock.AdvanceAsync(remaining);
+        }
+        await activating.WaitAsync(TimeSpan.FromSeconds(5));
+
+        waiting.Should().HaveCount(2);
+        waiting[0].Retuned.Should().BeFalse();
+        waiting[1].Retuned.Should().BeTrue();
+        waiting[1].At.Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, latency)));
     }
 
     [Theory]
@@ -571,14 +628,12 @@ public class LssMasterBoundaryTests
     }
 
     [Theory]
-    [InlineData(false, false, false)]
-    [InlineData(true, false, false)]
-    [InlineData(false, true, false)]
-    [InlineData(false, false, true)]
-    [InlineData(true, false, true)]
-    [InlineData(false, true, true)]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
     public async Task A_Missed_Waiting_Window_Without_A_Host_Switch_Is_A_Transport_Error(
-        bool rate, bool callback, bool lateWaiting)
+        bool callback, bool lateWaiting)
     {
         using var rig = new ClockedLssRig(new LssMasterOptions
         {
@@ -596,7 +651,7 @@ public class LssMasterBoundaryTests
         };
 
         var activating = rig.Master.ActivateBitTimingAsync(100,
-            bitsPerSecond: rate ? 250_000 : null, returnToWaiting: true);
+            returnToWaiting: true);
         activating.IsCompleted.Should().BeFalse("the slaves are still in their silent period");
         await rig.ArmedAsync(TimeSpan.FromMilliseconds(50));
         var following = rig.Master.SwitchStateGlobalAsync(LssState.Waiting);
