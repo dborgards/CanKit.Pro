@@ -20,6 +20,8 @@ namespace CanKit.Pro.CANopen
         public const uint GlobalFailsafeCommand = 1u;
         public const uint HeartbeatBase = 1792u;
         public const uint InvalidBit = 2147483648u;
+        public const uint LssMasterMessage = 2021u;
+        public const uint LssSlaveMessage = 2020u;
         public const byte MaxNodeId = 127;
         public const byte MinNodeId = 1;
         public const uint NmtCommand = 0u;
@@ -38,8 +40,11 @@ namespace CanKit.Pro.CANopen
         public const uint Tpdo2Base = 640u;
         public const uint Tpdo3Base = 896u;
         public const uint Tpdo4Base = 1152u;
+        public const byte UnconfiguredNodeId = 255;
         public static uint Emcy(byte nodeId) { }
         public static uint Heartbeat(byte nodeId) { }
+        public static bool IsActiveNodeId(byte nodeId) { }
+        public static bool IsLayerSettingNodeId(byte nodeId) { }
         public static bool IsRestricted(uint canId) { }
         public static uint RpdoDefault(byte nodeId, int pdoIndex) { }
         public static uint SdoRx(byte nodeId) { }
@@ -411,6 +416,191 @@ namespace CanKit.Pro.CANopen.Emcy
         public byte ProducerNodeId { get; }
         public byte[] Encode() { }
         public static CanKit.Pro.CANopen.Emcy.EmcyMessage Decode(byte producerNodeId, System.ReadOnlySpan<byte> data) { }
+    }
+}
+namespace CanKit.Pro.CANopen.Lss
+{
+    public static class CanOpenLss
+    {
+        public static CanKit.Pro.CANopen.Lss.ILssMaster OpenMaster(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.CANopen.Lss.LssMasterOptions? options = null) { }
+        public static CanKit.Pro.CANopen.Lss.ILssMaster OpenMaster(CanKit.Pro.RawCan.ICanBusService service, CanKit.Pro.CANopen.Lss.LssMasterOptions? options = null, bool leaveOpen = true) { }
+    }
+    public interface ILssMaster : System.IAsyncDisposable, System.IDisposable
+    {
+        CanKit.Pro.CANopen.Lss.LssMasterOptions Options { get; }
+        System.Threading.Tasks.Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = default, bool returnToWaiting = false, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssServiceResult> ConfigureNodeIdAsync(byte nodeId, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssFastscanResult> FastscanAsync(CanKit.Pro.CANopen.Lss.LssFastscanRequest? request = null, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<bool> IdentifyNonConfiguredSlavesAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<bool> IdentifyRemoteSlavesAsync(CanKit.Pro.CANopen.Lss.LssIdentityRange range, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssAddress> InquireAddressAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte> InquireNodeIdAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<uint> InquireProductCodeAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<uint> InquireRevisionNumberAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<uint> InquireSerialNumberAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<uint> InquireVendorIdAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssServiceResult> StoreConfigurationAsync(System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task SwitchStateGlobalAsync(CanKit.Pro.CANopen.Lss.LssState state, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<bool> SwitchStateSelectiveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, System.ReadOnlyMemory<byte> parameters, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public readonly struct LssAddress : System.IEquatable<CanKit.Pro.CANopen.Lss.LssAddress>
+    {
+        public LssAddress(uint vendorId, uint productCode, uint revisionNumber, uint serialNumber) { }
+        public uint this[int index] { get; }
+        public uint ProductCode { get; }
+        public uint RevisionNumber { get; }
+        public uint SerialNumber { get; }
+        public uint VendorId { get; }
+        public bool Equals(CanKit.Pro.CANopen.Lss.LssAddress other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public override string ToString() { }
+        public static bool operator !=(CanKit.Pro.CANopen.Lss.LssAddress left, CanKit.Pro.CANopen.Lss.LssAddress right) { }
+        public static bool operator ==(CanKit.Pro.CANopen.Lss.LssAddress left, CanKit.Pro.CANopen.Lss.LssAddress right) { }
+    }
+    public static class LssBitTiming
+    {
+        public const byte AutomaticIndex = 9;
+        public const byte Cia301Table = 0;
+        public const byte ManufacturerTableFirst = 128;
+        public const byte ManufacturerTableLast = 254;
+        [System.Runtime.CompilerServices.TupleElementNames(new string[] {
+                "Index",
+                "BitsPerSecond"})]
+        public static System.Collections.Generic.IReadOnlyList<System.ValueTuple<byte, int>> Cia301Rates { get; }
+        public static bool IsManufacturerTable(byte tableSelector) { }
+        public static bool TryGetCia301Index(int bitsPerSecond, out byte tableIndex) { }
+        public static bool TryGetCia301Rate(byte tableIndex, out int bitsPerSecond) { }
+    }
+    public static class LssCommand
+    {
+        public const byte ActivateBitTiming = 21;
+        public const byte BitTimingNotSupported = 1;
+        public const byte BitTimingOk = 0;
+        public const byte ConfigureBitTiming = 19;
+        public const byte ConfigureNodeId = 17;
+        public const byte Fastscan = 81;
+        public const byte FastscanReset = 128;
+        public const byte IdentifyNonConfiguredRemote = 76;
+        public const byte IdentifyNonConfiguredSlave = 80;
+        public const byte IdentifyRemoteProduct = 71;
+        public const byte IdentifyRemoteRevisionHigh = 73;
+        public const byte IdentifyRemoteRevisionLow = 72;
+        public const byte IdentifyRemoteSerialHigh = 75;
+        public const byte IdentifyRemoteSerialLow = 74;
+        public const byte IdentifyRemoteVendor = 70;
+        public const byte IdentifySlave = 79;
+        public const byte InquireNodeId = 94;
+        public const byte InquireProductCode = 91;
+        public const byte InquireRevisionNumber = 92;
+        public const byte InquireSerialNumber = 93;
+        public const byte InquireVendorId = 90;
+        public const byte ManufacturerSpecific = 255;
+        public const byte ModeConfiguration = 1;
+        public const byte ModeWaiting = 0;
+        public const byte NodeIdOk = 0;
+        public const byte NodeIdOutOfRange = 1;
+        public const byte StoreConfiguration = 23;
+        public const byte StoreMediaError = 2;
+        public const byte StoreNotSupported = 1;
+        public const byte StoreOk = 0;
+        public const byte SwitchSelectiveAcknowledge = 68;
+        public const byte SwitchSelectiveProduct = 65;
+        public const byte SwitchSelectiveRevision = 66;
+        public const byte SwitchSelectiveSerial = 67;
+        public const byte SwitchSelectiveVendor = 64;
+        public const byte SwitchStateGlobal = 4;
+        public static bool IsManufacturerSpecific(byte commandSpecifier) { }
+    }
+    public sealed class LssFastscanField
+    {
+        public LssFastscanField() { }
+        public int KnownHighBitCount { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanFieldMode Mode { get; init; }
+        public uint Value { get; init; }
+    }
+    public enum LssFastscanFieldMode
+    {
+        Scan = 0,
+        Match = 1,
+        Skip = 2,
+    }
+    public sealed class LssFastscanRequest
+    {
+        public LssFastscanRequest() { }
+        public CanKit.Pro.CANopen.Lss.LssFastscanField ProductCode { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanField RevisionNumber { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanField SerialNumber { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanField VendorId { get; init; }
+    }
+    public sealed class LssFastscanResult
+    {
+        public CanKit.Pro.CANopen.Lss.LssAddress Address { get; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanStatus Status { get; }
+        public bool Succeeded { get; }
+        public static CanKit.Pro.CANopen.Lss.LssFastscanResult Found(CanKit.Pro.CANopen.Lss.LssAddress address) { }
+        public static CanKit.Pro.CANopen.Lss.LssFastscanResult NoMatch(CanKit.Pro.CANopen.Lss.LssAddress @partial) { }
+        public static CanKit.Pro.CANopen.Lss.LssFastscanResult NoUnconfiguredSlave() { }
+    }
+    public enum LssFastscanStatus
+    {
+        Found = 0,
+        NoUnconfiguredSlave = 1,
+        NoMatch = 2,
+    }
+    public readonly struct LssIdentityRange : System.IEquatable<CanKit.Pro.CANopen.Lss.LssIdentityRange>
+    {
+        public LssIdentityRange(CanKit.Pro.CANopen.Lss.LssAddress address) { }
+        public LssIdentityRange(uint vendorId, uint productCode, uint revisionLow, uint revisionHigh, uint serialLow, uint serialHigh) { }
+        public uint ProductCode { get; }
+        public uint RevisionHigh { get; }
+        public uint RevisionLow { get; }
+        public uint SerialHigh { get; }
+        public uint SerialLow { get; }
+        public uint VendorId { get; }
+        public bool Contains(CanKit.Pro.CANopen.Lss.LssAddress address) { }
+        public bool Equals(CanKit.Pro.CANopen.Lss.LssIdentityRange other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public static bool operator !=(CanKit.Pro.CANopen.Lss.LssIdentityRange left, CanKit.Pro.CANopen.Lss.LssIdentityRange right) { }
+        public static bool operator ==(CanKit.Pro.CANopen.Lss.LssIdentityRange left, CanKit.Pro.CANopen.Lss.LssIdentityRange right) { }
+    }
+    public sealed class LssMasterOptions
+    {
+        public LssMasterOptions() { }
+        public System.Func<int, System.Threading.CancellationToken, System.Threading.Tasks.Task>? BitRateSwitch { get; init; }
+        public System.TimeSpan FastscanCycleTime { get; init; }
+        public System.TimeSpan FastscanTimeout { get; init; }
+        public System.TimeSpan IdentificationTimeout { get; init; }
+        public System.TimeSpan ResponseTimeout { get; init; }
+    }
+    public readonly struct LssServiceResult : System.IEquatable<CanKit.Pro.CANopen.Lss.LssServiceResult>
+    {
+        public LssServiceResult(byte errorCode, byte specError) { }
+        public byte ErrorCode { get; }
+        public bool IsManufacturerSpecific { get; }
+        public byte SpecError { get; }
+        public bool Succeeded { get; }
+        public static CanKit.Pro.CANopen.Lss.LssServiceResult Success { get; }
+        public bool Equals(CanKit.Pro.CANopen.Lss.LssServiceResult other) { }
+        public override bool Equals(object? obj) { }
+        public override int GetHashCode() { }
+        public override string ToString() { }
+        public static bool operator !=(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
+        public static bool operator ==(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
+    }
+    public enum LssState : byte
+    {
+        Waiting = 0,
+        Configuration = 1,
+    }
+    public sealed class LssTimeoutException : CanKit.Core.Exceptions.CanKitException
+    {
+        public LssTimeoutException(byte commandSpecifier, System.TimeSpan timeout) { }
+        public byte CommandSpecifier { get; }
+        public System.TimeSpan Timeout { get; }
     }
 }
 namespace CanKit.Pro.CANopen.Nmt

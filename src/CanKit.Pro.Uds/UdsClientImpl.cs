@@ -1484,43 +1484,9 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     private Task DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
         => _clock is null ? Task.Delay(delay, cancellationToken) : WaitOnClockAsync(_clock, delay, cancellationToken);
 
-    private static async Task WaitOnClockAsync(ProtocolActor clock, TimeSpan delay, CancellationToken cancellationToken)
-    {
-        var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var registration = cancellationToken.Register(static state =>
-            ((TaskCompletionSource<bool>)state!).TrySetCanceled(), done);
-        using var handle = clock.Schedule(delay, () => done.TrySetResult(true));
-        await done.Task.ConfigureAwait(false);
-    }
-
-    private sealed class ClockTimeout : IDisposable
-    {
-        private readonly CancellationTokenSource _cts;
-        private readonly IDisposable? _timer;
-
-        public ClockTimeout(TimeSpan remaining)
-            => _cts = new CancellationTokenSource(remaining);
-
-        public ClockTimeout(ProtocolActor clock, long deadline)
-        {
-            _cts = new CancellationTokenSource();
-            _timer = clock.ScheduleAt(deadline, () => ThreadPool.QueueUserWorkItem(static state =>
-                ((CancellationTokenSource)state!).Cancel(), _cts));
-        }
-
-        public CancellationToken Token => _cts.Token;
-
-        public bool IsCancellationRequested => _cts.IsCancellationRequested;
-
-        // On the actor's clock only the timer is released: a source without a timer of its own
-        // holds nothing that needs it, and one whose cancellation the timer has already handed
-        // to the thread pool must stay cancellable rather than throw there.
-        public void Dispose()
-        {
-            if (_timer is null) _cts.Dispose();
-            else _timer.Dispose();
-        }
-    }
+    private static Task WaitOnClockAsync(ProtocolActor clock, TimeSpan delay, CancellationToken cancellationToken)
+        => ClockTimeout.WaitUntilAsync(clock,
+            TickMath.DueAt(clock.TimeSource.GetTimestamp(), delay, clock.TimeSource.Frequency), cancellationToken);
 
     /// <summary>
     /// Elapsed time between two <see cref="Stopwatch.GetTimestamp"/> readings (or the injected

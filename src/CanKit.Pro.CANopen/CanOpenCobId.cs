@@ -17,6 +17,8 @@ namespace CanKit.Pro.CANopen;
 ///   <item><description>SDO server → client — <c>0x580 + node-id</c></description></item>
 ///   <item><description>SDO client → server — <c>0x600 + node-id</c></description></item>
 ///   <item><description>NMT error control (heartbeat / bootup) — <c>0x700 + node-id</c></description></item>
+///   <item><description>LSS slave message — <c>0x7E4</c> (CiA 305 §7.3)</description></item>
+///   <item><description>LSS master message — <c>0x7E5</c> (CiA 305 §7.3)</description></item>
 /// </list>
 /// </remarks>
 public static class CanOpenCobId
@@ -85,6 +87,18 @@ public static class CanOpenCobId
     /// <summary>Base COB-ID for NMT error control (heartbeat + bootup): <c>0x700 + node-id</c>.</summary>
     public const uint HeartbeatBase = 0x700;
 
+    /// <summary>LSS slave message CAN-ID (CiA 305 §7.3). Every LSS slave transmits here.</summary>
+    public const uint LssSlaveMessage = 0x7E4;
+
+    /// <summary>LSS master message CAN-ID (CiA 305 §7.3). The single LSS master transmits here.</summary>
+    public const uint LssMasterMessage = 0x7E5;
+
+    /// <summary>
+    /// Pending or persistent node-id that means the slave is not configured (CiA 305 §3.3).
+    /// It is not an active node-id: nothing on the bus is addressed with it.
+    /// </summary>
+    public const byte UnconfiguredNodeId = 0xFF;
+
     /// <summary>Global failsafe command, CiA DSP 304 V1.0 §8.2.3 / Table 3: COB-ID 001h, DLC 0.</summary>
     public const uint GlobalFailsafeCommand = 0x001;
 
@@ -150,13 +164,24 @@ public static class CanOpenCobId
 
     /// <summary>Validates that <paramref name="nodeId"/> falls in the legal CiA 301 range.</summary>
     /// <exception cref="ArgumentOutOfRangeException">Thrown when <paramref name="nodeId"/> is
-    /// outside <c>[1, 127]</c>.</exception>
+    /// outside <c>[1, 127]</c>. <see cref="UnconfiguredNodeId"/> is rejected here: it is a layer
+    /// setting, not an address a frame may use.</exception>
     public static void ValidateNodeId(byte nodeId)
     {
-        if (nodeId < MinNodeId || nodeId > MaxNodeId)
+        if (!IsActiveNodeId(nodeId))
             throw new ArgumentOutOfRangeException(nameof(nodeId), nodeId,
                 $"CANopen node-id must be in [{MinNodeId}, {MaxNodeId}].");
     }
+
+    /// <summary>Whether <paramref name="nodeId"/> may be the active node-id on the bus (1..127).</summary>
+    public static bool IsActiveNodeId(byte nodeId) => nodeId >= MinNodeId && nodeId <= MaxNodeId;
+
+    /// <summary>
+    /// Whether <paramref name="nodeId"/> is a legal pending or persistent layer-setting node-id:
+    /// 1..127, or <see cref="UnconfiguredNodeId"/>.
+    /// </summary>
+    public static bool IsLayerSettingNodeId(byte nodeId)
+        => IsActiveNodeId(nodeId) || nodeId == UnconfiguredNodeId;
 
     /// <summary>Returns <c>0x580 + node-id</c>, the SDO server → client (SDO Tx) COB-ID.</summary>
     public static uint SdoTx(byte nodeId) => SdoTxBase + nodeId;

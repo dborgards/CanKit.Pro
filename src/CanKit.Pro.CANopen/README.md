@@ -7,7 +7,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — and CANopen Safety as it reads CiA DSP 304 V1.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0, and an LSS master as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is validated against a scripted slave in that suite, not against a third-party LSS slave.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
@@ -36,8 +36,9 @@ FR-CO-024 are the device-role scope the maintainer decided on 16 September 2026
 scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #131
 (`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-048 to FR-CO-053 add the PDO extensions requested on 18 October 2026. FR-CO-035 to FR-CO-046 are CANopen
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
-(`docs/reviews/2026-10-09-canopen-safety-scope.md`). The SRS's "Quelle" column says for each
-of them whether a standard requires it, the architecture does, or a maintainer decision does.
+(`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
+v3.0.0. The SRS's "Quelle" column says for each of them whether a standard requires it, the
+architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
 | --- | --- |
@@ -87,6 +88,7 @@ of them whether a standard requires it, the architecture does, or a maintainer d
 | FR-CO-044 | `ConfigurePeerSafetyAsync` after §9.2 (write, read back, compare, `A5h` only without a difference) and `VerifyPeerSafetyConfigurationAsync` after §8.3.1 step D, both through the peer-SDO gate ([Configuring a peer](#configuring-a-peer)) |
 | FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start, and no Start goes to node 0 while one is assigned; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
+| FR-CO-047 | LSS master (CiA 305): switch state global and selective, configure node-id and bit timing, activate with both switch delays, store, inquire identity and node-id, identify remote and non-configured slaves, Fastscan ([Layer setting services](#layer-setting-services-cia-305)) |
 
 ## Not built, and why
 
@@ -125,6 +127,17 @@ Deliberate omissions, each checked against the norm text:
 * **Bit-granular SRDO mapping and more than 8 objects per SRDO** — the safety mapping retains its own narrower limits; the PDO extensions do not widen them.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
+* **LSS slave and the commissioning tool** — FR-CO-047 is the master only. A node does not yet
+  answer 7E5h, and an unconfigured node-id (`FFh`) is still rejected by `OpenNode`.
+* **Automatic bit-rate detection** — table 0 index 9 (CiA 801). The master sends the index; it
+  does not search for a rate itself.
+* **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
+  periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
+  that callback between them. The callback must retune the channel this master is already
+  reading; it must not dispose that bus. The second delay, and a waiting frame after a zero
+  delay, still go out on it. An adapter that cannot change rate while open is left alone:
+  omit `returnToWaiting`, dispose this master after the call returns, and send switch state
+  global from a new master on the new bus.
 
 What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
@@ -988,6 +1001,67 @@ the checksum — and has not been run against a certified safety device or teste
 redundancy of §9.5 (the pair "built by two different ways", the data "compared … in the
 application") and the safe state a safety controller enters are the device's to provide.
 
+## Layer setting services (CiA 305)
+
+`CanOpenLss.OpenMaster` is an LSS master (FR-CO-047). It transmits on `7E5h` and receives on
+`7E4h`. Exactly one LSS master may be active in a CANopen network; this type does not police
+other processes. Commands run one at a time. A confirmed service that draws no response within
+`LssMasterOptions.ResponseTimeout` throws `LssTimeoutException`. Switch state selective, the
+identify services and the Fastscan reset step treat that silence as "no slave matched".
+
+Switch state global with `LssState.Configuration` puts every LSS slave into configuration. Use
+it only when the network has a single LSS slave. Otherwise select one slave with
+`SwitchStateSelectiveAsync`, or let Fastscan do it: a successful Fastscan leaves that one
+unconfigured slave in configuration, and switch state selective is not required afterwards.
+
+```csharp
+await using var master = CanOpenLss.OpenMaster(bus, new LssMasterOptions
+{
+    ResponseTimeout = TimeSpan.FromSeconds(1),
+    FastscanTimeout = TimeSpan.FromMilliseconds(50),
+});
+
+var found = await master.FastscanAsync();
+if (found.Succeeded)
+{
+    var nodeId = await master.ConfigureNodeIdAsync(0x10);
+    if (nodeId.Succeeded)
+        await master.StoreConfigurationAsync();
+    await master.SwitchStateGlobalAsync(LssState.Waiting);
+}
+
+// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here.
+// No host-switch callback is configured in this example, so omit the per-call bit rate.
+await master.SwitchStateGlobalAsync(LssState.Configuration);
+await master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, tableIndex: 2);
+await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100);
+```
+
+Before sending further commands, dispose this master and reopen the adapter at 500 kbit/s.
+To retune the already-open channel between the two periods instead, configure `BitRateSwitch`
+and pass `bitsPerSecond` to `ActivateBitTimingAsync`. A supplied rate requires that callback
+on every activation path; a missing callback is rejected before any frame is sent.
+
+`ConfigureNodeIdAsync` sends the value it is given, including values the protocol rejects, so
+the slave's error code (`LssCommand.NodeIdOutOfRange`, or `LssCommand.ManufacturerSpecific`
+with `LssServiceResult.SpecError`) can be observed. `FFh` is a legal pending node-id: the
+slave is then not configured. Inquire node-id reports the active node-id, or the pending one
+when the slave has no active node-id yet.
+
+Fastscan walks vendor-id, product code, revision and serial. Bit 0 has priority over bit 1, so
+the slave found is the numerically smallest address among the unconfigured slaves that take
+part. A field can be scanned, matched (the number is already known) or skipped. The vendor-id
+cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
+`KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
+Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
+extra gap before the next Fastscan request, including the reset of a new scan. A completed scan
+returns without waiting for that gap. Identify waits out `IdentificationTimeout` the same way, so a
+later slave is not left queued for the next command. Give the slave a node-id in `1..127`
+before the next Fastscan, or the same slave is found again.
+
+The LSS slave inside `ICanOpenNode`, and a commissioning tool on top of this master, are not
+part of FR-CO-047.
+
 ## Flying master
 
 A master application joins the NMT flying-master election with `StartFlyingMaster`. The binding
@@ -1190,6 +1264,7 @@ CanKit.Pro.CANopen/
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
   Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
+  Lss/                                // CiA 305: LSS master, frame codec, Fastscan, address and bit-timing types
 ```
 
 ## Migrating from 1.2.x
