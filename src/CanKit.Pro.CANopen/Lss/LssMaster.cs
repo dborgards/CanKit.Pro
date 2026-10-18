@@ -75,16 +75,13 @@ internal sealed partial class LssMaster : ILssMaster
         Options = options;
         options.Validate();
         _ownsService = ownsService;
-        ISubscription? subscribed = null;
         try
         {
-            subscribed = service.Subscribe(frame =>
+            _subscription = service.Subscribe(frame =>
             {
                 var can = frame.Frame;
                 return !can.IsExtendedFrame && (uint)can.ID == CanOpenCobId.LssSlaveMessage;
             });
-            _subscription = subscribed;
-            _readerTask = Task.Run(ReadAsync);
         }
         catch
         {
@@ -92,13 +89,13 @@ internal sealed partial class LssMaster : ILssMaster
             // constructor already created so the caller can open again on the same service.
             _lifetime.Cancel();
             _readerCts.Cancel();
-            subscribed?.Dispose();
             _inbound.Writer.TryComplete();
             _readerCts.Dispose();
             _lifetime.Dispose();
             _gate.Dispose();
             throw;
         }
+        _readerTask = Task.Run(ReadAsync);
     }
 
     /// <inheritdoc />
