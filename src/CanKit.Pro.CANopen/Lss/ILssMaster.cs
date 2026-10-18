@@ -73,6 +73,9 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
     /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
     /// switch the master is still on the old rate and the slave will not hear the frame.
+    /// Cancellation or failure returns to the caller promptly; subsequent commands still wait
+    /// for the activation's two periods. An unconfirmed activation conservatively reserves
+    /// both periods from the failed send's completion.
     /// </summary>
     /// <exception cref="ArgumentException">A bit rate requires a switch callback. A zero delay with returnToWaiting requires both.</exception>
     /// <exception cref="CanOpenTransportException">The old-rate waiting window was missed and no host bit-rate switch is available.</exception>

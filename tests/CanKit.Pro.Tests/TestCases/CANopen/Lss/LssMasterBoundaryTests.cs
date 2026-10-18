@@ -397,6 +397,8 @@ public class LssMasterBoundaryTests
         }
         await activating.WaitAsync(TimeSpan.FromSeconds(5));
         (rig.Clock.Elapsed - TimeSpan.FromSeconds(1)).Should().Be(TimeSpan.FromMilliseconds(Math.Max(200, latency)));
+        rig.Service.Send = send;
+        await rig.Master.SwitchStateGlobalAsync(LssState.Waiting).WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [Fact]

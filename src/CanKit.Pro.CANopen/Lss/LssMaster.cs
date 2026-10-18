@@ -77,6 +77,8 @@ internal sealed partial class LssMaster : ILssMaster
     private readonly CancellationTokenSource _lifetime = new();
 
     private int _disposed;
+    // Guarded by _gate. An aborted activation must not release its silence reservation.
+    private long _nextCommandAt;
 
     internal LssMaster(ICanBusService service, LssMasterOptions options, bool ownsService, ProtocolActor? timers = null)
     {
@@ -162,12 +164,23 @@ internal sealed partial class LssMaster : ILssMaster
             throw new ArgumentException("Returning to waiting after a zero delay requires a bit rate and BitRateSwitch callback.");
         return Execute(async ct =>
         {
-            var sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
             var delay = TimeSpan.FromMilliseconds(switchDelayMilliseconds);
             var time = _time;
+            Sent sent;
+            try
+            {
+                sent = await SendAsync(LssFrames.ActivateBitTiming(switchDelayMilliseconds), ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                // A failed confirmation cannot prove the activate frame did not reach a slave.
+                // Reserve both periods from completion until a confirmed stamp can narrow it.
+                _nextCommandAt = TickMath.DueAt(time.GetTimestamp(), delay + delay, time.Frequency);
+            }
             long start = sent.Transmit > 0 ? sent.Transmit : time.GetTimestamp();
             long switchAt = TickMath.DueAt(start, delay, time.Frequency);
             long resumeAt = TickMath.DueAt(switchAt, delay, time.Frequency);
+            _nextCommandAt = resumeAt;
             bool waitingAtNewRate = returnToWaiting && delay == TimeSpan.Zero;
             if (returnToWaiting && delay > TimeSpan.Zero)
             {
@@ -367,6 +380,7 @@ internal sealed partial class LssMaster : ILssMaster
             try
             {
                 ThrowIfDisposed();
+                await DelayUntilAsync(_nextCommandAt, linked.Token).ConfigureAwait(false);
                 return await body(linked.Token).ConfigureAwait(false);
             }
             finally
