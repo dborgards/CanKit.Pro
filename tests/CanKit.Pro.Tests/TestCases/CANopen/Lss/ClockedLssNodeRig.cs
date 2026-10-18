@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -28,6 +29,7 @@ internal sealed class ClockedLssNodeRig : IDisposable
     private readonly List<(CanOpenNode Node, LssTestService Service)> _nodes = new();
 
     public LssMaster Master { get; }
+    public ConcurrentQueue<uint> NodeTransmitIds { get; } = new();
 
     public ClockedLssNodeRig()
     {
@@ -58,6 +60,12 @@ internal sealed class ClockedLssNodeRig : IDisposable
                 await Task.Yield();
         }
         return await operation;
+    }
+
+    public async Task TransmitAsync(uint cobId, byte[] payload)
+    {
+        using var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+        await SendAsync(frame);
     }
 
     public void Dispose()
@@ -96,6 +104,7 @@ internal sealed class ClockedLssNodeRig : IDisposable
     private async Task<TxConfirmation> ReplyAsync(CanFrame frame)
     {
         long sent = _clock.Elapsed.Ticks;
+        NodeTransmitIds.Enqueue((uint)frame.ID);
         await _service.Subscription.Enqueue(Frame(frame));
         return new TxConfirmation { Confirmed = true, HostHandoffTimestamp = sent, HostTransmitTimestamp = sent };
     }

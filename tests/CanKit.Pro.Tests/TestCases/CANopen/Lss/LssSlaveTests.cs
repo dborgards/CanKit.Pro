@@ -248,6 +248,44 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         third.NodeId.Should().Be(0x23);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task An_Unconfigured_Slave_Does_Not_Serve_Sdo_Until_It_Has_An_Active_Node_Id(bool write, bool block)
+    {
+        using var bench = new ClockedLssNodeRig();
+        var slave = bench.Add();
+        slave.ObjectDictionary.AddU32(0x2000, 0, 41);
+        var request = block
+            ? write ? SdoBlockFrames.BuildBlockDownloadInit(0x2000, 0, clientCrcSupported: false, sizeIndicated: true, totalSize: 4)
+                : SdoBlockFrames.BuildBlockUploadInit(0x2000, 0, clientCrcSupported: false, blockSize: 1, pst: 0)
+            : write ? SdoFrames.BuildDownloadInit(0x2000, 0, new byte[] { 42, 0, 0, 0 })
+                : SdoFrames.BuildUploadInit(0x2000, 0);
+
+        slave.State.Should().Be(NmtState.Initializing);
+        await bench.TransmitAsync(CanOpenCobId.SdoRx(CanOpenCobId.UnconfiguredNodeId), request);
+        bench.NodeTransmitIds.Should().NotContain(CanOpenCobId.SdoTx(CanOpenCobId.UnconfiguredNodeId));
+        slave.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(41);
+
+        await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
+        (await bench.RunAsync(bench.Master.ConfigureNodeIdAsync(127))).Succeeded.Should().BeTrue();
+        await WaitUntilAsync(() => slave.State == NmtState.PreOperational);
+        await bench.TransmitAsync(CanOpenCobId.SdoRx(127), request);
+        bench.NodeTransmitIds.Should().Contain(CanOpenCobId.SdoTx(127));
+        uint expected = write && !block ? 42u : 41u;
+        slave.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(expected);
+
+        (await bench.RunAsync(bench.Master.ConfigureNodeIdAsync(CanOpenCobId.UnconfiguredNodeId))).Succeeded.Should().BeTrue();
+        await bench.TransmitAsync(CanOpenCobId.NmtCommand, new byte[] { (byte)NmtCommand.ResetCommunication, 127 });
+        slave.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
+        slave.State.Should().Be(NmtState.Initializing);
+        await bench.TransmitAsync(CanOpenCobId.SdoRx(CanOpenCobId.UnconfiguredNodeId), request);
+        bench.NodeTransmitIds.Should().NotContain(CanOpenCobId.SdoTx(CanOpenCobId.UnconfiguredNodeId));
+        slave.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(expected);
+    }
+
     [Fact]
     public async Task Full_Fastscan_Reads_The_Identity_From_The_Object_Dictionary()
     {
