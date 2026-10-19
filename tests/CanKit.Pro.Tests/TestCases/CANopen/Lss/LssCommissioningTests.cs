@@ -44,15 +44,15 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Scan_Lists_Unconfigured_Slaves_Then_Releases_Them()
     {
-        using var bench = new Bench();
-        var slaves = bench.Unconfigured(First, Second, Third);
+        using var bench = new ClockedLssNodeRig(Quick());
+        var slaves = Unconfigured(bench, null, First, Second, Third);
         var tool = new LssCommissioning(bench.Master);
 
-        var listed = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var listed = await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = KnownVendor(),
             Limit = 2,
-        });
+        }));
         listed.Stop.Should().Be(LssScanStop.LimitReached);
         listed.Slaves.Should().HaveCount(2);
         listed.Slaves[0].Address.Should().Be(First);
@@ -65,7 +65,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             slave.LssState().Should().Be(LssState.Waiting);
         }
 
-        var again = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan { Fastscan = KnownVendor() });
+        var again = await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan { Fastscan = KnownVendor() }));
         again.Stop.Should().Be(LssScanStop.NoUnconfiguredSlave);
         again.Slaves.Select(slave => slave.Address.SerialNumber).Should().Equal(1u, 2u, 3u);
     }
@@ -73,18 +73,20 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Assign_Gives_The_Next_Node_Id_And_Stops_When_The_Slave_Rejects_The_Store()
     {
-        using var bench = new Bench();
+        // On the virtual clock (#315): Fastscan windows are timer-driven, so a loaded runner cannot
+        // make a slave's reply miss one. Each master call is driven with RunAsync.
+        using var bench = new ClockedLssNodeRig(Quick());
         var store = new MemoryStore();
-        var first = bench.Unconfigured(null, First)[0];
-        bench.Unconfigured(store, Second);
+        var first = Unconfigured(bench, null, First)[0];
+        Unconfigured(bench, store, Second);
         var tool = new LssCommissioning(bench.Master);
 
-        var assigned = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var assigned = await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = KnownVendor(),
             AssignFromNodeId = 0x21,
             Store = true,
-        });
+        }));
 
         assigned.Stop.Should().Be(LssScanStop.SlaveRejected);
         assigned.Slaves.Should().ContainSingle();
@@ -95,13 +97,13 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         first.NodeId.Should().Be(0x21);
         await WaitUntilAsync(() => first.LssState() == LssState.Waiting);
 
-        var withStore = bench.Unconfigured(store, Third)[0];
-        var stored = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var withStore = Unconfigured(bench, store, Third)[0];
+        var stored = await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = KnownVendor(),
             AssignFromNodeId = 0x22,
             Store = true,
-        });
+        }));
         stored.Stop.Should().Be(LssScanStop.NoUnconfiguredSlave);
         stored.Slaves.Select(slave => slave.Address).Should().Equal(Second, Third);
         stored.Slaves[0].NodeId.Should().Be(0x22);
@@ -114,6 +116,9 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Configure_And_Inquire_One_Slave_By_Its_Address()
     {
+        // Stays on the wall clock: after the activation the node is silent for its second switch
+        // delay, which it measures on its own clock, and the next request has to wait that out. A
+        // master on a virtual clock times that request out at once. No Fastscan window here.
         int rate = 0;
         var store = new MemoryStore();
         using var bench = new Bench(Quick(withBitRateSwitch: true));
@@ -172,26 +177,26 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task An_Empty_Scan_Leaves_A_Configured_Slave_In_Configuration()
     {
-        using var bench = new Bench();
-        var slave = bench.Slave(1, 5, new LssSlaveOptions());
+        using var bench = new ClockedLssNodeRig(Quick());
+        var slave = bench.Add(5);
         SetIdentity(slave, First);
         await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
         await WaitUntilAsync(() => slave.LssState() == LssState.Configuration);
 
-        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync();
+        var scan = await bench.RunAsync(new LssCommissioning(bench.Master).ScanUnconfiguredAsync());
         scan.Stop.Should().Be(LssScanStop.NoUnconfiguredSlave);
         scan.Slaves.Should().BeEmpty();
         slave.LssState().Should().Be(LssState.Configuration);
 
         // Opened after the global switch, so it is the only slave still in waiting.
-        var unconfigured = bench.Unconfigured(First)[0];
-        var missed = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var unconfigured = Unconfigured(bench, null, First)[0];
+        var missed = await bench.RunAsync(new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = new LssFastscanRequest
             {
                 VendorId = new LssFastscanField { Mode = LssFastscanFieldMode.Match, Value = 99 },
             },
-        });
+        }));
         missed.Stop.Should().Be(LssScanStop.NoMatch);
         missed.Slaves.Should().BeEmpty();
         slave.LssState().Should().Be(LssState.Configuration);
@@ -219,15 +224,15 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Configure_Does_Not_Reach_A_Slave_Already_In_Configuration()
     {
-        using var bench = new Bench();
-        var parked = bench.Unconfigured(First)[0];
-        var target = bench.Unconfigured(Second)[0];
+        using var bench = new ClockedLssNodeRig(Quick());
+        var parked = Unconfigured(bench, null, First)[0];
+        var target = Unconfigured(bench, null, Second)[0];
         await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
         await WaitUntilAsync(() => parked.LssState() == LssState.Configuration
             && target.LssState() == LssState.Configuration);
 
-        var result = await new LssCommissioning(bench.Master).ConfigureSlaveAsync(
-            Second, new LssSlaveConfiguration { NodeId = 0x30 });
+        var result = await bench.RunAsync(new LssCommissioning(bench.Master).ConfigureSlaveAsync(
+            Second, new LssSlaveConfiguration { NodeId = 0x30 }));
         result.Succeeded.Should().BeTrue();
         target.NodeId.Should().Be(0x30);
         parked.NodeId.Should().Be(CanOpenCobId.UnconfiguredNodeId);
@@ -237,15 +242,15 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Inquire_Reads_The_Addressed_Slave_When_Another_Is_In_Configuration()
     {
-        using var bench = new Bench();
-        var first = bench.Slave(1, 5, new LssSlaveOptions());
-        var second = bench.Slave(2, 6, new LssSlaveOptions());
+        using var bench = new ClockedLssNodeRig(Quick());
+        var first = bench.Add(5);
+        var second = bench.Add(6);
         SetIdentity(first, First);
         SetIdentity(second, Second);
         await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
         await WaitUntilAsync(() => first.LssState() == LssState.Configuration);
 
-        var result = await new LssCommissioning(bench.Master).InquireSlaveAsync(Second);
+        var result = await bench.RunAsync(new LssCommissioning(bench.Master).InquireSlaveAsync(Second));
         result.Succeeded.Should().BeTrue();
         result.Address.Should().Be(Second);
         result.NodeId.Should().Be(6);
@@ -278,14 +283,14 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task An_Assigning_Scan_Assigns_When_Fastscan_Skips_The_Serial_Number()
     {
-        using var bench = new Bench();
-        var parked = bench.Slave(1, 5, new LssSlaveOptions());
+        using var bench = new ClockedLssNodeRig(Quick());
+        var parked = bench.Add(5);
         SetIdentity(parked, new LssAddress(9, 9, 9, 9));
         await bench.Master.SwitchStateGlobalAsync(LssState.Configuration);
         await WaitUntilAsync(() => parked.LssState() == LssState.Configuration);
-        var free = bench.Unconfigured(new LssAddress(1, 1, 1, 7))[0];
+        var free = Unconfigured(bench, null, new LssAddress(1, 1, 1, 7))[0];
 
-        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var scan = await bench.RunAsync(new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = new LssFastscanRequest
             {
@@ -296,7 +301,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             },
             AssignFromNodeId = 0x41,
             Limit = 1,
-        });
+        }));
 
         scan.Stop.Should().Be(LssScanStop.LimitReached);
         scan.Slaves.Should().ContainSingle();
@@ -309,12 +314,12 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Scan_That_Misses_After_Parking_One_Slave_Releases_It()
     {
-        using var bench = new Bench();
-        var slaves = bench.Unconfigured(First, new LssAddress(9, 1, 1, 2));
-        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        using var bench = new ClockedLssNodeRig(Quick());
+        var slaves = Unconfigured(bench, null, First, new LssAddress(9, 1, 1, 2));
+        var scan = await bench.RunAsync(new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = KnownVendor(),
-        });
+        }));
         scan.Stop.Should().Be(LssScanStop.NoMatch);
         scan.Slaves.Should().ContainSingle();
         scan.Slaves[0].Address.Should().Be(First);
@@ -447,13 +452,13 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Assign_Stops_When_The_Next_Node_Id_Would_Not_Fit()
     {
-        using var bench = new Bench();
-        bench.Unconfigured(First, Second);
-        var scan = await new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
+        using var bench = new ClockedLssNodeRig(Quick());
+        Unconfigured(bench, null, First, Second);
+        var scan = await bench.RunAsync(new LssCommissioning(bench.Master).ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = KnownVendor(),
             AssignFromNodeId = 127,
-        });
+        }));
         scan.Stop.Should().Be(LssScanStop.NodeIdsExhausted);
         scan.Slaves.Should().ContainSingle();
         scan.Slaves[0].NodeId.Should().Be(127);
@@ -463,32 +468,32 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Configure_Can_Leave_The_Slave_In_Configuration_And_Report_A_Rejected_Table()
     {
-        using var bench = new Bench(Quick(withBitRateSwitch: true));
-        var slave = bench.Slave(1, 5, new LssSlaveOptions());
+        using var bench = new ClockedLssNodeRig(Quick(withBitRateSwitch: true));
+        var slave = bench.Add(5);
         SetIdentity(slave, First);
         var tool = new LssCommissioning(bench.Master);
 
-        var rejected = await tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        var rejected = await bench.RunAsync(tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
         {
             BitTimingSelector = 0,
             BitTimingIndex = LssBitTiming.AutomaticIndex,
             Store = true,
-        });
+        }));
         rejected.Succeeded.Should().BeFalse();
         rejected.BitTimingResult!.Value.ErrorCode.Should().Be(LssCommand.BitTimingNotSupported);
         rejected.StoreResult.Should().BeNull();
         await WaitUntilAsync(() => slave.LssState() == LssState.Waiting);
 
-        var held = await tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        var held = await bench.RunAsync(tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
         {
             NodeId = 0x31,
             ReleaseToWaiting = false,
-        });
+        }));
         held.Succeeded.Should().BeTrue();
         slave.LssState().Should().Be(LssState.Configuration);
 
         int switches = 0;
-        var rejecting = bench.Slave(2, 6, new LssSlaveOptions
+        var rejecting = bench.Add(6, new LssSlaveOptions
         {
             BitRateSwitch = (_, _) =>
             {
@@ -497,14 +502,14 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             },
         });
         SetIdentity(rejecting, Second);
-        var notStored = await tool.ConfigureSlaveAsync(Second, new LssSlaveConfiguration
+        var notStored = await bench.RunAsync(tool.ConfigureSlaveAsync(Second, new LssSlaveConfiguration
         {
             BitTimingSelector = 0,
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 20,
             ActivateBitRate = 250_000,
             Store = true,
-        });
+        }));
         notStored.Succeeded.Should().BeFalse();
         notStored.StoreResult!.Value.ErrorCode.Should().Be(LssCommand.StoreNotSupported);
         await Task.Delay(40);
@@ -514,28 +519,31 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Scan_Of_More_Than_One_Slave_Refuses_To_Activate_Bit_Timing()
     {
-        using var bench = new Bench(Quick(withBitRateSwitch: true));
+        using var bench = new ClockedLssNodeRig(Quick(withBitRateSwitch: true));
         var tool = new LssCommissioning(bench.Master);
-        var open = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        // Driven with RunAsync even though both calls are expected to throw: if the guard were
+        // gone the scan would start and wait on the virtual clock, and a call nobody drives would
+        // hang instead of failing the assertion.
+        var open = async () => await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             AssignFromNodeId = 0x10,
             BitTimingSelector = 0,
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 20,
-        });
+        }));
         await open.Should().ThrowAsync<ArgumentException>();
-        var two = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var two = async () => await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             AssignFromNodeId = 0x10,
             Limit = 2,
             BitTimingSelector = 0,
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 20,
-        });
+        }));
         await two.Should().ThrowAsync<ArgumentException>();
 
         int switches = 0;
-        var slave = bench.Slave(1, CanOpenCobId.UnconfiguredNodeId, new LssSlaveOptions
+        var slave = bench.Add(CanOpenCobId.UnconfiguredNodeId, new LssSlaveOptions
         {
             BitRateSwitch = (_, _) =>
             {
@@ -544,7 +552,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             },
         });
         SetIdentity(slave, First);
-        var one = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var one = await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             Fastscan = KnownVendor(),
             AssignFromNodeId = 0x10,
@@ -553,7 +561,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 20,
             ActivateBitRate = 250_000,
-        });
+        }));
         one.Stop.Should().Be(LssScanStop.LimitReached);
         one.Slaves.Should().ContainSingle();
         one.Slaves[0].Succeeded.Should().BeTrue();
@@ -763,6 +771,20 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         var act = async () => await scan;
         var thrown = await act.Should().ThrowAsync<Exception>();
         (thrown.Which is ObjectDisposedException or OperationCanceledException).Should().BeTrue();
+    }
+
+    /// <summary>Adds one unconfigured slave per address to a virtual-clock rig, like <c>Bench.Unconfigured</c>.</summary>
+    private static ICanOpenNode[] Unconfigured(ClockedLssNodeRig rig, ILssConfigurationStore? store,
+        params LssAddress[] addresses)
+    {
+        var nodes = new ICanOpenNode[addresses.Length];
+        for (int i = 0; i < addresses.Length; i++)
+        {
+            nodes[i] = rig.Add(lss: new LssSlaveOptions { Store = store });
+            SetIdentity(nodes[i], addresses[i]);
+        }
+
+        return nodes;
     }
 
     private static void SetIdentity(ICanOpenNode node, LssAddress address)
