@@ -492,7 +492,8 @@ their own mappability and access flags. The final byte is zero-padded. Native 24
 `ObjectDictionary.AddRaw` and EDS/DCF loading; `ReadRaw`/`WriteRaw` retain their exact widths.
 The existing `ReadUnsigned`/`WriteUnsigned` convenience methods remain U8/U16/U32.
 
-**SYNC counter and start value.** `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
+**SYNC counter and start value.** The start gate applies to cyclic TPDO types 1..240;
+acyclic TPDOs (0) and synchronous RTR sampling (252) use each accepted SYNC. `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
 one-byte counter that starts at 1 and wraps to 1. Boot-up, leaving NMT Stopped, enabling
 the producer and resuming a zero communication period reset it to 1. Only confirmed sends
 advance it; cancellation, rejection and stale queued ticks retain the value. A late

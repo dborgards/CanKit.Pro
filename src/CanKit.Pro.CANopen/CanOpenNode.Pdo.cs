@@ -581,7 +581,7 @@ internal sealed partial class CanOpenNode
             var rt = _tpdos[n];
             if (rt is null || !rt.Valid) continue;
             byte type = rt.TransmissionType;
-            if ((CanOpenTransmissionType.IsSynchronous(type) || type == CanOpenTransmissionType.RtrOnlySynchronous)
+            if (type is >= CanOpenTransmissionType.SynchronousEverySync and <= CanOpenTransmissionType.SynchronousCyclicMax
                 && _syncCounterOverflow > 1 && rt.SyncStartValue != 0 && !rt.SyncStarted)
             {
                 if (counter.GetValueOrDefault() != rt.SyncStartValue) continue;

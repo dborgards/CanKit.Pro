@@ -533,21 +533,31 @@ public class CanOpenLifeGuardingAndNmtStateTests : IClassFixture<VirtualAdapterF
         node.NmtCommandReceived += (_, e) => nmt.Add(e.Command);
 
         var cycle = TimeSpan.FromMilliseconds(10);
+        // A bus observation precedes the send-chain continuation. Finish that chain before
+        // advancing virtual time, or an outstanding confirmation can coalesce the next tick.
+        async Task AdvanceAndConfirmAsync()
+        {
+            await witness.AdvanceAsync(cycle);
+            Task chain = Task.CompletedTask;
+            await node.PostToActorAsync(() => chain = node.SyncSendChainForTests);
+            await chain.WithTimeoutAsync(ShortTimeout);
+        }
+
         node.StartSyncProducer(cycle);
         await witness.SettleAsync(); // the first cycle is armed on the clock as it stands
         SendNmt(masterBus, NmtCommand.Start, NodeId);
         (await nmt.NextAsync(ShortTimeout, "NMT command")).Should().Be(NmtCommand.Start);
 
-        await witness.AdvanceAsync(cycle);
+        await AdvanceAndConfirmAsync();
         (await syncTap.NextAsync()).Should().BeEmpty("a SYNC carries no data");
 
         SendNmt(masterBus, NmtCommand.Stop, NodeId);
         (await nmt.NextAsync(ShortTimeout, "NMT command")).Should().Be(NmtCommand.Stop);
-        for (var tick = 0; tick < 3; tick++) await witness.AdvanceAsync(cycle);
+        for (var tick = 0; tick < 3; tick++) await AdvanceAndConfirmAsync();
 
         SendNmt(masterBus, NmtCommand.Start, NodeId);
         (await nmt.NextAsync(ShortTimeout, "NMT command")).Should().Be(NmtCommand.Start);
-        await witness.AdvanceAsync(cycle);
+        await AdvanceAndConfirmAsync();
         (await syncTap.NextAsync()).Should().BeEmpty("the producer resumed with the first cycle after Start");
 
         syncTap.Count.Should().Be(0, "three cycles elapsed in Stopped and none of them transmitted a SYNC (Table 37)");

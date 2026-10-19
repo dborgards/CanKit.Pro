@@ -18,6 +18,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
     private long _syncCounterGeneration;
     private uint _configuredSyncCyclePeriod;
     private Task _syncSendChain = Task.CompletedTask;
+    internal Task SyncSendChainForTests => _syncSendChain;
     private long _syncProducerGeneration;
     private TimeSpan _syncWindow;
     private long _lastSync;
