@@ -26,19 +26,19 @@ internal sealed class ClockedLssNodeRig : IDisposable
     public LssMaster Master { get; }
     public ConcurrentQueue<uint> NodeTransmitIds { get; } = new();
 
-    public ClockedLssNodeRig()
+    public ClockedLssNodeRig(LssMasterOptions? options = null)
     {
         _clock.Advance(TimeSpan.FromSeconds(1));
         _timers = _clock.NewActor();
         _service.Send = SendAsync;
-        Master = new LssMaster(_service, new LssMasterOptions(), ownsService: false, _timers);
+        Master = new LssMaster(_service, options ?? new LssMasterOptions(), ownsService: false, _timers);
     }
 
-    public CanOpenNode Add()
+    public CanOpenNode Add(byte nodeId = CanOpenCobId.UnconfiguredNodeId, LssSlaveOptions? lss = null)
     {
         var service = new LssTestService { Send = ReplyAsync };
-        var node = new CanOpenNode(service, CanOpenCobId.UnconfiguredNodeId,
-            new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false);
+        var node = new CanOpenNode(service, nodeId,
+            new CanOpenNodeOptions { Lss = lss ?? new LssSlaveOptions() }, ownsService: false);
         _nodes.Add((node, service));
         return node;
     }
