@@ -25,12 +25,13 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     private static readonly LssAddress Second = new(1, 1, 1, 2);
     private static readonly LssAddress Third = new(1, 1, 1, 3);
 
-    private static LssMasterOptions Quick() => new()
+    private static LssMasterOptions Quick(bool withBitRateSwitch = false) => new()
     {
         ResponseTimeout = TimeSpan.FromMilliseconds(300),
-        FastscanTimeout = TimeSpan.FromMilliseconds(500),
+        FastscanTimeout = TimeSpan.FromMilliseconds(120),
         FastscanCycleTime = TimeSpan.FromMilliseconds(1),
         IdentificationTimeout = TimeSpan.FromMilliseconds(80),
+        BitRateSwitch = withBitRateSwitch ? (_, _) => Task.CompletedTask : null,
     };
 
     private static LssFastscanRequest KnownVendor() => new()
@@ -115,7 +116,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     {
         int rate = 0;
         var store = new MemoryStore();
-        using var bench = new Bench();
+        using var bench = new Bench(Quick(withBitRateSwitch: true));
         var slave = bench.Slave(1, 5, new LssSlaveOptions
         {
             Store = store,
@@ -342,6 +343,42 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         rejectedTiming.ActivateCalled.Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData(20, 250_000)]
+    [InlineData(0, null)]
+    public async Task Invalid_Activation_Is_Rejected_Before_Selecting_Or_Writing_A_Slave(
+        ushort delay, int? rate)
+    {
+        var master = new FoundMaster { Options = Quick() };
+        var tool = new LssCommissioning(master);
+        var configure = async () => await tool.ConfigureSlaveAsync(First, new LssSlaveConfiguration
+        {
+            NodeId = 0x10,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = delay,
+            ActivateBitRate = rate,
+            Store = true,
+        });
+        await configure.Should().ThrowAsync<ArgumentException>().WithParameterName("configuration");
+
+        var scan = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        {
+            AssignFromNodeId = 0x10,
+            Limit = 1,
+            BitTimingSelector = 0,
+            BitTimingIndex = 3,
+            ActivateDelayMilliseconds = delay,
+            ActivateBitRate = rate,
+            Store = true,
+        });
+        await scan.Should().ThrowAsync<ArgumentException>().WithParameterName("scan");
+        master.GlobalSwitches.Should().Be(0);
+        master.SelectiveCalls.Should().Be(0);
+        master.FastscanCalls.Should().Be(0);
+        master.ConfigureCalls.Should().Be(0);
+    }
+
     [Fact]
     public async Task A_Selective_Switch_That_Throws_Releases_The_Slave()
     {
@@ -426,7 +463,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Configure_Can_Leave_The_Slave_In_Configuration_And_Report_A_Rejected_Table()
     {
-        using var bench = new Bench();
+        using var bench = new Bench(Quick(withBitRateSwitch: true));
         var slave = bench.Slave(1, 5, new LssSlaveOptions());
         SetIdentity(slave, First);
         var tool = new LssCommissioning(bench.Master);
@@ -477,7 +514,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Scan_Of_More_Than_One_Slave_Refuses_To_Activate_Bit_Timing()
     {
-        using var bench = new Bench();
+        using var bench = new Bench(Quick(withBitRateSwitch: true));
         var tool = new LssCommissioning(bench.Master);
         var open = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
@@ -615,7 +652,10 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
             BitTimingSelector = 0,
             BitTimingIndex = 3,
         });
-        await again.Should().ThrowAsync<LssTimeoutException>();
+        var timeout = await again.Should().ThrowAsync<LssTimeoutException>();
+        timeout.Which.CommandSpecifier.Should().Be(LssCommand.ConfigureBitTiming);
+        timeout.Which.StackTrace.Should().Contain(nameof(FoundMaster.ConfigureBitTimingAsync));
+        master.ConfigureCalls.Should().Be(2);
     }
 
     [Fact]
@@ -781,7 +821,7 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public bool ActivateCalled { get; private set; }
 
-        public LssMasterOptions Options { get; } = new();
+        public LssMasterOptions Options { get; } = Quick(withBitRateSwitch: true);
 
         public Exception? OnRelease { get; init; }
 
@@ -861,11 +901,13 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public int GlobalSwitches { get; private set; }
 
+        public int FastscanCalls { get; private set; }
+
         public bool ThrowOnSecondConfigure { get; init; }
 
         public bool ThrowOnBitTiming { get; init; }
 
-        public LssMasterOptions Options { get; } = new();
+        public LssMasterOptions Options { get; init; } = Quick(withBitRateSwitch: true);
 
         public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
         {
@@ -923,7 +965,10 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
 
         public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
             CancellationToken cancellationToken = default)
-            => Task.FromResult(LssFastscanResult.Found(First));
+        {
+            FastscanCalls++;
+            return Task.FromResult(LssFastscanResult.Found(First));
+        }
 
         public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
             CancellationToken cancellationToken = default)
@@ -1036,11 +1081,11 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
         private readonly List<IDisposable> _disposables = new();
         private int _nextChannel = 1;
 
-        public Bench()
+        public Bench(LssMasterOptions? options = null)
         {
             Session = VirtualAdapterFixture.NewSession("lss-tool");
             var bus = Track(VirtualAdapterFixture.Open(Session, 0));
-            Master = Track(CanOpenLss.OpenMaster(bus, Quick()));
+            Master = Track(CanOpenLss.OpenMaster(bus, options ?? Quick()));
         }
 
         public string Session { get; }

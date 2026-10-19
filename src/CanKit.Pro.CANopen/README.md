@@ -1074,6 +1074,10 @@ them back to the rate the network is still using; the caller does that before a 
 A confirmed service that times out stops the scan and returns the slaves that already received
 a node-id, including the slave whose configure node-id succeeded before a later service timed out. Configure node-id writes the pending node-id. On a slave that already has an active
 node-id it takes effect at the next NMT reset communication, which this tool does not send.
+`ConfigureSlaveAsync` throws on a timeout; a previously confirmed pending node-id can still
+be written. The exception identifies the service that timed out and preserves its stack trace.
+Supplying `ActivateBitRate` requires the master's `BitRateSwitch` callback. Commissioning
+checks activation arguments before selecting or writing any slave.
 
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
 from a node that has already booted. A missing later sub-index is 0. A timeout or any other
