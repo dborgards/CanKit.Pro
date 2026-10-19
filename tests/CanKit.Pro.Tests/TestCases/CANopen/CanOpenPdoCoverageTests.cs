@@ -119,10 +119,7 @@ public partial class CanOpenPdoEngineTests
         od.WriteUnsigned(0x1600, 2, 0x20010020);
         od.ReadUnsigned(0x1600, 2).Should().Be(0x20010020);
         foreach (uint raw in new uint[] { 0x20010000, 0x20010041 })
-        {
-            Action width = () => od.WriteUnsigned(0x1600, 2, raw);
-            width.Should().Throw<ArgumentException>().WithMessage("*06070010*");
-        }
+            od.Invoking(d => d.WriteUnsigned(0x1600, 2, raw)).Should().Throw<ArgumentException>().WithMessage("*06070010*");
         await node.PostToActorAsync(() => { });
     }
 
@@ -478,10 +475,17 @@ public partial class CanOpenPdoEngineTests
         await Inject(node, CanOpenCobId.NmtCommand, (byte)NmtCommand.Start, Device);
         await Inject(node, Rpdo1, 42);
         object rp = ((Array)PdoField(node, "_rpdos")).GetValue(1)!;
-        object handle = rp.GetType().GetProperty("Deadline")!.GetValue(rp)!;
-        object entry = handle.GetType().GetField("_entry", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(handle)!;
-        var callback = (Action)entry.GetType().GetProperty("Callback")!.GetValue(entry)!;
-        ((IDisposable)handle).Dispose();
+        var handle = (IDisposable)rp.GetType().GetProperty("Deadline")!.GetValue(rp)!;
+        Action callback;
+        try
+        {
+            object entry = handle.GetType().GetField("_entry", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(handle)!;
+            callback = (Action)entry.GetType().GetProperty("Callback")!.GetValue(entry)!;
+        }
+        finally
+        {
+            handle.Dispose();
+        }
         var disposed = typeof(CanOpenNode).GetField("_disposed", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var state = typeof(CanOpenNode).GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!;
         int timeouts = 0;
