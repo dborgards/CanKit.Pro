@@ -27,7 +27,7 @@
   </ItemGroup>
 
   <ItemGroup Label="netstandard2.0 polyfills">
-    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Bcl.AsyncInterfaces" Version="10.0.13" />
     <PackageVersion Include="System.Memory" Version="4.6.3" />
     <PackageVersion Include="System.Threading.Channels" Version="10.0.12" />
   </ItemGroup>
