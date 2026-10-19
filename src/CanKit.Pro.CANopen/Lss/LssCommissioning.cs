@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -223,16 +224,21 @@ public sealed class LssUnconfiguredScanResult
 /// selected again before it is configured. A skipped LSS number is not in that address, so the
 /// slave Fastscan left in configuration is configured there; selecting again would miss it.
 /// Activating bit timing in a scan is limited to one slave.
+/// Commissioning calls sharing the same master run one sequence at a time, including cleanup.
+/// Do not call the master directly while a commissioning sequence is running.
 /// </remarks>
 public sealed class LssCommissioning
 {
+    private static readonly ConditionalWeakTable<ILssMaster, SemaphoreSlim> Sequences = new();
     private readonly ILssMaster _master;
+    private readonly SemaphoreSlim _sequence;
 
     /// <summary>Uses <paramref name="master"/> for every service. The caller disposes it.</summary>
     public LssCommissioning(ILssMaster master)
     {
         if (master is null) throw new ArgumentNullException(nameof(master));
         _master = master;
+        _sequence = Sequences.GetValue(master, static _ => new SemaphoreSlim(1, 1));
     }
 
     /// <summary>The master this tool drives.</summary>
@@ -251,6 +257,13 @@ public sealed class LssCommissioning
     {
         scan ??= new LssUnconfiguredScan();
         ValidateScan(scan);
+        return await InSequenceAsync(() => ScanUnconfiguredCoreAsync(scan, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LssUnconfiguredScanResult> ScanUnconfiguredCoreAsync(
+        LssUnconfiguredScan scan, CancellationToken cancellationToken)
+    {
         bool assigning = scan.AssignFromNodeId.HasValue;
         int nextId = scan.AssignFromNodeId ?? 0;
         var slaves = new List<LssCommissioningResult>();
@@ -363,6 +376,14 @@ public sealed class LssCommissioning
             configuration.ReleaseToWaiting,
             nameof(configuration));
 
+        return await InSequenceAsync(() => ConfigureSlaveCoreAsync(address, configuration, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LssCommissioningResult> ConfigureSlaveCoreAsync(
+        LssAddress address, LssSlaveConfiguration configuration, CancellationToken cancellationToken)
+    {
+
         if (!await SelectOnlyAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
 
@@ -397,9 +418,13 @@ public sealed class LssCommissioning
     /// address and node-id (§6.5). The slave is returned to waiting. A selective miss is
     /// <see cref="LssCommissioningResult.Selected"/> <see langword="false"/>.
     /// </summary>
-    public async Task<LssCommissioningResult> InquireSlaveAsync(
+    public Task<LssCommissioningResult> InquireSlaveAsync(
         LssAddress address,
         CancellationToken cancellationToken = default)
+        => InSequenceAsync(() => InquireSlaveCoreAsync(address, cancellationToken), cancellationToken);
+
+    private async Task<LssCommissioningResult> InquireSlaveCoreAsync(
+        LssAddress address, CancellationToken cancellationToken)
     {
         if (!await SelectOnlyAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
@@ -413,6 +438,21 @@ public sealed class LssCommissioning
         finally
         {
             await ReleaseToWaitingAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<T> InSequenceAsync<T>(Func<Task<T>> service, CancellationToken cancellationToken)
+    {
+        await _sequence.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await service().ConfigureAwait(false);
+        }
+        finally
+        {
+            // Shared by every commissioning wrapper for this master. No wait handle is
+            // allocated; the weak table releases the semaphore with the master.
+            _sequence.Release();
         }
     }
 

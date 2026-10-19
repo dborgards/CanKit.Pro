@@ -1078,6 +1078,9 @@ node-id it takes effect at the next NMT reset communication, which this tool doe
 be written. The exception identifies the service that timed out and preserves its stack trace.
 Supplying `ActivateBitRate` requires the master's `BitRateSwitch` callback. Commissioning
 checks activation arguments before selecting or writing any slave.
+Configure, inquire and scan sequences sharing a master are serialized through their cleanup,
+including calls from different `LssCommissioning` instances. Direct calls to that master must
+not overlap a commissioning sequence.
 
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
 from a node that has already booted. A missing later sub-index is 0. A timeout or any other
