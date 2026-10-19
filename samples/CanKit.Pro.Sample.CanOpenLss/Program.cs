@@ -57,6 +57,8 @@ namespace CanKit.Sample.CanOpenLss
 
                 var bitrate = GetInt(args, "--bitrate", 500_000, 1);
                 using var demoNetwork = demo ? DemoNetwork.Start() : null;
+                if (string.Equals(verb, "detect", StringComparison.OrdinalIgnoreCase))
+                    return await DetectBitRateAsync(endpoint, demo, args, cancellation.Token).ConfigureAwait(false);
                 using var bus = CanBus.Open(endpoint, cfg =>
                     cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitrate));
                 await using var master = CanOpenLssApi.OpenMaster(bus, new LssMasterOptions
@@ -222,6 +224,81 @@ namespace CanKit.Sample.CanOpenLss
             return failed ? 1 : 0;
         }
 
+        private static async Task<int> DetectBitRateAsync(
+            string endpoint, bool demo, string[] args, CancellationToken cancellationToken)
+        {
+            var candidates = ReadCandidates(args);
+            var allowNonListenOnly = HasFlag(args, "--allow-non-listen-only");
+            var options = new LssBitRateDetectionOptions
+            {
+                Candidates = candidates ?? LssBitRateDetectionOptions.DefaultCandidates,
+                ListenWindow = TimeSpan.FromMilliseconds(GetInt(args, "--window-ms", 2000, 1)),
+                ErrorFramesToReject = GetInt(args, "--error-frames", 2, 1),
+                Passes = GetInt(args, "--passes", 1, 1),
+                RequireListenOnly = !allowNonListenOnly,
+            };
+
+            // CiA 801 §5.2.1: each candidate is opened in listen-only mode, so the search never
+            // transmits. --allow-non-listen-only opens normal mode instead, for an adapter that
+            // rejects listen-only but is silent in normal mode; it is reactive, so a wrong
+            // candidate may put error frames on the bus. On the demo bus the probes join the demo
+            // session on their own channels; on a real adapter the one channel is reopened per
+            // candidate (§5.2.3, Figure 2).
+            var probeMode = allowNonListenOnly ? ChannelWorkMode.Normal : ChannelWorkMode.ListenOnly;
+            var channel = 10;
+            Func<int, CanKit.Abstractions.API.Can.ICanBus> factory = demo
+                ? rate => CanBus.Open($"virtual://{DemoNetwork.Session}/{channel++}", cfg => ConfigureProbe(cfg, rate, probeMode))
+                : rate => CanBus.Open(endpoint, cfg => ConfigureProbe(cfg, rate, probeMode));
+
+            var mode = allowNonListenOnly ? "normal mode (reactive)" : "listen-only";
+            Console.WriteLine($"CiA 801 bit-rate detection on {(demo ? "the demo bus" : endpoint)}, {mode}.");
+            Console.WriteLine(allowNonListenOnly
+                ? $"Listening up to {options.ListenWindow.TotalMilliseconds:0} ms per candidate; a wrong rate may emit error frames."
+                : $"Listening up to {options.ListenWindow.TotalMilliseconds:0} ms per candidate; transmitting nothing.");
+            if (!demo)
+                Console.WriteLine("A producer has to be on the bus (heartbeat, SYNC, or SDO reads of 1000h/1001h/1018h).");
+
+            var result = await LssBitRateDetection.DetectAsync(factory, options, cancellationToken)
+                .ConfigureAwait(false);
+
+            foreach (var probe in result.Probes)
+            {
+                var errors = probe.ErrorFrames > 0 ? $" ({probe.ErrorFrames} error frames)" : string.Empty;
+                Console.WriteLine($"  {probe.BitsPerSecond,8} bit/s : {probe.Outcome}{errors}");
+            }
+
+            if (result.Detected)
+            {
+                var index = result.TableIndex is { } tableIndex ? $", CiA 301 table index {tableIndex}" : string.Empty;
+                Console.WriteLine($"Detected {result.BitsPerSecond} bit/s{index}.");
+                return 0;
+            }
+
+            Console.WriteLine(
+                "No bit rate detected. The bus may be silent, or no candidate received a frame within the window.");
+            return 1;
+        }
+
+        private static void ConfigureProbe(
+            CanKit.Abstractions.API.Common.IBusInitOptionsConfigurator cfg, int bitrate, ChannelWorkMode workMode)
+            => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitrate)
+                .SetWorkMode(workMode).EnableErrorInfo();
+
+        private static IReadOnlyList<int>? ReadCandidates(string[] args)
+        {
+            var text = GetArg(args, "--candidates");
+            if (text is null) return null;
+            var list = new List<int>();
+            foreach (var part in text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (!TryParseInt(part, out var rate) || rate <= 0)
+                    throw new ArgumentException("--candidates is a comma-separated list of positive bit rates.");
+                list.Add(rate);
+            }
+
+            return list;
+        }
+
         private static int Print(LssCommissioningResult result)
         {
             Console.WriteLine(Format(result));
@@ -274,6 +351,7 @@ namespace CanKit.Sample.CanOpenLss
                 case "assign":
                 case "assign-unconfigured":
                 case "inquire":
+                case "detect":
                     return true;
                 default:
                     return false;
@@ -283,7 +361,7 @@ namespace CanKit.Sample.CanOpenLss
         private static void PrintUsage()
         {
             Console.WriteLine(
-                "Usage: CanOpenLss <scan|assign|assign-unconfigured|inquire> [--endpoint <endpoint>] " +
+                "Usage: CanOpenLss <scan|assign|assign-unconfigured|inquire|detect> [--endpoint <endpoint>] " +
                 "[--bitrate 500000] [--demo] [--timeout-ms 1000] [--fastscan-ms 50]");
             Console.WriteLine(
                 "  scan [--all] [--client-node 127] [--heartbeat-ms 400] [--probe-all] [--sdo-timeout-ms 200]");
@@ -293,6 +371,9 @@ namespace CanKit.Sample.CanOpenLss
             Console.WriteLine("         [--activate-ms <n> only together with --count 1]");
             Console.WriteLine("  --bit-rate is unsupported: this sample has no adapter-specific BitRateSwitch callback.");
             Console.WriteLine("  inquire --vendor <n> --product <n> --revision <n> --serial <n>");
+            Console.WriteLine(
+                "  detect [--candidates 500000,250000,...] [--window-ms 2000] [--error-frames 2] [--passes 1]");
+            Console.WriteLine("         [--allow-non-listen-only]  (CiA 801 automatic bit-rate detection)");
             Console.WriteLine();
             Console.WriteLine(
                 "--demo starts three unconfigured LSS slaves (serials 1, 2, 3) and configured node 4 " +
@@ -407,7 +488,8 @@ namespace CanKit.Sample.CanOpenLss
         /// </summary>
         private sealed class DemoNetwork : IDisposable
         {
-            public const string Endpoint = "virtual://canopen-lss-demo/0";
+            public const string Session = "canopen-lss-demo";
+            public const string Endpoint = "virtual://" + Session + "/0";
 
             private readonly List<IDisposable> _owned = new();
 

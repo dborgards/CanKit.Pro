@@ -39,7 +39,8 @@ Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
 v3.0.0. FR-CO-048 is the LSS slave in the node, including the pending node-id and
 `LSS_Supported` in a device description. FR-CO-049 is commissioning on the master: Fastscan,
-node-id assignment, bit timing, store and inquire. The SRS's "Quelle" column says for each of them whether a standard requires it, the
+node-id assignment, bit timing, store and inquire. FR-CO-050 is CiA 801 automatic bit-rate
+detection, the procedure behind table 0 index 9. The SRS's "Quelle" column says for each of them whether a standard requires it, the
 architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
@@ -93,6 +94,7 @@ architecture does, or a maintainer decision does.
 | FR-CO-047 | LSS master (CiA 305): switch state global and selective, configure node-id and bit timing, activate with both switch delays, store, inquire identity and node-id, identify remote and non-configured slaves, Fastscan ([Layer setting services](#layer-setting-services-cia-305)) |
 | FR-CO-048 | LSS slave in the node: waiting and configuration, identity from `1018h`, pending node-id applied on NMT reset communication, unconfigured `FFh` does not boot, store through `ILssConfigurationStore`, `LSS_Supported` in an EDS/DCF ([Layer setting services](#layer-setting-services-cia-305)) |
 | FR-CO-049 | LSS commissioning on the master: Fastscan of unconfigured slaves, batch and single node-id assignment, bit timing, store, inquire, and `1018h` of configured nodes ([Layer setting services](#layer-setting-services-cia-305)) |
+| FR-CO-050 | CiA 801 automatic bit-rate detection: listen at each candidate in listen-only mode, a received frame confirms the rate, errors or a degraded bus state rule it out, the table is walked over the passes allowed ([Automatic bit-rate detection](#automatic-bit-rate-detection-cia-801)) |
 
 ## Not built, and why
 
@@ -141,8 +143,16 @@ Deliberate omissions, each checked against the norm text:
 * **Bit-granular SRDO mapping, more than 8 objects per SRDO, 29-bit SRDO COB-IDs** — as for PDOs.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
-* **Automatic bit-rate detection** — table 0 index 9 (CiA 801). The master sends the index; it
-  does not search for a rate itself.
+* **Automatic bit-rate detection as an LSS command** — table 0 index 9 names CiA 801 detection,
+  but configure bit timing cannot make a device run it: the master only sends the index, and the
+  slave here rejects index 9 (`BitTimingNotSupported`), because it cannot reopen its own channel
+  at another rate on command. The CiA 801 procedure itself is built as a separate call,
+  [`LssBitRateDetection`](#automatic-bit-rate-detection-cia-801), which a device runs at startup
+  before it has a node-id.
+* **CiA 801 single-dominant-bit timing (§5.2.2), the external AND/OR-gate variant (§5.2.4), and
+  the default fallback bit rate (§5.1)** — the first needs a timer on the receive line that no
+  adapter exposes, the second is hardware, and the third is the approach the report rejects.
+  `LssBitRateDetection` is the listen-only method of §5.2.3 only.
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
   periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
   that callback between them. The callback must retune the channel this master is already
@@ -1108,6 +1118,51 @@ var one = await tool.ConfigureSlaveAsync(scan.Slaves[0].Address, new LssSlaveCon
 The sample `samples/CanKit.Pro.Sample.CanOpenLss` is that sequence as a command-line tool.
 `--demo` needs no hardware. Activating bit timing still does not reconfigure the open channel.
 
+### Automatic bit-rate detection (CiA 801)
+
+`LssBitRateDetection` (FR-CO-050) is the method behind table 0 index 9: a device that does not
+know the bit rate of the bus finds it before it is given a node-id, by listening at each
+candidate in turn. It is the listen-only approach of CiA 801 §5.2.3, Figure 1.
+
+For each candidate the caller's factory opens the controller **in listen-only mode**, so the
+search acknowledges nothing and transmits no error frame (§5.2.1). The detection then waits for
+the first of: a received frame — the controller delivers one only at the right rate, so the
+candidate is detected; enough error frames to rule the rate out (two by default, so a single
+corrupted frame at the right rate does not move the search on, §5.2.3/§7); or the end of the
+window. A window that ends with the controller no longer error-active rejects the candidate too,
+for adapters that move `BusState` without raising an error frame.
+
+```csharp
+// On CanKit, the factory opens each candidate listen-only, accepting every id.
+var result = await LssBitRateDetection.DetectAsync(rate => CanBus.Open(endpoint, cfg =>
+    cfg.Baud(rate).SetWorkMode(ChannelWorkMode.ListenOnly).EnableErrorInfo()));
+
+if (result.Detected)
+{
+    // result.BitsPerSecond is the rate; result.TableIndex is its CiA 301 table index when
+    // the table lists it. Reopen the bus at that rate for normal operation.
+}
+```
+
+The method needs traffic (§6): at least one frame has to be on the bus while the correct
+candidate is open. A CANopen manager produces it with its heartbeat, with SYNC, or with SDO
+reads of `1000h`, `1001h` or `1018h`. The factory opens each candidate afresh because adapters
+generally cannot change the bit rate of an open channel; the number of frames the search
+consumes depends on how many candidates precede the right one and on the adapter's close/reopen
+time (Figure 2). `LssBitRateDetectionOptions` sets the candidates and their order (500/250/125
+kbit/s first by default), the per-candidate window, the error threshold and the number of
+passes. `RequireListenOnly` only relaxes the detection's own check that each probe was opened
+listen-only; it does not change how your factory opens the bus. For an adapter that accepts
+listen-only but does not report the mode back, turning it off is enough and the factory keeps
+opening listen-only. For an adapter that rejects listen-only but is silent in normal mode, turn
+it off **and** have your factory open each probe in normal mode — which is reactive, so a wrong
+candidate may emit error frames, against §5.2.1. The sample's `detect` verb does exactly this
+under `--allow-non-listen-only`, and is otherwise this call on the command line, with `--demo`.
+
+The single-dominant-bit timing of §5.2.2, the external AND/OR-gate variant of §5.2.4 for
+controllers without a listen-only mode, and the default fallback bit rate of §5.1 are not built;
+see [Not built](#not-built-and-why).
+
 ## Flying master
 
 A master application joins the NMT flying-master election with `StartFlyingMaster`. The binding
@@ -1310,7 +1365,8 @@ CanKit.Pro.CANopen/
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
   Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
-  Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan
+  Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan;
+                                      //   CiA 801 automatic bit-rate detection (LssBitRateDetection.cs)
 ```
 
 ## Migrating from 1.2.x
@@ -1400,6 +1456,9 @@ Each item names what a caller does about it.
   opened: an out-of-range value now throws `ArgumentOutOfRangeException` from `With` rather than
   from `OpenNode`. It gained `srdoCount` and `enableChangeOfStateSrdo`; the 1.3.0 signature is
   kept beside it, so compiled callers keep working.
+* **Layer setting services (CiA 305) and CiA 801 bit-rate detection** are new: the LSS master,
+  the LSS slave in the node, commissioning, and `LssBitRateDetection` (see
+  [Layer setting services](#layer-setting-services-cia-305)).
 
 ## Install
 
