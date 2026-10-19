@@ -21,7 +21,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 /// Figure 9) as the configuration entity of CiA 319 v2.0.0 clause 5 — identity first, the steps
 /// of §5.3, the storage of step 5, the SRVT rule of §6.2 — and verifies them (§8.3.1 step D).
 /// The device is a real node; the mismatch path uses a fake expedited SDO server on a raw
-/// channel that answers one readback wrongly (FR-CO-044, FR-CO-049).</summary>
+/// channel that answers one readback wrongly (FR-CO-044, FR-CO-050).</summary>
 public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Master = 0x01;
