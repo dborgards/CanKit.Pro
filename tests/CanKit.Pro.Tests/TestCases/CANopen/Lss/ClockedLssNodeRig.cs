@@ -24,33 +24,58 @@ internal sealed class ClockedLssNodeRig : IDisposable
     private readonly List<(CanOpenNode Node, LssTestService Service)> _nodes = new();
 
     public LssMaster Master { get; }
+    public ProtocolActor Timers => _timers;
     public ConcurrentQueue<uint> NodeTransmitIds { get; } = new();
 
-    public ClockedLssNodeRig()
+    public ClockedLssNodeRig(LssMasterOptions? options = null)
     {
         _clock.Advance(TimeSpan.FromSeconds(1));
         _timers = _clock.NewActor();
         _service.Send = SendAsync;
-        Master = new LssMaster(_service, new LssMasterOptions(), ownsService: false, _timers);
+        Master = new LssMaster(_service, options ?? new LssMasterOptions(), ownsService: false, _timers);
     }
 
-    public CanOpenNode Add()
+    public CanOpenNode Add(byte nodeId = CanOpenCobId.UnconfiguredNodeId, LssSlaveOptions? lss = null)
     {
         var service = new LssTestService { Send = ReplyAsync };
-        var node = new CanOpenNode(service, CanOpenCobId.UnconfiguredNodeId,
-            new CanOpenNodeOptions { Lss = new LssSlaveOptions() }, ownsService: false);
+        var node = new CanOpenNode(service, nodeId,
+            new CanOpenNodeOptions { Lss = lss ?? new LssSlaveOptions() }, ownsService: false);
         _nodes.Add((node, service));
         return node;
     }
 
-    public async Task<T> RunAsync<T>(Task<T> operation)
+    // A scan is many actor and reader hand-offs, so on a starved host the same virtual work takes
+    // far more wall time (0.3 s idle took tens of seconds with the test host pinned to one core and
+    // 15 busy loops, #315). The guard therefore asks for progress, not for a total: it fails when
+    // the virtual clock has not moved forward for the stall budget of wall time, and when one
+    // operation has run longer than MaxVirtualRun of virtual time,
+    // which is deterministic and catches a loop that keeps re-arming timers. Only an advance by
+    // more than zero counts as progress: a loop that re-arms a zero-delay timer would otherwise
+    // refresh the stall clock on every pass and the detector itself would never end.
+    //
+    // The default stall budget is SchedulingBudget for every node plus one: while the master sends,
+    // SendAsync waits for each node's reply to drain, up to SchedulingBudget per node, and no
+    // master timer is armed meanwhile, so the clock cannot move. A send that takes longer than one
+    // budget in total while every node stays within its own is slow, not stuck.
+    private static readonly TimeSpan MaxVirtualRun = TimeSpan.FromMinutes(5);
+
+    public async Task<T> RunAsync<T>(Task<T> operation, TimeSpan? stallBudget = null)
     {
-        var limit = DateTime.UtcNow + LssTestTiming.SchedulingBudget;
+        // TimeSpan * int does not exist on net48, hence the ticks.
+        var stall = stallBudget ?? TimeSpan.FromTicks(LssTestTiming.SchedulingBudget.Ticks * (_nodes.Count + 1));
+        var started = _clock.Elapsed;
+        var lastProgress = DateTime.UtcNow;
         while (!operation.IsCompleted)
         {
-            if (DateTime.UtcNow >= limit) throw new TimeoutException("The clocked node scan did not settle.");
+            if (DateTime.UtcNow - lastProgress >= stall)
+                throw new TimeoutException("The clocked node scan made no progress.");
+            if (_clock.Elapsed - started >= MaxVirtualRun)
+                throw new TimeoutException("The clocked node scan did not settle in its virtual time budget.");
             if (await _timers.NextTimerDelayAsync() is { } delay)
+            {
                 await _clock.AdvanceAsync(delay);
+                if (delay > TimeSpan.Zero) lastProgress = DateTime.UtcNow;
+            }
             else
                 await Task.Yield();
         }
