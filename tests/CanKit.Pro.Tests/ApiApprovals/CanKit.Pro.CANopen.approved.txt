@@ -853,6 +853,7 @@ namespace CanKit.Pro.CANopen.Safety
                 "Parameter",
                 "Mapping"})]
         public System.Collections.Generic.IReadOnlyDictionary<int, System.ValueTuple<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter, CanKit.Pro.CANopen.Safety.SrdoMapping>> Srdos { get; }
+        public CanKit.Pro.CANopen.Safety.PeerSafetyStorage Storage { get; set; }
         public CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration Add(int srdoNumber, CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter parameter, CanKit.Pro.CANopen.Safety.SrdoMapping mapping) { }
         public static CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration FromDeviceDescription(CanKit.Pro.CANopen.CanOpenDeviceDescription description, byte nodeId) { }
     }
@@ -867,7 +868,15 @@ namespace CanKit.Pro.CANopen.Safety
     public sealed class PeerSafetyResult
     {
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetyMismatch> Mismatches { get; }
+        public CanKit.Pro.CANopen.Sdo.SdoAbortException? StorageAbort { get; }
+        public bool Stored { get; }
         public bool Succeeded { get; }
+    }
+    public enum PeerSafetyStorage : byte
+    {
+        None = 0,
+        AllParameters = 1,
+        CommunicationParameters = 2,
     }
     public readonly struct SrdoCommunicationParameter : System.IEquatable<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter>
     {

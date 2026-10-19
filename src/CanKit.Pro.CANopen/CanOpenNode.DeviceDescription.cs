@@ -224,10 +224,14 @@ internal sealed partial class CanOpenNode
     {
         private readonly Dictionary<ushort, List<DescribedEntry>> _objects;
 
-        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile)
+        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile,
+            (uint? VendorId, uint? ProductCode, uint? RevisionNumber) declaredIdentity,
+            (uint VendorId, uint ProductCode, uint RevisionNumber) deviceInfoIdentity)
         {
             _objects = objects;
             IsConfigurationFile = isConfigurationFile;
+            DeclaredIdentity = declaredIdentity;
+            DeviceInfoIdentity = deviceInfoIdentity;
             int highest = 0;
             foreach (var index in objects.Keys)
             {
@@ -240,11 +244,42 @@ internal sealed partial class CanOpenNode
         {
             var objects = new Dictionary<ushort, List<DescribedEntry>>();
             foreach (var pair in description.Objects.Objects) objects[pair.Key] = EntriesOf(pair.Value);
-            return new DescribedObjects(objects, description.IsConfigurationFile);
+            uint? vendorId = null, productCode = null, revisionNumber = null;
+            if (objects.TryGetValue(Co.Identity, out var identity))
+            {
+                foreach (var entry in identity)
+                {
+                    // An identity is a plain number. A $NODEID formula has no place in one and is
+                    // not read: resolved with any node-id it would make up a value to verify a
+                    // peer against, so the entry counts as having no value, which is refused.
+                    var value = IsNodeIdFormula(entry.Value) ? null : ParseUnsigned(0, entry, out _);
+                    switch (entry.Subindex)
+                    {
+                        case 0x01: vendorId = value; break;
+                        case 0x02: productCode = value; break;
+                        case 0x03: revisionNumber = value; break;
+                    }
+                }
+            }
+            var info = description.DeviceInfo;
+            return new DescribedObjects(objects, description.IsConfigurationFile,
+                (vendorId, productCode, revisionNumber), (info.VendorNumber, info.ProductNumber, info.RevisionNumber));
         }
 
         /// <summary>Whether the description is a DCF (<see cref="CanOpenDeviceDescription.IsConfigurationFile"/>).</summary>
         public bool IsConfigurationFile { get; }
+
+        /// <summary>The identity the file declares in its own 1018h:01–03 — "the entries in the
+        /// EDS" CiA 319 v2.0.0 §5.2 compares a device with — as read at the capture: the
+        /// ParameterValue, the DefaultValue where none; null where the entry is not declared or has
+        /// no value this implementation reads.</summary>
+        public (uint? VendorId, uint? ProductCode, uint? RevisionNumber) DeclaredIdentity { get; }
+
+        /// <summary>The file's <c>[DeviceInfo]</c> numbers — <c>VendorNumber</c>, <c>ProductNumber</c>,
+        /// <c>RevisionNumber</c> (CiA 306) — as read at the capture; an absent key reads as 0, and
+        /// a model built from an XDD carries its firmware version there. A second source of the
+        /// identity, which must agree with the first where it says anything.</summary>
+        public (uint VendorId, uint ProductCode, uint RevisionNumber) DeviceInfoIdentity { get; }
 
         /// <summary>The highest SRDO record declared (<see cref="DescribedSrdoCount"/>); 0 without one.</summary>
         public int SrdoCount { get; }
@@ -993,6 +1028,9 @@ internal sealed partial class CanOpenNode
     // -----------------------------------------------------------------------------------------
 
     private uint? ParseUnsigned(DescribedEntry entry, out string? raw) => ParseUnsigned(_nodeId, entry, out raw);
+
+    private static bool IsNodeIdFormula(string? value)
+        => !string.IsNullOrEmpty(value) && value!.IndexOf("$NODEID", StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static uint? ParseUnsigned(byte nodeId, DescribedEntry entry, out string? raw)
     {

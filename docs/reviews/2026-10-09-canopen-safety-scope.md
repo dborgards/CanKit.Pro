@@ -18,6 +18,16 @@ Nachgetragen (17.10.2026): CiA 305, im Zitat oben zusammen mit CiA 304 aus den e
 Runden ausgeschlossen, ist ab FR-CO-047 im Lieferumfang; der LSS-Slave ist FR-CO-048, die Inbetriebnahme FR-CO-049.
 Diese Runde selbst bleibt CiA 304.
 
+Nachgetragen (17.10.2026): die Tool-Seite (Posten 10, 11) ist um die Konfigurationsinstanz nach
+CiA 319 v2.0.0 (Draft Specification Proposal vom 02.12.2025) ergänzt — Identitätsprüfung über
+`1018h:01–03` gegen die 1018h-Einträge der gebundenen Datei, `[DeviceInfo]` als Gegenprobe
+(§5.2), Schritt 5 Speichern über `1010h` (`PeerSafetyConfiguration.Storage`), die SRVT-Regel für
+ein tx-SRDO, dessen Record die Datei ohne schreibbaren Sub-Index 03h deklariert (§6.2: 20 ms, als
+optional geschrieben, 0609 0011h und 0601 0002h toleriert; nur lesbar deklariert: nicht
+geschrieben) — und steht als FR-CO-051. Die Geräteseite von CiA 319 (§5.3 Schritt 4 beim
+A5h-Write, die 13FEh-Regeln, die periodische Prüfung, §5.4 Start) ist #308; Clause 7 und 8
+(Safety Application Layer der Profile) sind nicht gebaut.
+
 ## Woher die Belege kommen
 
 | Stufe | Was so belegt ist |

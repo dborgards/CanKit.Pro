@@ -1250,7 +1250,8 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   Fristen, Engine ohne Bus testbar; − das CANopen-Paket wächst; − Normbasis ist DSP 304 V1.0, der
   Abgleich gegen EN 50325-5 steht aus (#289). Entscheidungsakte:
   `docs/reviews/2026-10-09-canopen-safety-scope.md`.
-- **Status:** Umgesetzt als FR-CO-035..046.
+- **Status:** Umgesetzt als FR-CO-035..046; die Konfigurationsinstanz nach CiA 319 v2.0.0
+  (Identitätsprüfung, Speichern, SRVT-Vorgabe) als FR-CO-051 (17.10.2026).
 
 ---
 
