@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Concurrent;
-using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -25,8 +24,8 @@ public class LssCommissioningConcurrencyTests
     [InlineData("scan", "scan")]
     public async Task Wrappers_Sharing_A_Master_Hold_The_Sequence_Through_Cleanup(string first, string second)
     {
-        var master = DispatchProxy.Create<ILssMaster, PausedMaster>();
-        var paused = (PausedMaster)master;
+        var paused = new PausedMaster();
+        ILssMaster master = paused;
         var running = Run(new LssCommissioning(master), first);
         await paused.SelectionStarted.Task.WaitAsync(LssTestTiming.SchedulingBudget);
         int callsBefore = paused.Calls.Count;
@@ -54,8 +53,8 @@ public class LssCommissioningConcurrencyTests
     [Fact]
     public async Task Cancelling_A_Queued_Sequence_Sends_Nothing_And_Does_Not_Release_The_Owner()
     {
-        var master = DispatchProxy.Create<ILssMaster, PausedMaster>();
-        var paused = (PausedMaster)master;
+        var paused = new PausedMaster();
+        ILssMaster master = paused;
         var tool = new LssCommissioning(master);
         var running = Run(tool, "configure");
         await paused.SelectionStarted.Task.WaitAsync(LssTestTiming.SchedulingBudget);
@@ -84,8 +83,8 @@ public class LssCommissioningConcurrencyTests
     [Fact]
     public async Task A_Failed_Sequence_Releases_The_Reservation_After_Cleanup()
     {
-        var master = DispatchProxy.Create<ILssMaster, PausedMaster>();
-        var paused = (PausedMaster)master;
+        var paused = new PausedMaster();
+        ILssMaster master = paused;
         paused.FailSelection = true;
         var running = Run(new LssCommissioning(master), "configure");
         await paused.SelectionStarted.Task.WaitAsync(LssTestTiming.SchedulingBudget);
@@ -118,7 +117,7 @@ public class LssCommissioningConcurrencyTests
         };
 
     // Pauses at selection and cleanup without relying on a scheduler delay or a real bus.
-    private class PausedMaster : DispatchProxy
+    private sealed class PausedMaster : ILssMaster
     {
         public ConcurrentQueue<string> Calls { get; } = new();
         public TaskCompletionSource<bool> SelectionStarted { get; } = Signal();
@@ -129,41 +128,75 @@ public class LssCommissioningConcurrencyTests
         public int Selections;
         private int _globals;
 
-        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
-        {
-            string name = targetMethod!.Name;
-            Calls.Enqueue(name);
-            return name switch
-            {
-                "get_Options" => new LssMasterOptions(),
-                nameof(ILssMaster.SwitchStateGlobalAsync) => SwitchGlobal(),
-                nameof(ILssMaster.SwitchStateSelectiveAsync) => SelectAsync(),
-                nameof(ILssMaster.FastscanAsync) => ScanAsync(),
-                nameof(ILssMaster.ConfigureNodeIdAsync) => Task.FromResult(LssServiceResult.Success),
-                nameof(ILssMaster.InquireAddressAsync) => Task.FromResult(Address),
-                nameof(ILssMaster.InquireNodeIdAsync) => Task.FromResult((byte)0x10),
-                _ => throw new NotSupportedException(name),
-            };
-        }
+        public LssMasterOptions Options { get; } = new();
 
-        private Task SwitchGlobal()
+        public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
         {
+            Calls.Enqueue(nameof(SwitchStateGlobalAsync));
             if (Interlocked.Increment(ref _globals) != 2) return Task.CompletedTask;
             CleanupStarted.TrySetResult(true);
             return AllowCleanup.Task;
         }
 
-        private async Task<bool> SelectAsync()
+        public async Task<bool> SwitchStateSelectiveAsync(LssAddress address, CancellationToken cancellationToken = default)
         {
+            Calls.Enqueue(nameof(SwitchStateSelectiveAsync));
             await PauseSelectionAsync();
             return true;
         }
 
-        private async Task<LssFastscanResult> ScanAsync()
+        public async Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
+            CancellationToken cancellationToken = default)
         {
+            Calls.Enqueue(nameof(FastscanAsync));
             await PauseSelectionAsync();
             return LssFastscanResult.Found(Address);
         }
+
+        public Task<LssServiceResult> ConfigureNodeIdAsync(byte nodeId, CancellationToken cancellationToken = default)
+            => Record(nameof(ConfigureNodeIdAsync), LssServiceResult.Success);
+
+        public Task<LssAddress> InquireAddressAsync(CancellationToken cancellationToken = default)
+            => Record(nameof(InquireAddressAsync), Address);
+
+        public Task<byte> InquireNodeIdAsync(CancellationToken cancellationToken = default)
+            => Record(nameof(InquireNodeIdAsync), (byte)0x10);
+
+        private Task<T> Record<T>(string name, T result)
+        {
+            Calls.Enqueue(name);
+            return Task.FromResult(result);
+        }
+
+        public Task<LssServiceResult> ConfigureBitTimingAsync(byte tableSelector, byte tableIndex,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
+            bool returnToWaiting = false, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<uint> InquireVendorIdAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<uint> InquireProductCodeAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<uint> InquireRevisionNumberAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<uint> InquireSerialNumberAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task<bool> IdentifyRemoteSlavesAsync(LssIdentityRange range, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<bool> IdentifyNonConfiguredSlavesAsync(CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public void Dispose() { }
+
+        public ValueTask DisposeAsync() => default;
 
         private async Task PauseSelectionAsync()
         {
