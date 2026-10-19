@@ -24,6 +24,7 @@ internal sealed class ClockedLssNodeRig : IDisposable
     private readonly List<(CanOpenNode Node, LssTestService Service)> _nodes = new();
 
     public LssMaster Master { get; }
+    public ProtocolActor Timers => _timers;
     public ConcurrentQueue<uint> NodeTransmitIds { get; } = new();
 
     public ClockedLssNodeRig(LssMasterOptions? options = null)
@@ -46,25 +47,28 @@ internal sealed class ClockedLssNodeRig : IDisposable
     // A scan is many actor and reader hand-offs, so on a starved host the same virtual work takes
     // far more wall time (0.3 s idle took tens of seconds with the test host pinned to one core and
     // 15 busy loops, #315). The guard therefore asks for progress, not for a total: it fails when
-    // the virtual clock has not advanced for SchedulingBudget of wall time (nothing is armed and
-    // the operation does not complete), and when one operation has run longer than MaxVirtualRun
-    // of virtual time, which is deterministic and catches a loop that keeps re-arming timers.
+    // the virtual clock has not moved forward for the stall budget (SchedulingBudget unless given)
+    // of wall time, and when one operation has run longer than MaxVirtualRun of virtual time,
+    // which is deterministic and catches a loop that keeps re-arming timers. Only an advance by
+    // more than zero counts as progress: a loop that re-arms a zero-delay timer would otherwise
+    // refresh the stall clock on every pass and the detector itself would never end.
     private static readonly TimeSpan MaxVirtualRun = TimeSpan.FromMinutes(5);
 
-    public async Task<T> RunAsync<T>(Task<T> operation)
+    public async Task<T> RunAsync<T>(Task<T> operation, TimeSpan? stallBudget = null)
     {
+        var stall = stallBudget ?? LssTestTiming.SchedulingBudget;
         var started = _clock.Elapsed;
         var lastProgress = DateTime.UtcNow;
         while (!operation.IsCompleted)
         {
-            if (DateTime.UtcNow - lastProgress >= LssTestTiming.SchedulingBudget)
+            if (DateTime.UtcNow - lastProgress >= stall)
                 throw new TimeoutException("The clocked node scan made no progress.");
             if (_clock.Elapsed - started >= MaxVirtualRun)
                 throw new TimeoutException("The clocked node scan did not settle in its virtual time budget.");
             if (await _timers.NextTimerDelayAsync() is { } delay)
             {
                 await _clock.AdvanceAsync(delay);
-                lastProgress = DateTime.UtcNow;
+                if (delay > TimeSpan.Zero) lastProgress = DateTime.UtcNow;
             }
             else
                 await Task.Yield();
