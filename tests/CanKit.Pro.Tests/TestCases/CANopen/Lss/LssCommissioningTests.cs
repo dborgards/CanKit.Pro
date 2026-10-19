@@ -521,22 +521,25 @@ public class LssCommissioningTests : IClassFixture<VirtualAdapterFixture>
     {
         using var bench = new ClockedLssNodeRig(Quick(withBitRateSwitch: true));
         var tool = new LssCommissioning(bench.Master);
-        var open = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        // Driven with RunAsync even though both calls are expected to throw: if the guard were
+        // gone the scan would start and wait on the virtual clock, and a call nobody drives would
+        // hang instead of failing the assertion.
+        var open = async () => await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             AssignFromNodeId = 0x10,
             BitTimingSelector = 0,
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 20,
-        });
+        }));
         await open.Should().ThrowAsync<ArgumentException>();
-        var two = async () => await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+        var two = async () => await bench.RunAsync(tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
         {
             AssignFromNodeId = 0x10,
             Limit = 2,
             BitTimingSelector = 0,
             BitTimingIndex = 3,
             ActivateDelayMilliseconds = 20,
-        });
+        }));
         await two.Should().ThrowAsync<ArgumentException>();
 
         int switches = 0;
