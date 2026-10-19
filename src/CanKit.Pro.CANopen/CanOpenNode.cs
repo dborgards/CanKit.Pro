@@ -227,8 +227,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _srdoInFlight = new bool[_srdoCount + 1];
         _srdoPending = new SrdoPair?[_srdoCount + 1];
         _srdo = new Safety.SrdoEngine(_actor, _actor.TimeSource, _deadlines, _od, _nodeId, _srdoCount, this);
-        _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0,
-            () => { _ = EmitHeartbeat((byte)_state); });
+        _heartbeatProducer = new HeartbeatProducer(_actor, () => _disposed == 0, EmitPeriodicHeartbeat);
         _heartbeatConsumer = new HeartbeatConsumer(_deadlines);
         _heartbeatConsumer.TimedOut += (producer, timeout) => RaiseHeartbeatTimeout(producer, timeout);
         AttachFlyingMasterHeartbeatWatch();
@@ -498,20 +497,39 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // before the tick that became due while the application's reset hook ran, and before the
     // reply to a poll that was already in the mailbox (Codex and Bugbot on #133). Actor loop only.
     private Task _heartbeatSendChain = Task.CompletedTask;
+    private bool _periodicHeartbeatPending;
+
+    internal Task HeartbeatSendChain => _heartbeatSendChain;
+
+    private void EmitPeriodicHeartbeat()
+    {
+        // A timer tick is replaceable. Keep one outstanding periodic send even if a switch
+        // or the driver holds it indefinitely, rather than retaining a continuation per tick.
+        if (_periodicHeartbeatPending) return;
+        _periodicHeartbeatPending = true;
+        var send = EmitHeartbeat((byte)_state);
+        Action completed = () => _periodicHeartbeatPending = false;
+        _ = send.ContinueWith(task =>
+        {
+            _ = task.Exception;
+            RunOnActor(completed);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
 
     private Task EmitHeartbeat(byte payload)
     {
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = new[] { payload };
+        int generation = Volatile.Read(ref _nodeIdGeneration);
         var link = _heartbeatSendChain.ContinueWith(
             _ =>
             {
                 // The id is the one active when this frame is reached, not the one active when
                 // it was queued behind an earlier heartbeat. An unconfigured slave has nothing
                 // to announce on 0x700.
-                if (!CanOpenCobId.IsActiveNodeId(_nodeId))
+                if (Volatile.Read(ref _disposed) != 0 || !CanOpenCobId.IsActiveNodeId(_nodeId))
                     return Task.CompletedTask;
-                return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame);
+                return SendControlFrame(CanOpenCobId.Heartbeat(_nodeId), frame, nodeIdGeneration: generation);
             },
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _heartbeatSendChain = link;
@@ -523,18 +541,41 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         if (LayerSettingsBlockBoot()) return Task.CompletedTask;
         var frame = msg.Encode();
         byte errorRegister = msg.ErrorRegister;
+        // Resolve the producer and reserve its send in one actor turn. A reset that drains
+        // the previous send can retarget the dictionary before this queued emergency starts.
+        Func<Task> transmit = () =>
+        {
+            if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
+            uint cobId = _emcyCobId;
+            if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
+            _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
+            return SendControlFrame(cobId, frame, cancellationToken);
+        };
         var link = _emcySendChain.ContinueWith(
-            _ =>
-            {
-                if (cancellationToken.IsCancellationRequested) return Task.FromCanceled(cancellationToken);
-                uint cobId = _emcyCobId;
-                if (cobId == 0 || !_emcyValid) return Task.CompletedTask;
-                _od.WriteUnsigned(Co.ErrorRegister, 0x00, errorRegister);
-                return SendControlFrame(cobId, frame, cancellationToken);
-            },
+            _ => Volatile.Read(ref _disposed) != 0 ? Task.CompletedTask : DispatchQueuedEmcy(transmit),
             CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
         _emcySendChain = link;
         return link;
+    }
+
+    internal Task DispatchQueuedEmcy(Func<Task> transmit)
+        => DispatchQueuedEmcy(transmit, work => _actor.PostAsync(work));
+
+    internal async Task DispatchQueuedEmcy(Func<Task> transmit, Func<Func<Task>, Task<Task>> post)
+    {
+        // Callback failures belong to the inner task, even if the callback disposes the node.
+        // Only a refused or discarded actor dispatch is expected teardown.
+        Func<Task> invoke = async () => await transmit().ConfigureAwait(false);
+        Task sending;
+        try
+        {
+            sending = await post(invoke).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException) when (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+        await sending.ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -831,6 +872,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private bool BeginDispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return false;
+        CancelLssBitRateSwitch();
         try { _readerCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
 
         // On the actor already (a subscriber disposing from ApplicationReset, say) the cleanup runs
@@ -854,6 +896,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _heartbeatProducer.Dispose();
         _heartbeatConsumer.Dispose();
         CancelLssActivation();
+        DisposeLssBitRateLifetime();
         _syncProducerHandle?.Dispose();
         _syncProducerHandle = null;
         DisposePdoRuntime();
@@ -2537,28 +2580,19 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
-    private Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
-        Action<CanOpenTransportException?>? onSendCompleted = null)
+    internal Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
+        Action<CanOpenTransportException?>? onSendCompleted = null, bool rejectSuppression = false,
+        int? nodeIdGeneration = null)
     {
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
         // NMT and heartbeat are sent when the delay ends. Anything else is dropped, and an
         // in-flight SDO send is reported confirmed so its timeout can still decide it.
         // The gate either finishes the frame (held or dropped) or reserves the send so silence
         // cannot start until this frame has been handed to the driver.
-        if (GateTransmit(cobId, payload, onSendCompleted) is { } finished)
+        // Validate the frame before reserving: a construction failure never owns a send slot.
+        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+        if (GateTransmit(cobId, payload, onSendCompleted, cancellationToken, rejectSuppression, nodeIdGeneration) is { } finished)
             return finished;
-        CanFrame frame;
-        try
-        {
-            // Classic 11-bit CAN frame; no extended bit. Built after the reservation so a throw
-            // here still releases it: silence waits until this slot is gone.
-            frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-        }
-        catch (Exception)
-        {
-            ReleaseTransmit();
-            throw;
-        }
         // We do not await SendConfirmedAsync for
         // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
         // callers do not need per-frame confirmation. A failed send always surfaces via
@@ -2570,8 +2604,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             CanOpenTransportException? failure = null;
             try
             {
-                var conf = await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)
-                    .ConfigureAwait(false);
+                var conf = await SendReservedFrame(frame, cancellationToken).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     failure = new CanOpenTransportException(
@@ -2609,16 +2642,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             {
                 onSendCompleted?.Invoke(failure);
             }
-        }, cancellationToken);
-        // Also when the token cancels the task before the body runs: the reservation has to
-        // end or the switch delay never starts.
-        _ = send.ContinueWith(
-            static (_, state) => ((CanOpenNode)state!).ReleaseTransmit(),
-            this,
-            CancellationToken.None,
-            TaskContinuationOptions.None,
-            TaskScheduler.Default);
+        });
         return send;
+    }
+
+    /// <summary>
+    /// The reservation covers only the driver call. Release it before callers report failures
+    /// or invoke callbacks, since those may synchronously wait for the actor that starts silence.
+    /// </summary>
+    private async Task<TxConfirmation> SendReservedFrame(CanFrame frame, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            ReleaseTransmit();
+        }
     }
 
     /// <summary>
@@ -2723,7 +2765,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// Sends control frames in order on a single background task so Reset bootup (0x00) cannot
     /// race behind the subsequent Pre-Operational heartbeat.
     /// </summary>
-    private Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
+    internal Task SendOrderedControlFrames(params (uint CobId, byte[] Payload)[] frames)
         => SendOrderedControlFrames(onSendCompleted: null, frames);
 
     /// <summary>
@@ -2752,9 +2794,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// after each frame that was confirmed, so the owner of a long batch can tell progress from
     /// silence. It must be cheap and thread-safe.
     /// </summary>
-    private Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
+    internal Task SendOrderedControlFrames(Action<CanOpenTransportException?>? onSendCompleted,
         Func<bool>? shouldStop, Action? onFrameConfirmed, params (uint CobId, byte[] Payload)[] frames)
     {
+        int generation = Volatile.Read(ref _nodeIdGeneration);
         return Task.Run(async () =>
         {
             CanOpenTransportException? failure = null;
@@ -2766,47 +2809,40 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     // The same switch-delay rule as SendControlFrame. A confirmed non-send keeps
                     // the batch moving; the peer's timeout decides a transfer that lost its frames.
                     // Reserved sends finish before a new silence can start.
-                    if (!TryReserveTransmit())
-                    {
-                        onFrameConfirmed?.Invoke();
-                        continue;
-                    }
-
                     try
                     {
-                        try
+                        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+                        if (!TryReserveTransmit(generation))
                         {
-                            var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
-                            var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
-                            if (!conf.Confirmed)
+                            onFrameConfirmed?.Invoke();
+                            continue;
+                        }
+
+                        var conf = await SendReservedFrame(frame).ConfigureAwait(false);
+                        if (!conf.Confirmed)
+                        {
+                            var unconfirmed = new CanOpenTransportException(
+                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
+                            RaiseBackgroundException(unconfirmed);
+                            if (onSendCompleted is not null)
                             {
-                                var unconfirmed = new CanOpenTransportException(
-                                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
-                                RaiseBackgroundException(unconfirmed);
-                                if (onSendCompleted is not null)
-                                {
-                                    failure = unconfirmed;
-                                    return;
-                                }
-                            }
-                            else
-                            {
-                                onFrameConfirmed?.Invoke();
+                                failure = unconfirmed;
+                                return;
                             }
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            // As in SendControlFrame: the event carries the transfer's failure.
-                            failure = ex as CanOpenTransportException
-                                ?? new CanOpenTransportException(
-                                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
-                            RaiseBackgroundException(failure);
-                            return;
+                            onFrameConfirmed?.Invoke();
                         }
                     }
-                    finally
+                    catch (Exception ex)
                     {
-                        ReleaseTransmit();
+                        // As in SendControlFrame: the event carries the transfer's failure.
+                        failure = ex as CanOpenTransportException
+                            ?? new CanOpenTransportException(
+                                $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
+                        RaiseBackgroundException(failure);
+                        return;
                     }
                 }
             }

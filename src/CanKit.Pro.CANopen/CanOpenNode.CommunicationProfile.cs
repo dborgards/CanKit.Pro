@@ -782,29 +782,47 @@ internal sealed partial class CanOpenNode
         // leaving, and the next reset skips the retarget. The handler then sees the node-id
         // those COB-IDs already name. 1200h is not restored, so its baseline stays at the id
         // the live record still names until ApplyActiveNodeId moves it.
-        if (_lssEnabled)
+        bool resumeTransmits = false;
+        if (_lssEnabled && _pendingNodeId != _nodeId)
         {
-            _od.Transaction(() =>
+            // Do not hold the dictionary write gate while a driver confirmation is pending.
+            // Close admission first, then retire every reservation that owns the old identity.
+            resumeTransmits = !IsLssSilent();
+            WaitForTransmitsToDrain();
+            if (Volatile.Read(ref _disposed) != 0) return;
+            lock (_lssTxGate) _nodeIdGeneration++;
+        }
+        try
+        {
+            if (_lssEnabled)
+            {
+                _od.Transaction(() =>
+                {
+                    RestoreValues(_powerOnValues, communicationOnly);
+                    _profileCobIdNodeId = _powerOnNodeId;
+                    if (!CanOpenCobId.IsActiveNodeId(_pendingNodeId))
+                    {
+                        _nodeId = CanOpenCobId.UnconfiguredNodeId;
+                        _srdo.SetNodeId(_nodeId);
+                        // 1014h still names the power-on producer. This node no longer owns that
+                        // id, so a peer that takes it must not be dropped as our own echo.
+                        // Heartbeats already follow _nodeId.
+                        _emcyCobId = 0;
+                        return;
+                    }
+
+                    ApplyActiveNodeId(_pendingNodeId);
+                });
+            }
+            else
             {
                 RestoreValues(_powerOnValues, communicationOnly);
-                _profileCobIdNodeId = _powerOnNodeId;
-                if (!CanOpenCobId.IsActiveNodeId(_pendingNodeId))
-                {
-                    _nodeId = CanOpenCobId.UnconfiguredNodeId;
-                    _srdo.SetNodeId(_nodeId);
-                    // 1014h still names the power-on producer. This node no longer owns that
-                    // id, so a peer that takes it must not be dropped as our own echo.
-                    // Heartbeats already follow _nodeId.
-                    _emcyCobId = 0;
-                    return;
-                }
-
-                ApplyActiveNodeId(_pendingNodeId);
-            });
+            }
         }
-        else
+        finally
         {
-            RestoreValues(_powerOnValues, communicationOnly);
+            // A bit-rate switch already holding the gate keeps ownership of its silence.
+            if (resumeTransmits) CompleteLssTransmitHold();
         }
 
         // The application's turn, still in Initialisation: its objects are restored before the

@@ -1,11 +1,14 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Pro.Actor;
 
 namespace CanKit.Pro.CANopen.Lss;
 
 internal sealed partial class LssMaster
 {
+    private long _nextFastscanAt;
+
     /// <inheritdoc />
     public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
         CancellationToken cancellationToken = default)
@@ -27,6 +30,8 @@ internal sealed partial class LssMaster
             var field = fields[i];
             if (field is null)
                 throw new ArgumentException("Each LSS Fastscan field must be set.");
+            if (field.Mode is not (LssFastscanFieldMode.Scan or LssFastscanFieldMode.Match or LssFastscanFieldMode.Skip))
+                throw new ArgumentOutOfRangeException(nameof(field.Mode), field.Mode, "Fastscan mode must be Scan, Match or Skip.");
             if (i == 0 && field.Mode == LssFastscanFieldMode.Skip)
                 throw new ArgumentException("The vendor-id cannot be skipped in LSS Fastscan.");
             if (field.Mode == LssFastscanFieldMode.Skip) skips++;
@@ -63,7 +68,6 @@ internal sealed partial class LssMaster
                 .ConfigureAwait(false);
             if (!scanned.Matched)
                 return LssFastscanResult.NoMatch(AddressFrom(found));
-            found[index] = scanned.Id;
             // Bit 0 already carried this field's confirmation LSSNext (annex A.3.5). A slave
             // that answered has stored that LSSNext as its position, or has switched into
             // configuration when the value was 0, and will not answer the same frame again.
@@ -72,6 +76,7 @@ internal sealed partial class LssMaster
             if (!scanned.Bit0Acknowledged
                 && !await ProbeAsync(scanned.Id, 0, (byte)index, lssNext, cancellationToken).ConfigureAwait(false))
                 return LssFastscanResult.NoMatch(AddressFrom(found));
+            found[index] = scanned.Id;
             if (lssNext == 0)
                 return LssFastscanResult.Found(AddressFrom(found));
             index = next;
@@ -140,15 +145,29 @@ internal sealed partial class LssMaster
     private async Task<bool> ProbeAsync(uint idNumber, byte bitCheck, byte lssSub, byte lssNext,
         CancellationToken cancellationToken)
     {
-        var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken)
-            .ConfigureAwait(false);
-        // Annex A.3.3: the master cycle contains the whole response timeout. A second slave's
-        // 4Fh that arrives after the first must not be read as the next bit.
-        var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
-            Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
-        if (Options.FastscanCycleTime > TimeSpan.Zero)
-            await Task.Delay(Options.FastscanCycleTime, cancellationToken).ConfigureAwait(false);
-        return response is not null;
+        // Only consecutive Fastscan probes need this gap. A completed scan releases the gate
+        // immediately; another scan still observes the previous probe's gap.
+        await DelayUntilAsync(_nextFastscanAt, cancellationToken).ConfigureAwait(false);
+        long responseUntil = 0;
+        try
+        {
+            var sent = await SendAsync(LssFrames.Fastscan(idNumber, bitCheck, lssSub, lssNext), cancellationToken).ConfigureAwait(false);
+            long start = sent.Transmit > 0 ? sent.Transmit : _time.GetTimestamp();
+            responseUntil = TickMath.DueAt(start, Options.FastscanTimeout, _time.Frequency);
+            // Annex A.3.3: the master cycle contains the whole response timeout. A second
+            // slave's 4Fh must not become the next probe's answer, even after cancellation.
+            var response = await ReceiveAsync(sent, static d => d.Span[0] == LssCommand.IdentifySlave,
+                Options.FastscanTimeout, cancellationToken, drain: true).ConfigureAwait(false);
+            return response is not null;
+        }
+        finally
+        {
+            if (responseUntil > 0)
+            {
+                long end = Math.Max(_time.GetTimestamp(), Math.Max(responseUntil, _nextCommandAt));
+                _nextFastscanAt = TickMath.DueAt(end, Options.FastscanCycleTime, _time.Frequency);
+            }
+        }
     }
 
     private static LssAddress AddressFrom(uint[] found)

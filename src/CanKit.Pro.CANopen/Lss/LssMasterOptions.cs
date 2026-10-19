@@ -26,8 +26,9 @@ public sealed class LssMasterOptions
     public TimeSpan FastscanTimeout { get; init; } = TimeSpan.FromMilliseconds(50);
 
     /// <summary>
-    /// Extra gap after a Fastscan step's response window, before the next request (annex A.3.3,
-    /// master cycle time). The window itself is <see cref="FastscanTimeout"/>. Defaults to 1 ms.
+    /// Extra gap after a Fastscan step's response window, before the next Fastscan request
+    /// (annex A.3.3, master cycle time), including a new scan. The completed scan returns without
+    /// waiting for this gap. The window itself is <see cref="FastscanTimeout"/>. Defaults to 1 ms.
     /// Zero disables the extra gap.
     /// </summary>
     public TimeSpan FastscanCycleTime { get; init; } = TimeSpan.FromMilliseconds(1);
@@ -42,7 +43,8 @@ public sealed class LssMasterOptions
     /// Called from <see cref="ILssMaster.ActivateBitTimingAsync"/> after the first switch-delay
     /// period, with the bit rate the caller named. The callback retunes the channel this master
     /// is already reading. It must not dispose that bus: the second delay, and a waiting frame
-    /// sent after a zero delay, still use it. Null leaves the adapter alone. A caller whose
+    /// sent after a zero delay, still use it. Specifying a bit rate on the call requires this
+    /// callback. Leave both unset to leave the adapter alone. A caller whose
     /// adapter cannot change rate while open omits <c>returnToWaiting</c>, disposes this master
     /// after the call returns, and sends switch state global from a new master on the new bus.
     /// </summary>
@@ -50,8 +52,8 @@ public sealed class LssMasterOptions
 
     internal void Validate()
     {
-        // CancelAfter rejects a delay above Int32.MaxValue milliseconds, and a longer span
-        // overflows the tick multiply that builds a receive deadline.
+        // Keep the service's timing bounds stable independently of the scheduler's
+        // representation of absolute deadlines.
         RequireBounded(ResponseTimeout, nameof(ResponseTimeout), allowZero: false);
         RequireBounded(FastscanTimeout, nameof(FastscanTimeout), allowZero: false);
         RequireBounded(FastscanCycleTime, nameof(FastscanCycleTime), allowZero: true);
@@ -60,8 +62,8 @@ public sealed class LssMasterOptions
 
     private static void RequireBounded(TimeSpan value, string name, bool allowZero)
     {
-        var above = allowZero ? value < TimeSpan.Zero : value <= TimeSpan.Zero;
-        if (!above && value <= TimeSpan.FromMilliseconds(int.MaxValue)) return;
+        var belowMinimum = allowZero ? value < TimeSpan.Zero : value <= TimeSpan.Zero;
+        if (!belowMinimum && value <= TimeSpan.FromMilliseconds(int.MaxValue)) return;
         var message = allowZero
             ? "Must not be negative and no longer than 2147483647 milliseconds."
             : "Must be positive and no longer than 2147483647 milliseconds.";
