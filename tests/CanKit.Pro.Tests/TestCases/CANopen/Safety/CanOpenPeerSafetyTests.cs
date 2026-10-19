@@ -1423,7 +1423,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("visible string")]   // 2008h:00, VISIBLE_STRING: no fixed width
     [InlineData("domain")]           // 2009h:00, DOMAIN: no fixed width
     [InlineData("no data type")]     // 200Ah:00 declared without DataType: width unknown
-    [InlineData("unknown type")]     // 200Bh:00, DataType 0x0010 (INTEGER24), a code this implementation does not map
+    [InlineData("unknown type")]     // 200Bh:00, DataType 0x000C (TIME_OF_DAY), a code this implementation does not map
     public async Task Configure_Refuses_A_Mapping_The_Bound_File_Rules_Out_Before_Any_Frame(string what)
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
@@ -1432,7 +1432,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true),
             ((ushort)0x2008, "0x0009", "rw", true), ((ushort)0x2009, "0x000F", "rw", true),
-            ((ushort)0x200A, "", "rw", true), ((ushort)0x200B, "0x0010", "rw", true));
+            ((ushort)0x200A, "", "rw", true), ((ushort)0x200B, "0x000C", "rw", true));
         if (what == "flag absent")
         {
             var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n")

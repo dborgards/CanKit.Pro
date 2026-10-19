@@ -25,7 +25,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// object dictionary is left alone, and a frame that is not one of its RPDOs still is
 /// (FR-CO-030).
 /// </summary>
-public class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture>
+public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
 
@@ -613,11 +613,11 @@ PDOMapping=0
         }
 
         await Undecoded("", "not in the peer description");
-        await Undecoded(Map("1A00", "9", "0x20010008"), "at most 8");
+        await Undecoded(Map("1A00", "65", "0x20010008"), "at most 64");
         await Undecoded(Map("1A00", "2", "0x20010008"), "no sub-index 2");
         await Undecoded(Map("1A00", "1", "0x0"), "could not be read");
         await Undecoded(Map("1A00", "1", "nope"), "could not be read");
-        await Undecoded(Map("1A00", "1", "0x20010004"), "byte-aligned");
+        await Undecoded(Map("1A00", "1", "0x20010041"), "length");
         await Undecoded(Map("1A00", "2", "0x20000040", "0x20010008"), "longer than 8");
         await Undecoded(@"
 [1A00]
@@ -684,7 +684,7 @@ PDOMapping=0
                 "wide-count" => sub == 0 ? new byte[] { 9 } : null,
                 "short-entry" => sub == 0 ? new byte[] { 1 } : new byte[] { 0x08 },
                 "zero-entry" => sub == 0 ? new byte[] { 1 } : new byte[4],
-                "odd-length" => sub == 0 ? new byte[] { 1 } : U32(0x20010004),
+                "invalid-length" => sub == 0 ? new byte[] { 1 } : U32(0x20010041),
                 "too-long" => sub switch
                 {
                     0 => new byte[] { 2 },
@@ -720,7 +720,7 @@ PDOMapping=0
         shortCob.Observations[0].Origin.Should().Be(ForeignPdoMappingOrigin.DeviceDescription);
         shortCob.Observations[0].Decoded.Should().BeTrue();
 
-        foreach (var mode in new[] { "short-count", "wide-count", "short-entry", "zero-entry", "odd-length", "too-long", "abort-entry",
+        foreach (var mode in new[] { "short-count", "wide-count", "short-entry", "zero-entry", "invalid-length", "too-long", "abort-entry",
                      "two-byte-count", "five-byte-entry", "three-byte-entry" })
         {
             var result = await Observe(mode);

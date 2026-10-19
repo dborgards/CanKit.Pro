@@ -38,8 +38,10 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 internal sealed partial class CanOpenNode
 {
-    private readonly TpdoRuntime?[] _tpdos = new TpdoRuntime?[Co.PdoCount + 1];
-    private readonly RpdoRuntime?[] _rpdos = new RpdoRuntime?[Co.PdoCount + 1];
+    private volatile HashSet<uint> _extendedPdoIds = new();
+    private readonly int _pdoCount;
+    private readonly TpdoRuntime?[] _tpdos;
+    private readonly RpdoRuntime?[] _rpdos;
 
     // Change-of-state TPDO support (FR-CO-006): volatile pre-filter snapshot of OD entries
     // mapped in at least one event-driven or synchronous-acyclic TPDO (rebuilt from the records
@@ -61,11 +63,11 @@ internal sealed partial class CanOpenNode
         TimeSpan? eventTimerInterval = null, TimeSpan? inhibitTime = null)
     {
         ThrowIfDisposed();
-        if (pdoIndex is < 1 or > Co.PdoCount)
-            throw new ArgumentOutOfRangeException(nameof(pdoIndex), pdoIndex, "PDO index must be 1..4.");
+        if (pdoIndex < 1 || pdoIndex > _pdoCount)
+            throw new ArgumentOutOfRangeException(nameof(pdoIndex), pdoIndex, $"PDO index must be 1..{_pdoCount}.");
         if (mapping is null) throw new ArgumentNullException(nameof(mapping));
         byte type = CanOpenTransmissionType.FromTpdoTransmission(transmission);
-        uint word = ValidateCobIdArgument(cobId ?? CanOpenCobId.TpdoDefault(_nodeId, pdoIndex));
+        uint word = ValidateCobIdArgument(cobId ?? DefaultPdoCobId(pdoIndex, isTpdo: true));
         ushort timerMs = transmission == TpdoTransmission.EventTimer
             ? ToMilliseconds16(eventTimerInterval ?? _options.DefaultTpdoEventTimerInterval, nameof(eventTimerInterval), allowZero: false)
             : (ushort)0;
@@ -80,11 +82,11 @@ internal sealed partial class CanOpenNode
         RpdoTransmission transmission = RpdoTransmission.EventDriven)
     {
         ThrowIfDisposed();
-        if (pdoIndex is < 1 or > Co.PdoCount)
-            throw new ArgumentOutOfRangeException(nameof(pdoIndex), pdoIndex, "PDO index must be 1..4.");
+        if (pdoIndex < 1 || pdoIndex > _pdoCount)
+            throw new ArgumentOutOfRangeException(nameof(pdoIndex), pdoIndex, $"PDO index must be 1..{_pdoCount}.");
         if (mapping is null) throw new ArgumentNullException(nameof(mapping));
         byte type = CanOpenTransmissionType.FromRpdoTransmission(transmission);
-        uint word = ValidateCobIdArgument(cobId ?? CanOpenCobId.RpdoDefault(_nodeId, pdoIndex));
+        uint word = ValidateCobIdArgument(cobId ?? DefaultPdoCobId(pdoIndex, isTpdo: false));
 
         RunOnActorAndWait(() => WritePdoRecords((ushort)(Co.RpdoComm + pdoIndex - 1), (ushort)(Co.RpdoMap + pdoIndex - 1),
             mapping.ToArray(), word, type, inhibit: 0, eventTimerMs: 0, isTpdo: false, pdoIndex));
@@ -97,11 +99,15 @@ internal sealed partial class CanOpenNode
         return _actor.PostAsync(() => TriggerTpdoOnActor(pdoIndex));
     }
 
+    private uint DefaultPdoCobId(int number, bool isTpdo)
+    {
+        if (number > 4) throw new ArgumentException("PDOs above 4 need an explicit COB-ID.", "cobId");
+        return isTpdo ? CanOpenCobId.TpdoDefault(_nodeId, number) : CanOpenCobId.RpdoDefault(_nodeId, number);
+    }
+
     private static uint ValidateCobIdArgument(uint word)
     {
-        if ((word & CanOpenCobId.ExtendedFrameBit) != 0)
-            throw new ArgumentException("29-bit COB-IDs (bit 29) are not supported: this node sends and receives CAN base frames only.", "cobId");
-        if ((word & 0x1FFF_F800) != 0)
+        if ((word & CanOpenCobId.ExtendedFrameBit) == 0 && (word & 0x1FFF_F800) != 0)
             throw new ArgumentException("Bits 28..11 of an 11-bit COB-ID must be zero.", "cobId");
         return word;
     }
@@ -125,7 +131,7 @@ internal sealed partial class CanOpenNode
             _od.Transaction(() =>
             {
                 uint current = _od.ReadUnsigned(comm, 0x01);
-                _od.WriteUnsigned(comm, 0x01, current | CanOpenCobId.InvalidBit);
+                _od.WriteUnsigned(comm, 0x01, ((current & CanOpenCobId.InvalidBit) != 0 ? cobIdWord : current) | CanOpenCobId.InvalidBit);
                 _od.WriteUnsigned(map, 0x00, 0);
                 for (byte s = 1; s <= PdoMapping.MaxEntries; s++)
                 {
@@ -162,30 +168,44 @@ internal sealed partial class CanOpenNode
             case 0x01:
                 {
                     uint v = ObjectDictionary.DecodeU32(value);
-                    if (!IsUsableCobIdWord(v)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+                    uint current = _od.ReadUnsigned(index, 0x01);
+                    // Unassigned higher PDOs have an invalid identifier placeholder. A master
+                    // must be able to repeat its destroy step before assigning their CAN-ID.
+                    if (v == current && (v & CanOpenCobId.InvalidBit) != 0) return OdWriteDecision.Accept;
+                    if (!IsUsablePdoCobIdWord(v)) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     // §7.5.2.35 / §7.5.2.37: "It is not allowed to change bit 0 to 29 while the PDO
                     // exists and is valid (bit 31 = 0b)." Bit 30 (RTR / reserved) may change.
-                    uint current = _od.ReadUnsigned(index, 0x01);
                     const uint lower30 = 0x3FFF_FFFF;
                     if ((current & CanOpenCobId.InvalidBit) == 0 && (v & CanOpenCobId.InvalidBit) == 0
                         && (current & lower30) != (v & lower30))
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
                     // A frame on the SYNC CAN-ID (1005h) is a SYNC and nothing else, so a PDO
                     // cannot be created there (Codex on #133); 1005h refuses the mirror image.
-                    if ((v & CanOpenCobId.InvalidBit) == 0 && IsTheSyncCanId(v & CanOpenCobId.CanIdMask))
+                    if ((v & CanOpenCobId.InvalidBit) == 0 && IsTheSyncCanId(PdoFrameKey(v)))
                         return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-                    return OdWriteDecision.Accept;
+                    return ValidateMpdoCreation(index, v, isTpdo);
                 }
             case 0x02:
                 {
                     // Tables 68 and 72: "An attempt to change the value of the transmission type to
                     // any not supported value shall be responded with … 0609 0030h."
                     byte type = value[0];
+                    if (_od.TryReadUnsigned((ushort)(index + 0x200), 0, out var mode) && mode >= 0xFE
+                        && !CanOpenTransmissionType.IsEventDriven(type))
+                        return OdWriteDecision.Reject(SdoAbortCode.GeneralParameterIncompatibility);
                     bool reserved = isTpdo
                         ? CanOpenTransmissionType.IsReservedForTpdo(type)
                         : CanOpenTransmissionType.IsReservedForRpdo(type);
                     return reserved ? OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded) : OdWriteDecision.Accept;
                 }
+            case 0x05:
+                if (isTpdo && (value[0] | (value[1] << 8)) != 0
+                    && _od.TryReadUnsigned((ushort)(index + 0x200), 0, out var timerMode) && timerMode >= 0xFE)
+                    return OdWriteDecision.Reject(SdoAbortCode.GeneralParameterIncompatibility);
+                return OdWriteDecision.Accept;
+            case 0x06:
+                if (value[0] > 240) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
+                goto case 0x03;
             case 0x03:
                 {
                     // §7.5.2.37: "The value shall not be changed while the PDO exists (bit 31 of
@@ -215,23 +235,21 @@ internal sealed partial class CanOpenNode
         if (subindex == 0x00)
         {
             byte count = value[0];
-            if (count == 0) return OdWriteDecision.Accept; // "mapping disabled"
-            // Tables 69 / 73: 41h..FDh reserved, FEh/FFh MPDO (not supported); 09h..40h cannot
-            // fit a byte-aligned mapping into 8 bytes.
+            if (count == 0 || count is 0xFE or 0xFF) return OdWriteDecision.Accept; // disabled or MPDO
+            // Tables 69 / 73: 41h..FDh are reserved; FEh/FFh select MPDO instead of a mapping.
             if (count > 0x40) return OdWriteDecision.Reject(SdoAbortCode.ValueRangeExceeded);
-            if (count > PdoMapping.MaxEntries) return OdWriteDecision.Reject(SdoAbortCode.PdoMappingLengthExceeded);
             // Step 4 of the re-mapping procedure: "If … the device detects that the mapping is
             // not valid or not possible … 0602 0000h or 0604 0042h."
-            int totalBytes = 0;
+            int totalBits = 0;
             for (byte s = 1; s <= count; s++)
             {
                 if (!_od.TryReadUnsigned(index, s, out var raw) || raw == 0)
                     return OdWriteDecision.Reject(SdoAbortCode.ObjectDoesNotExist);
                 var abort = ValidateMappingEntry(raw, isTpdo);
                 if (abort is { } code) return OdWriteDecision.Reject(code);
-                totalBytes += (int)(raw & 0xFF) / 8;
+                totalBits += (int)(raw & 0xFF);
             }
-            return totalBytes > 8
+            return totalBits > 64
                 ? OdWriteDecision.Reject(SdoAbortCode.PdoMappingLengthExceeded)
                 : OdWriteDecision.Accept;
         }
@@ -246,12 +264,12 @@ internal sealed partial class CanOpenNode
         // "a wrong length for the PDO at all" is a step-3 rejection too: with the entries before
         // this slot, the mapping would already exceed 8 bytes. Slots after it may still hold a
         // previous mapping and do not count.
-        int precedingBytes = 0;
+        int precedingBits = 0;
         for (byte s = 1; s < subindex; s++)
         {
-            if (_od.TryReadUnsigned(index, s, out var earlier)) precedingBytes += (int)(earlier & 0xFF) / 8;
+            if (_od.TryReadUnsigned(index, s, out var earlier)) precedingBits += (int)(earlier & 0xFF);
         }
-        return precedingBytes + (int)(entry & 0xFF) / 8 > 8
+        return precedingBits + (int)(entry & 0xFF) > 64
             ? OdWriteDecision.Reject(SdoAbortCode.PdoMappingLengthExceeded)
             : OdWriteDecision.Accept;
     }
@@ -266,25 +284,24 @@ internal sealed partial class CanOpenNode
         var entryIndex = (ushort)((raw >> 16) & 0xFFFF);
         var entrySub = (byte)((raw >> 8) & 0xFF);
         var bitLength = (byte)(raw & 0xFF);
-        if (bitLength == 0 || bitLength > 64 || bitLength % 8 != 0)
+        if (bitLength == 0 || bitLength > 64)
             return SdoAbortCode.DataTypeLengthMismatch;
 
-        // §7.5.2.36: dummy mapping onto the static data types 0002h..0007h.
+        // §7.5.2.36: dummy mapping onto the static data types 0001h..0007h.
         if (entrySub == 0 && PdoMappingEntry.DummyBitLength(entryIndex) is var dummyBits && dummyBits != 0)
             return dummyBits == bitLength ? null : SdoAbortCode.ObjectCannotBeMapped;
 
-        // The communication profile area is not a PDO source or sink in this node: it declares
-        // its objects non-mappable, and the placeholders 1000h/1018h the application replaces or
-        // extends with Add* — whose mappability default serves application objects — must not
-        // become PDO targets that way either (Codex on #133). Whatever the entry's flag says.
-        if (entryIndex is >= 0x1000 and <= 0x1FFF) return SdoAbortCode.ObjectCannotBeMapped;
+        // A PDOMapping flag cannot make an object the standard forbids into a PDO target.
+        if (entryIndex is >= 0x1000 and <= 0x1FFF && !IsCommunicationPdoTarget(entryIndex, entrySub))
+            return SdoAbortCode.ObjectCannotBeMapped;
 
         if (!_od.TryGet(entryIndex, entrySub, out var target)) return SdoAbortCode.ObjectDoesNotExist;
         if (!target.PdoMappable) return SdoAbortCode.ObjectCannotBeMapped;
         var needed = isTpdo ? OdAccess.ReadOnly : OdAccess.WriteOnly;
         if ((target.Access & needed) == 0) return SdoAbortCode.ObjectCannotBeMapped;
         int fixedSize = OdEntryLayout.FixedSize(target.DataType);
-        if (fixedSize > 0 && bitLength / 8 != fixedSize) return SdoAbortCode.ObjectCannotBeMapped;
+        if (fixedSize > 0 && bitLength != fixedSize * 8
+            && !(target.DataType == OdDataType.Boolean && bitLength == 1)) return SdoAbortCode.ObjectCannotBeMapped;
         return null;
     }
 
@@ -302,24 +319,50 @@ internal sealed partial class CanOpenNode
         // raised; a record write that leaves the PDO valid (an event-timer change, say) must not
         // lose it, so it is re-requested against the rebuilt configuration below.
         bool inhibitedEventPending = rt.InhibitPending;
+        bool wasValid = rt.Valid;
+        uint previousCobId = rt.CobId;
+        byte previousType = rt.TransmissionType;
+        byte previousStart = rt.SyncStartValue;
+        byte previousKind = rt.MappingKind;
+        int previousSyncCounter = rt.SyncCounter;
+        bool previousSyncStarted = rt.SyncStarted;
+        bool previousSyncPending = rt.SyncAcyclicPending;
+        byte[]? previousSample = rt.RtrBuffer;
         rt.EventTimerHandle?.Dispose();
         rt.EventTimerHandle = null;
         rt.InhibitHandle?.Dispose();
         rt.InhibitHandle = null;
         rt.InhibitPending = false;
         rt.SyncCounter = 0;
+        rt.SyncStarted = false;
         rt.SyncAcyclicPending = false;
         rt.RtrBuffer = null;
 
         uint word = _od.TryReadUnsigned(comm, 0x01, out var w) ? w : CanOpenCobId.InvalidBit;
         rt.Valid = (word & CanOpenCobId.InvalidBit) == 0;
         rt.RtrAllowed = (word & CanOpenCobId.NoRtrBit) == 0;
-        rt.CobId = word & CanOpenCobId.CanIdMask;
+        rt.CobId = PdoFrameKey(word);
         rt.TransmissionType = _od.TryReadUnsigned(comm, 0x02, out var t) ? (byte)t : CanOpenTransmissionType.EventDrivenManufacturer;
         rt.InhibitTime = TimeSpan.FromTicks((_od.TryReadUnsigned(comm, 0x03, out var ih) ? ih : 0) * (TimeSpan.TicksPerMillisecond / 10));
         rt.EventTimer = TimeSpan.FromMilliseconds(_od.TryReadUnsigned(comm, 0x05, out var et) ? et : 0);
-        rt.Mapping = ReadMappingRecord(map);
-        rt.TotalBytes = TotalBytes(rt.Mapping);
+        rt.SyncStartValue = (byte)(_od.TryReadUnsigned(comm, 0x06, out var sv) ? sv : 0);
+        rt.MappingKind = (byte)(_od.TryReadUnsigned(map, 0, out var mode) ? mode : 0);
+        bool samePdo = wasValid && rt.Valid && previousCobId == rt.CobId
+            && previousType == rt.TransmissionType && previousStart == rt.SyncStartValue && previousKind == rt.MappingKind;
+        if (samePdo)
+        {
+            rt.SyncCounter = previousSyncCounter;
+            rt.SyncStarted = previousSyncStarted;
+            rt.SyncAcyclicPending = previousSyncPending;
+            rt.RtrBuffer = previousSample;
+        }
+        else
+        {
+            rt.MpdoPending.Clear();
+            rt.MpdoOrder.Clear();
+        }
+        rt.Mapping = rt.MappingKind == (byte)MpdoAddressMode.Source ? ReadMpdoScanner() : ReadMappingRecord(map);
+        rt.TotalBytes = rt.MappingKind >= 0xFE ? 8 : TotalBytes(rt.Mapping);
 
         if (rt.Valid)
         {
@@ -337,14 +380,20 @@ internal sealed partial class CanOpenNode
         var map = (ushort)(Co.RpdoMap + n - 1);
         var rp = _rpdos[n] ??= new RpdoRuntime(n);
         rp.SyncPending = null;
+        rp.Deadline?.Dispose();
+        rp.Deadline = null;
+        rp.EventTimer = TimeSpan.FromMilliseconds(_od.TryReadUnsigned(comm, 0x05, out var et) ? et : 0);
         rp.ShortFrameReported = false;
+        rp.MpdoTargetReported = false;
 
         uint word = _od.TryReadUnsigned(comm, 0x01, out var w) ? w : CanOpenCobId.InvalidBit;
         rp.Valid = (word & CanOpenCobId.InvalidBit) == 0;
-        rp.CobId = word & CanOpenCobId.CanIdMask;
+        rp.CobId = PdoFrameKey(word);
         rp.TransmissionType = _od.TryReadUnsigned(comm, 0x02, out var t) ? (byte)t : CanOpenTransmissionType.EventDrivenManufacturer;
+        rp.MappingKind = (byte)(_od.TryReadUnsigned(map, 0, out var mode) ? mode : 0);
         rp.Mapping = ReadMappingRecord(map);
-        rp.TotalBytes = TotalBytes(rp.Mapping);
+        rp.TotalBytes = rp.MappingKind >= 0xFE ? 8 : TotalBytes(rp.Mapping);
+        if (rp.MappingKind == (byte)MpdoAddressMode.Source) RebuildMpdoDispatcher();
     }
 
     private PdoMappingEntry[] ReadMappingRecord(ushort map)
@@ -370,8 +419,8 @@ internal sealed partial class CanOpenNode
     private static int TotalBytes(PdoMappingEntry[] mapping)
     {
         int total = 0;
-        foreach (var e in mapping) total += e.ByteLength;
-        return total;
+        foreach (var e in mapping) total += e.BitLength;
+        return (total + 7) / 8;
     }
 
     // =========================================================================================
@@ -391,17 +440,23 @@ internal sealed partial class CanOpenNode
             // tear the copy.
             if (!entry.IsDummy && _od.TryReadRaw(entry.Index, entry.Subindex, out var raw))
             {
-                int copy = Math.Min(raw.Length, entry.ByteLength);
-                Buffer.BlockCopy(raw, 0, payload, offset, copy);
+                PdoBits.Copy(raw, 0, payload, offset, entry.BitLength);
             }
-            offset += entry.ByteLength;
+            offset += entry.BitLength;
         }
         return payload;
     }
 
     private void EmitTpdo(TpdoRuntime rt)
     {
-        _ = SendControlFrame(rt.CobId, BuildTpdoPayload(rt));
+        if (rt.MappingKind >= 0xFE)
+        {
+            EmitQueuedMpdo(rt);
+            return;
+        }
+        if ((CanOpenTransmissionType.IsSynchronous(rt.TransmissionType)
+             || rt.TransmissionType == CanOpenTransmissionType.RtrOnlySynchronous) && !IsInsideSyncWindow()) return;
+        _ = SendPdoPayload(rt, BuildTpdoPayload(rt));
         rt.LastTransmission = _actor.TimeSource.GetTimestamp();
         rt.HasTransmitted = true;
         if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType) && rt.EventTimer > TimeSpan.Zero)
@@ -464,15 +519,15 @@ internal sealed partial class CanOpenNode
     /// <summary>A consumer requested the PDO with an RTR (CiA 301 §7.2.2.5.2, PDO read).</summary>
     private void HandleTpdoRtr(TpdoRuntime rt)
     {
-        if (_state != NmtState.Operational || !rt.Valid || !rt.RtrAllowed) return;
+        if (_state != NmtState.Operational || !rt.Valid || !rt.RtrAllowed || rt.MappingKind >= 0xFE) return;
         if (rt.TransmissionType == CanOpenTransmissionType.RtrOnlySynchronous)
         {
             // Table 72: "In case it is synchronous the CANopen device will start sampling with
             // the reception of every SYNC and then will buffer the PDO" — the buffer answers, and
             // before the first SYNC there is nothing sampled to answer with.
-            if (rt.RtrBuffer is { } buffered)
+            if (IsInsideSyncWindow() && rt.RtrBuffer is { } buffered)
             {
-                _ = SendControlFrame(rt.CobId, buffered);
+                _ = SendPdoPayload(rt, buffered);
                 rt.LastTransmission = _actor.TimeSource.GetTimestamp();
                 rt.HasTransmitted = true;
             }
@@ -496,9 +551,14 @@ internal sealed partial class CanOpenNode
     private void TriggerTpdoOnActor(int pdoIndex)
     {
         if (_state != NmtState.Operational) return;
-        if (pdoIndex is < 1 or > Co.PdoCount) return;
+        if (pdoIndex < 1 || pdoIndex > _pdoCount) return;
         var rt = _tpdos[pdoIndex];
         if (rt is null || !rt.Valid) return;
+        if (rt.MappingKind >= 0xFE)
+        {
+            if (rt.MappingKind == (byte)MpdoAddressMode.Source) TriggerSourceMpdo(rt);
+            return;
+        }
         if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
         else if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)) RequestEventDrivenTransmission(rt);
         else EmitTpdo(rt);
@@ -508,18 +568,25 @@ internal sealed partial class CanOpenNode
     // SYNC (FR-CO-010) — the trigger for every synchronous PDO.
     // =========================================================================================
 
-    private void HandleSync()
+    private void HandleSync(byte[] payload)
     {
         // Table 37: SYNC is not active in Stopped (nor before initialisation is finished).
         if (_state is NmtState.Stopped or NmtState.Initializing) return;
-        RaiseSyncReceived(DateTime.UtcNow);
+        if (!TryAcceptSync(payload, out var counter)) return;
+        RaiseSyncReceived(DateTime.UtcNow, counter);
         if (_state != NmtState.Operational) return;
 
-        for (int n = 1; n <= Co.PdoCount; n++)
+        for (int n = 1; n <= _pdoCount; n++)
         {
             var rt = _tpdos[n];
             if (rt is null || !rt.Valid) continue;
             byte type = rt.TransmissionType;
+            if (type is >= CanOpenTransmissionType.SynchronousEverySync and <= CanOpenTransmissionType.SynchronousCyclicMax
+                && _syncCounterOverflow > 1 && rt.SyncStartValue != 0 && !rt.SyncStarted)
+            {
+                if (counter.GetValueOrDefault() != rt.SyncStartValue) continue;
+                rt.SyncStarted = true;
+            }
             if (type == CanOpenTransmissionType.SynchronousAcyclic)
             {
                 if (!rt.SyncAcyclicPending) continue;
@@ -540,7 +607,7 @@ internal sealed partial class CanOpenNode
 
         // §7.2.2.2: "The data of synchronous RPDOs received after the occurrence of the SYNC
         // object is passed to the application with the occurrence of the following SYNC."
-        for (int n = 1; n <= Co.PdoCount; n++)
+        for (int n = 1; n <= _pdoCount; n++)
         {
             var rp = _rpdos[n];
             if (rp is null || !rp.Valid || rp.SyncPending is not { } pending) continue;
@@ -557,6 +624,11 @@ internal sealed partial class CanOpenNode
     {
         // CiA 301 Table 37: PDOs exist only in Operational.
         if (_state != NmtState.Operational || !rp.Valid) return;
+        if (rp.MappingKind >= 0xFE)
+        {
+            HandleMpdo(rp, payload);
+            return;
+        }
 
         // §7.5.2.36: fewer data bytes than mapped → not processed, EMCY 8210h if supported;
         // more than mapped → the first bytes up to the mapped length are used.
@@ -575,6 +647,8 @@ internal sealed partial class CanOpenNode
         }
 
         rp.ShortFrameReported = false;
+        if (CanOpenTransmissionType.IsSynchronous(rp.TransmissionType) && !IsInsideSyncWindow()) return;
+        RestartRpdoDeadline(rp);
 
         if (CanOpenTransmissionType.IsSynchronous(rp.TransmissionType))
         {
@@ -589,12 +663,11 @@ internal sealed partial class CanOpenNode
         int offset = 0;
         foreach (var entry in rp.Mapping)
         {
-            if (offset + entry.ByteLength > payload.Length) break;
+            // HandleRpdo checked the complete bit length before actuating or queuing this payload.
             if (!entry.IsDummy && _od.TryGet(entry.Index, entry.Subindex, out var odEntry)
                 && (odEntry.Access & OdAccess.WriteOnly) != 0)
             {
-                var chunk = new byte[entry.ByteLength];
-                Buffer.BlockCopy(payload, offset, chunk, 0, entry.ByteLength);
+                var chunk = PdoBits.Extract(payload, offset, entry.BitLength);
                 // Under the OD lock (WriteRaw) so readers on other threads see whole values.
                 // The mapping was validated against the entry's width when it was written, so a
                 // rejected write here means the entry was re-declared since; that is reported
@@ -607,7 +680,7 @@ internal sealed partial class CanOpenNode
                         $"RPDO{rp.PdoIndex}: the mapped object 0x{entry.Index:X4}:{entry.Subindex:X2} rejected {entry.ByteLength} byte(s): {ex.Message}", ex));
                 }
             }
-            offset += entry.ByteLength;
+            offset += entry.BitLength;
         }
         RaiseRpdoReceived(rp.PdoIndex, rp.CobId, payload);
     }
@@ -622,11 +695,14 @@ internal sealed partial class CanOpenNode
     /// Operational has no transmission left to re-arm it, so this is where it comes back.</summary>
     private void OnEnterOperational()
     {
-        for (int n = 1; n <= Co.PdoCount; n++)
+        _hasSync = false;
+        Interlocked.Increment(ref _syncWindowGeneration);
+        for (int n = 1; n <= _pdoCount; n++)
         {
             if (_tpdos[n] is { } rt)
             {
                 rt.SyncCounter = 0;
+                rt.SyncStarted = false;
                 rt.SyncAcyclicPending = false;
                 rt.RtrBuffer = null;
                 rt.EventTimerHandle?.Dispose();
@@ -634,13 +710,19 @@ internal sealed partial class CanOpenNode
                 if (rt.Valid && CanOpenTransmissionType.IsEventDriven(rt.TransmissionType))
                     ScheduleTpdoEventTimer(rt);
             }
-            if (_rpdos[n] is { } rp) rp.SyncPending = null;
+            if (_rpdos[n] is { } rp)
+            {
+                rp.SyncPending = null;
+                // OnLeaveOperational already cancelled the preceding receive deadline.
+            }
         }
     }
 
     private void OnLeaveOperational()
     {
-        for (int n = 1; n <= Co.PdoCount; n++)
+        _hasSync = false;
+        Interlocked.Increment(ref _syncWindowGeneration);
+        for (int n = 1; n <= _pdoCount; n++)
         {
             if (_tpdos[n] is { } rt)
             {
@@ -649,14 +731,22 @@ internal sealed partial class CanOpenNode
                 rt.InhibitHandle?.Dispose();
                 rt.InhibitHandle = null;
                 rt.InhibitPending = false;
+                rt.MpdoOrder.Clear();
+                rt.MpdoPending.Clear();
             }
-            if (_rpdos[n] is { } rp) rp.SyncPending = null;
+            if (_rpdos[n] is { } rp)
+            {
+                rp.SyncPending = null;
+                rp.Deadline?.Dispose();
+                rp.Deadline = null;
+            }
         }
     }
 
     private void DisposePdoRuntime()
     {
-        for (int n = 1; n <= Co.PdoCount; n++)
+        foreach (var rp in _rpdos) rp?.Deadline?.Dispose();
+        for (int n = 1; n <= _pdoCount; n++)
         {
             if (_tpdos[n] is { } rt)
             {
@@ -746,10 +836,15 @@ internal sealed partial class CanOpenNode
         // for the SRDO's sake even when change-of-state TPDOs are off.
         if (_options.EnableChangeOfStateTpdo)
         {
-            for (int n = 1; n <= Co.PdoCount; n++)
+            for (int n = 1; n <= _pdoCount; n++)
             {
                 var rt = _tpdos[n];
                 if (rt is null || !rt.Valid || !IsChangeOfStateTriggered(rt.TransmissionType)) continue;
+                if (rt.MappingKind == (byte)MpdoAddressMode.Source)
+                {
+                    TriggerSourceMpdo(rt, dirty);
+                    continue;
+                }
                 bool hit = false;
                 foreach (var e in rt.Mapping)
                 {
@@ -798,13 +893,16 @@ internal sealed partial class CanOpenNode
         var set = new HashSet<uint>();
         if (_options.EnableChangeOfStateTpdo)
         {
-            for (int n = 1; n <= Co.PdoCount; n++)
+            for (int n = 1; n <= _pdoCount; n++)
             {
                 var comm = (ushort)(Co.TpdoComm + n - 1);
                 if (!_od.TryReadUnsigned(comm, 0x01, out var word) || (word & CanOpenCobId.InvalidBit) != 0) continue;
                 byte type = _od.TryReadUnsigned(comm, 0x02, out var t) ? (byte)t : CanOpenTransmissionType.EventDrivenManufacturer;
                 if (!IsChangeOfStateTriggered(type)) continue;
-                foreach (var e in ReadMappingRecord((ushort)(Co.TpdoMap + n - 1))) set.Add(CosKey(e.Index, e.Subindex));
+                var map = (ushort)(Co.TpdoMap + n - 1);
+                var entries = _od.TryReadUnsigned(map, 0, out var mode) && mode == (byte)MpdoAddressMode.Source
+                    ? ReadMpdoScanner() : ReadMappingRecord(map);
+                foreach (var e in entries) set.Add(CosKey(e.Index, e.Subindex));
             }
         }
         if (_options.EnableChangeOfStateSrdo) _srdo.CollectChangeOfStateEntries(set, CosKey);
@@ -825,8 +923,11 @@ internal sealed partial class CanOpenNode
         }
 
         public int PdoIndex { get; }
+        public byte MappingKind { get; set; }
         public bool Valid { get; set; }
         public bool RtrAllowed { get; set; }
+        public Dictionary<uint, byte[]> MpdoPending { get; } = new();
+        public Queue<uint> MpdoOrder { get; } = new();
         public uint CobId { get; set; }
         public byte TransmissionType { get; set; } = CanOpenTransmissionType.EventDrivenManufacturer;
         public TimeSpan InhibitTime { get; set; }
@@ -839,6 +940,8 @@ internal sealed partial class CanOpenNode
         public long LastTransmission { get; set; }
         public bool HasTransmitted { get; set; }
         public int SyncCounter { get; set; }
+        public byte SyncStartValue { get; set; }
+        public bool SyncStarted { get; set; }
         public bool SyncAcyclicPending { get; set; }
         public byte[]? RtrBuffer { get; set; }
     }
@@ -851,12 +954,16 @@ internal sealed partial class CanOpenNode
         }
 
         public int PdoIndex { get; }
+        public byte MappingKind { get; set; }
         public bool Valid { get; set; }
         public uint CobId { get; set; }
         public byte TransmissionType { get; set; } = CanOpenTransmissionType.EventDrivenManufacturer;
         public PdoMappingEntry[] Mapping { get; set; } = Array.Empty<PdoMappingEntry>();
         public int TotalBytes { get; set; }
         public byte[]? SyncPending { get; set; }
+        public TimeSpan EventTimer { get; set; }
+        public IDisposable? Deadline { get; set; }
         public bool ShortFrameReported { get; set; }
+        public bool MpdoTargetReported { get; set; }
     }
 }

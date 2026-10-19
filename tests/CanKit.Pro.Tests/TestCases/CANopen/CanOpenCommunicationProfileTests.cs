@@ -222,13 +222,13 @@ public class CanOpenCommunicationProfileTests : IClassFixture<VirtualAdapterFixt
             var tpdoComm = (ushort)(0x1800 + n - 1);
             var tpdoMap = (ushort)(0x1A00 + n - 1);
 
-            od.ReadUnsigned(rpdoComm, 0x00).Should().Be(2u, "RPDO records carry COB-ID and transmission type");
+            od.ReadUnsigned(rpdoComm, 0x00).Should().Be(5u, "RPDO records include inhibit time and the deadline timer");
             uint rpdoCobId = od.ReadUnsigned(rpdoComm, 0x01);
             (rpdoCobId & CanOpenCobId.InvalidBit).Should().Be(CanOpenCobId.InvalidBit, "RPDO{0} does not exist yet", n);
             (rpdoCobId & CanOpenCobId.CanIdMask).Should().Be(CanOpenCobId.RpdoDefault(Slave, n));
             od.ReadUnsigned(rpdoComm, 0x02).Should().Be(CanOpenTransmissionType.EventDrivenManufacturer);
 
-            od.ReadUnsigned(tpdoComm, 0x00).Should().Be(5u, "inhibit time and event timer are supported (§7.5.2.37)");
+            od.ReadUnsigned(tpdoComm, 0x00).Should().Be(6u, "inhibit time and event timer are supported (§7.5.2.37)");
             uint tpdoCobId = od.ReadUnsigned(tpdoComm, 0x01);
             (tpdoCobId & CanOpenCobId.InvalidBit).Should().Be(CanOpenCobId.InvalidBit, "TPDO{0} does not exist yet", n);
             (tpdoCobId & CanOpenCobId.CanIdMask).Should().Be(CanOpenCobId.TpdoDefault(Slave, n));
