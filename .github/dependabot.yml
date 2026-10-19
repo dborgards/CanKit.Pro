@@ -16,9 +16,12 @@ updates:
       prefix: "build(deps)"
     groups:
       # Every package only tests/ references (Directory.Packages.props, the Test block). A
-      # test-only package left out of this list releases a patch nobody needs.
+      # test-only package left out of this list releases a patch nobody needs. The same goes for
+      # CycloneDX, the SBOM tool in .config/dotnet-tools.json: it changes what the SBOMs say, not
+      # what a package contains.
       test-tooling:
         patterns:
+          - "CycloneDX"
           - "xunit*"
           - "Microsoft.NET.Test.Sdk"
           - "coverlet.*"
@@ -32,6 +35,7 @@ updates:
       test-tooling-security:
         applies-to: security-updates
         patterns:
+          - "CycloneDX"
           - "xunit*"
           - "Microsoft.NET.Test.Sdk"
           - "coverlet.*"

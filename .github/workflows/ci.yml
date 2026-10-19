@@ -206,6 +206,22 @@ jobs:
       - name: Verify package contents
         run: python3 eng/verify-packages.py artifacts/nuget
 
+      # The release's SBOM step, run on every pull request for the same reason the pack is: a
+      # change that breaks it -- a dependency whose licence the tool cannot map to SPDX, a tool
+      # bump that changes the output -- should fail here, not on the release that was supposed to
+      # carry the SBOMs. The version is GitVersion's, minus the `+build` metadata that NuGet
+      # leaves out of a package file name.
+      - name: Generate SBOMs
+        run: |
+          set -euo pipefail
+          version='${{ needs.version.outputs.semver }}'
+          python3 eng/generate-sboms.py artifacts/nuget "${version%%+*}" artifacts/sbom
+
+      - name: Verify SBOMs
+        run: |
+          version='${{ needs.version.outputs.semver }}'
+          python3 eng/verify-sboms.py artifacts/sbom artifacts/nuget "${version%%+*}"
+
       - name: Upload packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -213,6 +229,13 @@ jobs:
           path: |
             artifacts/nuget/*.nupkg
             artifacts/nuget/*.snupkg
+          if-no-files-found: error
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: artifacts/sbom/*.cdx.json
           if-no-files-found: error
 
   release-config:

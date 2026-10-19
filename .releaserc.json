@@ -46,7 +46,7 @@
 
     ["@semantic-release/exec", {
       "verifyReleaseCmd": "node eng/verify-release-config.mjs ${nextRelease.version}",
-      "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version}",
+      "prepareCmd": "python3 eng/verify-packages.py artifacts/nuget ${nextRelease.version} && python3 eng/verify-sboms.py artifacts/sbom artifacts/nuget ${nextRelease.version}",
       "publishCmd": "dotnet nuget push \"artifacts/nuget/*.nupkg\" --source https://api.nuget.org/v3/index.json --api-key $NUGET_API_KEY --skip-duplicate && python3 eng/set-package-validation-baseline.py ${nextRelease.version} --commit-and-push ${branch.name}"
     }],
 
@@ -56,7 +56,10 @@
     }],
 
     ["@semantic-release/github", {
-      "assets": [{ "path": "artifacts/nuget/*.nupkg", "label": "NuGet packages" }],
+      "assets": [
+        { "path": "artifacts/nuget/*.nupkg", "label": "NuGet packages" },
+        { "path": "artifacts/sbom/*.cdx.json", "label": "SBOM (CycloneDX 1.6)" }
+      ],
       "successComment": false,
       "failComment": false
     }]

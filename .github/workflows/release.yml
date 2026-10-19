@@ -54,6 +54,10 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      # The package ids, as a JSON array: the `attest` job fans out over them. The fallback is
+      # never used for work -- `attest` is skipped when nothing is released -- but its matrix is
+      # still parsed, and an empty string or empty array is a workflow error, not a skip.
+      packages: ${{ steps.sbom.outputs.packages || '["none"]' }}
     steps:
       # `workflow_dispatch` lets the operator pick any branch, and this workflow ends in a job
       # holding the OIDC grant and the PAT while it runs config and plugin code from the chosen
@@ -137,6 +141,24 @@ jobs:
           --no-restore
           --no-build
 
+      # One CycloneDX SBOM per package, generated from the packages just packed so that each
+      # carries the SHA-512 of the bytes that will be published. Here, not in `release`: the SBOM
+      # tool restores and reads MSBuild output, the same reason packing lives in this job.
+      # Verified straight away, and again by `prepareCmd` against the downloaded artifact.
+      # docs/supply-chain.md says what the SBOMs contain and how a consumer checks them.
+      - name: Generate SBOMs
+        id: sbom
+        if: steps.version.outputs.version != ''
+        run: |
+          set -euo pipefail
+          python3 eng/generate-sboms.py artifacts/nuget "${{ steps.version.outputs.version }}" artifacts/sbom
+          packages=$(python3 -c "import json,pathlib; print(json.dumps(sorted(p.name[:-len('.cdx.json')] for p in pathlib.Path('artifacts/sbom').glob('*.cdx.json'))))")
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+
+      - name: Verify SBOMs
+        if: steps.version.outputs.version != ''
+        run: python3 eng/verify-sboms.py artifacts/sbom artifacts/nuget "${{ steps.version.outputs.version }}"
+
       - name: Upload packages
         if: steps.version.outputs.version != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -145,6 +167,14 @@ jobs:
           path: |
             artifacts/nuget/*.nupkg
             artifacts/nuget/*.snupkg
+          if-no-files-found: error
+
+      - name: Upload SBOMs
+        if: steps.version.outputs.version != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: artifacts/sbom/*.cdx.json
           if-no-files-found: error
 
   release:
@@ -213,6 +243,15 @@ jobs:
           name: nuget-packages
           path: artifacts/nuget
 
+      # The SBOMs `verify` generated, attached to the GitHub Release by .releaserc.json and
+      # re-checked against the packages by prepareCmd before the tag exists.
+      - name: Download SBOMs
+        if: needs.verify.outputs.version != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: artifacts/sbom
+
       # NuGet Trusted Publishing: exchange this run's OIDC token for a short-lived (1h) API key.
       # Requested right before the release step so it doesn't expire before the push happens.
       #
@@ -244,3 +283,58 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           NUGET_API_KEY: ${{ steps.nuget_login.outputs.NUGET_API_KEY }}
+
+  # Signed statements about what was released, made after the release and in a job of their own.
+  #
+  # Two attestations per package, both stored by GitHub and verifiable with `gh attestation
+  # verify`: SLSA build provenance (this repository, this workflow, this commit built the file)
+  # and the CycloneDX SBOM bound to the package as its subject. They need `id-token: write` and
+  # `attestations: write`, which is why this is not a step of `release`: that job already holds
+  # the publishing credentials and runs third-party release plugins, and a signing identity does
+  # not belong in the same process. This job has no secret and no PAT -- it downloads the same
+  # artifacts `release` published and signs their digests.
+  #
+  # After the release, not before: an attestation for a version that then fails to publish would
+  # vouch for something nobody can install. The price is that a failure here leaves a release
+  # without attestations; *Re-run failed jobs* repeats this job alone against the retained
+  # artifacts, and nothing else (docs/supply-chain.md).
+  attest:
+    name: attest ${{ matrix.package }}
+    needs: [verify, release]
+    if: ${{ !fromJSON(inputs.dry_run) && needs.verify.outputs.version != '' && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write          # the OIDC identity the attestation is signed with
+      attestations: write      # store the attestation against this repository
+      artifact-metadata: write # required by actions/attest alongside the two above
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.verify.outputs.packages) }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nuget-packages
+          path: artifacts/nuget
+
+      - name: Download SBOMs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: artifacts/sbom
+
+      # The default when neither `sbom-path` nor a predicate is given.
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/nuget/${{ matrix.package }}.${{ env.VERSION }}.nupkg
+
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: artifacts/nuget/${{ matrix.package }}.${{ env.VERSION }}.nupkg
+          sbom-path: artifacts/sbom/${{ matrix.package }}.cdx.json
