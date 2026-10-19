@@ -233,10 +233,14 @@ internal sealed partial class CanOpenNode
     {
         private readonly Dictionary<ushort, List<DescribedEntry>> _objects;
 
-        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile)
+        private DescribedObjects(Dictionary<ushort, List<DescribedEntry>> objects, bool isConfigurationFile,
+            (uint? VendorId, uint? ProductCode, uint? RevisionNumber) declaredIdentity,
+            (uint VendorId, uint ProductCode, uint RevisionNumber) deviceInfoIdentity)
         {
             _objects = objects;
             IsConfigurationFile = isConfigurationFile;
+            DeclaredIdentity = declaredIdentity;
+            DeviceInfoIdentity = deviceInfoIdentity;
             int highest = 0;
             foreach (var index in objects.Keys)
             {
@@ -249,11 +253,42 @@ internal sealed partial class CanOpenNode
         {
             var objects = new Dictionary<ushort, List<DescribedEntry>>();
             foreach (var pair in description.Objects.Objects) objects[pair.Key] = EntriesOf(pair.Value);
-            return new DescribedObjects(objects, description.IsConfigurationFile);
+            uint? vendorId = null, productCode = null, revisionNumber = null;
+            if (objects.TryGetValue(Co.Identity, out var identity))
+            {
+                foreach (var entry in identity)
+                {
+                    // An identity is a plain number. A $NODEID formula has no place in one and is
+                    // not read: resolved with any node-id it would make up a value to verify a
+                    // peer against, so the entry counts as having no value, which is refused.
+                    var value = IsNodeIdFormula(entry.Value) ? null : ParseUnsigned(0, entry, out _);
+                    switch (entry.Subindex)
+                    {
+                        case 0x01: vendorId = value; break;
+                        case 0x02: productCode = value; break;
+                        case 0x03: revisionNumber = value; break;
+                    }
+                }
+            }
+            var info = description.DeviceInfo;
+            return new DescribedObjects(objects, description.IsConfigurationFile,
+                (vendorId, productCode, revisionNumber), (info.VendorNumber, info.ProductNumber, info.RevisionNumber));
         }
 
         /// <summary>Whether the description is a DCF (<see cref="CanOpenDeviceDescription.IsConfigurationFile"/>).</summary>
         public bool IsConfigurationFile { get; }
+
+        /// <summary>The identity the file declares in its own 1018h:01–03 — "the entries in the
+        /// EDS" CiA 319 v2.0.0 §5.2 compares a device with — as read at the capture: the
+        /// ParameterValue, the DefaultValue where none; null where the entry is not declared or has
+        /// no value this implementation reads.</summary>
+        public (uint? VendorId, uint? ProductCode, uint? RevisionNumber) DeclaredIdentity { get; }
+
+        /// <summary>The file's <c>[DeviceInfo]</c> numbers — <c>VendorNumber</c>, <c>ProductNumber</c>,
+        /// <c>RevisionNumber</c> (CiA 306) — as read at the capture; an absent key reads as 0, and
+        /// a model built from an XDD carries its firmware version there. A second source of the
+        /// identity, which must agree with the first where it says anything.</summary>
+        public (uint VendorId, uint ProductCode, uint RevisionNumber) DeviceInfoIdentity { get; }
 
         /// <summary>The highest SRDO record declared (<see cref="DescribedSrdoCount"/>); 0 without one.</summary>
         public int SrdoCount { get; }
@@ -377,13 +412,13 @@ internal sealed partial class CanOpenNode
                 return ApplyFlyingMasterTiming(entries, findings);
         }
         if (index is >= Co.RpdoComm and < Co.RpdoComm + 0x200)
-            return ApplyPdoCommunicationRecord(index, Co.RpdoComm, isTpdo: false, entries, findings, pendingPdoCreates);
+            return ApplyPdoCommunicationRecord(index, isTpdo: false, entries, findings, pendingPdoCreates);
         if (index is >= Co.TpdoComm and < Co.TpdoComm + 0x200)
-            return ApplyPdoCommunicationRecord(index, Co.TpdoComm, isTpdo: true, entries, findings, pendingPdoCreates);
+            return ApplyPdoCommunicationRecord(index, isTpdo: true, entries, findings, pendingPdoCreates);
         if (index is >= Co.RpdoMap and < Co.RpdoMap + 0x200)
-            return ApplyPdoMappingRecord(index, Co.RpdoMap, entries, findings, failedMappings);
+            return ApplyPdoMappingRecord(index, entries, findings, failedMappings);
         if (index is >= Co.TpdoMap and < Co.TpdoMap + 0x200)
-            return ApplyPdoMappingRecord(index, Co.TpdoMap, entries, findings, failedMappings);
+            return ApplyPdoMappingRecord(index, entries, findings, failedMappings);
 
         // CiA DSP 304: only when the node has SRDOs; otherwise the objects are data like any other.
         if (IsManagedSafetyObject(index))
@@ -406,7 +441,7 @@ internal sealed partial class CanOpenNode
         {
             loaded += DeclareDescribedEntry(index, entry, findings) ? 1 : 0;
         }
-        if (IsCommunicationProfileArea(index) && index is not (Co.DeviceType or Co.Identity or 0x1002 or 0x1008 or 0x1009 or 0x100A or >= 0x1FA0 and <= 0x1FFF))
+        if (IsCommunicationProfileArea(index) && index is not (Co.DeviceType or Co.Identity or 0x1002 or 0x1008 or 0x1009 or 0x100A or >= 0x1FA0))
         {
             findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.NotImplemented,
                 "created as data: the node implements no behaviour behind this communication-profile object"));
@@ -647,16 +682,10 @@ internal sealed partial class CanOpenNode
         return loaded;
     }
 
-    private int ApplyPdoCommunicationRecord(ushort index, ushort baseIndex, bool isTpdo, List<DescribedEntry> entries,
+    private int ApplyPdoCommunicationRecord(ushort index, bool isTpdo, List<DescribedEntry> entries,
         List<DeviceDescriptionFinding> findings, List<(ushort, uint, string)> pendingPdoCreates)
     {
-        int n = index - baseIndex + 1;
-        if (n > _pdoCount)
-        {
-            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
-                $"the node implements {_pdoCount} {(isTpdo ? "TPDOs" : "RPDOs")}; this record is not created"));
-            return 0;
-        }
+        // Allocation already includes the highest PDO declared by this description.
         int loaded = 0;
         var described = new Dictionary<byte, DescribedEntry>();
         foreach (var entry in entries) described[entry.Subindex] = entry;
@@ -850,16 +879,10 @@ internal sealed partial class CanOpenNode
         return loaded;
     }
 
-    private int ApplyPdoMappingRecord(ushort index, ushort baseIndex, List<DescribedEntry> entries,
+    private int ApplyPdoMappingRecord(ushort index, List<DescribedEntry> entries,
         List<DeviceDescriptionFinding> findings, HashSet<ushort> failedMappings)
     {
-        int n = index - baseIndex + 1;
-        if (n > _pdoCount)
-        {
-            findings.Add(new DeviceDescriptionFinding(index, 0, DeviceDescriptionOutcome.Omitted,
-                $"the node implements {_pdoCount} PDOs of each kind; this record is not created"));
-            return 0;
-        }
+        // Allocation already includes the highest PDO declared by this description.
         // A PDO exists only with both records (objects overview, footnote *): a mapping record
         // whose communication record — or its COB-ID sub-index — the description does not
         // declare cannot form one, and the validation of a mapping write reads that COB-ID.
@@ -1008,6 +1031,9 @@ internal sealed partial class CanOpenNode
     // -----------------------------------------------------------------------------------------
 
     private uint? ParseUnsigned(DescribedEntry entry, out string? raw) => ParseUnsigned(_nodeId, entry, out raw);
+
+    private static bool IsNodeIdFormula(string? value)
+        => !string.IsNullOrEmpty(value) && value!.IndexOf("$NODEID", StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static uint? ParseUnsigned(byte nodeId, DescribedEntry entry, out string? raw)
     {

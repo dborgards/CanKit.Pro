@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using CanKit.Pro.CANopen.Lss;
 
 namespace CanKit.Pro.CANopen;
 
@@ -175,6 +176,15 @@ public sealed class CanOpenNodeOptions
     /// <see cref="EnableChangeOfStateTpdo"/>. The refresh cycle restarts from that transmission.</summary>
     public bool EnableChangeOfStateSrdo { get; init; } = true;
 
+    /// <summary>
+    /// Layer setting services (CiA 305). <see langword="null"/> (the default) leaves them off,
+    /// unless the device description the node is opened with sets <c>LSS_Supported</c>. An
+    /// instance turns them on, and <see cref="LssSlaveOptions.Enabled"/> <see langword="false"/>
+    /// turns them off even when the file says they are supported. A node-id of <c>0xFF</c> is
+    /// legal only while they are on.
+    /// </summary>
+    public LssSlaveOptions? Lss { get; init; }
+
     /// <summary>Returns a copy of this options record with the provided overrides. The 1.3.0
     /// signature, kept so that callers compiled against it still bind; source callers resolve
     /// to the overload with every parameter optional.</summary>
@@ -220,7 +230,7 @@ public sealed class CanOpenNodeOptions
             enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, pdoCount: null);
 
     /// <summary>Returns a copy of this options record with the provided overrides, validated
-    /// like the options a node is opened with. The optional PDO count override is 1..512.</summary>
+    /// like the options a node is opened with. The optional PDO count override is 1..512. <see cref="Lss"/> is kept; <see cref="WithLss"/> replaces it.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A resulting value is out of its range.</exception>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -239,6 +249,35 @@ public sealed class CanOpenNodeOptions
         int? srdoCount = null,
         bool? enableChangeOfStateSrdo = null,
         int? pdoCount = null)
+        => Copy(sdoTimeout, sdoServerTimeout, defaultTpdoEventTimerInterval, eventQueueCapacity, maxSdoTransferBytes,
+            sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
+            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, Lss, pdoCount);
+
+    /// <summary>
+    /// Returns a copy with <see cref="Lss"/> replaced. Pass <see langword="null"/> to turn layer
+    /// setting services back off unless a device description enables them.
+    /// </summary>
+    public CanOpenNodeOptions WithLss(LssSlaveOptions? lss)
+        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, lss, pdoCount: null);
+
+    private CanOpenNodeOptions Copy(
+        TimeSpan? sdoTimeout,
+        TimeSpan? sdoServerTimeout,
+        TimeSpan? defaultTpdoEventTimerInterval,
+        int? eventQueueCapacity,
+        int? maxSdoTransferBytes,
+        int? sdoBlockThresholdBytes,
+        byte? sdoBlockSize,
+        bool? sdoBlockCrcSupported,
+        int? sdoBlockMaxRetransmissions,
+        bool? respondToNodeGuardingRtr,
+        bool? enableChangeOfStateTpdo,
+        bool? writableCommunicationParameters,
+        CanOpenNodeProfile? profile,
+        int? srdoCount,
+        bool? enableChangeOfStateSrdo,
+        LssSlaveOptions? lss,
+        int? pdoCount)
     {
         var options = new CanOpenNodeOptions
         {
@@ -258,6 +297,7 @@ public sealed class CanOpenNodeOptions
             Profile = profile ?? Profile,
             SrdoCount = srdoCount ?? SrdoCount,
             EnableChangeOfStateSrdo = enableChangeOfStateSrdo ?? EnableChangeOfStateSrdo,
+            Lss = lss,
         };
         options.Validate();
         return options;

@@ -10,7 +10,7 @@ using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
-// FR-CO-048/049/050: CiA 301 §7.2.5, §7.5.2.7, §7.5.2.22, §7.5.2.35/37.
+// FR-CO-052/053/054: CiA 301 §7.2.5, §7.5.2.7, §7.5.2.22, §7.5.2.35/37.
 internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
 {
     private byte _syncCounterOverflow;
@@ -86,7 +86,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdoMonitoring
             long counterGeneration = 0;
             var send = await _actor.PostAsync(() =>
             {
-                if (_disposed != 0) return Task.FromResult(false);
+                // SendControlFrame checks disposal under the shared transmit gate.
                 bool CanSendPeriodic()
                 {
                     if (_disposed != 0 || !_syncGenerate) return false;

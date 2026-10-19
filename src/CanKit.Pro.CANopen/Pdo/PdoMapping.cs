@@ -280,17 +280,18 @@ public sealed class PdoMapping
 
     private void Validate()
     {
+        // Check the count before summing widths, so both limits have their own diagnostic.
+        if (_entries.Count > MaxEntries)
+        {
+            _entries.RemoveAt(_entries.Count - 1);
+            throw new InvalidOperationException($"PDO mapping holds at most {MaxEntries} entries.");
+        }
         if (TotalBytes > 8)
         {
             _entries.RemoveAt(_entries.Count - 1);
             throw new InvalidOperationException(
                 "PDO mapping total exceeds the 8-byte classic CAN limit.");
         }
-        if (_entries.Count > MaxEntries)
-        {
-            _entries.RemoveAt(_entries.Count - 1);
-            throw new InvalidOperationException(
-                $"PDO mapping holds at most {MaxEntries} entries.");
-        }
+
     }
 }

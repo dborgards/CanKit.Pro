@@ -51,7 +51,8 @@ namespace CanKit.Pro.CANopen;
 /// </remarks>
 public interface ICanOpenNode : IDisposable
 {
-    /// <summary>Node identifier (1..127) this instance answers as on the bus.</summary>
+    /// <summary>Node identifier (1..127) this instance answers as on the bus. <c>0xFF</c> while
+    /// an LSS slave has no active node-id yet (CiA 305): nothing on the bus is addressed with it.</summary>
     byte NodeId { get; }
 
     /// <summary>Options this node was constructed with.</summary>
@@ -130,10 +131,12 @@ public interface ICanOpenNode : IDisposable
     /// after the communication-profile objects have been restored and before the boot-up is
     /// transmitted: the application restores its own object dictionary objects in the handler,
     /// and the node announces itself only when the handler has returned — a master reacting to
-    /// the boot-up never reads a value the reset had not reached. The handler runs on the loop
-    /// the node's own work runs on, so it must not wait for the node (an SDO transfer,
-    /// <see cref="StoreParameters"/>, a configuration method); its exception is reported through
-    /// <see cref="BackgroundExceptionOccurred"/> and does not stop the reset.
+    /// the boot-up never reads a value the reset had not reached. When layer setting services
+    /// are on, the pending node-id is already the active one and the pre-defined COB-IDs already
+    /// name it. The handler runs on the loop the node's own work runs on, so it must not wait
+    /// for the node (an SDO transfer, <see cref="StoreParameters"/>, a configuration method);
+    /// its exception is reported through <see cref="BackgroundExceptionOccurred"/> and does not
+    /// stop the reset.
     /// </summary>
     event EventHandler<NmtResetEventArgs>? ApplicationReset;
 

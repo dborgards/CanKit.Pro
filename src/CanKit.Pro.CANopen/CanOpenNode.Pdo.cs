@@ -584,7 +584,7 @@ internal sealed partial class CanOpenNode
             if ((CanOpenTransmissionType.IsSynchronous(type) || type == CanOpenTransmissionType.RtrOnlySynchronous)
                 && _syncCounterOverflow > 1 && rt.SyncStartValue != 0 && !rt.SyncStarted)
             {
-                if (counter != rt.SyncStartValue) continue;
+                if (counter.GetValueOrDefault() != rt.SyncStartValue) continue;
                 rt.SyncStarted = true;
             }
             if (type == CanOpenTransmissionType.SynchronousAcyclic)
@@ -663,7 +663,7 @@ internal sealed partial class CanOpenNode
         int offset = 0;
         foreach (var entry in rp.Mapping)
         {
-            if (offset + entry.BitLength > payload.Length * 8) break;
+            // HandleRpdo checked the complete bit length before actuating or queuing this payload.
             if (!entry.IsDummy && _od.TryGet(entry.Index, entry.Subindex, out var odEntry)
                 && (odEntry.Access & OdAccess.WriteOnly) != 0)
             {
@@ -713,8 +713,7 @@ internal sealed partial class CanOpenNode
             if (_rpdos[n] is { } rp)
             {
                 rp.SyncPending = null;
-                rp.Deadline?.Dispose();
-                rp.Deadline = null;
+                // OnLeaveOperational already cancelled the preceding receive deadline.
             }
         }
     }

@@ -45,7 +45,8 @@ public static class CanOpen
     /// identities over one physical bus, or to co-exist with other protocol layers (ISO-TP,
     /// J1939, ...).</summary>
     /// <param name="service">The demux service. Must not be null.</param>
-    /// <param name="nodeId">CANopen node-id 1..127 this node identifies as.</param>
+    /// <param name="nodeId">CANopen node-id 1..127 this node identifies as, or <c>0xFF</c> for an
+    /// LSS slave that has no node-id yet (<see cref="CanOpenNodeOptions.Lss"/>).</param>
     /// <param name="options">Node options; defaults to a fresh <see cref="CanOpenNodeOptions"/>.</param>
     /// <param name="leaveOpen">When <c>true</c> (default) disposing the node does not dispose
     /// <paramref name="service"/>; when <c>false</c> the node takes ownership and disposes the

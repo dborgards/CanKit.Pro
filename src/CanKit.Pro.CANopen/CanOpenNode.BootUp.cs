@@ -542,23 +542,23 @@ internal sealed partial class CanOpenNode
     /// and rethrows the bus (<see cref="CanKitException"/> from a device adapter, and whatever
     /// else the driver raised, including <see cref="InvalidOperationException"/>).
     /// </summary>
-    private Task<bool> SendNmtReporting(byte[] payload)
+    private Task<bool> SendNmtReporting(byte[] payload, CancellationToken cancellationToken = default)
     {
+        // Flying-master NMT uses this path rather than SendControlFrame. The switch delay
+        // holds the frame: completing with true here would apply the reset before it is sent.
+        // The same gate as every other transmit: a frame already reserved goes out before
+        // silence starts, and one that arrives during the delay is held.
         var frame = CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand), payload, isExtendedFrame: false);
-        return Task.Run(async () =>
+        if (GateTransmit(CanOpenCobId.NmtCommand, payload, null, cancellationToken) is { } held)
+            return held;
+        var send = Task.Run(async () =>
         {
-            try
-            {
-                var conf = await _service.SendConfirmedAsync(frame).ConfigureAwait(false);
-                if (conf.Confirmed) return true;
-                RaiseBackgroundException(new CanOpenTransportException(
-                    $"CANopen frame TX on COB-ID 0x{CanOpenCobId.NmtCommand:X3} failed: {conf.FailureReason}."));
-                return false;
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
+            var conf = await SendReservedFrame(frame, cancellationToken).ConfigureAwait(false);
+            if (conf.Confirmed) return true;
+            RaiseBackgroundException(new CanOpenTransportException(
+                $"CANopen frame TX on COB-ID 0x{CanOpenCobId.NmtCommand:X3} failed: {conf.FailureReason}."));
+            return false;
         });
+        return send;
     }
 }

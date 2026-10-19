@@ -233,7 +233,7 @@ public partial class CanOpenPdoEngineTests
         wire.Payloads(CanOpenCobId.Sync)[6].Should().Equal(1);
     }
 
-    // FR-CO-048: start gates the initial sequence only; periods continue across overflow.
+    // FR-CO-052: start gates the initial sequence only; periods continue across overflow.
     [Theory]
     [InlineData(1)]
     [InlineData(3)]

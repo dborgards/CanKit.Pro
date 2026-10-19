@@ -461,7 +461,7 @@ public class LssMasterTests : IClassFixture<VirtualAdapterFixture>
             ProductCode = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
             RevisionNumber = new LssFastscanField { Mode = LssFastscanFieldMode.Skip },
         }));
-        skipped.Succeeded.Should().BeTrue();
+        skipped.Status.Should().Be(LssFastscanStatus.Found);
         skipped.Address.VendorId.Should().Be(1);
         skipped.Address.ProductCode.Should().Be(0);
         skipped.Address.SerialNumber.Should().Be(1);

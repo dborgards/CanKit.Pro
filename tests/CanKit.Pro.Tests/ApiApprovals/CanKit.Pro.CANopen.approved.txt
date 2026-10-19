@@ -96,6 +96,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
         public int EventQueueCapacity { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }
         public int MaxSdoTransferBytes { get; init; }
         public int PdoCount { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeProfile Profile { get; init; }
@@ -127,6 +128,7 @@ namespace CanKit.Pro.CANopen
                     int? srdoCount = default,
                     bool? enableChangeOfStateSrdo = default,
                     int? pdoCount = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions WithLss(CanKit.Pro.CANopen.Lss.LssSlaveOptions? lss) { }
     }
     public enum CanOpenNodeProfile
     {
@@ -442,6 +444,15 @@ namespace CanKit.Pro.CANopen.Lss
         public static CanKit.Pro.CANopen.Lss.ILssMaster OpenMaster(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.CANopen.Lss.LssMasterOptions? options = null) { }
         public static CanKit.Pro.CANopen.Lss.ILssMaster OpenMaster(CanKit.Pro.RawCan.ICanBusService service, CanKit.Pro.CANopen.Lss.LssMasterOptions? options = null, bool leaveOpen = true) { }
     }
+    public static class CanOpenLssNodeExtensions
+    {
+        public static CanKit.Pro.CANopen.Lss.LssState LssState(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+    }
+    public interface ILssConfigurationStore
+    {
+        bool TryLoad(out byte nodeId, out byte tableSelector, out byte tableIndex);
+        bool TryStore(byte nodeId, byte tableSelector, byte tableIndex, out byte specError);
+    }
     public interface ILssMaster : System.IAsyncDisposable, System.IDisposable
     {
         CanKit.Pro.CANopen.Lss.LssMasterOptions Options { get; }
@@ -462,6 +473,10 @@ namespace CanKit.Pro.CANopen.Lss
         System.Threading.Tasks.Task<bool> SwitchStateSelectiveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, System.ReadOnlyMemory<byte> parameters, System.Threading.CancellationToken cancellationToken = default);
     }
+    public interface ILssSlave
+    {
+        CanKit.Pro.CANopen.Lss.LssState State { get; }
+    }
     public readonly struct LssAddress : System.IEquatable<CanKit.Pro.CANopen.Lss.LssAddress>
     {
         public LssAddress(uint vendorId, uint productCode, uint revisionNumber, uint serialNumber) { }
@@ -476,6 +491,43 @@ namespace CanKit.Pro.CANopen.Lss
         public override string ToString() { }
         public static bool operator !=(CanKit.Pro.CANopen.Lss.LssAddress left, CanKit.Pro.CANopen.Lss.LssAddress right) { }
         public static bool operator ==(CanKit.Pro.CANopen.Lss.LssAddress left, CanKit.Pro.CANopen.Lss.LssAddress right) { }
+    }
+    public static class LssBitRateDetection
+    {
+        public static System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssBitRateDetectionResult> DetectAsync(System.Func<int, CanKit.Abstractions.API.Can.ICanBus> openListenOnly, CanKit.Pro.CANopen.Lss.LssBitRateDetectionOptions? options = null, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class LssBitRateDetectionOptions
+    {
+        public LssBitRateDetectionOptions() { }
+        public System.Collections.Generic.IReadOnlyList<int> Candidates { get; init; }
+        public int ErrorFramesToReject { get; init; }
+        public System.TimeSpan ListenWindow { get; init; }
+        public int Passes { get; init; }
+        public bool RequireListenOnly { get; init; }
+        public static System.Collections.Generic.IReadOnlyList<int> DefaultCandidates { get; }
+        public static System.TimeSpan DefaultListenWindow { get; }
+    }
+    public sealed class LssBitRateDetectionResult
+    {
+        public LssBitRateDetectionResult(int? bitsPerSecond, System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssBitRateProbe> probes) { }
+        public int? BitsPerSecond { get; }
+        public bool Detected { get; }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssBitRateProbe> Probes { get; }
+        public byte? TableIndex { get; }
+    }
+    public sealed class LssBitRateProbe
+    {
+        public LssBitRateProbe(int bitsPerSecond, CanKit.Pro.CANopen.Lss.LssBitRateProbeOutcome outcome, int errorFrames, CanKit.Abstractions.API.Common.Definitions.BusState busState) { }
+        public int BitsPerSecond { get; }
+        public CanKit.Abstractions.API.Common.Definitions.BusState BusState { get; }
+        public int ErrorFrames { get; }
+        public CanKit.Pro.CANopen.Lss.LssBitRateProbeOutcome Outcome { get; }
+    }
+    public enum LssBitRateProbeOutcome
+    {
+        Detected = 0,
+        Rejected = 1,
+        Inconclusive = 2,
     }
     public static class LssBitTiming
     {
@@ -530,6 +582,26 @@ namespace CanKit.Pro.CANopen.Lss
         public const byte SwitchSelectiveVendor = 64;
         public const byte SwitchStateGlobal = 4;
         public static bool IsManufacturerSpecific(byte commandSpecifier) { }
+    }
+    public sealed class LssCommissioning
+    {
+        public LssCommissioning(CanKit.Pro.CANopen.Lss.ILssMaster master) { }
+        public CanKit.Pro.CANopen.Lss.ILssMaster Master { get; }
+        public System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssCommissioningResult> ConfigureSlaveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, CanKit.Pro.CANopen.Lss.LssSlaveConfiguration configuration, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssCommissioningResult> InquireSlaveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssCommissioningResult>> ReadIdentitiesAsync(CanKit.Pro.CANopen.ICanOpenNode client, System.Collections.Generic.IEnumerable<byte> nodeIds, System.Threading.CancellationToken cancellationToken = default) { }
+        public System.Threading.Tasks.Task<CanKit.Pro.CANopen.Lss.LssUnconfiguredScanResult> ScanUnconfiguredAsync(CanKit.Pro.CANopen.Lss.LssUnconfiguredScan? scan = null, System.Threading.CancellationToken cancellationToken = default) { }
+    }
+    public sealed class LssCommissioningResult
+    {
+        public LssCommissioningResult(bool selected, CanKit.Pro.CANopen.Lss.LssAddress address, byte? nodeId = default, CanKit.Pro.CANopen.Lss.LssServiceResult? nodeIdResult = default, CanKit.Pro.CANopen.Lss.LssServiceResult? bitTimingResult = default, CanKit.Pro.CANopen.Lss.LssServiceResult? storeResult = default) { }
+        public CanKit.Pro.CANopen.Lss.LssAddress Address { get; }
+        public CanKit.Pro.CANopen.Lss.LssServiceResult? BitTimingResult { get; }
+        public byte? NodeId { get; }
+        public CanKit.Pro.CANopen.Lss.LssServiceResult? NodeIdResult { get; }
+        public bool Selected { get; }
+        public CanKit.Pro.CANopen.Lss.LssServiceResult? StoreResult { get; }
+        public bool Succeeded { get; }
     }
     public sealed class LssFastscanField
     {
@@ -593,6 +665,15 @@ namespace CanKit.Pro.CANopen.Lss
         public System.TimeSpan IdentificationTimeout { get; init; }
         public System.TimeSpan ResponseTimeout { get; init; }
     }
+    public enum LssScanStop
+    {
+        NoUnconfiguredSlave = 0,
+        NoMatch = 1,
+        LimitReached = 2,
+        NodeIdsExhausted = 3,
+        SlaveRejected = 4,
+        TimedOut = 5,
+    }
     public readonly struct LssServiceResult : System.IEquatable<CanKit.Pro.CANopen.Lss.LssServiceResult>
     {
         public LssServiceResult(byte errorCode, byte specError) { }
@@ -608,6 +689,31 @@ namespace CanKit.Pro.CANopen.Lss
         public static bool operator !=(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
         public static bool operator ==(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
     }
+    public sealed class LssSlaveConfiguration
+    {
+        public LssSlaveConfiguration() { }
+        public int? ActivateBitRate { get; init; }
+        public ushort? ActivateDelayMilliseconds { get; init; }
+        public byte? BitTimingIndex { get; init; }
+        public byte? BitTimingSelector { get; init; }
+        public byte? NodeId { get; init; }
+        public bool ReleaseToWaiting { get; init; }
+        public bool Store { get; init; }
+    }
+    public sealed class LssSlaveOptions
+    {
+        public LssSlaveOptions() { }
+        public System.Func<int, System.Threading.CancellationToken, System.Threading.Tasks.Task>? BitRateSwitch { get; init; }
+        public bool BitTimingSupported { get; init; }
+        public bool Enabled { get; init; }
+        public System.Func<byte, System.ReadOnlyMemory<byte>, byte[]>? Manufacturer { get; init; }
+        [System.Runtime.CompilerServices.TupleElementNames(new string?[]?[] {
+                "Selector",
+                "Index"})]
+        public System.Collections.Generic.IReadOnlyDictionary<System.ValueTuple<byte, byte>, int>? ManufacturerRates { get; init; }
+        public bool NodeIdConfigurationSupported { get; init; }
+        public CanKit.Pro.CANopen.Lss.ILssConfigurationStore? Store { get; init; }
+    }
     public enum LssState : byte
     {
         Waiting = 0,
@@ -618,6 +724,24 @@ namespace CanKit.Pro.CANopen.Lss
         public LssTimeoutException(byte commandSpecifier, System.TimeSpan timeout) { }
         public byte CommandSpecifier { get; }
         public System.TimeSpan Timeout { get; }
+    }
+    public sealed class LssUnconfiguredScan
+    {
+        public LssUnconfiguredScan() { }
+        public int? ActivateBitRate { get; init; }
+        public ushort? ActivateDelayMilliseconds { get; init; }
+        public byte? AssignFromNodeId { get; init; }
+        public byte? BitTimingIndex { get; init; }
+        public byte? BitTimingSelector { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssFastscanRequest? Fastscan { get; init; }
+        public int? Limit { get; init; }
+        public bool Store { get; init; }
+    }
+    public sealed class LssUnconfiguredScanResult
+    {
+        public LssUnconfiguredScanResult(System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssCommissioningResult> slaves, CanKit.Pro.CANopen.Lss.LssScanStop stop) { }
+        public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Lss.LssCommissioningResult> Slaves { get; }
+        public CanKit.Pro.CANopen.Lss.LssScanStop Stop { get; }
     }
 }
 namespace CanKit.Pro.CANopen.Nmt
@@ -787,6 +911,7 @@ namespace CanKit.Pro.CANopen.Safety
                 "Parameter",
                 "Mapping"})]
         public System.Collections.Generic.IReadOnlyDictionary<int, System.ValueTuple<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter, CanKit.Pro.CANopen.Safety.SrdoMapping>> Srdos { get; }
+        public CanKit.Pro.CANopen.Safety.PeerSafetyStorage Storage { get; set; }
         public CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration Add(int srdoNumber, CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter parameter, CanKit.Pro.CANopen.Safety.SrdoMapping mapping) { }
         public static CanKit.Pro.CANopen.Safety.PeerSafetyConfiguration FromDeviceDescription(CanKit.Pro.CANopen.CanOpenDeviceDescription description, byte nodeId) { }
     }
@@ -801,7 +926,15 @@ namespace CanKit.Pro.CANopen.Safety
     public sealed class PeerSafetyResult
     {
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Safety.PeerSafetyMismatch> Mismatches { get; }
+        public CanKit.Pro.CANopen.Sdo.SdoAbortException? StorageAbort { get; }
+        public bool Stored { get; }
         public bool Succeeded { get; }
+    }
+    public enum PeerSafetyStorage : byte
+    {
+        None = 0,
+        AllParameters = 1,
+        CommunicationParameters = 2,
     }
     public readonly struct SrdoCommunicationParameter : System.IEquatable<CanKit.Pro.CANopen.Safety.SrdoCommunicationParameter>
     {

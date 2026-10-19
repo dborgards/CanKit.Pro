@@ -38,7 +38,7 @@ public partial class CanOpenPdoEngineTests
             .GetMethod("HandleIncoming", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(node, new object[] { id, payload, false }));
 
-    // FR-CO-048: the matching SYNC is the FIRST counted SYNC, not the first transmission for n>1.
+    // FR-CO-052: the matching SYNC is the FIRST counted SYNC, not the first transmission for n>1.
     [Fact]
     public async Task Sync_Start_Waits_Through_Overflow_And_Restarts_On_Operational()
     {
@@ -154,7 +154,7 @@ public partial class CanOpenPdoEngineTests
             .Should().Be((uint)CanKit.Pro.CANopen.Sdo.SdoAbortCode.SubIndexDoesNotExist);
     }
 
-    // FR-CO-049: window boundaries are measured against the same virtual clock as the actor.
+    // FR-CO-053: window boundaries are measured against the same virtual clock as the actor.
     [Fact]
     public async Task Sync_Window_Discards_Late_Rpdos_And_Reopens_On_The_Next_Sync()
     {
@@ -213,7 +213,7 @@ public partial class CanOpenPdoEngineTests
         device.ObjectDictionary.ReadUnsigned(0x2000, 0).Should().Be(42);
     }
 
-    // FR-CO-050: no timer before first frame; a short frame does not refresh it; timeout is
+    // FR-CO-054: no timer before first frame; a short frame does not refresh it; timeout is
     // one-shot until reception, and the NMT transition cancels it.
     [Fact]
     public async Task Rpdo_Deadline_Starts_On_Reception_Refreshes_And_Stops_With_Nmt()

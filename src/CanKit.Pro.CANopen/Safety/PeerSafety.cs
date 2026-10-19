@@ -5,7 +5,8 @@ using System.Collections.ObjectModel;
 namespace CanKit.Pro.CANopen.Safety;
 
 /// <summary>What a safety node's configuration should be: 1300h and, per SRDO number, the
-/// communication parameter and the mapping. Built by hand or from a DCF's parameter values
+/// communication parameter and the mapping — and, for a configuration, whether the peer is to
+/// store it (<see cref="Storage"/>). Built by hand or from a DCF's parameter values
 /// (CiA 306). A record whose direction is 0 is not part of it — it is deleted on the peer.
 /// Not thread-safe: fill it on one thread, then hand it over. A transaction takes its own copy
 /// when it starts; a concurrent <see cref="Add"/> while that copy is being made is not supported.</summary>
@@ -13,9 +14,32 @@ public sealed class PeerSafetyConfiguration
 {
     private readonly Dictionary<int, (SrdoCommunicationParameter Parameter, SrdoMapping Mapping)> _srdos = new();
     private ReadOnlyDictionary<int, (SrdoCommunicationParameter Parameter, SrdoMapping Mapping)>? _view;
+    private PeerSafetyStorage _storage;
 
     /// <summary>1300h: 1 when true.</summary>
     public bool GlobalFailsafeCommandEnabled { get; init; }
+
+    /// <summary>CiA 319 v2.0.0 §5.3 step 5: once the peer has acknowledged the configuration
+    /// (13FEh = A5h read back), it is asked to store it in non-volatile memory — 13FEh and 13FFh
+    /// included — through 1010h at this sub-index, with the "save" signature.
+    /// <see cref="PeerSafetyStorage.None"/>, the default, stores nothing. Settable, so that a
+    /// configuration <see cref="FromDeviceDescription"/> built can ask for it too. The sub-index
+    /// must be one the peer's bound description declares, or the configuration is refused before
+    /// its first frame; a store the peer aborts is reported in the result
+    /// (<see cref="PeerSafetyResult.StorageAbort"/>), after the acknowledgement. A verification
+    /// does not read it.</summary>
+    /// <exception cref="ArgumentOutOfRangeException">Not a value of <see cref="PeerSafetyStorage"/>.</exception>
+    public PeerSafetyStorage Storage
+    {
+        get => _storage;
+        set
+        {
+            if (value is not (PeerSafetyStorage.None or PeerSafetyStorage.AllParameters or PeerSafetyStorage.CommunicationParameters))
+                throw new ArgumentOutOfRangeException(nameof(value), value,
+                    "The storage is None, AllParameters (1010h:01) or CommunicationParameters (1010h:02) (CiA 319 §5.3 step 5).");
+            _storage = value;
+        }
+    }
 
     /// <summary>The SRDOs to exist on the peer, by number.</summary>
     public IReadOnlyDictionary<int, (SrdoCommunicationParameter Parameter, SrdoMapping Mapping)> Srdos => _view ??= new(_srdos);
@@ -60,7 +84,7 @@ public sealed class PeerSafetyConfiguration
     /// a peer-safety transaction works from, taken when it starts.</summary>
     internal PeerSafetyConfiguration Snapshot()
     {
-        var copy = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = GlobalFailsafeCommandEnabled };
+        var copy = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = GlobalFailsafeCommandEnabled, Storage = Storage };
         foreach (var pair in _srdos)
             copy._srdos[pair.Key] = (pair.Value.Parameter, SrdoMapping.FromEntries(pair.Value.Mapping.ToArray()));
         return copy;
@@ -120,7 +144,11 @@ public sealed class PeerSafetyConfiguration
     }
 }
 
-/// <summary>One (index, sub-index) whose value on the peer is not what was expected.</summary>
+/// <summary>One (index, sub-index) whose value on the peer is not what was expected: an identity
+/// entry 1018h:01–03 that differs from the bound description's own 1018h entries (CiA 319 §5.2,
+/// nothing was written then) — or that the peer does not implement, reported with no bytes
+/// read once an earlier entry differed —, or a safety object whose readback differs from what
+/// was written (a configuration) or from the expectation (a verification).</summary>
 public sealed class PeerSafetyMismatch
 {
     internal PeerSafetyMismatch(ushort index, byte subindex, byte[] expected, byte[] actual)
@@ -131,27 +159,41 @@ public sealed class PeerSafetyMismatch
     public ushort Index { get; }
     /// <summary>Sub-index.</summary>
     public byte Subindex { get; }
-    /// <summary>The bytes written (configuration) or computed (verification).</summary>
+    /// <summary>The bytes written (configuration), the bytes the bound description's identity
+    /// encodes to (1018h:01–03), or the bytes computed (verification).</summary>
     public byte[] Expected { get; }
-    /// <summary>The bytes read back.</summary>
+    /// <summary>The bytes read back; empty for an identity entry the peer answered "sub-index does
+    /// not exist" after an earlier entry had differed.</summary>
     public byte[] Actual { get; }
     /// <inheritdoc />
     public override string ToString() => $"0x{Index:X4}:{Subindex:X2} expected {BitConverter.ToString(Expected)} read {BitConverter.ToString(Actual)}";
 }
 
 /// <summary>Outcome of <c>ICanOpenSafety.ConfigurePeerSafetyAsync</c> (succeeded =
-/// acknowledged with 13FEh = A5h) and <c>ICanOpenSafety.VerifyPeerSafetyConfigurationAsync</c>
-/// (succeeded = verified).</summary>
+/// acknowledged with 13FEh = A5h, and stored when asked) and
+/// <c>ICanOpenSafety.VerifyPeerSafetyConfigurationAsync</c> (succeeded = verified).</summary>
 public sealed class PeerSafetyResult
 {
-    internal PeerSafetyResult(bool succeeded, IReadOnlyList<PeerSafetyMismatch> mismatches)
+    internal PeerSafetyResult(bool succeeded, IReadOnlyList<PeerSafetyMismatch> mismatches, bool stored = false, Sdo.SdoAbortException? storageAbort = null)
     {
-        Succeeded = succeeded; Mismatches = mismatches;
+        Succeeded = succeeded; Mismatches = mismatches; Stored = stored; StorageAbort = storageAbort;
     }
     /// <summary>No mismatch, and for a configuration the acknowledgement was written and read back.</summary>
     public bool Succeeded { get; }
-    /// <summary>Every pair that differed; empty when <see cref="Succeeded"/>.</summary>
+    /// <summary>Every pair that differed; empty when <see cref="Succeeded"/>. For a configuration,
+    /// entries of 1018h mean the peer is not the device the bound description describes
+    /// (CiA 319 §5.2) and nothing was written.</summary>
     public IReadOnlyList<PeerSafetyMismatch> Mismatches { get; }
+    /// <summary>For a configuration: the peer confirmed the 1010h download that
+    /// <see cref="PeerSafetyConfiguration.Storage"/> asked for, after the acknowledgement (CiA 319
+    /// §5.3 step 5). False when none was asked for, when the result is not <see cref="Succeeded"/>,
+    /// when the peer aborted the store (<see cref="StorageAbort"/>), and for a verification.</summary>
+    public bool Stored { get; }
+    /// <summary>The abort the peer answered the step-5 download with, when it did: the
+    /// configuration is acknowledged (<see cref="Succeeded"/>, 13FEh = A5h on the peer) and not
+    /// stored. Null otherwise. A timeout or a cancellation of that download propagates instead, as
+    /// for every transfer.</summary>
+    public Sdo.SdoAbortException? StorageAbort { get; }
 }
 
 /// <summary>Outcome of <c>ICanOpenSafety.ObserveForeignSrdoAsync</c>.</summary>

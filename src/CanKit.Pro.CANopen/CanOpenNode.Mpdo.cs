@@ -10,7 +10,7 @@ using CanKit.Pro.CANopen.Sdo;
 
 namespace CanKit.Pro.CANopen;
 
-// FR-CO-053: CiA 301 §7.2.3, §7.5.2.39/40 (SAM/DAM and scanner/dispatcher lists).
+// FR-CO-057: CiA 301 §7.2.3, §7.5.2.39/40 (SAM/DAM and scanner/dispatcher lists).
 internal sealed partial class CanOpenNode : ICanOpenPdo
 {
     // Actor-owned snapshot; OD enumeration belongs to configuration, not reception.
@@ -34,7 +34,7 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
         ValidateCobIdArgument(cobId);
         ushort comm = (ushort)((isTpdo ? Co.TpdoComm : Co.RpdoComm) + number - 1);
         ushort map = (ushort)(comm + 0x200);
-        RunOnActorAndWait(() => _od.Transaction(() =>
+        Action writeRecords = () =>
         {
             uint current = _od.ReadUnsigned(comm, 1);
             _od.WriteUnsigned(comm, 1, ((current & CanOpenCobId.InvalidBit) != 0 ? cobId : current) | CanOpenCobId.InvalidBit);
@@ -45,7 +45,8 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
             if (_od.TryGet(comm, 5, out _)) _od.WriteUnsigned(comm, 5, 0);
             if (isTpdo && _od.TryGet(comm, 6, out _)) _od.WriteUnsigned(comm, 6, 0);
             _od.WriteUnsigned(comm, 1, cobId | (isTpdo ? CanOpenCobId.NoRtrBit : 0));
-        }));
+        };
+        RunOnActorAndWait(() => _od.Transaction(writeRecords));
     }
 
     /// <inheritdoc />
