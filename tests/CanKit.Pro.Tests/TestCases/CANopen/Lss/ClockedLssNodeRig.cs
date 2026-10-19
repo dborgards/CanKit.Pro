@@ -61,7 +61,8 @@ internal sealed class ClockedLssNodeRig : IDisposable
 
     public async Task<T> RunAsync<T>(Task<T> operation, TimeSpan? stallBudget = null)
     {
-        var stall = stallBudget ?? LssTestTiming.SchedulingBudget * (_nodes.Count + 1);
+        // TimeSpan * int does not exist on net48, hence the ticks.
+        var stall = stallBudget ?? TimeSpan.FromTicks(LssTestTiming.SchedulingBudget.Ticks * (_nodes.Count + 1));
         var started = _clock.Elapsed;
         var lastProgress = DateTime.UtcNow;
         while (!operation.IsCompleted)
