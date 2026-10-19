@@ -41,7 +41,7 @@ internal sealed class LssTestService : ICanBusService
     public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null,
         CancellationToken cancellationToken = default)
     {
-        Commands.Enqueue(frame.Data.Span[0]);
+        if (!frame.Data.IsEmpty) Commands.Enqueue(frame.Data.Span[0]);
         return Send(frame);
     }
 
@@ -79,16 +79,24 @@ internal sealed class LssTestSubscription : ISubscription
 
     public bool TryRead(out CanFrameEvent frameEvent)
     {
+        bool read = TryRead(out frameEvent, out var delivered);
+        delivered?.TrySetResult(true);
+        return read;
+    }
+
+    private bool TryRead(out CanFrameEvent frameEvent, out TaskCompletionSource<bool>? delivered)
+    {
         BeforeRead?.Invoke();
         if (ReadFailure is { } error && (!FailAfterFirstRead || _readOne)) throw error;
         if (_frames.Reader.TryRead(out var item))
         {
             _readOne = true;
             frameEvent = item.Frame;
-            item.Delivered.TrySetResult(true);
+            delivered = item.Delivered;
             return true;
         }
         frameEvent = default;
+        delivered = null;
         return false;
     }
     public ValueTask<bool> WaitToReadAsync(CancellationToken cancellationToken = default)
@@ -111,7 +119,12 @@ internal sealed class LssTestSubscription : ISubscription
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         while (await WaitToReadAsync(cancellationToken))
-            while (TryRead(out var frame)) yield return frame;
+            while (TryRead(out var frame, out var delivered))
+            {
+                yield return frame;
+                // The consumer has handled the frame before its enqueue is acknowledged.
+                delivered!.TrySetResult(true);
+            }
     }
 
     private async Task<bool> WaitParkedAsync(CancellationToken cancellationToken)

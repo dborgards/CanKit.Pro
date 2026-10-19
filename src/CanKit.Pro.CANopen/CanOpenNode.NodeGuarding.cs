@@ -120,12 +120,14 @@ internal sealed partial class CanOpenNode
             ReadOnlyMemory<byte>.Empty,
             isExtendedFrame: false,
             isRemoteFrame: true);
-        var svc = _service;
+        // A guarding poll is dropped for the delay, not held. Reserving the send keeps it
+        // from leaving after silence has been asked to start.
+        if (!TryReserveTransmit()) return;
         _ = System.Threading.Tasks.Task.Run(async () =>
         {
             try
             {
-                var conf = await svc.SendConfirmedAsync(frame).ConfigureAwait(false);
+                var conf = await SendReservedFrame(frame).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
                     RaiseBackgroundException(new CanOpenTransportException(
