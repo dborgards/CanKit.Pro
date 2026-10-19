@@ -96,6 +96,7 @@ namespace CanKit.Pro.CANopen
         public bool EnableChangeOfStateSrdo { get; init; }
         public bool EnableChangeOfStateTpdo { get; init; }
         public int EventQueueCapacity { get; init; }
+        public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }
         public int MaxSdoTransferBytes { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeProfile Profile { get; init; }
         public bool RespondToNodeGuardingRtr { get; init; }
@@ -109,6 +110,7 @@ namespace CanKit.Pro.CANopen
         public bool WritableCommunicationParameters { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile) { }
         public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default, CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default, int? srdoCount = default, bool? enableChangeOfStateSrdo = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions WithLss(CanKit.Pro.CANopen.Lss.LssSlaveOptions? lss) { }
     }
     public enum CanOpenNodeProfile
     {
@@ -412,6 +414,15 @@ namespace CanKit.Pro.CANopen.Lss
         public static CanKit.Pro.CANopen.Lss.ILssMaster OpenMaster(CanKit.Abstractions.API.Can.ICanBus bus, CanKit.Pro.CANopen.Lss.LssMasterOptions? options = null) { }
         public static CanKit.Pro.CANopen.Lss.ILssMaster OpenMaster(CanKit.Pro.RawCan.ICanBusService service, CanKit.Pro.CANopen.Lss.LssMasterOptions? options = null, bool leaveOpen = true) { }
     }
+    public static class CanOpenLssNodeExtensions
+    {
+        public static CanKit.Pro.CANopen.Lss.LssState LssState(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+    }
+    public interface ILssConfigurationStore
+    {
+        bool TryLoad(out byte nodeId, out byte tableSelector, out byte tableIndex);
+        bool TryStore(byte nodeId, byte tableSelector, byte tableIndex, out byte specError);
+    }
     public interface ILssMaster : System.IAsyncDisposable, System.IDisposable
     {
         CanKit.Pro.CANopen.Lss.LssMasterOptions Options { get; }
@@ -431,6 +442,10 @@ namespace CanKit.Pro.CANopen.Lss
         System.Threading.Tasks.Task SwitchStateGlobalAsync(CanKit.Pro.CANopen.Lss.LssState state, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<bool> SwitchStateSelectiveAsync(CanKit.Pro.CANopen.Lss.LssAddress address, System.Threading.CancellationToken cancellationToken = default);
         System.Threading.Tasks.Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, System.ReadOnlyMemory<byte> parameters, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public interface ILssSlave
+    {
+        CanKit.Pro.CANopen.Lss.LssState State { get; }
     }
     public readonly struct LssAddress : System.IEquatable<CanKit.Pro.CANopen.Lss.LssAddress>
     {
@@ -577,6 +592,20 @@ namespace CanKit.Pro.CANopen.Lss
         public override string ToString() { }
         public static bool operator !=(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
         public static bool operator ==(CanKit.Pro.CANopen.Lss.LssServiceResult left, CanKit.Pro.CANopen.Lss.LssServiceResult right) { }
+    }
+    public sealed class LssSlaveOptions
+    {
+        public LssSlaveOptions() { }
+        public System.Func<int, System.Threading.CancellationToken, System.Threading.Tasks.Task>? BitRateSwitch { get; init; }
+        public bool BitTimingSupported { get; init; }
+        public bool Enabled { get; init; }
+        public System.Func<byte, System.ReadOnlyMemory<byte>, byte[]>? Manufacturer { get; init; }
+        [System.Runtime.CompilerServices.TupleElementNames(new string?[]?[] {
+                "Selector",
+                "Index"})]
+        public System.Collections.Generic.IReadOnlyDictionary<System.ValueTuple<byte, byte>, int>? ManufacturerRates { get; init; }
+        public bool NodeIdConfigurationSupported { get; init; }
+        public CanKit.Pro.CANopen.Lss.ILssConfigurationStore? Store { get; init; }
     }
     public enum LssState : byte
     {

@@ -7,7 +7,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0 and, for the configuration entity, CiA 319 v2.0.0, and an LSS master as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is validated against a scripted slave in that suite, not against a third-party LSS slave.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0 and, for the configuration entity, CiA 319 v2.0.0, and LSS master and slave as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is also validated against a scripted slave in that suite, not against a third-party LSS slave.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
@@ -37,9 +37,10 @@ scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #1
 (`docs/reviews/2026-09-26-canopen-master-tool-scope.md`); FR-CO-035 to FR-CO-046 are CANopen
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
-v3.0.0, and FR-CO-048 the configuration entity after CiA 319 v2.0.0 (17 October 2026). The
-SRS's "Quelle" column says for each of them whether a standard requires it, the architecture
-does, or a maintainer decision does.
+v3.0.0, FR-CO-048 the LSS slave in the node, including the pending node-id and
+`LSS_Supported` in a device description, and FR-CO-049 the configuration entity after CiA 319
+v2.0.0 (17 October 2026). The SRS's "Quelle" column says for each of them whether a standard
+requires it, the architecture does, or a maintainer decision does.
 
 | SRS id | Feature |
 | --- | --- |
@@ -90,7 +91,8 @@ does, or a maintainer decision does.
 | FR-CO-045 | Step D in the boot-up: a DCF-bound safety slave is verified before NMT Start, and no Start goes to node 0 while one is assigned; a failure signals `SlaveSafetyConfigurationInvalid` and the slave is not started; a mandatory slave or a simultaneous start halts the boot ([Verifying, and the boot-up](#verifying-and-the-boot-up)) |
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
 | FR-CO-047 | LSS master (CiA 305): switch state global and selective, configure node-id and bit timing, activate with both switch delays, store, inquire identity and node-id, identify remote and non-configured slaves, Fastscan ([Layer setting services](#layer-setting-services-cia-305)) |
-| FR-CO-048 | `ConfigurePeerSafetyAsync` as the configuration entity of CiA 319 v2.0.0: the identity of §5.2 first, the steps of §5.3 with the storage of step 5 (`PeerSafetyConfiguration.Storage`, `PeerSafetyResult.Stored`), and the §6.2 default for the SRVT of a tx SRDO the peer does not implement, in the verification too ([Configuring a peer](#configuring-a-peer)) |
+| FR-CO-048 | LSS slave in the node: waiting and configuration, identity from `1018h`, pending node-id applied on NMT reset communication, unconfigured `FFh` does not boot, store through `ILssConfigurationStore`, `LSS_Supported` in an EDS/DCF ([Layer setting services](#layer-setting-services-cia-305)) |
+| FR-CO-049 | `ConfigurePeerSafetyAsync` as the configuration entity of CiA 319 v2.0.0: the identity of §5.2 first, the steps of §5.3 with the storage of step 5 (`PeerSafetyConfiguration.Storage`, `PeerSafetyResult.Stored`), and the §6.2 default for the SRVT of a tx SRDO the peer does not implement, in the verification too ([Configuring a peer](#configuring-a-peer)) |
 
 ## Not built, and why
 
@@ -149,8 +151,8 @@ Deliberate omissions, each checked against the norm text:
   start-up check of §5.4 against what was stored. Tracked in #308.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
-* **LSS slave and the commissioning tool** — FR-CO-047 is the master only. A node does not yet
-  answer 7E5h, and an unconfigured node-id (`FFh`) is still rejected by `OpenNode`.
+* **The LSS commissioning tool** — FR-CO-047 is the master and FR-CO-048 the slave. A tool that
+  scans and assigns node-ids on top of the master is not in this package yet.
 * **Automatic bit-rate detection** — table 0 index 9 (CiA 801). The master sends the index; it
   does not search for a rate itself.
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
@@ -516,6 +518,9 @@ other. `1017h` ≠ 0 runs the producer. Each sub-index of `1016h` with a node-id
 non-zero time is a consumer whose timeout is armed immediately, so a producer that never
 appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
 `0x700 + id`.
+
+For every node, periodic producer ticks are coalesced while a heartbeat send is outstanding;
+transmission recovery sends no catch-up burst, including when LSS is disabled.
 
 `HeartbeatTimeout`, `NodeGuardingTimeout` and `EmcyReceived` share the node's event queue
 with heartbeats, SYNC, PDOs and NMT, and keep their place in that order. They are the events
@@ -1083,8 +1088,61 @@ returns without waiting for that gap. Identify waits out `IdentificationTimeout`
 later slave is not left queued for the next command. Give the slave a node-id in `1..127`
 before the next Fastscan, or the same slave is found again.
 
-The LSS slave inside `ICanOpenNode`, and a commissioning tool on top of this master, are not
-part of FR-CO-047.
+### The slave
+
+`CanOpenNodeOptions.Lss` turns layer setting services on in the node (FR-CO-048). A device
+description with `LSS_Supported=1` does the same when `Lss` is left unset; an explicit
+`LssSlaveOptions.Enabled = false` wins over the file. `node.LssState()` is waiting or
+configuration. It is an extension, so `ICanOpenNode` itself did not grow a member.
+
+The node-id passed to `OpenNode` is the persistent and pending node-id. `0xFF` is legal only
+while LSS is on: the node then stays in NMT Initializing, sends no boot-up and serves no SDO,
+until configure node-id gives it a value in 1..127. That value becomes active at once and the
+node boots, and it stays in LSS configuration. A node that already has an active node-id keeps
+it until the next NMT reset communication, which copies the pending node-id into the active one
+and retargets pre-defined COB-IDs that still name the old one. Reset node copies the persistent
+node-id back into the pending one first. Neither reset reloads the bit timing.
+An identity change closes the transmit gate and drains old-ID reservations before publishing
+the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs
+resolve their COB-ID after the change. A bit-rate switch already holding the gate stays silent.
+
+`ILssConfigurationStore` is the only persistence. Without one, store answers "not supported".
+`1010h` does not store the layer settings, and an LSS store does not rewrite the object
+dictionary. Table 0 indexes follow `BaudRate_*` in the device description when the file names
+any of them; otherwise every named CiA 301 rate is accepted. `BitRateSwitch` is called when the
+pending timing becomes active; the callback can reconfigure the channel. The node stays silent
+until both the second switch delay and the callback complete successfully, including for a zero
+delay. While the node is active, failed or cancelled callbacks are reported on
+`BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
+Repeated activations serialize the callbacks.
+
+A new activation requests cancellation of the previous callback as soon as it is received,
+including during the first switch delay. Disposal also requests cancellation. Neither waits for
+application cancellation handlers. The replacement callback gets a fresh token and starts only
+after the previous callback finishes. Callbacks must honor their token or implement their own
+timeout: a callback that ignores cancellation still delays later callbacks and can continue after
+disposal. Queued callbacks are not started after their cancellation is requested. The node never
+resumes transmission on an assumed switch completion or a timeout alone.
+
+NMT, boot-up and heartbeat that come due in that window are held; cancelled NMT commands are
+not sent, and heartbeat frames use the node-id active when they are sent.
+The transmit gate closes before waiting for existing driver reservations to finish, so new
+traffic cannot prolong the drain or reach the driver before the switch completes.
+Periodic heartbeat ticks are coalesced while a send is outstanding, so recovery does not replay
+a backlog. Disposal discards queued heartbeats.
+A flying-master Reset Communication is applied only once its NMT frame has been sent. An SRDO
+pair already reserved finishes before switching starts; pairs due during silence are dropped
+as a unit. A GFC command that cannot be transmitted fails with `CanOpenTransportException`.
+Other frames are not sent.
+
+```csharp
+var store = new MyLssStore();
+using var node = CanOpen.OpenNode(bus, nodeId: 0xFF, new CanOpenNodeOptions
+{
+    Lss = new LssSlaveOptions { Store = store },
+});
+// node.State is Initializing and node.NodeId is 0xFF until a master configures 1..127.
+```
 
 ## Flying master
 
@@ -1288,7 +1346,7 @@ CanKit.Pro.CANopen/
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
   Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
-  Lss/                                // CiA 305: LSS master, frame codec, Fastscan, address and bit-timing types
+  Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan
 ```
 
 ## Migrating from 1.2.x
@@ -1374,7 +1432,7 @@ Each item names what a caller does about it.
 
 ## Changes since 1.3.0
 
-* **`ConfigurePeerSafetyAsync` is the configuration entity of CiA 319 v2.0.0** (FR-CO-048): it
+* **`ConfigurePeerSafetyAsync` is the configuration entity of CiA 319 v2.0.0** (FR-CO-049): it
   reads the peer's `1018h:01`–`03` first and compares them with the bound file's own `1018h`
   entries, so a file that does not declare them with a value, contradicts them in `[DeviceInfo]`
   or declares them all 0 is refused before the first frame, and a peer that is another device ends

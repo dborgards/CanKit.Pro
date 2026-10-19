@@ -74,6 +74,8 @@ public interface ICanOpenSafety
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was
     /// cancelled before the send was confirmed; or the bus service was disposed under the send,
     /// which is also reported on <c>BackgroundExceptionOccurred</c> as a transport failure.</exception>
+    /// <exception cref="CanOpenTransportException">LSS bit-rate switching suppresses transmission
+    /// of the GFC; the command was not handed to the driver.</exception>
     Task SendGlobalFailsafeCommandAsync(CancellationToken cancellationToken = default);
 
     /// <summary>The configuration entity of CiA 319 v2.0.0 clause 5 on the §9.2 Figure 9

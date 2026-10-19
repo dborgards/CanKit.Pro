@@ -79,8 +79,10 @@ internal sealed partial class CanOpenNode
     // Actor-confined runtime configuration derived from the OD.
     private volatile uint _syncCobId = CanOpenCobId.Sync;
     private bool _syncGenerate;
-    private uint _emcyCobId;
-    private bool _emcyValid = true;
+    // Read again when the frame is sent. A heartbeat or EMCY queued behind a transmit still
+    // in flight must follow a node-id change that lands before that transmit finishes.
+    private volatile uint _emcyCobId;
+    private volatile bool _emcyValid = true;
     private EmcyMessage? _pendingEmcy;
     private TimeSpan _guardTime;
     private byte _lifeTimeFactor;
@@ -433,12 +435,15 @@ internal sealed partial class CanOpenNode
         // is stored is what the dictionary held at the "save", not what a writer changed while the
         // actor was still getting to it (Codex on #133). Only the actor-owned state moves to the loop.
         var stored = SnapshotRestorableValues();
+        byte profileNodeId = _profileCobIdNodeId;
         RunOnActor(() =>
         {
             _powerOnValues = stored;
             // A store after "load" is the newer instruction: the next reset restores what was
             // just stored, not the defaults the earlier "load" asked for.
             _restoreDefaultsOnReset = false;
+            // The snapshot now holds the COB-IDs of the node-id they were last retargeted to.
+            NoteLayerSettingsPowerOn(profileNodeId);
         });
         return OdWriteDecision.Handled;
     }
@@ -752,6 +757,10 @@ internal sealed partial class CanOpenNode
         // sub-state reset communication is passed."
         _nodeGuardingProducerToggle = false;
         ResetLifeGuardingState();
+        // Reset node reloads the persistent node-id into the pending one. Reset communication
+        // keeps the pending node-id. Neither command reloads the bit timing (CiA 305 §8.3).
+        if (_lssEnabled && !communicationOnly)
+            _pendingNodeId = _persistentNodeId;
         // Before the dictionary is restored: a flying master that was mid-election must not keep
         // that deadline, and the restart the restored 1F80h performs is a warm boot.
         SuspendFlyingMasterForReset();
@@ -766,8 +775,56 @@ internal sealed partial class CanOpenNode
         {
             _powerOnValues = _factoryDefaults;
             _restoreDefaultsOnReset = false;
+            if (_lssEnabled) _powerOnNodeId = _factoryNodeId;
         }
-        RestoreValues(_powerOnValues, communicationOnly);
+        // The restore and the pending LSS node-id share one hold of the write gate. A 1010h
+        // save otherwise snapshots the power-on COB-IDs against the node-id this reset is
+        // leaving, and the next reset skips the retarget. The handler then sees the node-id
+        // those COB-IDs already name. 1200h is not restored, so its baseline stays at the id
+        // the live record still names until ApplyActiveNodeId moves it.
+        bool resumeTransmits = false;
+        if (_lssEnabled && _pendingNodeId != _nodeId)
+        {
+            // Do not hold the dictionary write gate while a driver confirmation is pending.
+            // Close admission first, then retire every reservation that owns the old identity.
+            resumeTransmits = !IsLssSilent();
+            WaitForTransmitsToDrain();
+            if (Volatile.Read(ref _disposed) != 0) return;
+            lock (_lssTxGate) _nodeIdGeneration++;
+        }
+        try
+        {
+            if (_lssEnabled)
+            {
+                _od.Transaction(() =>
+                {
+                    RestoreValues(_powerOnValues, communicationOnly);
+                    _profileCobIdNodeId = _powerOnNodeId;
+                    if (!CanOpenCobId.IsActiveNodeId(_pendingNodeId))
+                    {
+                        _nodeId = CanOpenCobId.UnconfiguredNodeId;
+                        _srdo.SetNodeId(_nodeId);
+                        // 1014h still names the power-on producer. This node no longer owns that
+                        // id, so a peer that takes it must not be dropped as our own echo.
+                        // Heartbeats already follow _nodeId.
+                        _emcyCobId = 0;
+                        return;
+                    }
+
+                    ApplyActiveNodeId(_pendingNodeId);
+                });
+            }
+            else
+            {
+                RestoreValues(_powerOnValues, communicationOnly);
+            }
+        }
+        finally
+        {
+            // A bit-rate switch already holding the gate keeps ownership of its silence.
+            if (resumeTransmits) CompleteLssTransmitHold();
+        }
+
         // The application's turn, still in Initialisation: its objects are restored before the
         // node announces itself, so a master reacting to the boot-up never reads a value the
         // reset had not reached. With a description the node restored the described ones above;
@@ -777,6 +834,21 @@ internal sealed partial class CanOpenNode
         // A subscriber may have disposed the node; its timers are gone and nothing is announced.
         if (Volatile.Read(ref _disposed) != 0) return;
 
+        // After the handler. Starting inside the restore would claim with the id the reset is
+        // leaving, and the boot-up must not go out until the application has restored its objects.
+        // An unconfigured pending node-id stays in reset-communication waiting.
+        ApplyFlyingMasterStartup();
+        if (_lssEnabled && !CanOpenCobId.IsActiveNodeId(_pendingNodeId))
+            return;
+        EnterPreOperationalFromReset();
+    }
+
+    /// <summary>
+    /// The boot-up tail of an NMT reset, and of an unconfigured LSS slave that has just been
+    /// given a node-id in 1..127. Does not raise <see cref="ICanOpenNode.ApplicationReset"/>.
+    /// </summary>
+    private void EnterPreOperationalFromReset()
+    {
         _state = NmtState.PreOperational;
         // Boot-up (0x00) first; a heartbeat with the new state follows only when the producer is
         // active, in which case §7.2.8.3.2.2 regards the boot-up as its first heartbeat — and the
@@ -876,7 +948,6 @@ internal sealed partial class CanOpenNode
         {
             _suppressFlyingMasterStartup = false;
         }
-        ApplyFlyingMasterStartup();
     }
 
     /// <inheritdoc />
