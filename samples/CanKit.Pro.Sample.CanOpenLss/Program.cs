@@ -48,6 +48,13 @@ namespace CanKit.Sample.CanOpenLss
 
             try
             {
+                if (HasFlag(args, "--bit-rate"))
+                {
+                    Console.Error.WriteLine(
+                        "--bit-rate requires an adapter-specific BitRateSwitch callback, which this sample does not install. Use --selector and --index to configure the pending timing.");
+                    return 2;
+                }
+
                 var bitrate = GetInt(args, "--bitrate", 500_000, 1);
                 using var demoNetwork = demo ? DemoNetwork.Start() : null;
                 if (string.Equals(verb, "detect", StringComparison.OrdinalIgnoreCase))
@@ -178,7 +185,6 @@ namespace CanKit.Sample.CanOpenLss
                 BitTimingSelector = ReadOptionalByte(args, "--selector"),
                 BitTimingIndex = ReadOptionalByte(args, "--index"),
                 ActivateDelayMilliseconds = ReadOptionalUShort(args, "--activate-ms"),
-                ActivateBitRate = ReadOptionalInt(args, "--bit-rate"),
             };
             var result = await tool.ConfigureSlaveAsync(ReadAddress(args), configuration, cancellationToken)
                 .ConfigureAwait(false);
@@ -211,7 +217,6 @@ namespace CanKit.Sample.CanOpenLss
                 BitTimingSelector = ReadOptionalByte(args, "--selector"),
                 BitTimingIndex = ReadOptionalByte(args, "--index"),
                 ActivateDelayMilliseconds = activate,
-                ActivateBitRate = ReadOptionalInt(args, "--bit-rate"),
             }, cancellationToken).ConfigureAwait(false);
             Console.WriteLine($"Stop: {scan.Stop}");
             bool failed = PrintAll(scan.Slaves) || scan.Stop == LssScanStop.SlaveRejected
@@ -361,9 +366,10 @@ namespace CanKit.Sample.CanOpenLss
             Console.WriteLine(
                 "  scan [--all] [--client-node 127] [--heartbeat-ms 400] [--probe-all] [--sdo-timeout-ms 200]");
             Console.WriteLine("  assign --vendor <n> --product <n> --revision <n> --serial <n> [--node-id <n>]");
-            Console.WriteLine("         [--selector <n> --index <n>] [--activate-ms <n>] [--bit-rate <n>] [--store]");
+            Console.WriteLine("         [--selector <n> --index <n>] [--activate-ms <n>] [--store]");
             Console.WriteLine("  assign-unconfigured --first-node-id <n> [--count <n>] [--selector <n> --index <n>] [--store]");
-            Console.WriteLine("         [--activate-ms <n> --bit-rate <n> only together with --count 1]");
+            Console.WriteLine("         [--activate-ms <n> only together with --count 1]");
+            Console.WriteLine("  --bit-rate is unsupported: this sample has no adapter-specific BitRateSwitch callback.");
             Console.WriteLine("  inquire --vendor <n> --product <n> --revision <n> --serial <n>");
             Console.WriteLine(
                 "  detect [--candidates 500000,250000,...] [--window-ms 2000] [--error-frames 2] [--passes 1]");
@@ -427,15 +433,6 @@ namespace CanKit.Sample.CanOpenLss
             if (TryParseBounded(args, name, required: false, ushort.MaxValue, out _) is not { } parsed)
                 return null;
             return (ushort)parsed;
-        }
-
-        private static int? ReadOptionalInt(string[] args, string name)
-        {
-            var text = GetArg(args, name);
-            if (text is null) return null;
-            if (!TryParseInt(text, out var value))
-                throw new ArgumentException($"{name} must be an integer.");
-            return value;
         }
 
         /// <summary>

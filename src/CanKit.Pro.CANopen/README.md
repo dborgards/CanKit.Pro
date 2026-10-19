@@ -517,6 +517,9 @@ non-zero time is a consumer whose timeout is armed immediately, so a producer th
 appears is reported too. `HeartbeatReceived` reports every heartbeat and boot-up on
 `0x700 + id`.
 
+For every node, periodic producer ticks are coalesced while a heartbeat send is outstanding;
+transmission recovery sends no catch-up burst, including when LSS is disabled.
+
 `HeartbeatTimeout`, `NodeGuardingTimeout` and `EmcyReceived` share the node's event queue
 with heartbeats, SYNC, PDOs and NMT, and keep their place in that order. They are the events
 the queue will not drop when a subscriber falls behind `EventQueueCapacity` (default 64). A
@@ -978,12 +981,17 @@ if (found.Succeeded)
     await master.SwitchStateGlobalAsync(LssState.Waiting);
 }
 
-// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here. BitRateSwitch, when
-// set, runs between them and retunes the channel this master is already reading.
+// Table 0 index 2 is 500 kbit/s. Both switch-delay periods elapse here.
+// No host-switch callback is configured in this example, so omit the per-call bit rate.
 await master.SwitchStateGlobalAsync(LssState.Configuration);
 await master.ConfigureBitTimingAsync(LssBitTiming.Cia301Table, tableIndex: 2);
-await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100, bitsPerSecond: 500_000);
+await master.ActivateBitTimingAsync(switchDelayMilliseconds: 100);
 ```
+
+Before sending further commands, dispose this master and reopen the adapter at 500 kbit/s.
+To retune the already-open channel between the two periods instead, configure `BitRateSwitch`
+and pass `bitsPerSecond` to `ActivateBitTimingAsync`. A supplied rate requires that callback
+on every activation path; a missing callback is rejected before any frame is sent.
 
 `ConfigureNodeIdAsync` sends the value it is given, including values the protocol rejects, so
 the slave's error code (`LssCommand.NodeIdOutOfRange`, or `LssCommand.ManufacturerSpecific`
@@ -997,7 +1005,8 @@ part. A field can be scanned, matched (the number is already known) or skipped. 
 cannot be skipped, and at most two numbers can; a partial scan must still select one slave.
 `KnownHighBitCount` checks a known prefix in one step and scans only the remaining bits.
 Each Fastscan step occupies `FastscanTimeout` from the request, and `FastscanCycleTime` is an
-extra gap after that window. Identify waits out `IdentificationTimeout` the same way, so a
+extra gap before the next Fastscan request, including the reset of a new scan. A completed scan
+returns without waiting for that gap. Identify waits out `IdentificationTimeout` the same way, so a
 later slave is not left queued for the next command. Give the slave a node-id in `1..127`
 before the next Fastscan, or the same slave is found again.
 
@@ -1015,15 +1024,38 @@ node boots, and it stays in LSS configuration. A node that already has an active
 it until the next NMT reset communication, which copies the pending node-id into the active one
 and retargets pre-defined COB-IDs that still name the old one. Reset node copies the persistent
 node-id back into the pending one first. Neither reset reloads the bit timing.
+An identity change closes the transmit gate and drains old-ID reservations before publishing
+the new node-id. Old queued SDO batches and heartbeat states are discarded; queued EMCYs
+resolve their COB-ID after the change. A bit-rate switch already holding the gate stays silent.
 
 `ILssConfigurationStore` is the only persistence. Without one, store answers "not supported".
 `1010h` does not store the layer settings, and an LSS store does not rewrite the object
 dictionary. Table 0 indexes follow `BaudRate_*` in the device description when the file names
 any of them; otherwise every named CiA 301 rate is accepted. `BitRateSwitch` is called when the
-pending timing becomes active. The open channel is not reconfigured. During the second switch
-delay the node transmits nothing. NMT, boot-up and heartbeat that come due in that window are
-sent when the delay ends, and a flying-master Reset Communication is applied only once that
-frame has been sent. Other frames are not sent.
+pending timing becomes active; the callback can reconfigure the channel. The node stays silent
+until both the second switch delay and the callback complete successfully, including for a zero
+delay. While the node is active, failed or cancelled callbacks are reported on
+`BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
+Repeated activations serialize the callbacks.
+
+A new activation requests cancellation of the previous callback as soon as it is received,
+including during the first switch delay. Disposal also requests cancellation. Neither waits for
+application cancellation handlers. The replacement callback gets a fresh token and starts only
+after the previous callback finishes. Callbacks must honor their token or implement their own
+timeout: a callback that ignores cancellation still delays later callbacks and can continue after
+disposal. Queued callbacks are not started after their cancellation is requested. The node never
+resumes transmission on an assumed switch completion or a timeout alone.
+
+NMT, boot-up and heartbeat that come due in that window are held; cancelled NMT commands are
+not sent, and heartbeat frames use the node-id active when they are sent.
+The transmit gate closes before waiting for existing driver reservations to finish, so new
+traffic cannot prolong the drain or reach the driver before the switch completes.
+Periodic heartbeat ticks are coalesced while a send is outstanding, so recovery does not replay
+a backlog. Disposal discards queued heartbeats.
+A flying-master Reset Communication is applied only once its NMT frame has been sent. An SRDO
+pair already reserved finishes before switching starts; pairs due during silence are dropped
+as a unit. A GFC command that cannot be transmitted fails with `CanOpenTransportException`.
+Other frames are not sent.
 
 ```csharp
 var store = new MyLssStore();
@@ -1052,6 +1084,13 @@ them back to the rate the network is still using; the caller does that before a 
 A confirmed service that times out stops the scan and returns the slaves that already received
 a node-id, including the slave whose configure node-id succeeded before a later service timed out. Configure node-id writes the pending node-id. On a slave that already has an active
 node-id it takes effect at the next NMT reset communication, which this tool does not send.
+`ConfigureSlaveAsync` throws on a timeout; a previously confirmed pending node-id can still
+be written. The exception identifies the service that timed out and preserves its stack trace.
+Supplying `ActivateBitRate` requires the master's `BitRateSwitch` callback. Commissioning
+checks activation arguments before selecting or writing any slave.
+Configure, inquire and scan sequences sharing a master are serialized through their cleanup,
+including calls from different `LssCommissioning` instances. Direct calls to that master must
+not overlap a commissioning sequence.
 
 Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
 from a node that has already booted. A missing later sub-index is 0. A timeout or any other

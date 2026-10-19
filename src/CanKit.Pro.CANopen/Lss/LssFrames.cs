@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 
 namespace CanKit.Pro.CANopen.Lss;
 
@@ -92,16 +93,11 @@ internal static class LssFrames
     }
 
     internal static uint ReadU32(ReadOnlySpan<byte> frame)
-        => (uint)(frame[1] | (frame[2] << 8) | (frame[3] << 16) | (frame[4] << 24));
+        => BinaryPrimitives.ReadUInt32LittleEndian(frame.Slice(1));
 
     internal static ushort ReadSwitchDelay(ReadOnlySpan<byte> frame)
         => (ushort)(frame[1] | (frame[2] << 8));
 
     internal static void WriteU32(byte[] frame, int offset, uint value)
-    {
-        frame[offset] = (byte)value;
-        frame[offset + 1] = (byte)(value >> 8);
-        frame[offset + 2] = (byte)(value >> 16);
-        frame[offset + 3] = (byte)(value >> 24);
-    }
+        => BinaryPrimitives.WriteUInt32LittleEndian(frame.AsSpan(offset), value);
 }

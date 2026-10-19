@@ -21,6 +21,16 @@ namespace CanKit.Pro.CANopen.Lss;
 /// response of switch state selective, identify, or the Fastscan reset step is a normal result:
 /// no slave matched.
 /// </para>
+/// <para>
+/// Cancellation returns promptly, but later commands wait out an abandoned response window
+/// so its delayed replies cannot answer a new request. A cancelled Fastscan also preserves
+/// its probe's cycle gap. If transmission fails or is cancelled after entering the send
+/// service, delivery can remain indeterminate: the driver may still transmit arbitrarily
+/// later. The master then rejects every subsequent command with a
+/// <see cref="CanOpenTransportException"/>. Dispose it, reset the transport and re-establish
+/// a quiescent network before opening another master. Explicit driver rejection and
+/// cancellation checked before entering the service leave the master usable.
+/// </para>
 /// </remarks>
 public interface ILssMaster : IDisposable, IAsyncDisposable
 {
@@ -60,16 +70,25 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// <summary>
     /// Tells every slave in LSS configuration to copy the pending bit rate to the active one
     /// after <paramref name="switchDelayMilliseconds"/>, and to stay silent for a second period
-    /// of the same length (§6.4.4, §7.5.3). This call waits out both periods. When
+    /// of the same length (§6.4.4, §7.5.3). Both periods are measured from the activation
+    /// transmission; delayed confirmations do not restart them. This call waits out both periods. When
     /// <paramref name="bitsPerSecond"/> and <see cref="LssMasterOptions.BitRateSwitch"/> are both
     /// set, the switch runs after the first period, before slaves may transmit again.
     /// When <paramref name="returnToWaiting"/> is <see langword="true"/>, switch state global
     /// (waiting) is sent while both ends still share a bitrate. A positive delay sends it
-    /// before either delay. A zero delay has already moved the slave, so the frame is sent
+    /// before either delay when its confirmation returns before the first deadline.
+    /// If that window was missed, the host switches rate and sends waiting after the second
+    /// period; without a host switch the call fails after both periods have elapsed. A zero
+    /// delay has already moved the slave, so the frame is sent
     /// after <see cref="LssMasterOptions.BitRateSwitch"/>, on the new rate. Pass
     /// <paramref name="bitsPerSecond"/> and set that callback for a zero delay; without the
     /// switch the master is still on the old rate and the slave will not hear the frame.
+    /// Cancellation or failure after a confirmed send returns to the caller promptly;
+    /// subsequent commands still wait for the activation's two periods. An indeterminate
+    /// send makes the master unusable as described in the interface remarks.
     /// </summary>
+    /// <exception cref="ArgumentException">A bit rate requires a switch callback. A zero delay with returnToWaiting requires both.</exception>
+    /// <exception cref="CanOpenTransportException">The old-rate waiting window was missed and no host bit-rate switch is available.</exception>
     Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
         bool returnToWaiting = false, CancellationToken cancellationToken = default);
 
@@ -124,6 +143,7 @@ public interface ILssMaster : IDisposable, IAsyncDisposable
     /// </summary>
     /// <exception cref="ArgumentException">The vendor-id is skipped, or more than two LSS numbers
     /// are skipped. A partial scan must still select one slave (§6.7, annex A.3.4).</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A field mode is undefined or its known-high-bit count is outside 0..32.</exception>
     Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
         CancellationToken cancellationToken = default);
 

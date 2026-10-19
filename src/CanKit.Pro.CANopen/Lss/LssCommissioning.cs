@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Core.Exceptions;
@@ -30,8 +32,10 @@ public enum LssScanStop
     SlaveRejected,
 
     /// <summary>
-    /// A confirmed service timed out. Slaves already configured are in the result. The one
-    /// that did not answer is not, and its node-id was not handed out.
+    /// A confirmed service timed out. Slaves whose configure node-id was confirmed are in
+    /// the result, including the slave whose bit timing or store subsequently timed out.
+    /// A slave whose configure node-id was not confirmed is omitted; it may still have
+    /// applied that pending node-id despite the missing confirmation.
     /// </summary>
     TimedOut,
 }
@@ -78,12 +82,14 @@ public sealed class LssUnconfiguredScan
     /// and index, and <see cref="Limit"/> 1. <see langword="null"/> (the default) configures the
     /// timing and does not activate it. A scan that can select more than one slave must not
     /// activate: that slave would switch rate while the next one is still found at the old rate.
+    /// A zero delay also requires <see cref="ActivateBitRate"/> and the master's switch callback.
     /// </summary>
     public ushort? ActivateDelayMilliseconds { get; init; }
 
     /// <summary>
     /// Bit rate passed to the master's <c>BitRateSwitch</c> during activate. The open channel is
-    /// not reconfigured. Requires <see cref="ActivateDelayMilliseconds"/>.
+    /// not reconfigured automatically. Requires <see cref="ActivateDelayMilliseconds"/> and
+    /// <see cref="LssMasterOptions.BitRateSwitch"/> on the master.
     /// </summary>
     public int? ActivateBitRate { get; init; }
 }
@@ -111,10 +117,13 @@ public sealed class LssSlaveConfiguration
     /// one selectively switched slave, which is valid when it is the only LSS slave or every
     /// other node already runs the new rate (Table 3, §6.4.4). Otherwise the bus ends up with
     /// mixed rates.
+    /// With <see cref="ReleaseToWaiting"/>, a zero delay requires <see cref="ActivateBitRate"/>
+    /// and the master's switch callback.
     /// </summary>
     public ushort? ActivateDelayMilliseconds { get; init; }
 
-    /// <summary>Bit rate passed to the master's switch callback during activate.</summary>
+    /// <summary>Bit rate passed to the master's switch callback during activate. Requires
+    /// <see cref="LssMasterOptions.BitRateSwitch"/> on the master.</summary>
     public int? ActivateBitRate { get; init; }
 
     /// <summary>
@@ -217,16 +226,21 @@ public sealed class LssUnconfiguredScanResult
 /// selected again before it is configured. A skipped LSS number is not in that address, so the
 /// slave Fastscan left in configuration is configured there; selecting again would miss it.
 /// Activating bit timing in a scan is limited to one slave.
+/// Commissioning calls sharing the same master run one sequence at a time, including cleanup.
+/// Do not call the master directly while a commissioning sequence is running.
 /// </remarks>
 public sealed class LssCommissioning
 {
+    private static readonly ConditionalWeakTable<ILssMaster, SemaphoreSlim> Sequences = new();
     private readonly ILssMaster _master;
+    private readonly SemaphoreSlim _sequence;
 
     /// <summary>Uses <paramref name="master"/> for every service. The caller disposes it.</summary>
     public LssCommissioning(ILssMaster master)
     {
         if (master is null) throw new ArgumentNullException(nameof(master));
         _master = master;
+        _sequence = Sequences.GetValue(master, static _ => new SemaphoreSlim(1, 1));
     }
 
     /// <summary>The master this tool drives.</summary>
@@ -245,6 +259,13 @@ public sealed class LssCommissioning
     {
         scan ??= new LssUnconfiguredScan();
         ValidateScan(scan);
+        return await InSequenceAsync(() => ScanUnconfiguredCoreAsync(scan, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LssUnconfiguredScanResult> ScanUnconfiguredCoreAsync(
+        LssUnconfiguredScan scan, CancellationToken cancellationToken)
+    {
         bool assigning = scan.AssignFromNodeId.HasValue;
         int nextId = scan.AssignFromNodeId ?? 0;
         var slaves = new List<LssCommissioningResult>();
@@ -337,6 +358,11 @@ public sealed class LssCommissioning
     /// <paramref name="configuration"/>. Returns a result with <see cref="LssCommissioningResult.Selected"/>
     /// <see langword="false"/> when no slave confirms.
     /// </summary>
+    /// <exception cref="LssTimeoutException">
+    /// A confirmed service did not answer. Earlier services may already have succeeded:
+    /// a timeout during bit timing or store can leave the pending node-id written on the slave.
+    /// The exception's command specifier identifies the service that timed out.
+    /// </exception>
     public async Task<LssCommissioningResult> ConfigureSlaveAsync(
         LssAddress address,
         LssSlaveConfiguration configuration,
@@ -349,7 +375,16 @@ public sealed class LssCommissioning
             configuration.BitTimingIndex,
             configuration.ActivateDelayMilliseconds,
             configuration.ActivateBitRate,
+            configuration.ReleaseToWaiting,
             nameof(configuration));
+
+        return await InSequenceAsync(() => ConfigureSlaveCoreAsync(address, configuration, cancellationToken), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LssCommissioningResult> ConfigureSlaveCoreAsync(
+        LssAddress address, LssSlaveConfiguration configuration, CancellationToken cancellationToken)
+    {
 
         if (!await SelectOnlyAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
@@ -368,7 +403,7 @@ public sealed class LssCommissioning
                 configuration.ReleaseToWaiting,
                 cancellationToken).ConfigureAwait(false);
             if (applied.Timeout is not null)
-                throw applied.Timeout;
+                ExceptionDispatchInfo.Capture(applied.Timeout).Throw();
             return applied.Result;
         }
         finally
@@ -385,9 +420,13 @@ public sealed class LssCommissioning
     /// address and node-id (§6.5). The slave is returned to waiting. A selective miss is
     /// <see cref="LssCommissioningResult.Selected"/> <see langword="false"/>.
     /// </summary>
-    public async Task<LssCommissioningResult> InquireSlaveAsync(
+    public Task<LssCommissioningResult> InquireSlaveAsync(
         LssAddress address,
         CancellationToken cancellationToken = default)
+        => InSequenceAsync(() => InquireSlaveCoreAsync(address, cancellationToken), cancellationToken);
+
+    private async Task<LssCommissioningResult> InquireSlaveCoreAsync(
+        LssAddress address, CancellationToken cancellationToken)
     {
         if (!await SelectOnlyAsync(address, cancellationToken).ConfigureAwait(false))
             return new LssCommissioningResult(selected: false, address);
@@ -401,6 +440,21 @@ public sealed class LssCommissioning
         finally
         {
             await ReleaseToWaitingAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<T> InSequenceAsync<T>(Func<Task<T>> service, CancellationToken cancellationToken)
+    {
+        await _sequence.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await service().ConfigureAwait(false);
+        }
+        finally
+        {
+            // Shared by every commissioning wrapper for this master. No wait handle is
+            // allocated; the weak table releases the semaphore with the master.
+            _sequence.Release();
         }
     }
 
@@ -653,7 +707,7 @@ public sealed class LssCommissioning
         return value;
     }
 
-    private static void ValidateScan(LssUnconfiguredScan scan)
+    private void ValidateScan(LssUnconfiguredScan scan)
     {
         if (scan.Limit is { } limit && limit < 1)
             throw new ArgumentOutOfRangeException(nameof(scan), limit, "The scan limit must be at least 1.");
@@ -673,15 +727,17 @@ public sealed class LssCommissioning
             scan.BitTimingIndex,
             scan.ActivateDelayMilliseconds,
             scan.ActivateBitRate,
+            returnToWaiting: true,
             nameof(scan));
     }
 
-    private static void ValidateServices(
+    private void ValidateServices(
         byte? nodeId,
         byte? selector,
         byte? index,
         ushort? activateDelay,
         int? activateRate,
+        bool returnToWaiting,
         string paramName)
     {
         if (nodeId is { } id && id != CanOpenCobId.UnconfiguredNodeId && !CanOpenCobId.IsActiveNodeId(id))
@@ -692,5 +748,9 @@ public sealed class LssCommissioning
             throw new ArgumentException("Activating bit timing needs a table selector and index.", paramName);
         if (activateRate is not null && activateDelay is null)
             throw new ArgumentException("A bit rate to activate needs the switch delay.", paramName);
+        if (activateRate is not null && _master.Options.BitRateSwitch is null)
+            throw new ArgumentException("Specifying a bit rate requires a BitRateSwitch callback on the master.", paramName);
+        if (activateDelay == 0 && returnToWaiting && activateRate is null)
+            throw new ArgumentException("Returning to waiting after a zero delay requires a bit rate and BitRateSwitch callback.", paramName);
     }
 }

@@ -73,7 +73,17 @@ public sealed class LssSlaveOptions
     /// bit rate in bits per second when the table names one. Runs off the node's actor. The
     /// open channel is not reconfigured: adapters generally cannot change rate while they are
     /// open, so the callback reopens the channel or records the rate. <see langword="null"/>
-    /// (the default) only updates the slave's active table entry.
+    /// (the default) only updates the slave's active table entry. Transmission resumes only
+    /// after both the second switch delay and this task complete successfully, including for
+    /// a zero delay. While the node is active, a failure is reported on its background exception
+    /// event and keeps transmission suppressed until a later successful activation. Switch
+    /// callbacks are serialized.
+    /// The token requests cancellation asynchronously when another activation supersedes the
+    /// switch or the node is disposed. A replacement callback starts only after the previous
+    /// callback finishes, with a fresh token. The callback
+    /// must cooperate with cancellation or provide its own timeout; a task that ignores the
+    /// token cannot be forcibly stopped, and does not block disposal. Pending callbacks do not
+    /// start after cancellation. The node never resumes transmission merely because a hook is slow.
     /// </summary>
     public Func<int, CancellationToken, Task>? BitRateSwitch { get; init; }
 

@@ -18,6 +18,9 @@ dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- inquire --demo --ve
 On a real bus, drop `--demo` and pass the adapter endpoint. The bit rate has to match the
 slaves. Activating a new bit timing waits both switch delays and does not reconfigure the
 open channel; reopen the adapter afterwards if the slaves actually changed rate.
+`--bit-rate` is rejected before opening the bus: this sample does not install an
+adapter-specific `LssMasterOptions.BitRateSwitch` callback. Applications that pass
+`ActivateBitRate` to commissioning must supply that callback on the master.
 
 ```bash
 dotnet run --project samples/CanKit.Pro.Sample.CanOpenLss -- scan --endpoint socketcan://can0 --bitrate 500000
