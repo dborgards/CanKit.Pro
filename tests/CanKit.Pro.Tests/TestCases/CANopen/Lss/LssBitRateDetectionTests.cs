@@ -141,6 +141,23 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Fact]
+    public async Task An_Adapter_That_Refuses_The_Error_Subscription_Still_Decides_By_The_Window()
+    {
+        // Some adapters reject the error-frame subscription unless configured for it (ProbeAsync's
+        // TrySubscribe). The probe must still run: the window and the bus state decide it, and no
+        // error frames are counted because none can be observed.
+        var opened = new List<DetectionProbeBus>();
+        var options = new LssBitRateDetectionOptions { Candidates = new[] { 1_000_000, 500_000 } };
+        var factory = DetectionProbeBus.Factory(NewSession(), opened, failErrorSubscription: true);
+        var result = await DetectAsync(factory, options, new[] { State(BusState.BusOff), Frame() });
+
+        result.BitsPerSecond.Should().Be(500_000);
+        result.Probes[0].Outcome.Should().Be(LssBitRateProbeOutcome.Rejected,
+            "a degraded state rules a rate out even when error frames cannot be observed");
+        result.Probes[0].ErrorFrames.Should().Be(0, "the error subscription was refused, so none were counted");
+    }
+
+    [Fact]
     public async Task A_Silent_Bus_Within_The_Window_Is_Inconclusive_And_No_Rate_Is_Returned()
     {
         var opened = new List<DetectionProbeBus>();
@@ -266,8 +283,9 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task A_Factory_That_Returns_No_Bus_Fails()
     {
-        var detect = () => LssBitRateDetection.DetectAsync(_ => null!,
-            new LssBitRateDetectionOptions { Candidates = new[] { 500_000 } });
+        // No options: the default-options path (options ?? new) runs, and the first candidate's
+        // null bus throws before any window, so the default candidate list is not walked.
+        var detect = () => LssBitRateDetection.DetectAsync(_ => null!);
 
         await detect.Should().ThrowAsync<InvalidOperationException>().WithMessage("*no bus*");
     }
@@ -323,6 +341,8 @@ public class LssBitRateDetectionTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public void Options_Reject_An_Empty_Duplicate_Or_Non_Positive_Candidate_List()
     {
+        new Action(() => new LssBitRateDetectionOptions { Candidates = null! }.Validate())
+            .Should().Throw<ArgumentException>();
         new Action(() => new LssBitRateDetectionOptions { Candidates = Array.Empty<int>() }.Validate())
             .Should().Throw<ArgumentException>();
         new Action(() => new LssBitRateDetectionOptions { Candidates = new[] { 500_000, 500_000 } }.Validate())

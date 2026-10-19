@@ -41,12 +41,12 @@ internal sealed class DetectionProbeBus : ICanBus
     /// <paramref name="workMode"/>, each on its own channel of <paramref name="session"/>.
     /// </summary>
     public static DetectionProbeBus Open(string session, int channel, int bitsPerSecond,
-        ChannelWorkMode workMode = ChannelWorkMode.ListenOnly)
+        ChannelWorkMode workMode = ChannelWorkMode.ListenOnly, bool failErrorSubscription = false)
     {
         var source = CanKit.Core.CanBus.Open(
             $"virtual://{session}/{channel}",
             cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(bitsPerSecond).SetWorkMode(workMode));
-        return new DetectionProbeBus(source);
+        return new DetectionProbeBus(source) { FailErrorSubscription = failErrorSubscription };
     }
 
     /// <summary>The last probe bus the factory handed out, for the test to raise events on.</summary>
@@ -55,17 +55,22 @@ internal sealed class DetectionProbeBus : ICanBus
     /// <summary>Whether <see cref="Dispose"/> has run — the detection disposes every probe bus.</summary>
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
+    /// <summary>When set before the detection subscribes, <see cref="ErrorFrameReceived"/> rejects
+    /// the subscription, as an adapter not configured for error reporting does.</summary>
+    public bool FailErrorSubscription { get; set; }
+
     /// <summary>
     /// A factory for <see cref="LssBitRateDetection"/> that opens one probe bus per candidate on
     /// <paramref name="session"/>, records it as <see cref="Last"/>, and collects them all.
     /// </summary>
     public static Func<int, ICanBus> Factory(string session, List<DetectionProbeBus> opened,
-        ChannelWorkMode workMode = ChannelWorkMode.ListenOnly, int? reportRate = null)
+        ChannelWorkMode workMode = ChannelWorkMode.ListenOnly, int? reportRate = null,
+        bool failErrorSubscription = false)
     {
         var channel = 0;
         return rate =>
         {
-            var bus = Open(session, ++channel, reportRate ?? rate, workMode);
+            var bus = Open(session, ++channel, reportRate ?? rate, workMode, failErrorSubscription);
             opened.Add(bus);
             Last = bus;
             return bus;
@@ -88,7 +93,7 @@ internal sealed class DetectionProbeBus : ICanBus
     public void RaiseErrors(int count)
     {
         for (var i = 0; i < count; i++)
-            ErrorFrameReceived?.Invoke(this, StubErrorInfo.Instance);
+            _errorFrameReceived?.Invoke(this, StubErrorInfo.Instance);
     }
 
     /// <summary>Raises <see cref="FaultOccurred"/>.</summary>
@@ -146,7 +151,23 @@ internal sealed class DetectionProbeBus : ICanBus
     public event EventHandler<Exception>? BackgroundExceptionOccurred;
 #pragma warning restore CS0067
 
-    public event EventHandler<ICanErrorInfo>? ErrorFrameReceived;
+    private EventHandler<ICanErrorInfo>? _errorFrameReceived;
+
+    /// <summary>
+    /// Subscribing throws when <see cref="FailErrorSubscription"/> is set, as some adapters do when
+    /// they are not configured for error reporting. The detection then falls back to the window and
+    /// the bus state (<c>LssBitRateDetection.ProbeAsync</c>'s <c>TrySubscribe</c>).
+    /// </summary>
+    public event EventHandler<ICanErrorInfo>? ErrorFrameReceived
+    {
+        add
+        {
+            if (FailErrorSubscription)
+                throw new NotSupportedException("This adapter does not offer the error-frame subscription.");
+            _errorFrameReceived += value;
+        }
+        remove => _errorFrameReceived -= value;
+    }
 
     public event EventHandler<CanReceiveDataView>? FrameObserved;
 
