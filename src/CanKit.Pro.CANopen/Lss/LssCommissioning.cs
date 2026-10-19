@@ -32,8 +32,10 @@ public enum LssScanStop
     SlaveRejected,
 
     /// <summary>
-    /// A confirmed service timed out. Slaves already configured are in the result. The one
-    /// that did not answer is not, and its node-id was not handed out.
+    /// A confirmed service timed out. Slaves whose configure node-id was confirmed are in
+    /// the result, including the slave whose bit timing or store subsequently timed out.
+    /// A slave whose configure node-id was not confirmed is omitted; it may still have
+    /// applied that pending node-id despite the missing confirmation.
     /// </summary>
     TimedOut,
 }
