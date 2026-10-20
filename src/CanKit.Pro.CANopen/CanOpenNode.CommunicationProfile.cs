@@ -1025,6 +1025,11 @@ internal sealed partial class CanOpenNode
                 {
                     _restoringValues = false;
                 }
+                // CiA 319 v2.0.0 §5.4: what came back from the store is checked before the node
+                // announces itself — the CRC of every existing SRDO against the 13FFh stored with
+                // it; a mismatch sets 13FEh to 00h (#308). After the flag: this is the device's
+                // own finding, not part of the restore.
+                RevalidateSafetyConfiguration();
             });
         }
         finally

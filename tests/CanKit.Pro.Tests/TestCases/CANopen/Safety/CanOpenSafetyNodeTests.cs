@@ -262,6 +262,35 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the download indication clears 13FEh, whether or not the value changed");
     }
 
+    // CiA 319 §5.4 (FR-CO-058): after a reset the stored configuration is compared with the
+    // checksum stored with it before the boot-up. The store is a snapshot of the dictionary, so
+    // a record changed behind the dictionary's back — SetRawValue, the stand-in for a bit flipped
+    // in NVRAM — is stored next to the A5h that was never cleared for it, and comes back so.
+    [Fact]
+    public async Task A_Stored_Configuration_That_Does_Not_Match_Its_Checksum_Comes_Back_Invalid()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30));
+        node.Safety().CommitSafetyConfiguration();
+        var od = node.ObjectDictionary;
+        od.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
+        refresh.SetRawValue(new byte[] { 40, 0 }); // not a write: no hook, 13FEh stays A5h
+        node.StoreParameters();
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing told the node");
+
+        wire.SendNmt(NmtCommand.ResetCommunication, Producer);
+        await WaitUntilAsync(() => od.ReadUnsigned(0x1301, 2) == 40 && node.State == NmtState.PreOperational, "restored");
+        // The restore and the §5.4 check run in the reset's actor turn; a State read is a round
+        // trip queued behind it.
+        _ = node.State;
+        od.ReadUnsigned(0x1301, 2).Should().Be(40u, "the stored record came back as stored (FR-CO-035)");
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.4: the CRC in 13FFh is the one of 30 ms");
+    }
+
     [Fact]
     public async Task Configuration_Is_Refused_In_Operational()
     {
