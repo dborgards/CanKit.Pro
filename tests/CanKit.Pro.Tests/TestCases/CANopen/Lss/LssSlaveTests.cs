@@ -597,6 +597,52 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode);
     }
 
+    // Codex on #331: a reply must not overtake an older one when a new silence begins while the
+    // older ones are still being flushed. The slave starts a silence only once nothing is in
+    // flight, so the window is between two held sends; the seam puts the second activation and
+    // a third command exactly there.
+    [Fact]
+    public async Task Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+
+        Task? second = null;
+        int seamRuns = 0;
+        ((CanOpenNode)slave).BetweenHeldSendsForTests = () =>
+        {
+            if (Interlocked.Increment(ref seamRuns) != 1) return;
+            // Between the first held send and the next: the second silence begins, and a third
+            // command arrives in it, before the flush goes on.
+            second = bench.Master.ActivateBitTimingAsync(200, null);
+            WaitUntilAsync(() => Volatile.Read(ref switches) == 2).GetAwaiter().GetResult();
+            Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));
+            Thread.Sleep(40);
+        };
+
+        var first = bench.Master.ActivateBitTimingAsync(200, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));
+        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));
+        await first;
+        await WaitUntilAsync(() => second is not null);
+        await second!;
+        await WaitUntilAsync(() => heard.LssReplies.Count >= 3);
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+    }
+
     [Fact]
     public async Task The_Second_Delay_Suppresses_A_Node_Guarding_Rtr()
     {

@@ -306,8 +306,13 @@ internal sealed partial class CanOpenNode : ILssSlave
                 CancellationToken.None,
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default).ConfigureAwait(false);
+            BetweenHeldSendsForTests?.Invoke();
         }
     }
+
+    /// <summary>Test seam: runs after each held frame has completed and before the next is sent —
+    /// the window in which a new silence can begin (Codex on #331).</summary>
+    internal Action? BetweenHeldSendsForTests;
 
     private async Task<bool> SendHeldHeartbeat(byte[] payload, CancellationToken cancellationToken, int nodeIdGeneration)
     {
@@ -455,12 +460,20 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
     }
 
+    // Every reply of this slave goes out through one chain, each send started only once the one
+    // before it has completed. During the second switch delay a send is held and completes when
+    // the silence ends (HoldsAcrossLssSilence), so the chain keeps the replies in the order the
+    // commands came, across silences too: a reply that arrives while an earlier one is still
+    // being flushed waits behind it instead of entering the held queue ahead of it (Codex on
+    // #331). Actor only.
+    private Task _lssReplyChain = Task.CompletedTask;
+
     private void ReplyLss(byte[]? payload)
     {
         if (payload is null) return;
-        // During the second switch delay the send is held, with every other reply that arrives
-        // then, and goes out in that order once the slave may transmit again (HoldsAcrossLssSilence).
-        _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
+        _lssReplyChain = _lssReplyChain.ContinueWith(
+            _ => SendControlFrame(CanOpenCobId.LssSlaveMessage, payload),
+            CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
     }
 
     private static byte[]? NormalizeLssResponse(byte[]? response)
