@@ -442,27 +442,28 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // write gate, like the writes it is compared with.
     private byte[]? _safetyImage;
 
+    // The entries PopulateSafetyObjects creates for a node with SRDOs, in a fixed order; each
+    // is fixed-width and cannot be re-declared, so the bytes alone are unambiguous.
     private byte[] CaptureSafetyImage()
     {
         var image = new List<byte>();
-        foreach (var key in _od.SnapshotKeys())
+        void Take(ushort index, byte subindex) => image.AddRange(_od.ReadRaw(index, subindex));
+        for (int n = 1; n <= _srdoCount; n++)
         {
-            var index = (ushort)(key >> 8);
-            if (!SrdoRecords.IsChecksummed(index) || !_od.TryGet(index, (byte)key, out var entry)) continue;
-            var value = entry.GetRawValue();
-            image.Add((byte)(key >> 24)); image.Add((byte)(key >> 16)); image.Add((byte)(key >> 8)); image.Add((byte)key);
-            image.Add((byte)value.Length);
-            image.AddRange(value);
+            for (byte s = 0; s <= 6; s++) Take(SrdoRecords.CommIndex(n), s);
+            for (byte s = 0; s <= SrdoRecords.MappingSubindices; s++) Take(SrdoRecords.MapIndex(n), s);
         }
+        for (byte n = 0; n <= _srdoCount; n++) Take(Co.SrdoChecksum, n);
         return image.ToArray();
     }
 
-    /// <summary>The periodic half of §5.3: with A5h standing, the checksummed objects must still be
-    /// what they were when it was written. Returns false when it cleared 13FEh. Under the write gate.</summary>
+    /// <summary>The periodic half of §5.3: with A5h standing — the image exists exactly then, as
+    /// <see cref="VerifyConfigurationValidAndTakeImage"/> keeps it — the checksummed objects must
+    /// still be what they were when it was written. Returns false when it cleared 13FEh. Under the
+    /// write gate.</summary>
     private bool SafetyImageStands()
     {
-        if (!IsConfigurationValidFlagSet()) return true;
-        var image = _safetyImage ??= CaptureSafetyImage();
+        if (_safetyImage is not { } image) return true;
         if (CaptureSafetyImage().AsSpan().SequenceEqual(image)) return true;
         _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
         _safetyImage = null;
@@ -474,11 +475,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     // puts back is one more configuration to check.
     private IDeadline? _srdoConfigurationCheck;
 
-    /// <summary>Actor only.</summary>
+    /// <summary>Actor only: from the node's first actor turn, and from a check re-arming itself,
+    /// which has looked at <c>_disposed</c> already.</summary>
     private void StartSrdoConfigurationCheck()
     {
         if (_srdoCount == 0 || _options.SrdoConfigurationCheckInterval is not { } interval) return;
-        if (Volatile.Read(ref _disposed) != 0) return;
         _srdoConfigurationCheck = _deadlines.Arm(interval, OnSrdoConfigurationCheck);
     }
 

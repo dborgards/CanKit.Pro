@@ -461,11 +461,36 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
 
         safety.DeleteSrdo(2);
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the delete is a write");
+        Advance(clock, node, TimeSpan.FromSeconds(1));                      // a check with 13FEh at 00h: nothing to compare
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u);
         safety.CommitSafetyConfiguration();
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
         Advance(clock, node, TimeSpan.FromSeconds(1));
         Advance(clock, node, TimeSpan.FromSeconds(1));
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "deleted by a write, committed, and unchanged since");
+    }
+
+    // Outside Operational a mismatch clears 13FEh and nothing else: the engine is not re-read —
+    // the transition to Operational does that (§9.5) — and the SRDO stays NotOperational.
+    [Fact]
+    public void A_Mismatch_Found_Outside_Operational_Clears_13FEh_And_Leaves_The_Engine_To_The_Transition()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        node.State.Should().Be(NmtState.PreOperational);
+
+        node.ObjectDictionary.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
+        refresh.SetRawValue(new byte[] { 40, 0 });
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational, "the engine was not touched");
     }
 
     [Fact]
