@@ -116,4 +116,23 @@ public class SafetyTypesTests
         changed.Reason.Should().Be(SrdoInvalidReason.Mismatch);
         new GlobalFailsafeCommandReceivedEventArgs(ts).Timestamp.Should().Be(ts);
     }
+
+    // FR-CO-059: the interval is an option; a template changes it through its own With, the
+    // general With keeps it (Codex on #329).
+    [Fact]
+    public void The_Check_Interval_Is_Kept_By_With_And_Replaced_By_Its_Own_With()
+    {
+        var template = new CanOpenNodeOptions { SrdoCount = 1 };
+        template.SrdoConfigurationCheckInterval.Should().BeNull("off by default: CiA 319 names no interval");
+
+        var on = template.WithSrdoConfigurationCheckInterval(TimeSpan.FromSeconds(2));
+        on.SrdoConfigurationCheckInterval.Should().Be(TimeSpan.FromSeconds(2));
+        on.SrdoCount.Should().Be(1, "everything else is kept");
+        on.With(sdoTimeout: TimeSpan.FromSeconds(3)).SrdoConfigurationCheckInterval.Should().Be(TimeSpan.FromSeconds(2), "With keeps it");
+        on.WithLss(null).SrdoConfigurationCheckInterval.Should().Be(TimeSpan.FromSeconds(2), "WithLss keeps it too");
+        on.WithSrdoConfigurationCheckInterval(null).SrdoConfigurationCheckInterval.Should().BeNull("replaced: off");
+
+        Action zero = () => template.WithSrdoConfigurationCheckInterval(TimeSpan.Zero);
+        zero.Should().Throw<ArgumentOutOfRangeException>("validated like the options a node is opened with");
+    }
 }

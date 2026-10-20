@@ -289,7 +289,8 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         using var bus = Open(session, 1);
         using var node = CanOpen.OpenNode(bus, CanOpenDeviceDescription.ParseDcf(SafetyDcfText()));
         var od = node.ObjectDictionary;
-        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u,
+            "the file is the power-on state and 13FEh is applied last: at that write the node compares the checksums and sets it back (CiA 319 §5.3 step 4, FR-CO-058)");
         node.DeviceDescription!.Findings.Where(f => f.Index is >= 0x1300 and <= 0x13FF).Should().BeEmpty();
         SrdoRecords.IsConfigurationValid(od, 1).Should().BeFalse("the stored checksum is not the one of the records");
     }
