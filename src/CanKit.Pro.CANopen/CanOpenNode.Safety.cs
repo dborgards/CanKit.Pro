@@ -404,28 +404,69 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// recalculated and compared with 13FFh:n; one mismatch sets 13FEh to 00h. "All SRDOs in its
     /// object dictionary" is read as the SRDOs that exist (sub-index 01h ≠ 0), the ones §9.5
     /// checks and the configuration entity verifies (FR-CO-044): a deleted SRDO has no
-    /// configuration to protect. <paramref name="mustExist"/> names the SRDOs that are not allowed
-    /// to read as deleted or reserved all the same: the periodic check passes the ones the engine
-    /// runs, because while 13FEh stands at A5h no write can have deleted one — a write clears it —
-    /// so a record that nevertheless reads as gone was changed behind the dictionary's back
-    /// (Bugbot on #329). Under the dictionary's write gate — the hook calls it on the writing
-    /// thread, the restore inside its transaction, the periodic check inside one of its own.
-    /// Returns false when it cleared 13FEh.</summary>
-    private bool RevalidateSafetyConfiguration(Func<int, bool>? mustExist = null)
+    /// configuration to protect. Under the dictionary's write gate — the hook calls it on the
+    /// writing thread, the restore inside its transaction, the periodic check inside one of its
+    /// own. Returns false when it cleared 13FEh.</summary>
+    private bool RevalidateSafetyConfiguration()
     {
         if (_srdoCount == 0) return true;
-        if (!_od.TryReadUnsigned(Co.SrdoConfigurationValid, 0x00, out var valid) || valid != SrdoRecords.ConfigurationValidValue)
-            return true;
+        if (!IsConfigurationValidFlagSet()) return true;
         for (int n = 1; n <= _srdoCount; n++)
         {
-            bool exists = SrdoRecords.TryReadCommunication(_od, n, out var p) && p.Direction != SrdoDirection.None;
-            if (exists ? SrdoRecords.IsConfigurationValid(_od, n) : mustExist is null || !mustExist(n)) continue;
+            if (!SrdoRecords.TryReadCommunication(_od, n, out var p) || p.Direction == SrdoDirection.None) continue;
+            if (SrdoRecords.IsConfigurationValid(_od, n)) continue;
             // Unchecked: this is the device's own finding, not a configuration write — and the
             // periodic check can reach here in Operational, where a validated write is refused.
             _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
             return false;
         }
         return true;
+    }
+
+    private bool IsConfigurationValidFlagSet()
+        => _od.TryReadUnsigned(Co.SrdoConfigurationValid, 0x00, out var valid) && valid == SrdoRecords.ConfigurationValidValue;
+
+    /// <summary>13FEh was written, or came back from the store: step 4 (or §5.4), and when A5h
+    /// stands afterwards, the image the periodic check compares against. Under the write gate.</summary>
+    private void VerifyConfigurationValidAndTakeImage()
+    {
+        _safetyImage = RevalidateSafetyConfiguration() && IsConfigurationValidFlagSet() ? CaptureSafetyImage() : null;
+    }
+
+    // The checksummed objects — the SRDO records, their mappings, 13FFh — byte for byte as they
+    // stood when 13FEh last became A5h. Every write to one of them clears 13FEh (§8.4.2.2), so
+    // while A5h stands, any difference from this image was made behind the dictionary's back: a
+    // bit flipped in a record, a direction reading as deleted or reserved, a checksum entry
+    // changed. The engine's own view of the records is not consulted — it is refreshed by a later
+    // actor turn and a legitimate delete-and-commit could outrun it (Bugbot on #329). Under the
+    // write gate, like the writes it is compared with.
+    private byte[]? _safetyImage;
+
+    private byte[] CaptureSafetyImage()
+    {
+        var image = new List<byte>();
+        foreach (var key in _od.SnapshotKeys())
+        {
+            var index = (ushort)(key >> 8);
+            if (!SrdoRecords.IsChecksummed(index) || !_od.TryGet(index, (byte)key, out var entry)) continue;
+            var value = entry.GetRawValue();
+            image.Add((byte)(key >> 24)); image.Add((byte)(key >> 16)); image.Add((byte)(key >> 8)); image.Add((byte)key);
+            image.Add((byte)value.Length);
+            image.AddRange(value);
+        }
+        return image.ToArray();
+    }
+
+    /// <summary>The periodic half of §5.3: with A5h standing, the checksummed objects must still be
+    /// what they were when it was written. Returns false when it cleared 13FEh. Under the write gate.</summary>
+    private bool SafetyImageStands()
+    {
+        if (!IsConfigurationValidFlagSet()) return true;
+        var image = _safetyImage ??= CaptureSafetyImage();
+        if (CaptureSafetyImage().AsSpan().SequenceEqual(image)) return true;
+        _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
+        _safetyImage = null;
+        return false;
     }
 
     // §5.3, "should … periodically": armed on the actor at start when the option says so,
@@ -445,15 +486,18 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         if (Volatile.Read(ref _disposed) != 0) return;
         bool stands = true;
-        // The engine's view of which SRDOs exist, as published after its last rebuild: an armed
-        // record whose direction now reads as none or reserved is a mismatch, not a deletion.
-        _od.Transaction(() => stands = RevalidateSafetyConfiguration(n => _srdo.GetState(n).Direction != SrdoDirection.None));
+        _od.Transaction(() => stands = RevalidateSafetyConfiguration() && SafetyImageStands());
         // Outside Operational the transition re-reads the records (§9.5). Inside it the engine
         // armed them with the configuration that just failed, so they are re-read now: every
         // SRDO is ConfigurationInvalid, a producer stops, a consumer reports invalid (§8.3.1 D).
+        // And the send period ends, as it does on leaving Operational: a pair still pending, one
+        // already queued on the chain behind a held one, and the inverted half of the held one
+        // send nothing more (Codex on #329).
         if (!stands && _state == NmtState.Operational)
         {
             for (int n = 1; n <= _srdoCount; n++) _srdo.Rebuild(n);
+            Array.Clear(_srdoPending, 0, _srdoPending.Length);
+            EndSrdoSendPeriod();
         }
         StartSrdoConfigurationCheck();
     }
@@ -617,11 +661,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         var pending = _srdoPending[srdoNumber];
         _srdoPending[srdoNumber] = null;
-        // Nor for an SRDO that stopped being valid meanwhile — the periodic check found its
-        // configuration apart from its checksum (#308), or a mapped object went away: §8.3.1 D,
-        // "the safety node shall not transmit SRDOs".
-        if (pending is not null && _srdo.IsOperational && Volatile.Read(ref _disposed) == 0
-            && _srdo.GetState(srdoNumber).IsValid)
+        if (pending is not null && _srdo.IsOperational && Volatile.Read(ref _disposed) == 0)
             QueueSrdoPair(srdoNumber, pending);
         else
             _srdoInFlight[srdoNumber] = false;

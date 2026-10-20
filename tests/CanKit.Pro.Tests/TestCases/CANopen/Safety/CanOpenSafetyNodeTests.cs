@@ -295,10 +295,11 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     // configuration by periodically recalculating the CRC". Opt-in by interval. In Operational a
     // mismatch makes the SRDO ConfigurationInvalid and the producer falls silent (§8.3.1 D).
     // The corrupted byte is the refresh time, or the direction — to 0 (deleted) or 3 (reserved,
-    // read as none): a record the engine runs that reads as gone is a mismatch, not a deletion
-    // (Bugbot on #329). The SRDO then reports itself as no longer existing (reason null, as the
-    // record reads), where the time case reports ConfigurationInvalid; either way it is invalid,
-    // 13FEh is 00h and nothing more goes out.
+    // read as none): the records are compared with the image taken when A5h was written, so a
+    // record that now reads as gone is a mismatch, not a deletion (Bugbot on #329). The SRDO then
+    // reports itself as no longer existing (reason null, as the record reads), where the time
+    // case reports ConfigurationInvalid; either way it is invalid, 13FEh is 00h and nothing more
+    // goes out.
     [Theory]
     [InlineData(0x02, 40)]
     [InlineData(0x01, 0)]
@@ -391,8 +392,80 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         service.Release();                                                  // the held pair completes
         await AwaitSrdoChainAsync(node);
         await WaitUntilAsync(() => !SrdoPairInFlight(node), "nothing in flight");
-        service.Handed(cob2).Should().Be(1, "the held pair's inverted half still goes out");
-        service.Handed(cob1).Should().Be(1, "the pair that waited behind it does not: the SRDO is no longer valid");
+        service.Handed(cob1).Should().Be(1, "the pair that waited behind the held one does not go out: the period ended with the invalidation");
+        service.Handed(cob2).Should().Be(0, "nor does the held pair's inverted half, as on leaving Operational");
+    }
+
+    // Codex on #329: a pair of another SRDO that was already queued on the send chain behind the
+    // held one is not covered by the pending slot; the period's end is what stops it.
+    [Fact]
+    public async Task A_Pair_Already_Queued_Behind_A_Held_One_Is_Dropped_When_The_Periodic_Check_Invalidates()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer,
+            new CanOpenNodeOptions
+            {
+                SrdoCount = 2,
+                EnableChangeOfStateSrdo = false,
+                SrdoConfigurationCheckInterval = TimeSpan.FromMilliseconds(60),
+            }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(25), 0x125, 0x126);
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+
+        // Both first pairs are due at 8.5 ms; SRDO 1's is handed and held, SRDO 2's link is
+        // queued on the chain behind it and has handed nothing yet.
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        await WaitUntilAsync(() => SrdoPairInFlight(node, 2), "SRDO 2's pair on the chain");
+        service.Handed(0x125).Should().Be(0, "queued behind the held pair");
+
+        node.ObjectDictionary.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
+        refresh.SetRawValue(new byte[] { 40, 0 });
+        Advance(clock, node, TimeSpan.FromMilliseconds(60));                // the check at 60 ms
+        await WaitUntilAsync(() => !node.Safety().GetSrdoState(1).IsValid && !node.Safety().GetSrdoState(2).IsValid, "invalidated");
+
+        service.Release();
+        await AwaitSrdoChainAsync(node);
+        await WaitUntilAsync(() => !SrdoPairInFlight(node) && !SrdoPairInFlight(node, 2), "nothing in flight");
+        service.Handed(0x125).Should().Be(0, "the queued pair of SRDO 2 never reaches the service");
+        service.Handed(0x126).Should().Be(0);
+        service.Handed(cob1 + 1).Should().Be(0, "nor the inverted half of the held pair");
+    }
+
+    // A legitimate delete followed by a commit is not a corruption: the image is taken anew at
+    // the commit's A5h, so the next periodic check finds nothing.
+    [Fact]
+    public async Task A_Delete_Followed_By_A_Commit_Survives_The_Periodic_Check()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 2, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(25), 0x125, 0x126);
+        safety.CommitSafetyConfiguration();
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+
+        safety.DeleteSrdo(2);
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the delete is a write");
+        safety.CommitSafetyConfiguration();
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "deleted by a write, committed, and unchanged since");
     }
 
     [Fact]

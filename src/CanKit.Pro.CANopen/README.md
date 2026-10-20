@@ -828,15 +828,17 @@ its existing SRDOs (sub-index `01h` ≠ 0 — a deleted SRDO has no configuratio
 * **After a reset** (§5.4), over what the reset put back, before the boot-up goes out. The
   stored values come back as stored; only `13FEh` is cleared.
 * **Periodically**, when `CanOpenNodeOptions.SrdoConfigurationCheckInterval` is set (§5.3 says the
-  SRD "should" do this and names no interval, so it is opt-in). A mismatch found in Operational
-  makes every SRDO `ConfigurationInvalid` as the transition would: the producer stops, a pair
-  already waiting is dropped, the consumer reports invalid, and `SrdoStateChanged` says so. An
-  SRDO the engine runs whose direction now reads as 0 or reserved counts as a mismatch, not as
-  deleted — while `13FEh` stands at `A5h` no write can have deleted it; `13FEh` is cleared, the
-  producer stops, and the SRDO reports itself as no longer existing (reason `null`), as its
-  record reads. CiA 319 specifies no
-  notification of the configuration entity. `With` keeps the interval;
-  `WithSrdoConfigurationCheckInterval` replaces it.
+  SRD "should" do this and names no interval, so it is opt-in; `With` keeps the interval,
+  `WithSrdoConfigurationCheckInterval` replaces it). Besides the checksums, the check compares the
+  checksummed objects — the records, their mappings, `13FFh` — byte for byte with the image taken
+  when `A5h` was written or restored: every write to one of them clears `13FEh`, so while `A5h`
+  stands any difference was made behind the dictionary's back, a direction that now reads as 0 or
+  reserved included. A mismatch found in Operational makes every SRDO invalid as the transition
+  would — `ConfigurationInvalid`, or no longer existing (reason `null`) when its record reads as
+  deleted — and ends the send period as leaving Operational does: a pair waiting, a pair already
+  queued on the chain and the inverted half of a held pair go nowhere; the consumer reports
+  invalid, and `SrdoStateChanged` says so. CiA 319 specifies no notification of the
+  configuration entity.
 
 And the clearing rule of §5.3 after step 5 holds as the dictionary works: every accepted write
 to a safety parameter clears `13FEh`, whether or not the value changed; a write the node refuses
