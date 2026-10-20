@@ -507,11 +507,16 @@ public class CanOpenSdoClientSendFailureTests
         // The block initiate is still unconfirmed when the caller cancels. Its outcome, failed,
         // arrives after the session is gone -- with no transfer to that server, or with the next
         // one already running -- and must fail neither.
+        //
+        // Nobody answers server 0x11, so the only way the next transfer can end on its own is
+        // its SDO timeout. A loaded host once took the 30 s this test used to allow and the
+        // assertion below read that timeout as the stale outcome's doing (#311); the timeout is
+        // now beyond any stall, and the transfer is cancelled at the end regardless.
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-stale-{Guid.NewGuid():N}");
         using var inner = new CanBusService(bus);
         var service = new HeldConfirmationService(inner);
         using var client = CanOpen.OpenNode(service, 0x7F,
-            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMinutes(10) }, leaveOpen: true);
         var firstInitConfirmation = new TaskCompletionSource<TxConfirmation>();
         var inits = 0;
         service.Hold = frame =>
@@ -553,12 +558,12 @@ public class CanOpenSdoClientSendFailureTests
     {
         // The upload is cancelled while its end acknowledgement is unconfirmed. That outcome
         // then arrives with no transfer to the server, or with the next one running, and must
-        // complete neither.
+        // complete neither. The next transfer's SDO timeout is beyond any stall, as above (#311).
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-end-stale-{Guid.NewGuid():N}");
         using var inner = new CanBusService(bus);
         var service = new HeldConfirmationService(inner);
         using var client = CanOpen.OpenNode(service, 0x7F,
-            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) }, leaveOpen: true);
+            new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMinutes(10) }, leaveOpen: true);
         var server = unchecked((int)CanOpenCobId.SdoTx(0x11));
         var endAckConfirmation = new TaskCompletionSource<TxConfirmation>();
         var endAckSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
