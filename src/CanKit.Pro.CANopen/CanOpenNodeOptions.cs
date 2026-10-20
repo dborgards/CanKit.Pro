@@ -177,6 +177,18 @@ public sealed class CanOpenNodeOptions
     public bool EnableChangeOfStateSrdo { get; init; } = true;
 
     /// <summary>
+    /// How often a node with SRDOs recalculates the checksums of its existing SRDOs and compares
+    /// them with <c>13FFh</c> while <c>13FEh</c> says <c>A5h</c> — CiA 319 v2.0.0 §5.3: the SRD
+    /// "should validate the consistency of its safety-related configuration by periodically
+    /// recalculating the CRC". A mismatch sets <c>13FEh</c> to <c>00h</c>; in Operational every
+    /// SRDO is then <c>ConfigurationInvalid</c>, as it would be at the transition. <see langword="null"/>,
+    /// the default, runs no periodic check: CiA 319 names no interval, and the checks at the write
+    /// of <c>A5h</c>, after a reset and at the transition to Operational run regardless. Kept by
+    /// <see cref="With(TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, byte?, bool?, int?, bool?, bool?, bool?, CanOpenNodeProfile?, int?, bool?, int?)"/>.
+    /// </summary>
+    public TimeSpan? SrdoConfigurationCheckInterval { get; init; }
+
+    /// <summary>
     /// Layer setting services (CiA 305). <see langword="null"/> (the default) leaves them off,
     /// unless the device description the node is opened with sets <c>LSS_Supported</c>. An
     /// instance turns them on, and <see cref="LssSlaveOptions.Enabled"/> <see langword="false"/>
@@ -298,6 +310,7 @@ public sealed class CanOpenNodeOptions
             SrdoCount = srdoCount ?? SrdoCount,
             EnableChangeOfStateSrdo = enableChangeOfStateSrdo ?? EnableChangeOfStateSrdo,
             Lss = lss,
+            SrdoConfigurationCheckInterval = SrdoConfigurationCheckInterval,
         };
         options.Validate();
         return options;
@@ -335,5 +348,8 @@ public sealed class CanOpenNodeOptions
         if (SrdoCount is < 0 or > 64)
             throw new ArgumentOutOfRangeException(nameof(SrdoCount), SrdoCount,
                 "SrdoCount must be 0..64: CiA DSP 304 limits a network to 64 SRDOs (§3).");
+        if (SrdoConfigurationCheckInterval is { } check && check <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(SrdoConfigurationCheckInterval), check,
+                "SrdoConfigurationCheckInterval must be positive, or null for no periodic check.");
     }
 }

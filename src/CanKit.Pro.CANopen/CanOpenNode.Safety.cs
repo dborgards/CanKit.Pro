@@ -8,6 +8,7 @@ using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Safety;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.Reliability;
 
 namespace CanKit.Pro.CANopen;
 
@@ -423,6 +424,34 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         return true;
     }
 
+    // §5.3, "should … periodically": armed on the actor at start when the option says so,
+    // re-armed after every check, dropped with the node. A reset does not stop it — what a reset
+    // puts back is one more configuration to check.
+    private IDeadline? _srdoConfigurationCheck;
+
+    /// <summary>Actor only.</summary>
+    private void StartSrdoConfigurationCheck()
+    {
+        if (_srdoCount == 0 || _options.SrdoConfigurationCheckInterval is not { } interval) return;
+        if (Volatile.Read(ref _disposed) != 0) return;
+        _srdoConfigurationCheck = _deadlines.Arm(interval, OnSrdoConfigurationCheck);
+    }
+
+    private void OnSrdoConfigurationCheck()
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        bool stands = true;
+        _od.Transaction(() => stands = RevalidateSafetyConfiguration());
+        // Outside Operational the transition re-reads the records (§9.5). Inside it the engine
+        // armed them with the configuration that just failed, so they are re-read now: every
+        // SRDO is ConfigurationInvalid, a producer stops, a consumer reports invalid (§8.3.1 D).
+        if (!stands && _state == NmtState.Operational)
+        {
+            for (int n = 1; n <= _srdoCount; n++) _srdo.Rebuild(n);
+        }
+        StartSrdoConfigurationCheck();
+    }
+
     public Task TriggerSrdoAsync(int srdoNumber, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
@@ -582,7 +611,11 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         var pending = _srdoPending[srdoNumber];
         _srdoPending[srdoNumber] = null;
-        if (pending is not null && _srdo.IsOperational && Volatile.Read(ref _disposed) == 0)
+        // Nor for an SRDO that stopped being valid meanwhile — the periodic check found its
+        // configuration apart from its checksum (#308), or a mapped object went away: §8.3.1 D,
+        // "the safety node shall not transmit SRDOs".
+        if (pending is not null && _srdo.IsOperational && Volatile.Read(ref _disposed) == 0
+            && _srdo.GetState(srdoNumber).IsValid)
             QueueSrdoPair(srdoNumber, pending);
         else
             _srdoInFlight[srdoNumber] = false;

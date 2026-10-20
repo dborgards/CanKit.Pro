@@ -311,6 +311,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _actor.Post(() =>
         {
             ApplyAllCommunicationObjects();
+            StartSrdoConfigurationCheck();
             // An unconfigured LSS slave stays in NMT reset-communication waiting (§8.3.1):
             // no boot-up, no heartbeat, no SDO, until a valid pending node-id is configured.
             if (LayerSettingsBlockBoot()) return;
@@ -903,6 +904,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _syncProducerHandle = null;
         DisposePdoRuntime();
         _srdo.Dispose();
+        _srdoConfigurationCheck?.Dispose();
+        _srdoConfigurationCheck = null;
         EndSrdoSendPeriod(); // a disposed node sends no pair still on the chain
         _lifeGuardingDeadline?.Dispose();
         _lifeGuardingDeadline = null;
