@@ -820,7 +820,10 @@ node's NMT state is not affected.
 
 The device side of CiA 319 adds three more moments at which the node compares the checksums of
 its existing SRDOs (sub-index `01h` ≠ 0 — a deleted SRDO has no configuration to protect, and
-§9.5 does not check it either) with `13FFh` and, on a mismatch, sets `13FEh` to `00h` itself:
+§9.5 does not check it either) with `13FFh` and, on a mismatch, sets `13FEh` to `00h` itself.
+The checksum is recomputed over the record as the dictionary holds it, every mapping slot raw,
+the inverted ones included (`SrdoRecords.RecordChecksum`; the transition to Operational uses it
+too), so a record changed behind the dictionary's back in any slot is a mismatch:
 
 * **At the write of `A5h`** (§5.3 step 4), from any writer — the configuration entity's SDO, a
   local write, a device description applying `13FEh` last. The readback of step 4 therefore

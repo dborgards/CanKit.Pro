@@ -265,9 +265,14 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     // CiA 319 §5.4 (FR-CO-058): after a reset the stored configuration is compared with the
     // checksum stored with it before the boot-up. The store is a snapshot of the dictionary, so
     // a record changed behind the dictionary's back — SetRawValue, the stand-in for a bit flipped
-    // in NVRAM — is stored next to the A5h that was never cleared for it, and comes back so.
-    [Fact]
-    public async Task A_Stored_Configuration_That_Does_Not_Match_Its_Checksum_Comes_Back_Invalid()
+    // in NVRAM — is stored next to the A5h that was never cleared for it, and comes back so. The
+    // checksum is recomputed over the record as the dictionary holds it, the inverted mapping
+    // slots included (Codex on #329): the second case corrupts one of those, which the plain
+    // slots say nothing about.
+    [Theory]
+    [InlineData(0x1301, 0x02, new byte[] { 40, 0 })]
+    [InlineData(0x1381, 0x02, new byte[] { 0x10, 0x00, 0x00, 0x20 })]
+    public async Task A_Stored_Configuration_That_Does_Not_Match_Its_Checksum_Comes_Back_Invalid(int index, byte subindex, byte[] corrupted)
     {
         var session = NewSession();
         using var bus = Open(session, 1);
@@ -277,18 +282,18 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30));
         node.Safety().CommitSafetyConfiguration();
         var od = node.ObjectDictionary;
-        od.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
-        refresh.SetRawValue(new byte[] { 40, 0 }); // not a write: no hook, 13FEh stays A5h
+        od.TryGet((ushort)index, subindex, out var entry).Should().BeTrue();
+        entry.SetRawValue(corrupted); // not a write: no hook, 13FEh stays A5h
         node.StoreParameters();
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing told the node");
 
         wire.SendNmt(NmtCommand.ResetCommunication, Producer);
-        await WaitUntilAsync(() => od.ReadUnsigned(0x1301, 2) == 40 && node.State == NmtState.PreOperational, "restored");
+        await WaitUntilAsync(() => od.ReadRaw((ushort)index, subindex).AsSpan().SequenceEqual(corrupted) && node.State == NmtState.PreOperational, "restored");
         // The restore and the §5.4 check run in the reset's actor turn; a State read is a round
         // trip queued behind it.
         _ = node.State;
-        od.ReadUnsigned(0x1301, 2).Should().Be(40u, "the stored record came back as stored (FR-CO-035)");
-        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.4: the CRC in 13FFh is the one of 30 ms");
+        od.ReadRaw((ushort)index, subindex).Should().Equal(corrupted, "the stored record came back as stored (FR-CO-035)");
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.4: the CRC in 13FFh is the one of the record as committed");
     }
 
     // CiA 319 §5.3 (FR-CO-059): "the SRD should validate the consistency of its safety-related

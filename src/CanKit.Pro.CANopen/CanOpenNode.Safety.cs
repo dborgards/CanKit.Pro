@@ -452,7 +452,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         void Take(ushort index, byte subindex) => image.AddRange(_od.ReadRaw(index, subindex));
         for (int n = 1; n <= _srdoCount; n++)
         {
-            if (!SrdoRecords.TryReadCommunication(_od, n, out var p) || p.Direction == SrdoDirection.None) continue;
+            if (_od.ReadUnsigned(SrdoRecords.CommIndex(n), 0x01) is not (1 or 2)) continue; // deleted, or reserved
             image.Add((byte)n);
             for (byte s = 0; s <= 6; s++) Take(SrdoRecords.CommIndex(n), s);
             for (byte s = 0; s <= SrdoRecords.MappingSubindices; s++) Take(SrdoRecords.MapIndex(n), s);
