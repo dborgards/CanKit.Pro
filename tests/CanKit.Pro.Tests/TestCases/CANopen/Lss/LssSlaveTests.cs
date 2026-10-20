@@ -38,9 +38,13 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         BitRateSwitch = (_, _) => Task.CompletedTask,
     };
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
+    private static Task WaitUntilAsync(Func<bool> condition) => WaitUntilAsync(condition, TimeSpan.FromSeconds(3));
+
+    /// <summary>For a wait that spans a switch delay of its own: the budget is the delay plus
+    /// what a loaded runner adds, which 3 s did not cover on Windows (#331).</summary>
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan budget)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var deadline = DateTime.UtcNow + budget;
         while (!condition())
         {
             if (DateTime.UtcNow >= deadline)
@@ -645,9 +649,9 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         // A long second silence: the premise is that 5Ch is held by it, and a loaded runner must
         // not let the silence end before 5Ch has reached the slave (macOS CI on #331).
         var second = bench.Master.ActivateBitTimingAsync(1000, null);        // the second silence begins in that window
-        await WaitUntilAsync(() => Volatile.Read(ref switches) == 2);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 2, TimeSpan.FromSeconds(10));
         Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives in it
-        await WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2);     // 5Bh and 5Ch held
+        await WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2, TimeSpan.FromSeconds(10)); // 5Bh and 5Ch held
         slave.IsLssSilentForTests.Should().BeTrue("the premise: 5Ch arrived during the second silence");
         release.Set();                                                        // the flush goes on
         await second;
@@ -657,9 +661,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
     // Codex and Bugbot on #331: a driver that throws while a held heartbeat or LSS reply is
     // flushed has nobody awaiting that send, so the failure is reported on
-    // BackgroundExceptionOccurred, as it is for a frame that was not held.
-    [Fact]
-    public async Task A_Driver_Throw_While_Flushing_A_Held_Reply_Is_Reported()
+    // BackgroundExceptionOccurred, as it is for a frame that was not held. The same for a
+    // cancellation nobody asked for -- the service disposed under the pending send.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Driver_Throw_While_Flushing_A_Held_Reply_Is_Reported(bool asCancellation)
     {
         int switches = 0;
         using var bench = new Bench();
@@ -686,9 +693,14 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         var activate = bench.Master.ActivateBitTimingAsync(200, null);
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
         throwing.ThrowOnNextReply = true;
+        throwing.ThrowCancellation = asCancellation;
         Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // held; its flush will throw
         await activate;
-        await WaitUntilAsync(() => { lock (reported) return reported.Any(e => e is CanOpenTransportException t && t.InnerException is InvalidOperationException); });
+        await WaitUntilAsync(() =>
+        {
+            lock (reported) return reported.Any(e => e is CanOpenTransportException t
+            && (asCancellation ? t.InnerException is OperationCanceledException : t.InnerException is InvalidOperationException));
+        });
     }
 
     // Codex on #331: the silence has ended but the flush is still sending the held replies —
@@ -790,6 +802,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         private readonly ICanBusService _inner;
         public ThrowingReplyService(ICanBusService inner) => _inner = inner;
         public volatile bool ThrowOnNextReply;
+        public volatile bool ThrowCancellation;
         public ICanBus Bus => _inner.Bus;
         public int SubscriptionCount => _inner.SubscriptionCount;
         public event EventHandler<Exception>? BackgroundExceptionOccurred
@@ -807,6 +820,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             if (ThrowOnNextReply && (uint)frame.ID == CanOpenCobId.LssSlaveMessage)
             {
                 ThrowOnNextReply = false;
+                if (ThrowCancellation) throw new OperationCanceledException("the service was disposed under the send");
                 throw new InvalidOperationException("the driver refused the frame");
             }
             return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);

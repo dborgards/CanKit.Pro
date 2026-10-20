@@ -351,8 +351,15 @@ internal sealed partial class CanOpenNode : ILssSlave
                     $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}."));
             item.Signal.TrySetResult(conf.Confirmed);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException oce)
         {
+            // A cancellation nobody asked for -- the service disposed under the pending send --
+            // means the frame was not sent; for a held heartbeat or LSS reply, which nobody
+            // awaits, that is reported as the transport failure it is, as SendControlFrame does
+            // for a frame that was not held (Codex on #331).
+            if (!item.IsNmt && !item.CancellationToken.IsCancellationRequested)
+                RaiseBackgroundException(new CanOpenTransportException(
+                    $"CANopen frame TX on COB-ID 0x{cobId:X3} was cancelled before it was confirmed.", oce));
             item.Signal.TrySetCanceled();
         }
         catch (Exception ex)
