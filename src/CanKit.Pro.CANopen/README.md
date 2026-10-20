@@ -830,8 +830,13 @@ its existing SRDOs (sub-index `01h` ≠ 0 — a deleted SRDO has no configuratio
 * **Periodically**, when `CanOpenNodeOptions.SrdoConfigurationCheckInterval` is set (§5.3 says the
   SRD "should" do this and names no interval, so it is opt-in). A mismatch found in Operational
   makes every SRDO `ConfigurationInvalid` as the transition would: the producer stops, a pair
-  already waiting is dropped, the consumer reports invalid, and `SrdoStateChanged` says so. CiA
-  319 specifies no notification of the configuration entity.
+  already waiting is dropped, the consumer reports invalid, and `SrdoStateChanged` says so. An
+  SRDO the engine runs whose direction now reads as 0 or reserved counts as a mismatch, not as
+  deleted — while `13FEh` stands at `A5h` no write can have deleted it; `13FEh` is cleared, the
+  producer stops, and the SRDO reports itself as no longer existing (reason `null`), as its
+  record reads. CiA 319 specifies no
+  notification of the configuration entity. `With` keeps the interval;
+  `WithSrdoConfigurationCheckInterval` replaces it.
 
 And the clearing rule of §5.3 after step 5 holds as the dictionary works: every accepted write
 to a safety parameter clears `13FEh`, whether or not the value changed; a write the node refuses

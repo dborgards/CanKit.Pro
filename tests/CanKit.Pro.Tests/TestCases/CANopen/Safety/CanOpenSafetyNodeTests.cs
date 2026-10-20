@@ -294,8 +294,16 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     // CiA 319 §5.3 (FR-CO-059): "the SRD should validate the consistency of its safety-related
     // configuration by periodically recalculating the CRC". Opt-in by interval. In Operational a
     // mismatch makes the SRDO ConfigurationInvalid and the producer falls silent (§8.3.1 D).
-    [Fact]
-    public async Task The_Periodic_Check_Finds_A_Corrupted_Record_And_Stops_The_Producer()
+    // The corrupted byte is the refresh time, or the direction — to 0 (deleted) or 3 (reserved,
+    // read as none): a record the engine runs that reads as gone is a mismatch, not a deletion
+    // (Bugbot on #329). The SRDO then reports itself as no longer existing (reason null, as the
+    // record reads), where the time case reports ConfigurationInvalid; either way it is invalid,
+    // 13FEh is 00h and nothing more goes out.
+    [Theory]
+    [InlineData(0x02, 40)]
+    [InlineData(0x01, 0)]
+    [InlineData(0x01, 3)]
+    public async Task The_Periodic_Check_Finds_A_Corrupted_Record_And_Stops_The_Producer(byte subindex, byte value)
     {
         var session = NewSession();
         using var bus = Open(session, 1);
@@ -320,12 +328,14 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
         safety.GetSrdoState(1).IsValid.Should().BeTrue();
 
-        od.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
-        refresh.SetRawValue(new byte[] { 40, 0 }); // behind the dictionary's back: no hook, nothing cleared
+        od.TryGet(0x1301, subindex, out var entry).Should().BeTrue();
+        entry.SetRawValue(subindex == 0x02 ? new byte[] { value, 0 } : new[] { value }); // behind the dictionary's back: no hook, nothing cleared
         Advance(clock, node, TimeSpan.FromSeconds(1));
         od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the next check found the record and its checksum apart");
-        await WaitUntilAsync(() => { lock (changes) return changes.Any(c => c.Reason == SrdoInvalidReason.ConfigurationInvalid); }, "state change");
-        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+        await WaitUntilAsync(() => { lock (changes) return changes.Any(c => !c.IsValid); }, "state change");
+        safety.GetSrdoState(1).IsValid.Should().BeFalse();
+        safety.GetSrdoState(1).Reason.Should().Be(subindex == 0x02 ? SrdoInvalidReason.ConfigurationInvalid : null,
+            "a record that reads as deleted or reserved is an SRDO that no longer exists; a wrong time is a wrong checksum");
 
         // Nothing more goes out: the chain drained, a completed pair's continuation settled, the
         // chain drained again — then the count is final, and a further cycle's worth of time adds

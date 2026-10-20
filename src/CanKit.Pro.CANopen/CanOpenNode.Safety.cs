@@ -404,18 +404,22 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     /// recalculated and compared with 13FFh:n; one mismatch sets 13FEh to 00h. "All SRDOs in its
     /// object dictionary" is read as the SRDOs that exist (sub-index 01h ≠ 0), the ones §9.5
     /// checks and the configuration entity verifies (FR-CO-044): a deleted SRDO has no
-    /// configuration to protect. Under the dictionary's write gate — the hook calls it on the
-    /// writing thread, the restore inside its transaction, the periodic check inside one of its
-    /// own. Returns false when it cleared 13FEh.</summary>
-    private bool RevalidateSafetyConfiguration()
+    /// configuration to protect. <paramref name="mustExist"/> names the SRDOs that are not allowed
+    /// to read as deleted or reserved all the same: the periodic check passes the ones the engine
+    /// runs, because while 13FEh stands at A5h no write can have deleted one — a write clears it —
+    /// so a record that nevertheless reads as gone was changed behind the dictionary's back
+    /// (Bugbot on #329). Under the dictionary's write gate — the hook calls it on the writing
+    /// thread, the restore inside its transaction, the periodic check inside one of its own.
+    /// Returns false when it cleared 13FEh.</summary>
+    private bool RevalidateSafetyConfiguration(Func<int, bool>? mustExist = null)
     {
         if (_srdoCount == 0) return true;
         if (!_od.TryReadUnsigned(Co.SrdoConfigurationValid, 0x00, out var valid) || valid != SrdoRecords.ConfigurationValidValue)
             return true;
         for (int n = 1; n <= _srdoCount; n++)
         {
-            if (!SrdoRecords.TryReadCommunication(_od, n, out var p) || p.Direction == SrdoDirection.None) continue;
-            if (SrdoRecords.IsConfigurationValid(_od, n)) continue;
+            bool exists = SrdoRecords.TryReadCommunication(_od, n, out var p) && p.Direction != SrdoDirection.None;
+            if (exists ? SrdoRecords.IsConfigurationValid(_od, n) : mustExist is null || !mustExist(n)) continue;
             // Unchecked: this is the device's own finding, not a configuration write — and the
             // periodic check can reach here in Operational, where a validated write is refused.
             _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
@@ -441,7 +445,9 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
     {
         if (Volatile.Read(ref _disposed) != 0) return;
         bool stands = true;
-        _od.Transaction(() => stands = RevalidateSafetyConfiguration());
+        // The engine's view of which SRDOs exist, as published after its last rebuild: an armed
+        // record whose direction now reads as none or reserved is a mismatch, not a deletion.
+        _od.Transaction(() => stands = RevalidateSafetyConfiguration(n => _srdo.GetState(n).Direction != SrdoDirection.None));
         // Outside Operational the transition re-reads the records (§9.5). Inside it the engine
         // armed them with the configuration that just failed, so they are re-read now: every
         // SRDO is ConfigurationInvalid, a producer stops, a consumer reports invalid (§8.3.1 D).
