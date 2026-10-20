@@ -664,11 +664,13 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     // Codex and Bugbot on #331: a driver that throws while a held heartbeat or LSS reply is
     // flushed has nobody awaiting that send, so the failure is reported on
     // BackgroundExceptionOccurred, as it is for a frame that was not held. The same for a
-    // cancellation nobody asked for -- the service disposed under the pending send.
+    // cancellation nobody asked for -- the service disposed under the pending send -- and for a
+    // send the service answers as not confirmed.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_Driver_Throw_While_Flushing_A_Held_Reply_Is_Reported(bool asCancellation)
+    [InlineData("throw")]
+    [InlineData("cancel")]
+    [InlineData("unconfirmed")]
+    public async Task A_Driver_Throw_While_Flushing_A_Held_Reply_Is_Reported(string failure)
     {
         int switches = 0;
         using var bench = new Bench();
@@ -694,14 +696,20 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
 
         var activate = bench.Master.ActivateBitTimingAsync(200, null);
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
-        throwing.ThrowOnNextReply = true;
-        throwing.ThrowCancellation = asCancellation;
-        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // held; its flush will throw
+        throwing.FailNextReply = failure;
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // held; its flush will fail
         await activate;
         await WaitUntilAsync(() =>
         {
-            lock (reported) return reported.Any(e => e is CanOpenTransportException t
-            && (asCancellation ? t.InnerException is OperationCanceledException : t.InnerException is InvalidOperationException));
+            lock (reported)
+            {
+                return reported.Any(e => e is CanOpenTransportException t && failure switch
+                {
+                    "throw" => t.InnerException is InvalidOperationException,
+                    "cancel" => t.InnerException is OperationCanceledException,
+                    _ => t.InnerException is null && t.Message.Contains("Timeout"),
+                });
+            }
         });
     }
 
@@ -798,13 +806,13 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         public void Dispose() => _inner.Dispose();
     }
 
-    /// <summary>A bus service whose next slave reply (7E4h) throws from the driver.</summary>
+    /// <summary>A bus service whose next slave reply (7E4h) fails: the driver throws, the send is
+    /// cancelled, or the service answers "not confirmed".</summary>
     private sealed class ThrowingReplyService : ICanBusService
     {
         private readonly ICanBusService _inner;
         public ThrowingReplyService(ICanBusService inner) => _inner = inner;
-        public volatile bool ThrowOnNextReply;
-        public volatile bool ThrowCancellation;
+        public volatile string? FailNextReply;
         public ICanBus Bus => _inner.Bus;
         public int SubscriptionCount => _inner.SubscriptionCount;
         public event EventHandler<Exception>? BackgroundExceptionOccurred
@@ -819,11 +827,16 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
         public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
         {
-            if (ThrowOnNextReply && (uint)frame.ID == CanOpenCobId.LssSlaveMessage)
+            if (FailNextReply is { } failure && (uint)frame.ID == CanOpenCobId.LssSlaveMessage)
             {
-                ThrowOnNextReply = false;
-                if (ThrowCancellation) throw new OperationCanceledException("the service was disposed under the send");
-                throw new InvalidOperationException("the driver refused the frame");
+                FailNextReply = null;
+                switch (failure)
+                {
+                    case "cancel": throw new OperationCanceledException("the service was disposed under the send");
+                    case "unconfirmed":
+                        return Task.FromResult(new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout, Timestamp = DateTime.UtcNow });
+                    default: throw new InvalidOperationException("the driver refused the frame");
+                }
             }
             return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
         }
