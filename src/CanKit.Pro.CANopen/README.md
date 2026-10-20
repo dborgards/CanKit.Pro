@@ -40,7 +40,7 @@ Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 v3.0.0. FR-CO-048 is the LSS slave in the node, including the pending node-id and
 `LSS_Supported` in a device description. FR-CO-049 is commissioning on the master: Fastscan,
 node-id assignment, bit timing, store and inquire. FR-CO-050 is CiA 801 automatic bit-rate
-detection, the procedure behind table 0 index 9. FR-CO-051 is the configuration entity after CiA 319 v2.0.0 (17 October 2026). FR-CO-052 to FR-CO-057 add the PDO extensions. The SRS's "Quelle"
+detection, the procedure behind table 0 index 9. FR-CO-051 is the configuration entity after CiA 319 v2.0.0 (17 October 2026). FR-CO-052 to FR-CO-057 add the PDO extensions. FR-CO-058 and FR-CO-059 are the device side of CiA 319 (20 October 2026). The SRS's "Quelle"
 column says for each of them whether a standard requires it, the architecture does, or a
 maintainer decision does.
 
@@ -102,6 +102,8 @@ maintainer decision does.
 | FR-CO-054 | RPDO deadline (`1400h:05`), one-shot application indication and EMCY `8250h` |
 | FR-CO-055 | Bit mapping, one-bit BOOLEAN/dummy and native 24/40/48/56-bit integer widths |
 | FR-CO-056 | Configurable PDO count up to 512 per direction and 29-bit PDO identifiers |
+| FR-CO-058 | The device side of CiA 319: at the write of `A5h` the checksums of the existing SRDOs are compared and a mismatch sets `13FEh` back to `00h` at once (§5.3 step 4); the same after a reset, before the boot-up (§5.4) ([Configuring and committing](#configuring-and-committing)) |
+| FR-CO-059 | `SrdoConfigurationCheckInterval`: the same check repeated periodically (§5.3, opt-in); a mismatch in Operational makes every SRDO `ConfigurationInvalid` ([Configuring and committing](#configuring-and-committing)) |
 | FR-CO-057 | SAM/DAM MPDO, scanner/dispatcher blocks and inhibit queue |
 
 ## Not built, and why
@@ -145,10 +147,6 @@ Deliberate omissions, each checked against the norm text:
   profile's to say, and no profile with safety provisions is implemented here. What they share
   with the SRDO signature is the polynomial: `SrdoCrc.Crc16Xmodem`, suitable for up to 2048 bytes,
   with the choices V1.0 leaves open (#289).
-* **The device side of CiA 319** — step 4 of its §5.3 at the write of `A5h` (a device here checks
-  the checksums at the transition to Operational, FR-CO-038, and keeps `A5h` until then), the
-  `13FEh` rules §5.3 states for the download indication, the periodic recalculation, and the
-  start-up check of §5.4 against what was stored. Tracked in #308.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
 * **Automatic bit-rate detection as an LSS command** — table 0 index 9 names CiA 801 detection,
@@ -693,8 +691,10 @@ The tool side — configuring a device as its *configuration entity* — follows
 2.0.0** (draft specification proposal, 2 December 2025), the implementation and configuration
 specification for safety-related devices: the identity verification of its §5.2, the sequence of
 §5.3 with the storage of step 5, and the rule of §6.2 for the checksum of an SRVT the device does
-not implement. Its clauses 7 and 8, the safety application layer of CiA profiles and of
-manufacturer-specific profiles, and what it says the device does are not built — see
+not implement. What it says the device does — step 4 of §5.3, the download indication, the
+periodic recalculation and the start-up check of §5.4 — is built as described under
+[Configuring and committing](#configuring-and-committing). Its clauses 7 and 8, the safety
+application layer of CiA profiles and of manufacturer-specific profiles, are not — see
 [Not built](#not-built-and-why). "CiA 319" in this section means that version.
 
 ### Opening a safety node
@@ -718,8 +718,8 @@ one — at its defaults, deleted, with the node's default access (read-only on t
 `WritableCommunicationParameters`), and is reported as `SuppliedDefault`. A mapping
 record without its communication record is applied with that SRDO deleted, and a mapping the
 node refuses leaves that SRDO deleted. `13FEh` is applied last, so a file whose checksums match its records loads as a
-valid configuration; a file whose checksum does not match loads without a finding and is simply
-not valid. EdsDcfNet evaluates `$NODEID` in the form `$NODEID+<constant>`: the pre-defined
+valid configuration; a file whose checksum does not match loads without a finding, and the node
+sets `13FEh` back to `00h` at that write (CiA 319 §5.3 step 4, below). EdsDcfNet evaluates `$NODEID` in the form `$NODEID+<constant>`: the pre-defined
 COB-ID FFh + 2 × node-id is not of that form, so a file states it as a number or as
 `$NODEID+<constant>` for its own node-id.
 
@@ -817,6 +817,25 @@ At every transition to Operational each SRDO is checked (§9.5, last rule; §8.3
 `13FEh` = `A5h` and `13FFh:n` equal to the checksum of the record. Without both the SRDO is
 `ConfigurationInvalid`: a producer does not transmit, a consumer reports invalid at once. The
 node's NMT state is not affected.
+
+The device side of CiA 319 adds three more moments at which the node compares the checksums of
+its existing SRDOs (sub-index `01h` ≠ 0 — a deleted SRDO has no configuration to protect, and
+§9.5 does not check it either) with `13FFh` and, on a mismatch, sets `13FEh` to `00h` itself:
+
+* **At the write of `A5h`** (§5.3 step 4), from any writer — the configuration entity's SDO, a
+  local write, a device description applying `13FEh` last. The readback of step 4 therefore
+  sees `00h` on a device whose checksums do not fit, instead of the `A5h` just written.
+* **After a reset** (§5.4), over what the reset put back, before the boot-up goes out. The
+  stored values come back as stored; only `13FEh` is cleared.
+* **Periodically**, when `CanOpenNodeOptions.SrdoConfigurationCheckInterval` is set (§5.3 says the
+  SRD "should" do this and names no interval, so it is opt-in). A mismatch found in Operational
+  makes every SRDO `ConfigurationInvalid` as the transition would: the producer stops, a pair
+  already waiting is dropped, the consumer reports invalid, and `SrdoStateChanged` says so. CiA
+  319 specifies no notification of the configuration entity.
+
+And the clearing rule of §5.3 after step 5 holds as the dictionary works: every accepted write
+to a safety parameter clears `13FEh`, whether or not the value changed; a write the node refuses
+— read-only, out of range, in Operational — leaves it.
 
 ### Producer
 
