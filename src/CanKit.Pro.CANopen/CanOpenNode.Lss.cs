@@ -154,6 +154,10 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private bool IsLssSilent() => Volatile.Read(ref _lssSilent) != 0;
 
+    /// <summary>Test seams: whether the slave is in its switch silence, and how many frames it holds.</summary>
+    internal bool IsLssSilentForTests => IsLssSilent();
+    internal int HeldTransmitCountForTests { get { lock (_lssTxGate) return _lssHeldTx.Count; } }
+
     /// <summary>
     /// One decision for this frame, under <see cref="_lssTxGate"/>. A held or suppressed frame
     /// comes back as the task the caller waits on. A frame that may leave now reserves an
@@ -346,6 +350,13 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
         catch (Exception ex)
         {
+            // A held heartbeat or LSS reply has nobody awaiting its signal, so a driver throw is
+            // reported here, as SendControlFrame reports it for a frame that was not held; the
+            // held NMT's caller observes the signal and reports it itself (Codex and Bugbot on
+            // #331).
+            if (!item.IsNmt)
+                RaiseBackgroundException(ex as CanOpenTransportException ?? new CanOpenTransportException(
+                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex));
             item.Signal.TrySetException(ex);
         }
     }
