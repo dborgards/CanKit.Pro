@@ -8,8 +8,8 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       # A shipped dependency moving is a change in the packages, so .releaserc.json lets
-      # `build(deps)` publish a patch -- except for the `test-tooling` group below, which it
-      # recognises by that name in the subject ("Bump the test-tooling group ..."). 1.3.0 carried
+      # `build(deps)` publish a patch -- except for the `test-tooling` and `repo-tooling` groups
+      # below, which it recognises by name in the subject ("Bump the test-tooling group ..."). 1.3.0 carried
       # coverlet and Polyfill bumps as release entries for want of this split (#257). Rename the
       # group and the rule in .releaserc.json has to follow; eng/verify-release-config.mjs
       # checks the rule against a subject of this shape.
@@ -42,6 +42,20 @@ updates:
           - "AwesomeAssertions"
           - "Polyfill"
           - "PublicApiGenerator"
+      # The other entries of .config/dotnet-tools.json: GitVersion computes the version and
+      # DefaultDocumentation renders the API reference, neither is part of a package. Ungrouped,
+      # a bump of either (#283) carried the plain `build(deps)` subject and would have released a
+      # patch of nine unchanged packages. .releaserc.json recognises this group by name as it
+      # does `test-tooling`; rename it and that rule has to follow (#328).
+      repo-tooling:
+        patterns:
+          - "gitversion.tool"
+          - "defaultdocumentation.console"
+      repo-tooling-security:
+        applies-to: security-updates
+        patterns:
+          - "gitversion.tool"
+          - "defaultdocumentation.console"
     ignore:
       # CanKit is the upstream this product is built on; moving to a new version is a decision
       # about compatibility and testing, made by bumping CanKitVersion in eng/Dependencies.props.
