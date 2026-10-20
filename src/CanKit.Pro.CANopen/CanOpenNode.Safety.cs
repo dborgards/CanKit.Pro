@@ -413,7 +413,10 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         if (!IsConfigurationValidFlagSet()) return true;
         for (int n = 1; n <= _srdoCount; n++)
         {
-            if (!SrdoRecords.TryReadCommunication(_od, n, out var p) || p.Direction == SrdoDirection.None) continue;
+            // Deleted is a raw 0 and nothing else: a reserved direction (3..255) is a record that
+            // existed and was changed behind the dictionary's back — the validator never stores
+            // one — and it fails the checksum below rather than passing as deleted (Codex on #329).
+            if (_od.ReadUnsigned(SrdoRecords.CommIndex(n), 0x01) == 0) continue;
             if (SrdoRecords.IsConfigurationValid(_od, n)) continue;
             // Unchecked: this is the device's own finding, not a configuration write — and the
             // periodic check can reach here in Operational, where a validated write is refused.
@@ -452,7 +455,7 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         void Take(ushort index, byte subindex) => image.AddRange(_od.ReadRaw(index, subindex));
         for (int n = 1; n <= _srdoCount; n++)
         {
-            if (_od.ReadUnsigned(SrdoRecords.CommIndex(n), 0x01) is not (1 or 2)) continue; // deleted, or reserved
+            if (_od.ReadUnsigned(SrdoRecords.CommIndex(n), 0x01) == 0) continue; // deleted; a reserved value never passes the check before
             image.Add((byte)n);
             for (byte s = 0; s <= 6; s++) Take(SrdoRecords.CommIndex(n), s);
             for (byte s = 0; s <= SrdoRecords.MappingSubindices; s++) Take(SrdoRecords.MapIndex(n), s);

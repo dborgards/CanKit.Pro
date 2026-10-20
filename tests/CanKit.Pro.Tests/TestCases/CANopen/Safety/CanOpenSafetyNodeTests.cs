@@ -268,10 +268,12 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
     // in NVRAM — is stored next to the A5h that was never cleared for it, and comes back so. The
     // checksum is recomputed over the record as the dictionary holds it, the inverted mapping
     // slots included (Codex on #329): the second case corrupts one of those, which the plain
-    // slots say nothing about.
+    // slots say nothing about; the third corrupts the direction to a reserved value, which is
+    // still an existing record (sub-index 01h ≠ 0), not a deleted one.
     [Theory]
     [InlineData(0x1301, 0x02, new byte[] { 40, 0 })]
     [InlineData(0x1381, 0x02, new byte[] { 0x10, 0x00, 0x00, 0x20 })]
+    [InlineData(0x1301, 0x01, new byte[] { 3 })]
     public async Task A_Stored_Configuration_That_Does_Not_Match_Its_Checksum_Comes_Back_Invalid(int index, byte subindex, byte[] corrupted)
     {
         var session = NewSession();
@@ -287,11 +289,15 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         node.StoreParameters();
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing told the node");
 
+        // The restore and the §5.4 check run in the reset's actor turn, before ApplicationReset is
+        // raised there: the event is the witness that both have run. (The corrupted bytes are what
+        // the restore brings back, so no dictionary value changes with it, and the node is
+        // PreOperational before and after — neither can be waited on; CI caught a wait that was
+        // true before the reset had started.)
+        var reset = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.ApplicationReset += (_, _) => reset.TrySetResult(true);
         wire.SendNmt(NmtCommand.ResetCommunication, Producer);
-        await WaitUntilAsync(() => od.ReadRaw((ushort)index, subindex).AsSpan().SequenceEqual(corrupted) && node.State == NmtState.PreOperational, "restored");
-        // The restore and the §5.4 check run in the reset's actor turn; a State read is a round
-        // trip queued behind it.
-        _ = node.State;
+        await reset.Task.WithTimeoutAsync(ShortTimeout);
         od.ReadRaw((ushort)index, subindex).Should().Equal(corrupted, "the stored record came back as stored (FR-CO-035)");
         od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.4: the CRC in 13FFh is the one of the record as committed");
     }

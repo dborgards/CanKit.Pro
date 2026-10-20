@@ -106,7 +106,6 @@ internal static class SrdoRecords
     {
         if (!od.TryReadUnsigned(ConfigurationValid, 0x00, out var valid) || valid != ConfigurationValidValue) return false;
         if (!od.TryReadUnsigned(Checksum, (byte)n, out var stored)) return false;
-        if (!od.TryReadUnsigned(CommIndex(n), 0x01, out _)) return false;
         return stored == RecordChecksum(od, n);
     }
 
