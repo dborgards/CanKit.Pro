@@ -637,7 +637,9 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         {
             if (Interlocked.Increment(ref seamRuns) != 1) return;
             entered.Set();
-            release.Wait(TimeSpan.FromSeconds(5));
+            // Longer than every wait the test makes while it holds: a seam that lets go on its own
+            // sends 5Bh before 5Ch is held and fails the premise, not the claim (Windows CI on #331).
+            release.Wait(TimeSpan.FromSeconds(30));
         };
 
         var first = bench.Master.ActivateBitTimingAsync(200, null);          // the first silence
