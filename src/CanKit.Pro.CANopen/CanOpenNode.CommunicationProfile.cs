@@ -564,6 +564,12 @@ internal sealed partial class CanOpenNode
         // that was stored with it must survive the restoring of 13FFh that follows it.
         if (!_restoringValues && Safety.SrdoRecords.IsChecksummed(index) && _od.TryGet(Co.SrdoConfigurationValid, 0, out _))
             _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0, new byte[] { 0 });
+        // CiA 319 v2.0.0 §5.3 step 4: at the write of A5h the SRD recalculates the CRCs of its
+        // SRDOs and compares them with 13FFh; a mismatch sets 13FEh back to 00h here and now, so
+        // the configuration entity's readback of step 4 sees it (#308). Not during a restore:
+        // §5.4 runs the same check once, after everything stored is back (RestoreValues).
+        if (!_restoringValues && index == Co.SrdoConfigurationValid && _srdoCount > 0)
+            RevalidateSafetyConfiguration();
         RunOnActor(() => ApplyCommunicationObject(index, subindex));
     }
 

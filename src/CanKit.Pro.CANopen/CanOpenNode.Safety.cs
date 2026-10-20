@@ -397,6 +397,32 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         }));
     }
 
+    // ---- CiA 319 v2.0.0, the device side (#308) --------------------------------------------
+
+    /// <summary>§5.3 step 4 and §5.4: while 13FEh says A5h, the CRC of every existing SRDO is
+    /// recalculated and compared with 13FFh:n; one mismatch sets 13FEh to 00h. "All SRDOs in its
+    /// object dictionary" is read as the SRDOs that exist (sub-index 01h ≠ 0), the ones §9.5
+    /// checks and the configuration entity verifies (FR-CO-044): a deleted SRDO has no
+    /// configuration to protect. Under the dictionary's write gate — the hook calls it on the
+    /// writing thread, the restore inside its transaction, the periodic check inside one of its
+    /// own. Returns false when it cleared 13FEh.</summary>
+    private bool RevalidateSafetyConfiguration()
+    {
+        if (_srdoCount == 0) return true;
+        if (!_od.TryReadUnsigned(Co.SrdoConfigurationValid, 0x00, out var valid) || valid != SrdoRecords.ConfigurationValidValue)
+            return true;
+        for (int n = 1; n <= _srdoCount; n++)
+        {
+            if (!SrdoRecords.TryReadCommunication(_od, n, out var p) || p.Direction == SrdoDirection.None) continue;
+            if (SrdoRecords.IsConfigurationValid(_od, n)) continue;
+            // Unchecked: this is the device's own finding, not a configuration write — and the
+            // periodic check can reach here in Operational, where a validated write is refused.
+            _od.WriteRawUnchecked(Co.SrdoConfigurationValid, 0x00, new byte[] { 0 });
+            return false;
+        }
+        return true;
+    }
+
     public Task TriggerSrdoAsync(int srdoNumber, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();

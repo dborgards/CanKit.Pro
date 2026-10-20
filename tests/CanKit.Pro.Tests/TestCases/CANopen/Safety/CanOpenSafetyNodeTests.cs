@@ -204,6 +204,32 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
     }
 
+    // CiA 319 v2.0.0 §5.3 step 4 (FR-CO-058): the device compares the checksums at the write of
+    // A5h, not only at the transition to Operational, so the configuration entity's readback of
+    // step 4 sees 00h. A deleted SRDO has no configuration to protect and is not compared.
+    [Fact]
+    public void Writing_A5h_Over_A_Wrong_Checksum_Sets_13FEh_Back_To_Zero_At_Once()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 2 });
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "the checksums match");
+
+        od.WriteUnsigned(0x13FF, 1, od.ReadUnsigned(0x13FF, 1) ^ 1);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.3 step 4: the SRD compared the CRCs at the write of A5h");
+
+        od.WriteUnsigned(0x13FF, 2, 0x1234); // SRDO 2 is deleted: its checksum is not compared
+        od.WriteUnsigned(0x13FF, 1, od.ReadUnsigned(0x13FF, 1) ^ 1);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "SRDO 1 matches again and SRDO 2 does not exist");
+    }
+
     [Fact]
     public async Task Configuration_Is_Refused_In_Operational()
     {
