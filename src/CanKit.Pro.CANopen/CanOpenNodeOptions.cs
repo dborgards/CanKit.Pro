@@ -184,7 +184,8 @@ public sealed class CanOpenNodeOptions
     /// SRDO is then <c>ConfigurationInvalid</c>, as it would be at the transition. <see langword="null"/>,
     /// the default, runs no periodic check: CiA 319 names no interval, and the checks at the write
     /// of <c>A5h</c>, after a reset and at the transition to Operational run regardless. Kept by
-    /// <see cref="With(TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, byte?, bool?, int?, bool?, bool?, bool?, CanOpenNodeProfile?, int?, bool?, int?)"/>.
+    /// <see cref="With(TimeSpan?, TimeSpan?, TimeSpan?, int?, int?, int?, byte?, bool?, int?, bool?, bool?, bool?, CanOpenNodeProfile?, int?, bool?, int?)"/>;
+    /// <see cref="WithSrdoConfigurationCheckInterval"/> replaces it.
     /// </summary>
     public TimeSpan? SrdoConfigurationCheckInterval { get; init; }
 
@@ -242,7 +243,8 @@ public sealed class CanOpenNodeOptions
             enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, pdoCount: null);
 
     /// <summary>Returns a copy of this options record with the provided overrides, validated
-    /// like the options a node is opened with. The optional PDO count override is 1..512. <see cref="Lss"/> is kept; <see cref="WithLss"/> replaces it.</summary>
+    /// like the options a node is opened with. The optional PDO count override is 1..512. <see cref="Lss"/> is kept; <see cref="WithLss"/> replaces it.
+    /// <see cref="SrdoConfigurationCheckInterval"/> is kept likewise; <see cref="WithSrdoConfigurationCheckInterval"/> replaces it.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A resulting value is out of its range.</exception>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -263,14 +265,26 @@ public sealed class CanOpenNodeOptions
         int? pdoCount = null)
         => Copy(sdoTimeout, sdoServerTimeout, defaultTpdoEventTimerInterval, eventQueueCapacity, maxSdoTransferBytes,
             sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
-            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, Lss, pdoCount);
+            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, Lss, pdoCount,
+            SrdoConfigurationCheckInterval);
 
     /// <summary>
     /// Returns a copy with <see cref="Lss"/> replaced. Pass <see langword="null"/> to turn layer
     /// setting services back off unless a device description enables them.
     /// </summary>
     public CanOpenNodeOptions WithLss(LssSlaveOptions? lss)
-        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, lss, pdoCount: null);
+        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, lss, pdoCount: null,
+            SrdoConfigurationCheckInterval);
+
+    /// <summary>
+    /// Returns a copy with <see cref="SrdoConfigurationCheckInterval"/> replaced — a template's
+    /// way to turn the periodic check on, off (<see langword="null"/>) or to another interval,
+    /// validated like the options a node is opened with (Codex on #329).
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="interval"/> is not positive.</exception>
+    public CanOpenNodeOptions WithSrdoConfigurationCheckInterval(TimeSpan? interval)
+        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, Lss, pdoCount: null,
+            interval);
 
     private CanOpenNodeOptions Copy(
         TimeSpan? sdoTimeout,
@@ -289,7 +303,8 @@ public sealed class CanOpenNodeOptions
         int? srdoCount,
         bool? enableChangeOfStateSrdo,
         LssSlaveOptions? lss,
-        int? pdoCount)
+        int? pdoCount,
+        TimeSpan? srdoConfigurationCheckInterval)
     {
         var options = new CanOpenNodeOptions
         {
@@ -310,7 +325,7 @@ public sealed class CanOpenNodeOptions
             SrdoCount = srdoCount ?? SrdoCount,
             EnableChangeOfStateSrdo = enableChangeOfStateSrdo ?? EnableChangeOfStateSrdo,
             Lss = lss,
-            SrdoConfigurationCheckInterval = SrdoConfigurationCheckInterval,
+            SrdoConfigurationCheckInterval = srdoConfigurationCheckInterval,
         };
         options.Validate();
         return options;
