@@ -830,10 +830,11 @@ its existing SRDOs (sub-index `01h` ≠ 0 — a deleted SRDO has no configuratio
 * **Periodically**, when `CanOpenNodeOptions.SrdoConfigurationCheckInterval` is set (§5.3 says the
   SRD "should" do this and names no interval, so it is opt-in; `With` keeps the interval,
   `WithSrdoConfigurationCheckInterval` replaces it). Besides the checksums, the check compares the
-  checksummed objects — the records, their mappings, `13FFh` — byte for byte with the image taken
-  when `A5h` was written or restored: every write to one of them clears `13FEh`, so while `A5h`
-  stands any difference was made behind the dictionary's back, a direction that now reads as 0 or
-  reserved included. A mismatch found in Operational makes every SRDO invalid as the transition
+  checksummed objects of the SRDOs that existed then — each one's record, mapping and `13FFh:n`
+  — byte for byte with the image taken when `A5h` was written or restored: every write to one of
+  them clears `13FEh`, so while `A5h` stands any difference was made behind the dictionary's
+  back, a direction that now reads as 0 or reserved included. A deleted SRDO is not in the image;
+  it has no configuration to protect. A mismatch found in Operational makes every SRDO invalid as the transition
   would — `ConfigurationInvalid`, or no longer existing (reason `null`) when its record reads as
   deleted — and ends the send period as leaving Operational does: a pair waiting, a pair already
   queued on the chain and the inverted half of a held pair go nowhere; the consumer reports

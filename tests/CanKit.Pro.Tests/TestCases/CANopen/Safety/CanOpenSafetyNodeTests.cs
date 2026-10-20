@@ -470,6 +470,34 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "deleted by a write, committed, and unchanged since");
     }
 
+    // Codex on #329: a deleted SRDO has no configuration to protect, so its unused record and
+    // checksum slot are not in the image — a bit flipped there does not take the live SRDO down.
+    [Fact]
+    public async Task A_Change_Behind_The_Dictionary_In_A_Deleted_Srdos_Record_Is_Not_A_Mismatch()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 2, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();                                 // SRDO 2 stays deleted
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        var od = node.ObjectDictionary;
+
+        od.TryGet(0x1302, 0x02, out var refresh2).Should().BeTrue();
+        refresh2.SetRawValue(new byte[] { 40, 0 });                         // the deleted SRDO's record
+        od.TryGet(0x13FF, 0x02, out var checksum2).Should().BeTrue();
+        checksum2.SetRawValue(new byte[] { 0x34, 0x12 });                   // and its checksum slot
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing of SRDO 1 changed");
+        safety.GetSrdoState(1).IsValid.Should().BeTrue();
+    }
+
     // Outside Operational a mismatch clears 13FEh and nothing else: the engine is not re-read —
     // the transition to Operational does that (§9.5) — and the SRDO stays NotOperational.
     [Fact]

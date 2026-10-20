@@ -433,27 +433,31 @@ internal sealed partial class CanOpenNode : ICanOpenSafety, ISrdoEngineHost
         _safetyImage = RevalidateSafetyConfiguration() && IsConfigurationValidFlagSet() ? CaptureSafetyImage() : null;
     }
 
-    // The checksummed objects — the SRDO records, their mappings, 13FFh — byte for byte as they
-    // stood when 13FEh last became A5h. Every write to one of them clears 13FEh (§8.4.2.2), so
-    // while A5h stands, any difference from this image was made behind the dictionary's back: a
-    // bit flipped in a record, a direction reading as deleted or reserved, a checksum entry
-    // changed. The engine's own view of the records is not consulted — it is refreshed by a later
-    // actor turn and a legitimate delete-and-commit could outrun it (Bugbot on #329). Under the
-    // write gate, like the writes it is compared with.
+    // The checksummed objects of the SRDOs that existed when 13FEh last became A5h — each one's
+    // record, mapping and 13FFh:n — byte for byte as they stood then. Every write to one of them
+    // clears 13FEh (§8.4.2.2), so while A5h stands, any difference from this image was made
+    // behind the dictionary's back: a bit flipped in a record, a direction reading as deleted or
+    // reserved, a checksum entry changed. A deleted SRDO is not in it: it has no configuration
+    // to protect, as every other check here holds, and a flipped bit in its unused record must
+    // not take the live SRDOs down (Codex on #329). The engine's own view of the records is not
+    // consulted — it is refreshed by a later actor turn and a legitimate delete-and-commit could
+    // outrun it (Bugbot on #329). Under the write gate, like the writes it is compared with.
     private byte[]? _safetyImage;
 
-    // The entries PopulateSafetyObjects creates for a node with SRDOs, in a fixed order; each
-    // is fixed-width and cannot be re-declared, so the bytes alone are unambiguous.
+    // Each entry is fixed-width and cannot be re-declared, and the SRDO number leads its bytes,
+    // so the image is unambiguous without lengths.
     private byte[] CaptureSafetyImage()
     {
         var image = new List<byte>();
         void Take(ushort index, byte subindex) => image.AddRange(_od.ReadRaw(index, subindex));
         for (int n = 1; n <= _srdoCount; n++)
         {
+            if (!SrdoRecords.TryReadCommunication(_od, n, out var p) || p.Direction == SrdoDirection.None) continue;
+            image.Add((byte)n);
             for (byte s = 0; s <= 6; s++) Take(SrdoRecords.CommIndex(n), s);
             for (byte s = 0; s <= SrdoRecords.MappingSubindices; s++) Take(SrdoRecords.MapIndex(n), s);
+            Take(Co.SrdoChecksum, (byte)n);
         }
-        for (byte n = 0; n <= _srdoCount; n++) Take(Co.SrdoChecksum, n);
         return image.ToArray();
     }
 
