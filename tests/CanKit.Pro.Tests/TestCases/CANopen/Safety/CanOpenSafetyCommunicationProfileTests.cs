@@ -224,7 +224,10 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         od.WriteUnsigned(0x1381, 2, 0x2000_0008);
         od.WriteUnsigned(0x1381, 0, 2);
         od.WriteUnsigned(0x1301, 1, 1);
-        od.WriteUnsigned(0x13FF, 1, 0x1234);
+        // The record's own checksum: since CiA 319 §5.3 step 4 (FR-CO-058) the node compares at the
+        // write of A5h, so a stored configuration is valid only with the checksum that fits it.
+        var crc = RecordChecksum(od, 1);
+        od.WriteUnsigned(0x13FF, 1, crc);
         od.WriteUnsigned(0x13FE, 0, 0xA5);
         node.StoreParameters();
 
@@ -240,25 +243,36 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         await WaitForStateAsync(node, NmtState.PreOperational);
 
         od.ReadUnsigned(0x1301, 2).Should().Be(25u, "the reset restored the stored values");
-        od.ReadUnsigned(0x13FF, 1).Should().Be(0x1234u);
+        od.ReadUnsigned(0x13FF, 1).Should().Be((uint)crc);
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "restoring is not a write to a safety-relevant parameter");
     }
 
-    /// <summary>A valid configuration on the device, stored with "save", then changed.</summary>
-    private static void StoreAValidConfigurationThenChangeIt(ObjectDictionary od, ICanOpenNode node)
+    /// <summary>The checksum of record n as it stands (FR-CO-037).</summary>
+    private static ushort RecordChecksum(ObjectDictionary od, int n)
+    {
+        SrdoRecords.TryReadCommunication(od, n, out var parameter).Should().BeTrue();
+        return SrdoCrc.Compute(parameter, SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, n)));
+    }
+
+    /// <summary>A valid configuration on the device — its checksum the record's own, since the
+    /// node compares at the write of A5h (FR-CO-058) — stored with "save", then changed.
+    /// Returns that checksum.</summary>
+    private static ushort StoreAValidConfigurationThenChangeIt(ObjectDictionary od, ICanOpenNode node)
     {
         od.AddU8(0x2000, 0x00, 0);
         od.WriteUnsigned(0x1381, 1, 0x2000_0008);
         od.WriteUnsigned(0x1381, 2, 0x2000_0008);
         od.WriteUnsigned(0x1381, 0, 2);
         od.WriteUnsigned(0x1301, 1, 1);
-        od.WriteUnsigned(0x13FF, 1, 0x1234);
+        var crc = RecordChecksum(od, 1);
+        od.WriteUnsigned(0x13FF, 1, crc);
         od.WriteUnsigned(0x13FE, 0, 0xA5);
         node.StoreParameters();
 
         od.WriteUnsigned(0x1301, 2, 40);
         od.WriteUnsigned(0x13FF, 1, 0x4321);
         od.WriteUnsigned(0x13FE, 0, 0);
+        return crc;
     }
 
     [Fact]
@@ -269,7 +283,7 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
         using var master = Open(session, 2);
         using var node = OpenDevice(bus);
         var od = node.ObjectDictionary;
-        StoreAValidConfigurationThenChangeIt(od, node);
+        var crc = StoreAValidConfigurationThenChangeIt(od, node);
 
         // Operational first, so that the wait below ends on the PreOperational the reset enters.
         SendNmt(master, NmtCommand.Start, Device);
@@ -279,7 +293,7 @@ public class CanOpenSafetyCommunicationProfileTests : IClassFixture<VirtualAdapt
 
         od.ReadUnsigned(0x1301, 1).Should().Be(1u);
         od.ReadUnsigned(0x1301, 2).Should().Be(25u, "Reset Node restored the stored values");
-        od.ReadUnsigned(0x13FF, 1).Should().Be(0x1234u);
+        od.ReadUnsigned(0x13FF, 1).Should().Be((uint)crc);
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
     }
 

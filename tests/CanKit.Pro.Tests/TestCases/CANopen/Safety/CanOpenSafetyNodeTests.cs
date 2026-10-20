@@ -204,6 +204,334 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
     }
 
+    // CiA 319 v2.0.0 §5.3 step 4 (FR-CO-058): the device compares the checksums at the write of
+    // A5h, not only at the transition to Operational, so the configuration entity's readback of
+    // step 4 sees 00h. A deleted SRDO has no configuration to protect and is not compared.
+    [Fact]
+    public void Writing_A5h_Over_A_Wrong_Checksum_Sets_13FEh_Back_To_Zero_At_Once()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 2 });
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        var od = node.ObjectDictionary;
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "the checksums match");
+
+        od.WriteUnsigned(0x13FF, 1, od.ReadUnsigned(0x13FF, 1) ^ 1);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.3 step 4: the SRD compared the CRCs at the write of A5h");
+
+        od.WriteUnsigned(0x13FF, 2, 0x1234); // SRDO 2 is deleted: its checksum is not compared
+        od.WriteUnsigned(0x13FF, 1, od.ReadUnsigned(0x13FF, 1) ^ 1);
+        od.WriteUnsigned(0x13FE, 0, 0xA5);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "SRDO 1 matches again and SRDO 2 does not exist");
+    }
+
+    // CiA 319 §5.3, after step 5 (FR-CO-036): the first SDO download indication to a safety
+    // parameter clears 13FEh "even if the value included in the download indication is identical
+    // to the value currently in the object entry"; a download the node answers with a failure
+    // "shall not".
+    [Fact]
+    public async Task A_Download_Of_The_Identical_Value_Clears_13FEh_A_Refused_One_Does_Not()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = CanOpen.OpenNode(bus, Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, WritableCommunicationParameters = true });
+        AddApplicationObjects(device.ObjectDictionary);
+        device.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        device.Safety().CommitSafetyConfiguration();
+        var od = device.ObjectDictionary;
+        uint request = CanOpenCobId.SdoRx(Producer), response = CanOpenCobId.SdoTx(Producer);
+
+        // Refused: sub-index 04h is the transmission type, 0609 0030h on any write (§8.4.2.2).
+        wire.Transmit(request, new byte[] { 0x2F, 0x01, 0x13, 0x04, 254, 0, 0, 0 });
+        await wire.WaitForCountAsync(response, 1);
+        wire.Payloads(response)[0][0].Should().Be(0x80, "abort");
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "a download answered with a failure is no indication");
+
+        // Identical: 25 ms is what the record holds.
+        wire.Transmit(request, new byte[] { 0x2B, 0x01, 0x13, 0x02, 25, 0, 0, 0 });
+        await wire.WaitForCountAsync(response, 2);
+        wire.Payloads(response)[1][0].Should().Be(0x60, "accepted");
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the download indication clears 13FEh, whether or not the value changed");
+    }
+
+    // CiA 319 §5.4 (FR-CO-058): after a reset the stored configuration is compared with the
+    // checksum stored with it before the boot-up. The store is a snapshot of the dictionary, so
+    // a record changed behind the dictionary's back — SetRawValue, the stand-in for a bit flipped
+    // in NVRAM — is stored next to the A5h that was never cleared for it, and comes back so. The
+    // checksum is recomputed over the record as the dictionary holds it, the inverted mapping
+    // slots included (Codex on #329): the second case corrupts one of those, which the plain
+    // slots say nothing about; the third corrupts the direction to a reserved value, which is
+    // still an existing record (sub-index 01h ≠ 0), not a deleted one.
+    [Theory]
+    [InlineData(0x1301, 0x02, new byte[] { 40, 0 })]
+    [InlineData(0x1381, 0x02, new byte[] { 0x10, 0x00, 0x00, 0x20 })]
+    [InlineData(0x1301, 0x01, new byte[] { 3 })]
+    public async Task A_Stored_Configuration_That_Does_Not_Match_Its_Checksum_Comes_Back_Invalid(int index, byte subindex, byte[] corrupted)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Producer, new CanOpenNodeOptions { SrdoCount = 1 });
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(30));
+        node.Safety().CommitSafetyConfiguration();
+        var od = node.ObjectDictionary;
+        od.TryGet((ushort)index, subindex, out var entry).Should().BeTrue();
+        entry.SetRawValue(corrupted); // not a write: no hook, 13FEh stays A5h
+        node.StoreParameters();
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing told the node");
+
+        // The restore and the §5.4 check run in the reset's actor turn, before ApplicationReset is
+        // raised there: the event is the witness that both have run. (The corrupted bytes are what
+        // the restore brings back, so no dictionary value changes with it, and the node is
+        // PreOperational before and after — neither can be waited on; CI caught a wait that was
+        // true before the reset had started.)
+        var reset = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.ApplicationReset += (_, _) => reset.TrySetResult(true);
+        wire.SendNmt(NmtCommand.ResetCommunication, Producer);
+        await reset.Task.WithTimeoutAsync(ShortTimeout);
+        od.ReadRaw((ushort)index, subindex).Should().Equal(corrupted, "the stored record came back as stored (FR-CO-035)");
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "§5.4: the CRC in 13FFh is the one of the record as committed");
+    }
+
+    // CiA 319 §5.3 (FR-CO-059): "the SRD should validate the consistency of its safety-related
+    // configuration by periodically recalculating the CRC". Opt-in by interval. In Operational a
+    // mismatch makes the SRDO ConfigurationInvalid and the producer falls silent (§8.3.1 D).
+    // The corrupted byte is the refresh time, or the direction — to 0 (deleted) or 3 (reserved,
+    // read as none): the records are compared with the image taken when A5h was written, so a
+    // record that now reads as gone is a mismatch, not a deletion (Bugbot on #329). The SRDO then
+    // reports itself as no longer existing (reason null, as the record reads), where the time
+    // case reports ConfigurationInvalid; either way it is invalid, 13FEh is 00h and nothing more
+    // goes out.
+    [Theory]
+    [InlineData(0x02, 40)]
+    [InlineData(0x01, 0)]
+    [InlineData(0x01, 3)]
+    public async Task The_Periodic_Check_Finds_A_Corrupted_Record_And_Stops_The_Producer(byte subindex, byte value)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) },
+            ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        var changes = new List<SrdoStateChangedEventArgs>();
+        safety.SrdoStateChanged += (_, e) => { lock (changes) changes.Add(e); };
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        safety.GetSrdoState(1).IsValid.Should().BeTrue();
+        var od = node.ObjectDictionary;
+
+        // A check with nothing wrong changes nothing.
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        safety.GetSrdoState(1).IsValid.Should().BeTrue();
+
+        od.TryGet(0x1301, subindex, out var entry).Should().BeTrue();
+        entry.SetRawValue(subindex == 0x02 ? new byte[] { value, 0 } : new[] { value }); // behind the dictionary's back: no hook, nothing cleared
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the next check found the record and its checksum apart");
+        await WaitUntilAsync(() => { lock (changes) return changes.Any(c => !c.IsValid); }, "state change");
+        safety.GetSrdoState(1).IsValid.Should().BeFalse();
+        safety.GetSrdoState(1).Reason.Should().Be(subindex == 0x02 ? SrdoInvalidReason.ConfigurationInvalid : null,
+            "a record that reads as deleted or reserved is an SRDO that no longer exists; a wrong time is a wrong checksum");
+
+        // Nothing more goes out: the chain drained, a completed pair's continuation settled, the
+        // chain drained again — then the count is final, and a further cycle's worth of time adds
+        // nothing to it.
+        await AwaitSrdoChainAsync(node);
+        Settle(node);
+        await AwaitSrdoChainAsync(node);
+        int pairs = wire.Count(0x0FFu + 2 * Producer);
+        Advance(clock, node, TimeSpan.FromMilliseconds(100));
+        await AwaitSrdoChainAsync(node);
+        Settle(node);
+        await AwaitSrdoChainAsync(node);
+        wire.Count(0x0FFu + 2 * Producer).Should().Be(pairs, "§8.3.1 D: the safety node shall not transmit SRDOs");
+    }
+
+    // FR-CO-059, the pair that was waiting: a pair pending behind an unconfirmed one does not
+    // reach the bus once the periodic check has found the configuration apart from its checksum.
+    // The SRDO is no longer valid, and §8.3.1 D has the node transmit nothing.
+    [Fact]
+    public async Task A_Pending_Pair_Is_Dropped_When_The_Periodic_Check_Invalidates_The_Srdo()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer,
+            new CanOpenNodeOptions
+            {
+                SrdoCount = 1,
+                EnableChangeOfStateSrdo = false,
+                SrdoConfigurationCheckInterval = TimeSpan.FromMilliseconds(60), // armed at open, due at 60 ms
+            }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        uint cob2 = cob1 + 1;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));          // first pair at 8.5 ms, held
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        Advance(clock, node, TimeSpan.FromMilliseconds(25));                // cycle at 33.5 ms: pending behind the held pair
+        service.Handed(cob1).Should().Be(1, "the pair due meanwhile waits behind the held one");
+
+        node.ObjectDictionary.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
+        refresh.SetRawValue(new byte[] { 40, 0 });                          // behind the dictionary's back
+        Advance(clock, node, TimeSpan.FromMilliseconds(30));                // 63.5 ms: the check has run
+        await WaitUntilAsync(() => node.Safety().GetSrdoState(1).Reason == SrdoInvalidReason.ConfigurationInvalid, "invalidated");
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+
+        service.Release();                                                  // the held pair completes
+        await AwaitSrdoChainAsync(node);
+        await WaitUntilAsync(() => !SrdoPairInFlight(node), "nothing in flight");
+        service.Handed(cob1).Should().Be(1, "the pair that waited behind the held one does not go out: the period ended with the invalidation");
+        service.Handed(cob2).Should().Be(0, "nor does the held pair's inverted half, as on leaving Operational");
+    }
+
+    // Codex on #329: a pair of another SRDO that was already queued on the send chain behind the
+    // held one is not covered by the pending slot; the period's end is what stops it.
+    [Fact]
+    public async Task A_Pair_Already_Queued_Behind_A_Held_One_Is_Dropped_When_The_Periodic_Check_Invalidates()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        var service = new HoldingService(new CanBusService(bus));
+        using var node = new CanOpenNode(service, Producer,
+            new CanOpenNodeOptions
+            {
+                SrdoCount = 2,
+                EnableChangeOfStateSrdo = false,
+                SrdoConfigurationCheckInterval = TimeSpan.FromMilliseconds(60),
+            }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        node.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        node.Safety().ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(25), 0x125, 0x126);
+        node.Safety().CommitSafetyConfiguration();
+        uint cob1 = 0x0FFu + 2 * Producer;
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+
+        // Both first pairs are due at 8.5 ms; SRDO 1's is handed and held, SRDO 2's link is
+        // queued on the chain behind it and has handed nothing yet.
+        Advance(clock, node, TimeSpan.FromMilliseconds(Producer));
+        await WaitUntilAsync(() => service.Handed(cob1) == 1, "first frame handed to the service");
+        await WaitUntilAsync(() => SrdoPairInFlight(node, 2), "SRDO 2's pair on the chain");
+        service.Handed(0x125).Should().Be(0, "queued behind the held pair");
+
+        node.ObjectDictionary.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
+        refresh.SetRawValue(new byte[] { 40, 0 });
+        Advance(clock, node, TimeSpan.FromMilliseconds(60));                // the check at 60 ms
+        await WaitUntilAsync(() => !node.Safety().GetSrdoState(1).IsValid && !node.Safety().GetSrdoState(2).IsValid, "invalidated");
+
+        service.Release();
+        await AwaitSrdoChainAsync(node);
+        await WaitUntilAsync(() => !SrdoPairInFlight(node) && !SrdoPairInFlight(node, 2), "nothing in flight");
+        service.Handed(0x125).Should().Be(0, "the queued pair of SRDO 2 never reaches the service");
+        service.Handed(0x126).Should().Be(0);
+        service.Handed(cob1 + 1).Should().Be(0, "nor the inverted half of the held pair");
+    }
+
+    // A legitimate delete followed by a commit is not a corruption: the image is taken anew at
+    // the commit's A5h, so the next periodic check finds nothing.
+    [Fact]
+    public async Task A_Delete_Followed_By_A_Commit_Survives_The_Periodic_Check()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 2, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.ConfigureSrdoProducer(2, new SrdoMapping().Add(0x2000, 0x00, 16), TimeSpan.FromMilliseconds(25), 0x125, 0x126);
+        safety.CommitSafetyConfiguration();
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+
+        safety.DeleteSrdo(2);
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the delete is a write");
+        Advance(clock, node, TimeSpan.FromSeconds(1));                      // a check with 13FEh at 00h: nothing to compare
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+        safety.CommitSafetyConfiguration();
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "deleted by a write, committed, and unchanged since");
+    }
+
+    // Codex on #329: a deleted SRDO has no configuration to protect, so its unused record and
+    // checksum slot are not in the image — a bit flipped there does not take the live SRDO down.
+    [Fact]
+    public async Task A_Change_Behind_The_Dictionary_In_A_Deleted_Srdos_Record_Is_Not_A_Mismatch()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 2, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();                                 // SRDO 2 stays deleted
+        wire.SendNmt(NmtCommand.Start, Producer);
+        await WaitUntilAsync(() => node.State == NmtState.Operational, "start");
+        var od = node.ObjectDictionary;
+
+        od.TryGet(0x1302, 0x02, out var refresh2).Should().BeTrue();
+        refresh2.SetRawValue(new byte[] { 40, 0 });                         // the deleted SRDO's record
+        od.TryGet(0x13FF, 0x02, out var checksum2).Should().BeTrue();
+        checksum2.SetRawValue(new byte[] { 0x34, 0x12 });                   // and its checksum slot
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "nothing of SRDO 1 changed");
+        safety.GetSrdoState(1).IsValid.Should().BeTrue();
+    }
+
+    // Outside Operational a mismatch clears 13FEh and nothing else: the engine is not re-read —
+    // the transition to Operational does that (§9.5) — and the SRDO stays NotOperational.
+    [Fact]
+    public void A_Mismatch_Found_Outside_Operational_Clears_13FEh_And_Leaves_The_Engine_To_The_Transition()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        var clock = new ManualTimeSource();
+        using var node = new CanOpenNode(new CanBusService(bus), Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, SrdoConfigurationCheckInterval = TimeSpan.FromSeconds(1) }, ownsService: true, clock);
+        AddApplicationObjects(node.ObjectDictionary);
+        var safety = node.Safety();
+        safety.ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        safety.CommitSafetyConfiguration();
+        node.State.Should().Be(NmtState.PreOperational);
+
+        node.ObjectDictionary.TryGet(0x1301, 0x02, out var refresh).Should().BeTrue();
+        refresh.SetRawValue(new byte[] { 40, 0 });
+        Advance(clock, node, TimeSpan.FromSeconds(1));
+        node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+        safety.GetSrdoState(1).Reason.Should().Be(SrdoInvalidReason.NotOperational, "the engine was not touched");
+    }
+
     [Fact]
     public async Task Configuration_Is_Refused_In_Operational()
     {

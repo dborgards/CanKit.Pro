@@ -107,6 +107,7 @@ namespace CanKit.Pro.CANopen
         public int SdoBlockThresholdBytes { get; init; }
         public System.TimeSpan SdoServerTimeout { get; init; }
         public System.TimeSpan SdoTimeout { get; init; }
+        public System.TimeSpan? SrdoConfigurationCheckInterval { get; init; }
         public int SrdoCount { get; init; }
         public bool WritableCommunicationParameters { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile) { }
@@ -129,6 +130,7 @@ namespace CanKit.Pro.CANopen
                     bool? enableChangeOfStateSrdo = default,
                     int? pdoCount = default) { }
         public CanKit.Pro.CANopen.CanOpenNodeOptions WithLss(CanKit.Pro.CANopen.Lss.LssSlaveOptions? lss) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions WithSrdoConfigurationCheckInterval(System.TimeSpan? interval) { }
     }
     public enum CanOpenNodeProfile
     {
