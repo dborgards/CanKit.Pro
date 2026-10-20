@@ -230,6 +230,38 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "SRDO 1 matches again and SRDO 2 does not exist");
     }
 
+    // CiA 319 §5.3, after step 5 (FR-CO-036): the first SDO download indication to a safety
+    // parameter clears 13FEh "even if the value included in the download indication is identical
+    // to the value currently in the object entry"; a download the node answers with a failure
+    // "shall not".
+    [Fact]
+    public async Task A_Download_Of_The_Identical_Value_Clears_13FEh_A_Refused_One_Does_Not()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var device = CanOpen.OpenNode(bus, Producer,
+            new CanOpenNodeOptions { SrdoCount = 1, WritableCommunicationParameters = true });
+        AddApplicationObjects(device.ObjectDictionary);
+        device.Safety().ConfigureSrdoProducer(1, new SrdoMapping().Add(0x2001, 0x00, 8), TimeSpan.FromMilliseconds(25));
+        device.Safety().CommitSafetyConfiguration();
+        var od = device.ObjectDictionary;
+        uint request = CanOpenCobId.SdoRx(Producer), response = CanOpenCobId.SdoTx(Producer);
+
+        // Refused: sub-index 04h is the transmission type, 0609 0030h on any write (§8.4.2.2).
+        wire.Transmit(request, new byte[] { 0x2F, 0x01, 0x13, 0x04, 254, 0, 0, 0 });
+        await wire.WaitForCountAsync(response, 1);
+        wire.Payloads(response)[0][0].Should().Be(0x80, "abort");
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "a download answered with a failure is no indication");
+
+        // Identical: 25 ms is what the record holds.
+        wire.Transmit(request, new byte[] { 0x2B, 0x01, 0x13, 0x02, 25, 0, 0, 0 });
+        await wire.WaitForCountAsync(response, 2);
+        wire.Payloads(response)[1][0].Should().Be(0x60, "accepted");
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u);
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u, "the download indication clears 13FEh, whether or not the value changed");
+    }
+
     [Fact]
     public async Task Configuration_Is_Refused_In_Operational()
     {
