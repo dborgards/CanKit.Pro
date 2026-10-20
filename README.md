@@ -127,6 +127,7 @@ renders everything below plus the per-package READMEs with navigation and search
 | [Architecture (arc42)](docs/architecture/arc42-CanKit.Pro.md) | Layer model L0–L4, building blocks, runtime views, ADRs — German |
 | [Requirements (SRS)](docs/requirements/SRS-CanKit.Pro.md) | The `FR-RAW-*` requirements the code and tests cite — German |
 | [Release process](docs/release-process.md) | GitVersion + semantic-release, how a commit becomes a NuGet package |
+| [Supply chain](docs/supply-chain.md) | The CycloneDX SBOM and attestations that come with each release, and how to check them |
 | [Licensing](docs/licensing.md) | Why this is MIT although it grew out of an Apache-2.0 fork |
 | [Migration from CanKit.Pro.legacy](docs/migration-from-legacy.md) | What moved, what stayed, what changed on the way |
 | [Contributing](CONTRIBUTING.md) | Branching, Conventional Commits, running the tests |

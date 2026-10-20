@@ -122,8 +122,14 @@ tagging or publishing anything. Uncheck it to release for real.
    grant and none of the publishing secrets: a bare `dotnet pack` restores and builds, so it
    cannot run in the job that holds `id-token: write`. This is the gate — nothing is tagged
    or published if the tests fail on this exact commit.
+   The same job generates and verifies one CycloneDX SBOM per package from the packages it just packed
+   ([Supply chain](supply-chain.md)); they travel to `release` as an artifact next to the packages.
 3. `NuGet/login` exchanges the run's OIDC token for a NuGet API key valid for one hour.
-4. `npx semantic-release`, which runs the steps below in this order.
+4. `npx semantic-release`, which runs the steps below in this order. Its GitHub Release carries the
+   SBOMs next to the `.nupkg` files.
+5. A separate `attest` job — after the release, with no publishing credential — signs a build-provenance
+   attestation and an SBOM attestation for each package. If it fails, re-run the failed job; it needs
+   nothing but the retained artifacts.
 
 ### The order the steps actually run in, and why it matters
 
@@ -134,6 +140,7 @@ analyze        →  nothing to release? stop here
 verifyRelease  →  re-check the release configuration for the version about to go out  (exec)
 prepare        →  CHANGELOG.md regenerated                     (@semantic-release/changelog)
                →  verify the nine packages `verify` packed     (@semantic-release/exec, prepareCmd)
+               →  verify their nine SBOMs against the packages (same prepareCmd)
                →  changelog committed and PUSHED to main       (@semantic-release/git)
    ↓
   TAG          →  vX.Y.Z created and pushed                    (semantic-release core)
@@ -141,7 +148,7 @@ prepare        →  CHANGELOG.md regenerated                     (@semantic-rele
 publish        →  dotnet nuget push … --skip-duplicate         (@semantic-release/exec, publishCmd)
                →  package-validation baseline set to X.Y.Z,
                   committed and pushed [skip ci]               (same publishCmd, chained behind the push)
-               →  GitHub Release with the .nupkg attached      (@semantic-release/github)
+               →  GitHub Release with the .nupkg and SBOMs attached  (@semantic-release/github)
 ```
 
 Two boundaries matter here.
