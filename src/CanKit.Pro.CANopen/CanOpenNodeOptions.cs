@@ -151,6 +151,10 @@ public sealed class CanOpenNodeOptions
     /// </summary>
     public bool WritableCommunicationParameters { get; init; }
 
+    /// <summary>Number of PDO records per direction (1..512), default 4. An EDS/DCF
+    /// raises this to its highest declared PDO. PDOs above 4 require an explicit COB-ID.</summary>
+    public int PdoCount { get; init; } = 4;
+
     /// <summary>
     /// Device or tool. Read when <c>1F80h</c> is created: <see cref="CanOpenNodeProfile.Device"/>
     /// leaves the self-start and slave-start suppress bits clear, <see cref="CanOpenNodeProfile.Tool"/>
@@ -203,9 +207,30 @@ public sealed class CanOpenNodeOptions
             sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
             enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount: null, enableChangeOfStateSrdo: null);
 
+    /// <summary>The previous full signature, retained for callers compiled against it.</summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public CanOpenNodeOptions With(
+        TimeSpan? sdoTimeout,
+        TimeSpan? sdoServerTimeout,
+        TimeSpan? defaultTpdoEventTimerInterval,
+        int? eventQueueCapacity,
+        int? maxSdoTransferBytes,
+        int? sdoBlockThresholdBytes,
+        byte? sdoBlockSize,
+        bool? sdoBlockCrcSupported,
+        int? sdoBlockMaxRetransmissions,
+        bool? respondToNodeGuardingRtr,
+        bool? enableChangeOfStateTpdo,
+        bool? writableCommunicationParameters,
+        CanOpenNodeProfile? profile,
+        int? srdoCount,
+        bool? enableChangeOfStateSrdo)
+        => With(sdoTimeout, sdoServerTimeout, defaultTpdoEventTimerInterval, eventQueueCapacity, maxSdoTransferBytes,
+            sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
+            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, pdoCount: null);
+
     /// <summary>Returns a copy of this options record with the provided overrides, validated
-    /// like the options a node is opened with. <see cref="Lss"/> is kept;
-    /// <see cref="WithLss"/> replaces it.</summary>
+    /// like the options a node is opened with. The optional PDO count override is 1..512. <see cref="Lss"/> is kept; <see cref="WithLss"/> replaces it.</summary>
     /// <exception cref="ArgumentOutOfRangeException">A resulting value is out of its range.</exception>
     public CanOpenNodeOptions With(
         TimeSpan? sdoTimeout = null,
@@ -222,17 +247,18 @@ public sealed class CanOpenNodeOptions
         bool? writableCommunicationParameters = null,
         CanOpenNodeProfile? profile = null,
         int? srdoCount = null,
-        bool? enableChangeOfStateSrdo = null)
+        bool? enableChangeOfStateSrdo = null,
+        int? pdoCount = null)
         => Copy(sdoTimeout, sdoServerTimeout, defaultTpdoEventTimerInterval, eventQueueCapacity, maxSdoTransferBytes,
             sdoBlockThresholdBytes, sdoBlockSize, sdoBlockCrcSupported, sdoBlockMaxRetransmissions, respondToNodeGuardingRtr,
-            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, Lss);
+            enableChangeOfStateTpdo, writableCommunicationParameters, profile, srdoCount, enableChangeOfStateSrdo, Lss, pdoCount);
 
     /// <summary>
     /// Returns a copy with <see cref="Lss"/> replaced. Pass <see langword="null"/> to turn layer
     /// setting services back off unless a device description enables them.
     /// </summary>
     public CanOpenNodeOptions WithLss(LssSlaveOptions? lss)
-        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, lss);
+        => Copy(null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, lss, pdoCount: null);
 
     private CanOpenNodeOptions Copy(
         TimeSpan? sdoTimeout,
@@ -250,10 +276,12 @@ public sealed class CanOpenNodeOptions
         CanOpenNodeProfile? profile,
         int? srdoCount,
         bool? enableChangeOfStateSrdo,
-        LssSlaveOptions? lss)
+        LssSlaveOptions? lss,
+        int? pdoCount)
     {
         var options = new CanOpenNodeOptions
         {
+            PdoCount = pdoCount ?? PdoCount,
             SdoTimeout = sdoTimeout ?? SdoTimeout,
             SdoServerTimeout = sdoServerTimeout ?? SdoServerTimeout,
             DefaultTpdoEventTimerInterval = defaultTpdoEventTimerInterval ?? DefaultTpdoEventTimerInterval,
@@ -277,6 +305,8 @@ public sealed class CanOpenNodeOptions
 
     internal void Validate()
     {
+        if (PdoCount is < 1 or > 512)
+            throw new ArgumentOutOfRangeException(nameof(PdoCount), PdoCount, "PDO count must be 1..512.");
         if (SdoTimeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(SdoTimeout), SdoTimeout,
                 "SDO timeout must be positive.");

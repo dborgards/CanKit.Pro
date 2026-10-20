@@ -98,6 +98,7 @@ namespace CanKit.Pro.CANopen
         public int EventQueueCapacity { get; init; }
         public CanKit.Pro.CANopen.Lss.LssSlaveOptions? Lss { get; init; }
         public int MaxSdoTransferBytes { get; init; }
+        public int PdoCount { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeProfile Profile { get; init; }
         public bool RespondToNodeGuardingRtr { get; init; }
         public bool SdoBlockCrcSupported { get; init; }
@@ -109,7 +110,24 @@ namespace CanKit.Pro.CANopen
         public int SrdoCount { get; init; }
         public bool WritableCommunicationParameters { get; init; }
         public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile) { }
-        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout = default, System.TimeSpan? sdoServerTimeout = default, System.TimeSpan? defaultTpdoEventTimerInterval = default, int? eventQueueCapacity = default, int? maxSdoTransferBytes = default, int? sdoBlockThresholdBytes = default, byte? sdoBlockSize = default, bool? sdoBlockCrcSupported = default, int? sdoBlockMaxRetransmissions = default, bool? respondToNodeGuardingRtr = default, bool? enableChangeOfStateTpdo = default, bool? writableCommunicationParameters = default, CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default, int? srdoCount = default, bool? enableChangeOfStateSrdo = default) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(System.TimeSpan? sdoTimeout, System.TimeSpan? sdoServerTimeout, System.TimeSpan? defaultTpdoEventTimerInterval, int? eventQueueCapacity, int? maxSdoTransferBytes, int? sdoBlockThresholdBytes, byte? sdoBlockSize, bool? sdoBlockCrcSupported, int? sdoBlockMaxRetransmissions, bool? respondToNodeGuardingRtr, bool? enableChangeOfStateTpdo, bool? writableCommunicationParameters, CanKit.Pro.CANopen.CanOpenNodeProfile? profile, int? srdoCount, bool? enableChangeOfStateSrdo) { }
+        public CanKit.Pro.CANopen.CanOpenNodeOptions With(
+                    System.TimeSpan? sdoTimeout = default,
+                    System.TimeSpan? sdoServerTimeout = default,
+                    System.TimeSpan? defaultTpdoEventTimerInterval = default,
+                    int? eventQueueCapacity = default,
+                    int? maxSdoTransferBytes = default,
+                    int? sdoBlockThresholdBytes = default,
+                    byte? sdoBlockSize = default,
+                    bool? sdoBlockCrcSupported = default,
+                    int? sdoBlockMaxRetransmissions = default,
+                    bool? respondToNodeGuardingRtr = default,
+                    bool? enableChangeOfStateTpdo = default,
+                    bool? writableCommunicationParameters = default,
+                    CanKit.Pro.CANopen.CanOpenNodeProfile? profile = default,
+                    int? srdoCount = default,
+                    bool? enableChangeOfStateSrdo = default,
+                    int? pdoCount = default) { }
         public CanKit.Pro.CANopen.CanOpenNodeOptions WithLss(CanKit.Pro.CANopen.Lss.LssSlaveOptions? lss) { }
     }
     public enum CanOpenNodeProfile
@@ -201,6 +219,8 @@ namespace CanKit.Pro.CANopen
     public readonly struct ForeignPdoSignal
     {
         public ForeignPdoSignal(byte peerNodeId, CanKit.Pro.CANopen.ForeignPdoKind kind, int pdoNumber, uint cobId, ushort index, byte subIndex, byte[] value, CanKit.Pro.CANopen.ForeignPdoMappingOrigin origin) { }
+        public ForeignPdoSignal(byte peerNodeId, CanKit.Pro.CANopen.ForeignPdoKind kind, int pdoNumber, uint cobId, ushort index, byte subIndex, byte[] value, CanKit.Pro.CANopen.ForeignPdoMappingOrigin origin, int bitLength) { }
+        public int BitLength { get; }
         public uint CobId { get; }
         public ushort Index { get; }
         public CanKit.Pro.CANopen.ForeignPdoKind Kind { get; }
@@ -347,6 +367,14 @@ namespace CanKit.Pro.CANopen
     public enum OdDataType : byte
     {
         Boolean = 1,
+        Integer24 = 16,
+        Integer40 = 18,
+        Integer48 = 19,
+        Integer56 = 20,
+        Unsigned24 = 22,
+        Unsigned40 = 24,
+        Unsigned48 = 25,
+        Unsigned56 = 26,
         Unsigned8 = 5,
         Unsigned16 = 6,
         Unsigned32 = 7,
@@ -389,6 +417,8 @@ namespace CanKit.Pro.CANopen
     public sealed class SyncReceivedEventArgs : System.EventArgs
     {
         public SyncReceivedEventArgs(System.DateTime timestamp) { }
+        public SyncReceivedEventArgs(System.DateTime timestamp, byte? counter) { }
+        public byte? Counter { get; }
         public System.DateTime Timestamp { get; }
     }
 }
@@ -753,6 +783,10 @@ namespace CanKit.Pro.CANopen.Nmt
 }
 namespace CanKit.Pro.CANopen.Pdo
 {
+    public static class CanOpenPdoExtensions
+    {
+        public static CanKit.Pro.CANopen.Pdo.ICanOpenPdo Pdo(this CanKit.Pro.CANopen.ICanOpenNode node) { }
+    }
     public static class CanOpenTransmissionType
     {
         public const byte EventDrivenManufacturer = 254;
@@ -771,12 +805,29 @@ namespace CanKit.Pro.CANopen.Pdo
         public static bool IsSynchronous(byte type) { }
         public static byte SynchronousEveryNthSync(int n) { }
     }
+    public interface ICanOpenPdo : CanKit.Pro.CANopen.Pdo.ICanOpenPdoMonitoring
+    {
+        void ConfigureMultiplexedRpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.MpdoAddressMode mode, uint cobId);
+        void ConfigureMultiplexedTpdo(int pdoIndex, CanKit.Pro.CANopen.Pdo.MpdoAddressMode mode, uint cobId);
+        System.Threading.Tasks.Task SendDestinationMpdoAsync(int pdoIndex, byte destinationNodeId, ushort index, byte subindex, System.ReadOnlyMemory<byte> value, System.Threading.CancellationToken cancellationToken = default);
+        System.Threading.Tasks.Task SendSourceMpdoAsync(int pdoIndex, ushort index, byte subindex, System.Threading.CancellationToken cancellationToken = default);
+    }
+    public interface ICanOpenPdoMonitoring
+    {
+        event System.EventHandler<CanKit.Pro.CANopen.Pdo.RpdoTimeoutEventArgs>? RpdoTimeout;
+    }
+    public enum MpdoAddressMode : byte
+    {
+        Source = 254,
+        Destination = 255,
+    }
     public sealed class PdoMapping
     {
-        public const int MaxEntries = 8;
+        public const int MaxEntries = 64;
         public PdoMapping() { }
         public PdoMapping(System.Collections.Generic.IEnumerable<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> entries) { }
         public System.Collections.Generic.IReadOnlyList<CanKit.Pro.CANopen.Pdo.PdoMappingEntry> Entries { get; }
+        public int TotalBits { get; }
         public int TotalBytes { get; }
         public CanKit.Pro.CANopen.Pdo.PdoMapping Add(CanKit.Pro.CANopen.Pdo.PdoMappingEntry entry) { }
         public CanKit.Pro.CANopen.Pdo.PdoMapping Add(ushort index, byte subindex, byte bitLength) { }
@@ -794,6 +845,13 @@ namespace CanKit.Pro.CANopen.Pdo
         public override bool Equals(object? obj) { }
         public override int GetHashCode() { }
         public static byte DummyBitLength(ushort index) { }
+    }
+    public sealed class RpdoTimeoutEventArgs : System.EventArgs
+    {
+        public RpdoTimeoutEventArgs(int pdoIndex, uint cobId, System.TimeSpan timeout) { }
+        public uint CobId { get; }
+        public int PdoIndex { get; }
+        public System.TimeSpan Timeout { get; }
     }
     public enum RpdoTransmission : byte
     {

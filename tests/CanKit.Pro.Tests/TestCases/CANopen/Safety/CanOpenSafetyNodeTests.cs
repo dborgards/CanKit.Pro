@@ -1280,6 +1280,13 @@ public class CanOpenSafetyNodeTests : IClassFixture<VirtualAdapterFixture>
         node.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
     }
 
+    [Fact]
+    public void A_Foreign_Node_Does_Not_Provide_Pdo_Monitoring()
+    {
+        Action access = () => CanKit.Pro.CANopen.Pdo.CanOpenPdoExtensions.Pdo(new ForeignNode());
+        access.Should().Throw<NotSupportedException>();
+    }
+
     /// <summary>An ICanOpenNode this library did not create: every member throws.</summary>
     private sealed class ForeignNode : ICanOpenNode
     {

@@ -183,7 +183,7 @@ internal sealed partial class CanOpenNode : ILssSlave
                     return Task.FromException<bool>(new CanOpenTransportException(
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} is suppressed by the LSS bit-rate switch."));
                 reportSuppressed = () => onSendCompleted?.Invoke(null);
-                finished = Task.FromResult(true);
+                finished = Task.FromResult(false);
             }
             else
             {
@@ -859,7 +859,7 @@ internal sealed partial class CanOpenNode : ILssSlave
             if (profileFrom != nodeId)
             {
                 RetargetCobId(Co.EmcyCobId, 0x00, CanOpenCobId.Emcy(profileFrom), CanOpenCobId.Emcy(nodeId));
-                for (int n = 1; n <= Co.PdoCount; n++)
+                for (int n = 1; n <= Math.Min(4, _pdoCount); n++)
                 {
                     RetargetCobId((ushort)(Co.RpdoComm + n - 1), 0x01,
                         CanOpenCobId.RpdoDefault(profileFrom, n), CanOpenCobId.RpdoDefault(nodeId, n));

@@ -182,6 +182,8 @@ internal sealed partial class CanOpenNode
             { reason = $"the file's mapping entry {inv} does not repeat entry {s} (CiA DSP 304 §8.4.2.2: the inverted object of the one before it)"; return false; }
             try { list.Add(new PdoMappingEntry((ushort)(word >> 16), (byte)(word >> 8), (byte)word)); }
             catch (ArgumentOutOfRangeException) { reason = $"the file's mapping entry {s} is not byte-aligned"; return false; }
+            if (list[list.Count - 1].BitLength % 8 != 0)
+            { reason = "an SRDO mapping must be byte-aligned"; return false; }
             total += list[list.Count - 1].ByteLength;
             if (total > 8) { reason = "the file's mapping exceeds 8 bytes"; return false; }
         }
