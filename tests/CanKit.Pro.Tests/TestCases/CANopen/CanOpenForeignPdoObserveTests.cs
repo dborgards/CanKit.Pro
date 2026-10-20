@@ -88,7 +88,6 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
         var session = NewSession();
         using var peerBus = Open(session, 0);
         using var toolBus = Open(session, 1);
-        using var observer = Open(session, 2);
         var file = PeerFile();
         using var peer = CanOpen.OpenNode(peerBus, Peer, file);
         using var tool = CanOpen.OpenNode(toolBus, Tool);
@@ -97,7 +96,9 @@ public partial class CanOpenForeignPdoObserveTests : IClassFixture<VirtualAdapte
             .Add(0x0005, 0x00, 8)
             .Add(0x2001, 0x00, 8));
 
-        var uploads = new SdoTap(observer, Peer);
+        // On the peer's bus, not a bystander's: this test asserts the order of the uploads, and
+        // only a participant of the exchange sees them in it (see SdoTap).
+        var uploads = new SdoTap(peerBus, Peer);
         var sink = new ListSink();
         var background = new List<Exception>();
         tool.BackgroundExceptionOccurred += (_, ex) => background.Add(ex);
@@ -1361,7 +1362,16 @@ PDOMapping=1
         public void Write(ForeignPdoSignal signal) => Signals.Add(signal);
     }
 
-    /// <summary>SDO upload initiates addressed to one server, in the order they were sent.</summary>
+    /// <summary>SDO upload initiates addressed to one server, in the order the tapped bus saw them.</summary>
+    /// <remarks>
+    /// That is the order they were sent in only on a bus that takes part in the exchange. The
+    /// Virtual hub hands one frame to its targets one after another on the sender's thread, with
+    /// nothing holding the targets together; between the server's bus and a bystander's the sender
+    /// can be preempted, the server answers, and the next request — sent only after that answer —
+    /// reaches the bystander first. On the server's bus the next request cannot arrive before the
+    /// one it was waiting on. Tap that bus for an ordered assertion (#321); a bystander is fine for
+    /// <c>Contain</c>/<c>NotContain</c>.
+    /// </remarks>
     private sealed class SdoTap
     {
         private readonly List<(ushort Index, byte Sub)> _uploads = new();
