@@ -59,7 +59,6 @@ internal sealed partial class CanOpenNode : ILssSlave
     private int _lssTxInFlight;
     private int _nodeIdGeneration;
     private int _lssWaitingForTransmits;
-    private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
     private readonly object _lssTxGate = new();
 
@@ -238,11 +237,14 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// <summary>
     /// NMT and the heartbeat COB-ID (boot-up, producer, state change, guarding reply) have to
     /// leave once the slave may transmit again. Reporting them confirmed while they are still
-    /// held would apply a flying-master reset that never reached the bus.
+    /// held would apply a flying-master reset that never reached the bus. So does an LSS reply:
+    /// a command that arrives during the second switch delay is performed, and its reply goes
+    /// out, in order with any other, once the slave may transmit — dropping it would make the
+    /// master time out on a service the slave carried out (#320).
     /// </summary>
     private static bool HoldsAcrossLssSilence(uint cobId)
     {
-        if (cobId == CanOpenCobId.NmtCommand) return true;
+        if (cobId == CanOpenCobId.NmtCommand || cobId == CanOpenCobId.LssSlaveMessage) return true;
         // 0x700 is not a heartbeat. Subtracting the minimum node-id wraps it, and every
         // other non-heartbeat COB-ID, past 127 in the same way, so one comparison is enough.
         uint nodeId = cobId - CanOpenCobId.HeartbeatBase;
@@ -282,7 +284,6 @@ internal sealed partial class CanOpenNode : ILssSlave
             }
         }
 
-        FlushDeferredLssReply();
         if (held.Length != 0)
             _ = SendHeldInOrder(held);
     }
@@ -296,8 +297,8 @@ internal sealed partial class CanOpenNode : ILssSlave
             // flying-master NMT chain, and the frames queued behind this one would stay held.
             // Through the gate again: a silence that started while this flush was in
             // progress holds what has not reached the driver yet.
-            Task<bool> send = item.IsNmt
-                ? SendNmtReporting(item.Payload, item.CancellationToken)
+            Task<bool> send = item.IsNmt ? SendNmtReporting(item.Payload, item.CancellationToken)
+                : item.IsLssReply ? SendControlFrame(CanOpenCobId.LssSlaveMessage, item.Payload, item.CancellationToken)
                 : SendHeldHeartbeat(item.Payload, item.CancellationToken, item.NodeIdGeneration);
             await send.ContinueWith(
                 static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
@@ -363,6 +364,7 @@ internal sealed partial class CanOpenNode : ILssSlave
             int nodeIdGeneration)
         {
             IsNmt = cobId == CanOpenCobId.NmtCommand;
+            IsLssReply = cobId == CanOpenCobId.LssSlaveMessage;
             Payload = payload;
             Signal = signal;
             CancellationToken = cancellationToken;
@@ -370,6 +372,7 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
 
         public bool IsNmt { get; }
+        public bool IsLssReply { get; }
         public byte[] Payload { get; }
         public TaskCompletionSource<bool> Signal { get; }
         public CancellationToken CancellationToken { get; }
@@ -381,7 +384,6 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivationGeneration++;
         _lssActivation?.Dispose();
         _lssActivation = null;
-        _lssDeferredReply = null;
         _lssDelayElapsed = false;
         // The node may transmit again. Disposal must not put a frame on a bus that is going away.
         if (Volatile.Read(ref _disposed) != 0 || _lssBitRateSwitch.Status == TaskStatus.RanToCompletion)
@@ -456,22 +458,8 @@ internal sealed partial class CanOpenNode : ILssSlave
     private void ReplyLss(byte[]? payload)
     {
         if (payload is null) return;
-        // A command that arrives during the second switch delay is applied, and the response
-        // goes out once the slave may transmit again. Dropping it would make the master time out
-        // on a service the slave already performed.
-        if (IsLssSilent())
-        {
-            _lssDeferredReply = payload;
-            return;
-        }
-        _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
-    }
-
-    private void FlushDeferredLssReply()
-    {
-        var payload = _lssDeferredReply;
-        _lssDeferredReply = null;
-        if (payload is null) return;
+        // During the second switch delay the send is held, with every other reply that arrives
+        // then, and goes out in that order once the slave may transmit again (HoldsAcrossLssSilence).
         _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
     }
 

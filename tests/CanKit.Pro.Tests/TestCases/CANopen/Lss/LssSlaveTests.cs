@@ -563,6 +563,40 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
     }
 
+    // #320: two commands arrive during the second switch delay. Both are performed, and both
+    // replies go out once the slave may transmit again, in the order the commands came — the
+    // slave used to keep one deferred reply and lose the earlier one to the later.
+    [Fact]
+    public async Task Two_Commands_During_The_Second_Delay_Are_Both_Answered_In_Order()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+
+        using var heard = bench.Listen();
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        using (var poke = VirtualAdapterFixture.Open(bench.Session, 9))
+        {
+            Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));
+            Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));
+        }
+        await Task.Delay(40);
+        heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage, "the slave is silent during the second delay");
+        await activate;
+        await WaitUntilAsync(() => heard.LssReplies.Count >= 2);
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode);
+    }
+
     [Fact]
     public async Task The_Second_Delay_Suppresses_A_Node_Guarding_Rtr()
     {
@@ -2914,6 +2948,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         private readonly CanBusService _service;
         private readonly ISubscription _subscription;
         private readonly List<uint> _ids = new();
+        private readonly List<byte> _lssReplies = new();
 
         public Listener(CanKit.Abstractions.API.Can.ICanBus bus)
         {
@@ -2925,6 +2960,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<uint> Ids
         {
             get { lock (_ids) return _ids.ToArray(); }
+        }
+
+        /// <summary>The command specifier of every slave reply (7E4h) heard, in order.</summary>
+        public IReadOnlyList<byte> LssReplies
+        {
+            get { lock (_ids) return _lssReplies.ToArray(); }
         }
 
         public void Dispose()
@@ -2939,7 +2980,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             {
                 await foreach (var frame in _subscription.Frames.ConfigureAwait(false))
                 {
-                    lock (_ids) _ids.Add((uint)frame.Frame.ID);
+                    lock (_ids)
+                    {
+                        _ids.Add((uint)frame.Frame.ID);
+                        if ((uint)frame.Frame.ID == CanOpenCobId.LssSlaveMessage && frame.Frame.Data.Length > 0)
+                            _lssReplies.Add(frame.Frame.Data.Span[0]);
+                    }
                 }
             }
             catch (ObjectDisposedException)
