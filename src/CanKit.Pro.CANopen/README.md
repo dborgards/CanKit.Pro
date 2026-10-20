@@ -1234,8 +1234,9 @@ until both the second switch delay and the callback complete successfully, inclu
 delay. While the node is active, failed or cancelled callbacks are reported on
 `BackgroundExceptionOccurred` and keep the node silent until a later successful activation.
 Repeated activations serialize the callbacks. An LSS command that arrives during the silence is
-performed at once; its reply is held with the other frames that may not go out yet and sent in
-order with them once the slave may transmit — every reply, not only the last one.
+performed at once; its reply is held like the other frames that may not go out yet and sent once
+the slave may transmit — every reply, not only the last one, and the replies keep the order of
+the commands, across a further silence too.
 
 A new activation requests cancellation of the previous callback as soon as it is received,
 including during the first switch delay. Disposal also requests cancellation. Neither waits for

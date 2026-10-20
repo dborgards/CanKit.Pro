@@ -598,49 +598,85 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex on #331: a reply must not overtake an older one when a new silence begins while the
-    // older ones are still being flushed. The slave starts a silence only once nothing is in
-    // flight, so the window is between two held sends; the seam puts the second activation and
-    // a third command exactly there.
+    // older ones are still being flushed. A silence starts only once nothing is in flight, so the
+    // window is between two held sends. On the virtual bus a send confirms synchronously and the
+    // flush runs on the actor, which closes that window; a bus that confirms asynchronously — any
+    // hardware adapter — lets the flush continue on the pool with the actor free, and the seam
+    // holds the flush there while the test drives the second silence and a third command into it.
     [Fact]
     public async Task Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends()
     {
         int switches = 0;
         using var bench = new Bench();
-        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var slave = new CanOpenNode(new AsynchronouslyConfirmingService(new CanBusService(bus)), 5, new CanOpenNodeOptions
         {
-            BitRateSwitch = (_, _) =>
+            Lss = new LssSlaveOptions
             {
-                Interlocked.Increment(ref switches);
-                return Task.CompletedTask;
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
             },
-        });
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        }, ownsService: true);
         await EnterConfiguration(bench.Master, slave);
         (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
         using var heard = bench.Listen();
         using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
 
-        Task? second = null;
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
         int seamRuns = 0;
-        ((CanOpenNode)slave).BetweenHeldSendsForTests = () =>
+        slave.BetweenHeldSendsForTests = () =>
         {
             if (Interlocked.Increment(ref seamRuns) != 1) return;
-            // Between the first held send and the next: the second silence begins, and a third
-            // command arrives in it, before the flush goes on.
-            second = bench.Master.ActivateBitTimingAsync(200, null);
-            WaitUntilAsync(() => Volatile.Read(ref switches) == 2).GetAwaiter().GetResult();
-            Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));
-            Thread.Sleep(40);
+            entered.Set();
+            release.Wait(TimeSpan.FromSeconds(5));
         };
 
-        var first = bench.Master.ActivateBitTimingAsync(200, null);
+        var first = bench.Master.ActivateBitTimingAsync(200, null);          // the first silence
         await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
-        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));
-        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // 5Ah, held
+        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));     // 5Bh, held
         await first;
-        await WaitUntilAsync(() => second is not null);
-        await second!;
+        await WaitUntilAsync(() => entered.IsSet);                           // 5Ah is out; the flush holds before 5Bh
+        var second = bench.Master.ActivateBitTimingAsync(200, null);         // the second silence begins in that window
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 2);
+        Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives in it
+        await Task.Delay(40);
+        release.Set();                                                        // the flush goes on
+        await second;
         await WaitUntilAsync(() => heard.LssReplies.Count >= 3);
         heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+    }
+
+    /// <summary>A bus service whose confirmations complete asynchronously, as a hardware adapter's
+    /// do; the virtual bus confirms synchronously, which keeps a flush on the actor.</summary>
+    private sealed class AsynchronouslyConfirmingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        public AsynchronouslyConfirmingService(ICanBusService inner) => _inner = inner;
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+            await Task.Yield();
+            return confirmation;
+        }
+        public void Dispose() => _inner.Dispose();
     }
 
     [Fact]
