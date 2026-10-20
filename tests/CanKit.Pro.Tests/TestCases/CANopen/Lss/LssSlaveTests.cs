@@ -38,9 +38,13 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         BitRateSwitch = (_, _) => Task.CompletedTask,
     };
 
-    private static async Task WaitUntilAsync(Func<bool> condition)
+    private static Task WaitUntilAsync(Func<bool> condition) => WaitUntilAsync(condition, TimeSpan.FromSeconds(3));
+
+    /// <summary>For a wait that spans a switch delay of its own: the budget is the delay plus
+    /// what a loaded runner adds, which 3 s did not cover on Windows (#331).</summary>
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan budget)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+        var deadline = DateTime.UtcNow + budget;
         while (!condition())
         {
             if (DateTime.UtcNow >= deadline)
@@ -561,6 +565,309 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         store.NodeId.Should().Be(0x12);
         await activate;
         await WaitUntilAsync(() => heard.Ids.Contains(CanOpenCobId.LssSlaveMessage));
+    }
+
+    // #320: two commands arrive during the second switch delay. Both are performed, and both
+    // replies go out once the slave may transmit again, in the order the commands came — the
+    // slave used to keep one deferred reply and lose the earlier one to the later.
+    [Fact]
+    public async Task Two_Commands_During_The_Second_Delay_Are_Both_Answered_In_Order()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        var slave = bench.Slave(1, 5, new LssSlaveOptions
+        {
+            BitRateSwitch = (_, _) =>
+            {
+                Interlocked.Increment(ref switches);
+                return Task.CompletedTask;
+            },
+        });
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+
+        using var heard = bench.Listen();
+        var activate = bench.Master.ActivateBitTimingAsync(800, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        using (var poke = VirtualAdapterFixture.Open(bench.Session, 9))
+        {
+            Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));
+            Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));
+        }
+        await Task.Delay(40);
+        heard.Ids.Should().NotContain(CanOpenCobId.LssSlaveMessage, "the slave is silent during the second delay");
+        await activate;
+        await WaitUntilAsync(() => heard.LssReplies.Count >= 2);
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode);
+    }
+
+    // Codex on #331: a reply must not overtake an older one when a new silence begins while the
+    // older ones are still being flushed. A silence starts only once nothing is in flight, so the
+    // window is between two held sends. On the virtual bus a send confirms synchronously and the
+    // flush runs on the actor, which closes that window; a bus that confirms asynchronously — any
+    // hardware adapter — lets the flush continue on the pool with the actor free, and the seam
+    // holds the flush there while the test drives the second silence and a third command into it.
+    [Fact]
+    public async Task Replies_Keep_Their_Order_When_A_New_Silence_Begins_Between_Two_Held_Sends()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        using var slave = new CanOpenNode(new AsynchronouslyConfirmingService(new CanBusService(bus)), 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
+            },
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        }, ownsService: true);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        int seamRuns = 0;
+        slave.BetweenHeldSendsForTests = () =>
+        {
+            if (Interlocked.Increment(ref seamRuns) != 1) return;
+            entered.Set();
+            // Longer than every wait the test makes while it holds: a seam that lets go on its own
+            // sends 5Bh before 5Ch is held and fails the premise, not the claim (Windows CI on #331).
+            release.Wait(TimeSpan.FromSeconds(30));
+        };
+
+        var first = bench.Master.ActivateBitTimingAsync(200, null);          // the first silence
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // 5Ah, held
+        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));     // 5Bh, held
+        await first;
+        await WaitUntilAsync(() => entered.IsSet);                           // 5Ah is out; the flush holds before 5Bh
+        // A long second silence: the premise is that 5Ch is held by it, and a loaded runner must
+        // not let the silence end before 5Ch has reached the slave (macOS CI on #331).
+        var second = bench.Master.ActivateBitTimingAsync(1000, null);        // the second silence begins in that window
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 2, TimeSpan.FromSeconds(10));
+        Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives in it
+        await WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2, TimeSpan.FromSeconds(10)); // 5Bh and 5Ch held
+        slave.IsLssSilentForTests.Should().BeTrue("the premise: 5Ch arrived during the second silence");
+        release.Set();                                                        // the flush goes on
+        await second;
+        await WaitUntilAsync(() => heard.LssReplies.Count >= 3);
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+    }
+
+    // Codex and Bugbot on #331: a driver that throws while a held heartbeat or LSS reply is
+    // flushed has nobody awaiting that send, so the failure is reported on
+    // BackgroundExceptionOccurred, as it is for a frame that was not held. The same for a
+    // cancellation nobody asked for -- the service disposed under the pending send -- and for a
+    // send the service answers as not confirmed.
+    [Theory]
+    [InlineData("throw")]
+    [InlineData("cancel")]
+    [InlineData("unconfirmed")]
+    public async Task A_Driver_Throw_While_Flushing_A_Held_Reply_Is_Reported(string failure)
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        var throwing = new ThrowingReplyService(new CanBusService(bus));
+        using var slave = new CanOpenNode(throwing, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
+            },
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        }, ownsService: true);
+        var reported = new List<Exception>();
+        slave.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+
+        var activate = bench.Master.ActivateBitTimingAsync(200, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        throwing.FailNextReply = failure;
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // held; its flush will fail
+        await activate;
+        await WaitUntilAsync(() =>
+        {
+            lock (reported)
+            {
+                return reported.Any(e => e is CanOpenTransportException t && failure switch
+                {
+                    "throw" => t.InnerException is InvalidOperationException,
+                    "cancel" => t.InnerException is OperationCanceledException,
+                    _ => t.InnerException is null && t.Message.Contains("Timeout"),
+                });
+            }
+        });
+    }
+
+    // Codex on #331: the silence has ended but the flush is still sending the held replies —
+    // on hardware a confirmation takes time — and a command arrives then. Its reply joins the
+    // queue behind the held ones instead of going straight to the driver ahead of them.
+    [Fact]
+    public async Task A_Reply_Arriving_While_The_Flush_Is_Still_Draining_Waits_Behind_It()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        var holding = new HoldingReplyService(new CanBusService(bus));
+        using var slave = new CanOpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
+            },
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        }, ownsService: true);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+
+        var activate = bench.Master.ActivateBitTimingAsync(200, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // 5Ah, held
+        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));     // 5Bh, held
+        holding.HoldNextReply = true;
+        await activate;
+        await WaitUntilAsync(() => holding.Holding);                          // 5Ah handed; its confirmation is held, 5Bh still queued
+        slave.IsLssSilentForTests.Should().BeFalse("the silence is over; only the flush is still under way");
+        Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives now
+        await WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2);     // behind 5Bh, not past it
+        holding.Release();
+        await WaitUntilAsync(() => heard.LssReplies.Count >= 3);
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+    }
+
+    /// <summary>A bus service that, once asked, hands the next slave reply (7E4h) to the bus but
+    /// holds its confirmation until <see cref="Release"/>; everything else passes through.</summary>
+    private sealed class HoldingReplyService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly object _gate = new();
+        private TaskCompletionSource<TxConfirmation>? _held;
+        private int _handed;
+        public HoldingReplyService(ICanBusService inner) => _inner = inner;
+        public volatile bool HoldNextReply;
+        public int Handed => Volatile.Read(ref _handed);
+        public bool Holding { get { lock (_gate) return _held is not null; } }
+        public void Release()
+        {
+            TaskCompletionSource<TxConfirmation>? held;
+            lock (_gate) { held = _held; _held = null; }
+            held?.TrySetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
+        }
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if ((uint)frame.ID == CanOpenCobId.LssSlaveMessage)
+            {
+                lock (_gate)
+                {
+                    Interlocked.Increment(ref _handed);
+                    if (HoldNextReply)
+                    {
+                        HoldNextReply = false;
+                        _held = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _ = _inner.SendConfirmedAsync(frame, timeout, cancellationToken); // the frame still reaches the bus
+                        return _held.Task;
+                    }
+                }
+            }
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+        public void Dispose() => _inner.Dispose();
+    }
+
+    /// <summary>A bus service whose next slave reply (7E4h) fails: the driver throws, the send is
+    /// cancelled, or the service answers "not confirmed".</summary>
+    private sealed class ThrowingReplyService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        public ThrowingReplyService(ICanBusService inner) => _inner = inner;
+        public volatile string? FailNextReply;
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (FailNextReply is { } failure && (uint)frame.ID == CanOpenCobId.LssSlaveMessage)
+            {
+                FailNextReply = null;
+                switch (failure)
+                {
+                    case "cancel": throw new OperationCanceledException("the service was disposed under the send");
+                    case "unconfirmed":
+                        return Task.FromResult(new TxConfirmation { Confirmed = false, FailureReason = TxConfirmFailureReason.Timeout, Timestamp = DateTime.UtcNow });
+                    default: throw new InvalidOperationException("the driver refused the frame");
+                }
+            }
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+        public void Dispose() => _inner.Dispose();
+    }
+
+    /// <summary>A bus service whose confirmations complete asynchronously, as a hardware adapter's
+    /// do; the virtual bus confirms synchronously, which keeps a flush on the actor.</summary>
+    private sealed class AsynchronouslyConfirmingService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        public AsynchronouslyConfirmingService(ICanBusService inner) => _inner = inner;
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            var confirmation = await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+            await Task.Yield();
+            return confirmation;
+        }
+        public void Dispose() => _inner.Dispose();
     }
 
     [Fact]
@@ -2914,6 +3221,7 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         private readonly CanBusService _service;
         private readonly ISubscription _subscription;
         private readonly List<uint> _ids = new();
+        private readonly List<byte> _lssReplies = new();
 
         public Listener(CanKit.Abstractions.API.Can.ICanBus bus)
         {
@@ -2925,6 +3233,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         public IReadOnlyList<uint> Ids
         {
             get { lock (_ids) return _ids.ToArray(); }
+        }
+
+        /// <summary>The command specifier of every slave reply (7E4h) heard, in order.</summary>
+        public IReadOnlyList<byte> LssReplies
+        {
+            get { lock (_ids) return _lssReplies.ToArray(); }
         }
 
         public void Dispose()
@@ -2939,7 +3253,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
             {
                 await foreach (var frame in _subscription.Frames.ConfigureAwait(false))
                 {
-                    lock (_ids) _ids.Add((uint)frame.Frame.ID);
+                    lock (_ids)
+                    {
+                        _ids.Add((uint)frame.Frame.ID);
+                        if ((uint)frame.Frame.ID == CanOpenCobId.LssSlaveMessage && frame.Frame.Data.Length > 0)
+                            _lssReplies.Add(frame.Frame.Data.Span[0]);
+                    }
                 }
             }
             catch (ObjectDisposedException)

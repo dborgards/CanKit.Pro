@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Core.Exceptions;
 using CanKit.Pro.CANopen.Lss;
 using EdsDcfNet.Models;
@@ -59,7 +60,6 @@ internal sealed partial class CanOpenNode : ILssSlave
     private int _lssTxInFlight;
     private int _nodeIdGeneration;
     private int _lssWaitingForTransmits;
-    private byte[]? _lssDeferredReply;
     private readonly Queue<HeldTransmit> _lssHeldTx = new();
     private readonly object _lssTxGate = new();
 
@@ -154,6 +154,10 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private bool IsLssSilent() => Volatile.Read(ref _lssSilent) != 0;
 
+    /// <summary>Test seams: whether the slave is in its switch silence, and how many frames it holds.</summary>
+    internal bool IsLssSilentForTests => IsLssSilent();
+    internal int HeldTransmitCountForTests { get { lock (_lssTxGate) return _lssHeldTx.Count; } }
+
     /// <summary>
     /// One decision for this frame, under <see cref="_lssTxGate"/>. A held or suppressed frame
     /// comes back as the task the caller waits on. A frame that may leave now reserves an
@@ -175,6 +179,13 @@ internal sealed partial class CanOpenNode : ILssSlave
                     : Task.FromResult(false);
             if (nodeIdGeneration is { } generation && generation != _nodeIdGeneration)
                 return Task.FromResult(false);
+            // While the flush of a silence is still draining -- confirmations come back
+            // asynchronously on hardware -- a holdable frame joins the queue behind what is
+            // still in it, so a reply to a command that arrived just after the delay cannot
+            // overtake a reply held by it (Codex on #331). The flush ends only when it finds
+            // the queue empty under this gate, so nothing joins a flush that is gone.
+            if (!IsLssSilent() && _lssFlushing && HoldsAcrossLssSilence(cobId))
+                return EnqueueHeldTransmit(cobId, payload, cancellationToken);
             if (IsLssSilent())
             {
                 if (HoldsAcrossLssSilence(cobId))
@@ -238,11 +249,14 @@ internal sealed partial class CanOpenNode : ILssSlave
     /// <summary>
     /// NMT and the heartbeat COB-ID (boot-up, producer, state change, guarding reply) have to
     /// leave once the slave may transmit again. Reporting them confirmed while they are still
-    /// held would apply a flying-master reset that never reached the bus.
+    /// held would apply a flying-master reset that never reached the bus. So does an LSS reply:
+    /// a command that arrives during the second switch delay is performed, and its reply goes
+    /// out once the slave may transmit, in the order the commands came (ReplyLss) — dropping it
+    /// would make the master time out on a service the slave carried out (#320).
     /// </summary>
     private static bool HoldsAcrossLssSilence(uint cobId)
     {
-        if (cobId == CanOpenCobId.NmtCommand) return true;
+        if (cobId == CanOpenCobId.NmtCommand || cobId == CanOpenCobId.LssSlaveMessage) return true;
         // 0x700 is not a heartbeat. Subtracting the minimum node-id wraps it, and every
         // other non-heartbeat COB-ID, past 127 in the same way, so one comparison is enough.
         uint nodeId = cobId - CanOpenCobId.HeartbeatBase;
@@ -267,73 +281,98 @@ internal sealed partial class CanOpenNode : ILssSlave
 
     private void EndLssSilence()
     {
-        HeldTransmit[] held;
+        bool start;
         lock (_lssTxGate)
         {
             // The flag and the queue move together. A send that arrives as the delay ends
-            // either joins this flush or sees the flag clear and goes out on its own.
+            // either joins the flush, still queued, or sees the flag clear and goes out on its own.
             Volatile.Write(ref _lssSilent, 0);
-            if (_lssHeldTx.Count == 0)
-                held = Array.Empty<HeldTransmit>();
-            else
+            start = _lssHeldTx.Count != 0 && !_lssFlushing;
+            if (start) _lssFlushing = true;
+        }
+        if (start) _ = FlushHeldAsync();
+    }
+
+    // Whether FlushHeldAsync is running. Under _lssTxGate. One flush at a time: a silence that
+    // ends while the previous flush is still draining leaves the draining to it.
+    private bool _lssFlushing;
+
+    // The one consumer of the held queue. Each frame is taken out under the gate together with
+    // the reservation of its send, so a silence that begins meanwhile finds it either sent or
+    // still at the head of the queue, ahead of whatever that silence holds — never re-held
+    // behind a newer frame, which is what a snapshot of the queue sent one by one allowed
+    // (Codex on #331). Each outcome completes the frame's signal: SendConfirmedAsync can
+    // surface a driver exception that is not a CanKitException, and a signal left unfinished
+    // would stall the flying-master NMT chain and everything queued behind it.
+    private async Task FlushHeldAsync()
+    {
+        while (true)
+        {
+            HeldTransmit item;
+            lock (_lssTxGate)
             {
-                held = _lssHeldTx.ToArray();
-                _lssHeldTx.Clear();
+                if (IsLssSilent() || Volatile.Read(ref _disposed) != 0 || _lssHeldTx.Count == 0)
+                {
+                    _lssFlushing = false;
+                    return;
+                }
+                item = _lssHeldTx.Dequeue();
+                if (item.Signal.Task.IsCanceled) continue;
+                // A reset may have changed the identity while this heartbeat or boot-up was
+                // held: like EmitHeartbeat, resolve it when reached and discard it if no
+                // identity is active.
+                if (item.IsHeartbeat && (item.NodeIdGeneration != _nodeIdGeneration || !CanOpenCobId.IsActiveNodeId(_nodeId)))
+                {
+                    item.Signal.TrySetResult(false);
+                    continue;
+                }
+                _lssTxInFlight++;
             }
-        }
-
-        FlushDeferredLssReply();
-        if (held.Length != 0)
-            _ = SendHeldInOrder(held);
-    }
-
-    private async Task SendHeldInOrder(HeldTransmit[] held)
-    {
-        foreach (var item in held.Where(static item => !item.Signal.Task.IsCanceled))
-        {
-            // Every outcome completes the signal. SendNmtReporting can surface a driver exception
-            // that is not a CanKitException; leaving the signal unfinished would stall the
-            // flying-master NMT chain, and the frames queued behind this one would stay held.
-            // Through the gate again: a silence that started while this flush was in
-            // progress holds what has not reached the driver yet.
-            Task<bool> send = item.IsNmt
-                ? SendNmtReporting(item.Payload, item.CancellationToken)
-                : SendHeldHeartbeat(item.Payload, item.CancellationToken, item.NodeIdGeneration);
-            await send.ContinueWith(
-                static (task, state) => CompleteHeld((TaskCompletionSource<bool>)state!, task),
-                item.Signal,
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default).ConfigureAwait(false);
+            await SendHeldAsync(item).ConfigureAwait(false);
+            BetweenHeldSendsForTests?.Invoke();
         }
     }
 
-    private async Task<bool> SendHeldHeartbeat(byte[] payload, CancellationToken cancellationToken, int nodeIdGeneration)
+    /// <summary>Test seam: runs after each held frame has completed and before the next is taken
+    /// from the queue — the window in which a new silence can begin (Codex on #331).</summary>
+    internal Action? BetweenHeldSendsForTests;
+
+    private async Task SendHeldAsync(HeldTransmit item)
     {
-        // A reset may have changed the identity while this heartbeat or boot-up was held.
-        // Like EmitHeartbeat, resolve it when reached and discard it if no identity is active.
-        byte nodeId = _nodeId;
-        if (!CanOpenCobId.IsActiveNodeId(nodeId)) return false;
-        await SendControlFrame(CanOpenCobId.Heartbeat(nodeId), payload, cancellationToken,
-            nodeIdGeneration: nodeIdGeneration).ConfigureAwait(false);
-        return true;
-    }
-
-    private static void CompleteHeld(TaskCompletionSource<bool> signal, Task<bool> send)
-    {
-        if (send.Status == TaskStatus.RanToCompletion)
+        uint cobId = item.IsNmt ? CanOpenCobId.NmtCommand
+            : item.IsLssReply ? CanOpenCobId.LssSlaveMessage
+            : CanOpenCobId.Heartbeat(_nodeId);
+        try
         {
-            signal.TrySetResult(send.Result);
-            return;
+            var frame = CanFrame.Classic(unchecked((int)cobId), item.Payload, isExtendedFrame: false);
+            var conf = await SendReservedFrame(frame, item.CancellationToken).ConfigureAwait(false);
+            if (!conf.Confirmed)
+                RaiseBackgroundException(new CanOpenTransportException(
+                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}."));
+            item.Signal.TrySetResult(conf.Confirmed);
         }
-
-        if (IsNmtCancellation(send))
+        catch (OperationCanceledException oce)
         {
-            signal.TrySetCanceled();
-            return;
+            // A cancellation nobody asked for -- the service disposed under the pending send --
+            // means the frame was not sent; for a held heartbeat or LSS reply, which nobody
+            // awaits, that is reported as the transport failure it is, as SendControlFrame does
+            // for a frame that was not held (Codex on #331).
+            if (!item.IsNmt && !item.CancellationToken.IsCancellationRequested)
+                RaiseBackgroundException(new CanOpenTransportException(
+                    $"CANopen frame TX on COB-ID 0x{cobId:X3} was cancelled before it was confirmed.", oce));
+            item.Signal.TrySetCanceled();
         }
-
-        signal.TrySetException(send.Exception!.InnerExceptions);
+        catch (Exception ex)
+        {
+            // A held heartbeat or LSS reply has nobody awaiting its signal, so a driver throw is
+            // reported here, as SendControlFrame reports it for a frame that was not held; the
+            // held NMT's caller observes the signal and reports it itself (Codex and Bugbot on
+            // #331).
+            if (!item.IsNmt)
+                RaiseBackgroundException(ex as CanOpenTransportException ?? new CanOpenTransportException(
+                    $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex));
+            item.Signal.TrySetException(ex);
+        }
     }
 
     private void DropHeldTransmits()
@@ -363,6 +402,8 @@ internal sealed partial class CanOpenNode : ILssSlave
             int nodeIdGeneration)
         {
             IsNmt = cobId == CanOpenCobId.NmtCommand;
+            IsLssReply = cobId == CanOpenCobId.LssSlaveMessage;
+            IsHeartbeat = !IsNmt && !IsLssReply;
             Payload = payload;
             Signal = signal;
             CancellationToken = cancellationToken;
@@ -370,6 +411,8 @@ internal sealed partial class CanOpenNode : ILssSlave
         }
 
         public bool IsNmt { get; }
+        public bool IsLssReply { get; }
+        public bool IsHeartbeat { get; }
         public byte[] Payload { get; }
         public TaskCompletionSource<bool> Signal { get; }
         public CancellationToken CancellationToken { get; }
@@ -381,7 +424,6 @@ internal sealed partial class CanOpenNode : ILssSlave
         _lssActivationGeneration++;
         _lssActivation?.Dispose();
         _lssActivation = null;
-        _lssDeferredReply = null;
         _lssDelayElapsed = false;
         // The node may transmit again. Disposal must not put a frame on a bus that is going away.
         if (Volatile.Read(ref _disposed) != 0 || _lssBitRateSwitch.Status == TaskStatus.RanToCompletion)
@@ -456,22 +498,9 @@ internal sealed partial class CanOpenNode : ILssSlave
     private void ReplyLss(byte[]? payload)
     {
         if (payload is null) return;
-        // A command that arrives during the second switch delay is applied, and the response
-        // goes out once the slave may transmit again. Dropping it would make the master time out
-        // on a service the slave already performed.
-        if (IsLssSilent())
-        {
-            _lssDeferredReply = payload;
-            return;
-        }
-        _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
-    }
-
-    private void FlushDeferredLssReply()
-    {
-        var payload = _lssDeferredReply;
-        _lssDeferredReply = null;
-        if (payload is null) return;
+        // During the second switch delay the send is held, in the queue that FlushHeldAsync
+        // drains in order once the slave may transmit again (HoldsAcrossLssSilence). Started
+        // here, on the actor, so the reply takes its place before anything the actor sends next.
         _ = SendControlFrame(CanOpenCobId.LssSlaveMessage, payload);
     }
 
