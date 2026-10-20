@@ -1236,7 +1236,7 @@ delay. While the node is active, failed or cancelled callbacks are reported on
 Repeated activations serialize the callbacks. An LSS command that arrives during the silence is
 performed at once; its reply is held like the other frames that may not go out yet and sent once
 the slave may transmit — every reply, not only the last one, and the replies keep the order of
-the commands, across a further silence too.
+the commands, across a further silence too and while the held ones are still going out.
 
 A new activation requests cancellation of the previous callback as soon as it is received,
 including during the first switch delay. Disposal also requests cancellation. Neither waits for

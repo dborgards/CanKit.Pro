@@ -179,6 +179,13 @@ internal sealed partial class CanOpenNode : ILssSlave
                     : Task.FromResult(false);
             if (nodeIdGeneration is { } generation && generation != _nodeIdGeneration)
                 return Task.FromResult(false);
+            // While the flush of a silence is still draining -- confirmations come back
+            // asynchronously on hardware -- a holdable frame joins the queue behind what is
+            // still in it, so a reply to a command that arrived just after the delay cannot
+            // overtake a reply held by it (Codex on #331). The flush ends only when it finds
+            // the queue empty under this gate, so nothing joins a flush that is gone.
+            if (!IsLssSilent() && _lssFlushing && HoldsAcrossLssSilence(cobId))
+                return EnqueueHeldTransmit(cobId, payload, cancellationToken);
             if (IsLssSilent())
             {
                 if (HoldsAcrossLssSilence(cobId))

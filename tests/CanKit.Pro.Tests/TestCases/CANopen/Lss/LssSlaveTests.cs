@@ -691,6 +691,99 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         await WaitUntilAsync(() => { lock (reported) return reported.Any(e => e is CanOpenTransportException t && t.InnerException is InvalidOperationException); });
     }
 
+    // Codex on #331: the silence has ended but the flush is still sending the held replies —
+    // on hardware a confirmation takes time — and a command arrives then. Its reply joins the
+    // queue behind the held ones instead of going straight to the driver ahead of them.
+    [Fact]
+    public async Task A_Reply_Arriving_While_The_Flush_Is_Still_Draining_Waits_Behind_It()
+    {
+        int switches = 0;
+        using var bench = new Bench();
+        using var bus = VirtualAdapterFixture.Open(bench.Session, 1);
+        var holding = new HoldingReplyService(new CanBusService(bus));
+        using var slave = new CanOpenNode(holding, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    Interlocked.Increment(ref switches);
+                    return Task.CompletedTask;
+                },
+            },
+            SdoTimeout = TimeSpan.FromMilliseconds(250),
+        }, ownsService: true);
+        await EnterConfiguration(bench.Master, slave);
+        (await bench.Master.ConfigureBitTimingAsync(0, 3)).Succeeded.Should().BeTrue();
+        using var heard = bench.Listen();
+        using var poke = VirtualAdapterFixture.Open(bench.Session, 9);
+
+        var activate = bench.Master.ActivateBitTimingAsync(200, null);
+        await WaitUntilAsync(() => Volatile.Read(ref switches) == 1);
+        Transmit(poke, LssFrames.Command(LssCommand.InquireVendorId));        // 5Ah, held
+        Transmit(poke, LssFrames.Command(LssCommand.InquireProductCode));     // 5Bh, held
+        holding.HoldNextReply = true;
+        await activate;
+        await WaitUntilAsync(() => holding.Holding);                          // 5Ah handed; its confirmation is held, 5Bh still queued
+        slave.IsLssSilentForTests.Should().BeFalse("the silence is over; only the flush is still under way");
+        Transmit(poke, LssFrames.Command(LssCommand.InquireRevisionNumber));  // 5Ch arrives now
+        await WaitUntilAsync(() => slave.HeldTransmitCountForTests == 2);     // behind 5Bh, not past it
+        holding.Release();
+        await WaitUntilAsync(() => heard.LssReplies.Count >= 3);
+        heard.LssReplies.Should().Equal(LssCommand.InquireVendorId, LssCommand.InquireProductCode, LssCommand.InquireRevisionNumber);
+    }
+
+    /// <summary>A bus service that, once asked, hands the next slave reply (7E4h) to the bus but
+    /// holds its confirmation until <see cref="Release"/>; everything else passes through.</summary>
+    private sealed class HoldingReplyService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly object _gate = new();
+        private TaskCompletionSource<TxConfirmation>? _held;
+        private int _handed;
+        public HoldingReplyService(ICanBusService inner) => _inner = inner;
+        public volatile bool HoldNextReply;
+        public int Handed => Volatile.Read(ref _handed);
+        public bool Holding { get { lock (_gate) return _held is not null; } }
+        public void Release()
+        {
+            TaskCompletionSource<TxConfirmation>? held;
+            lock (_gate) { held = _held; _held = null; }
+            held?.TrySetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
+        }
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions() => _inner.FindOverlappingFilterSubscriptions();
+        public Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if ((uint)frame.ID == CanOpenCobId.LssSlaveMessage)
+            {
+                lock (_gate)
+                {
+                    Interlocked.Increment(ref _handed);
+                    if (HoldNextReply)
+                    {
+                        HoldNextReply = false;
+                        _held = new TaskCompletionSource<TxConfirmation>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _ = _inner.SendConfirmedAsync(frame, timeout, cancellationToken); // the frame still reaches the bus
+                        return _held.Task;
+                    }
+                }
+            }
+            return _inner.SendConfirmedAsync(frame, timeout, cancellationToken);
+        }
+        public void Dispose() => _inner.Dispose();
+    }
+
     /// <summary>A bus service whose next slave reply (7E4h) throws from the driver.</summary>
     private sealed class ThrowingReplyService : ICanBusService
     {
