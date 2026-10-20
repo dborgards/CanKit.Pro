@@ -45,7 +45,7 @@ namespace CanKit.Pro.Tests.TestCases.CANopen;
 /// not how long a thread pool took to notice.
 /// </para>
 /// </remarks>
-public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
+public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
 
@@ -165,12 +165,13 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
             _bus.FrameObserved += (_, e) =>
             {
                 var frame = e.CanFrame;
-                if (frame.IsExtendedFrame || frame.IsRemoteFrame) return;
+                if (frame.IsRemoteFrame) return;
                 var data = frame.Data.ToArray();
                 lock (_gate)
                 {
-                    if (!_frames.TryGetValue((uint)frame.ID, out var list))
-                        _frames[(uint)frame.ID] = list = new List<byte[]>();
+                    uint key = (uint)frame.ID | (frame.IsExtendedFrame ? CanOpenCobId.ExtendedFrameBit : 0);
+                    if (!_frames.TryGetValue(key, out var list))
+                        _frames[key] = list = new List<byte[]>();
                     list.Add(data);
                 }
             };
@@ -200,7 +201,8 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         }
 
         public void Transmit(uint cobId, byte[] data)
-            => _bus.Transmit(CanFrame.Classic(unchecked((int)cobId), data, isExtendedFrame: false));
+            => _bus.Transmit(CanFrame.Classic(unchecked((int)(cobId & 0x1FFF_FFFF)), data,
+                isExtendedFrame: (cobId & CanOpenCobId.ExtendedFrameBit) != 0));
 
         public void SendSync() => Transmit(CanOpenCobId.Sync, Array.Empty<byte>());
 
@@ -657,7 +659,7 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
     [Theory]
     [InlineData((ushort)0x0000, (byte)0, (byte)0)]   // default(PdoMappingEntry)
     [InlineData((ushort)0x2001, (byte)0, (byte)0)]
-    [InlineData((ushort)0x2001, (byte)0, (byte)12)]
+    [InlineData((ushort)0x2001, (byte)0, (byte)65)]
     [InlineData((ushort)0x2001, (byte)0, (byte)72)]
     public void Mapping_Add_Refuses_An_Entry_Of_A_Width_The_Constructor_Would_Refuse(ushort index, byte subindex, byte bitLength)
     {
@@ -942,7 +944,7 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
     // (07Fh in 001h..07Fh, 581h the default SDO tx of node 1, 701h the NMT error control of node
     // 1). The PDO stays destroyed.
     [Theory]
-    [InlineData(CanOpenCobId.ExtendedFrameBit | 0x191u, false)]
+    [InlineData(0x1000u, false)]
     [InlineData(0x07Fu, true)]
     [InlineData(0x581u, true)]
     [InlineData(0x701u, true)]
@@ -1044,7 +1046,7 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
     [Theory]
     [InlineData(0x1A00, 0x1017, 0x00, 16, SdoAbortCode.ObjectCannotBeMapped)]   // a communication object is not PDO-mappable
     [InlineData(0x1A00, 0x2000, 0x00, 16, SdoAbortCode.ObjectCannotBeMapped)]   // UNSIGNED8 mapped as 16 bits
-    [InlineData(0x1A00, 0x2000, 0x00, 12, SdoAbortCode.DataTypeLengthMismatch)] // not a byte multiple
+    [InlineData(0x1A00, 0x2000, 0x00, 12, SdoAbortCode.ObjectCannotBeMapped)] // not a byte multiple
     [InlineData(0x1A00, 0x0005, 0x00, 16, SdoAbortCode.ObjectCannotBeMapped)]   // dummy UNSIGNED8 (§7.5.2.36) is 8 bits wide
     [InlineData(0x1600, 0x2001, 0x00, 16, SdoAbortCode.ObjectCannotBeMapped)]   // an RPDO cannot write a read-only object
     public async Task Pdo_Mapping_Entry_That_Cannot_Be_Mapped_Is_Rejected(int mapIndex, int index, int subindex,
@@ -1122,9 +1124,9 @@ public class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture>
         (await DownloadShouldAbortAsync(master, 0x1A00, 0x00, new byte[] { 0x02 }))
             .AbortCode.Should().Be((uint)SdoAbortCode.ObjectDoesNotExist, "slot 02h is empty, so a count of 2 names no object");
         (await DownloadShouldAbortAsync(master, 0x1A00, 0x00, new byte[] { 0x09 }))
-            .AbortCode.Should().Be((uint)SdoAbortCode.PdoMappingLengthExceeded, "nine byte-aligned entries cannot fit into 8 bytes");
-        (await DownloadShouldAbortAsync(master, 0x1A00, 0x00, new byte[] { 0xFE }))
-            .AbortCode.Should().Be((uint)SdoAbortCode.ValueRangeExceeded, "FEh is SAM-MPDO (Table 73), which this node does not support");
+            .AbortCode.Should().Be((uint)SdoAbortCode.ObjectDoesNotExist, "slot 2 is still empty, even though nine one-bit entries could fit");
+        (await DownloadShouldAbortAsync(master, 0x1A00, 0x00, new byte[] { 0xFD }))
+            .AbortCode.Should().Be((uint)SdoAbortCode.ValueRangeExceeded, "41h..FDh are reserved (Table 73)");
         (await UploadAsync(master, 0x1A00, 0x00)).Should().Equal(new byte[] { 0x00 }, "no rejected count is stored");
 
         await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x01 });

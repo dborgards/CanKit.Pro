@@ -84,14 +84,14 @@ internal static class PeerSdoLaboratory
             (0x1200, 2),
             (0x2001, 5),
         };
-        for (ushort index = 0x1400; index <= 0x1403; index++) records.Add((index, 5));
-        for (ushort index = 0x1600; index <= 0x1603; index++) records.Add((index, 8));
-        for (ushort index = 0x1800; index <= 0x1803; index++) records.Add((index, 5));
-        for (ushort index = 0x1A00; index <= 0x1A03; index++) records.Add((index, 8));
+        for (ushort index = 0x1400; index <= 0x1403; index++) records.Add((index, 6));
+        for (ushort index = 0x1600; index <= 0x1603; index++) records.Add((index, 64));
+        for (ushort index = 0x1800; index <= 0x1803; index++) records.Add((index, 6));
+        for (ushort index = 0x1A00; index <= 0x1A03; index++) records.Add((index, 64));
 
         var variables = new ushort[]
         {
-            0x1000, 0x1001, 0x1005, 0x1006, 0x1008, 0x100C, 0x100D, 0x1014, 0x1017, 0x1900,
+            0x1000, 0x1001, 0x1005, 0x1006, 0x1007, 0x1019, 0x1008, 0x100C, 0x100D, 0x1014, 0x1017, 0x1900,
             0x2000, 0x2002, 0x2100, 0x2101, 0x2200, 0x2222,
             0x2500, 0x2600, 0x2700, 0x2800, 0x2900,
             0x2A00, 0x2A01, 0x2A02, 0x2A10,

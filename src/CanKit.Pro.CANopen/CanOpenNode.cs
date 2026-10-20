@@ -79,7 +79,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private LinkedListNode<PendingEvent>? _oldestNonCritical;
     private int _pendingNonCritical;
     private long _submittedEventCount;
-    private readonly Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>> _pendingKeyed = new();
+    private readonly Dictionary<(byte, int, ulong), LinkedListNode<PendingEvent>> _pendingKeyed = new();
     // Per producer node-id: the last event still waiting that says something about the producer's
     // state -- a heartbeat or guarding response, an EMCY, but not a timeout. A waiting critical
     // event absorbs an identical one only while no such event was queued behind it, so "error,
@@ -87,7 +87,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // while a heartbeat timeout and a node-guarding timeout for the same node do not keep each
     // other apart. An event that was dropped to make room is no longer waiting and does not count:
     // the handler will never see it (#201).
-    private readonly LinkedListNode<PendingEvent>?[] _lastForProducer = new LinkedListNode<PendingEvent>?[256];
+    private readonly LinkedListNode<PendingEvent>?[] _lastForProducer = new LinkedListNode<PendingEvent>?[EventKey.RpdoProducerSlotBase + Co.PdoCount + 1];
     private long _enqueueOrdinal;
     private readonly int[] _pendingEmcyPerProducer = new int[256];
     private readonly bool[] _emcyOverflowReported = new bool[256];
@@ -201,6 +201,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
+        _pdoCount = Math.Max(_options.PdoCount, DescribedPdoCount(description));
+        _tpdos = new TpdoRuntime?[_pdoCount + 1];
+        _rpdos = new RpdoRuntime?[_pdoCount + 1];
         _ownsService = ownsService;
         var layer = ResolveLayerSettings(nodeId, description);
         _lssEnabled = layer.Enabled;
@@ -279,7 +282,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             _subscription = _service.Subscribe(f =>
             {
                 var frame = f.Frame;
-                if (frame.IsExtendedFrame) return false;
+                if (frame.IsExtendedFrame) return _extendedPdoIds.Contains((uint)frame.ID);
                 uint id = (uint)frame.ID;
                 // 0x000 NMT master, 0x080..0x77F everything else CANopen.
                 // 0x071..0x076 are the flying-master services, inside the identifier range CiA 301
@@ -455,11 +458,10 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     public Task SendSyncAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        // The dictionary, not the actor's copy of it: a caller that has just written 1005h sees
-        // its own write here, while the runtime copy is updated by a posted apply that may not
-        // have run yet. The value was validated when the dictionary accepted it.
-        uint cobId = _od.ReadUnsigned(Co.SyncCobId, 0x00) & CanOpenCobId.CanIdMask;
-        return SendControlFrame(cobId, Array.Empty<byte>(), cancellationToken);
+        // LSS may be draining a driver send on the actor. Suppression cannot wait behind it.
+        if (IsLssSilent()) return cancellationToken.IsCancellationRequested
+            ? Task.FromCanceled(cancellationToken) : Task.CompletedTask;
+        return _actor.PostAsync(() => SendNextSync(cancellationToken), cancellationToken).Unwrap();
     }
 
     /// <inheritdoc />
@@ -965,8 +967,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 .ConfigureAwait(false))
             {
                 var frame = frameEvent.Frame;
-                if (frame.IsExtendedFrame) continue;
-                uint id = (uint)frame.ID;
+                uint id = (uint)frame.ID | (frame.IsExtendedFrame ? CanOpenCobId.ExtendedFrameBit : 0);
                 // Node-guarding (FR-CO-009) piggy-backs on the heartbeat COB-ID and uses a
                 // *remote* frame from consumer → producer. Preserve the RTR flag through to
                 // the actor loop so HandleIncoming can distinguish an RTR poll from a genuine
@@ -1195,8 +1196,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// </summary>
     private void ReconcileProducer(int producer)
     {
-        var absorbers = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
-        var newest = new Dictionary<(byte, byte, ulong), LinkedListNode<PendingEvent>>();
+        var absorbers = new Dictionary<(byte, int, ulong), LinkedListNode<PendingEvent>>();
+        var newest = new Dictionary<(byte, int, ulong), LinkedListNode<PendingEvent>>();
         LinkedListNode<PendingEvent>? lastTracked = null;
 
         for (var node = _pendingEvents.First; node is not null;)
@@ -1316,19 +1317,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     private readonly struct EventKey
     {
         private readonly byte _kind;
-        private readonly byte _producer;
+        private readonly int _producer;
         private readonly ulong _payload;
 
-        private EventKey(byte kind, byte producer, ulong payload)
+        private EventKey(byte kind, int producer, ulong payload)
         {
             _kind = kind;
             _producer = producer;
             _payload = payload;
         }
 
-        public bool IsTimeout => _kind is 1 or 2;
+        public bool IsTimeout => _kind is 1 or 2 or 6;
 
-        public byte ProducerId => _producer;
+        public int ProducerId => _producer;
+
+        public const int RpdoProducerSlotBase = 256;
+
+        public static int RpdoProducerSlot(int number) => RpdoProducerSlotBase + number;
+
+        public static EventKey RpdoTimeout(int number) => new(6, RpdoProducerSlot(number), 0);
 
         public static EventKey HeartbeatTimeout(byte producer) => new(1, producer, 0);
 
@@ -1338,7 +1345,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // never share a slot with a node's heartbeats, timeouts or EMCYs (ReconcileProducer and
         // _lastForProducer read the slot as "who the event is about"): the GFC is slot 0, which
         // no node has, and SRDO n (1..64) is slot 128 + n, i.e. 129..192. Every per-producer
-        // array is 256 long. The slot is passed to EnqueueEvent as its producer, so an identical
+        // EMCY array is 256 long; local PDO event slots start at 257. The slot is passed to EnqueueEvent as its producer, so an identical
         // event still waiting absorbs a new one unless a different event of the same slot was
         // queued in between — a repeated GFC folds, an SRDO's alternating transitions do not.
         public const int GfcProducerSlot = 0;
@@ -1361,7 +1368,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
 
         /// <summary>The fields that make two keys the same event, as a tuple so that keys can be
         /// compared and hashed without members of their own.</summary>
-        public (byte, byte, ulong) Identity => (_kind, _producer, _payload);
+        public (byte, int, ulong) Identity => (_kind, _producer, _payload);
     }
 
     // Self-traffic guards (#95) are per message class rather than one test at the top, because
@@ -1408,7 +1415,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // master moved it).
             if (cobId == _syncCobId && !isRtr)
             {
-                HandleSync();
+                HandleSync(data);
                 return;
             }
             // A remote frame is either a PDO read request for our valid TPDOs on that COB-ID
@@ -1416,8 +1423,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // (Codex on #133) — or a node-guarding poll addressed to us; nothing else answers an RTR.
             if (isRtr)
             {
+                if (isFd) return;
                 bool requested = false;
-                for (int n = 1; n <= Co.PdoCount; n++)
+                for (int n = 1; n <= _pdoCount; n++)
                 {
                     if (_tpdos[n] is { Valid: true } tpdo && tpdo.CobId == cobId)
                     {
@@ -1434,11 +1442,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             // range-based guesses below. Two valid RPDOs may share a COB-ID — the dictionary holds
             // both records and CiA 301 does not forbid it — and then each is actuated (Codex on #133).
             bool consumed = false;
-            for (int n = 1; n <= Co.PdoCount; n++)
+            for (int n = 1; n <= _pdoCount; n++)
             {
                 if (_rpdos[n] is { Valid: true } rpdo && rpdo.CobId == cobId)
                 {
-                    HandleRpdo(rpdo, data);
+                    if (!isFd) HandleRpdo(rpdo, data);
                     consumed = true;
                 }
             }
@@ -1636,7 +1644,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                 // CiA 301 Table 37: SYNC is not active in Stopped; the producer keeps its cycle
                 // and resumes transmitting when the node leaves Stopped.
                 if (_state is NmtState.Stopped or NmtState.Initializing) return;
-                _ = SendControlFrame(_syncCobId, Array.Empty<byte>());
+                _ = SendNextSync(periodic: true);
             }
             finally
             {
@@ -2580,9 +2588,12 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
-    internal Task SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
+    /// <summary>Test seam for pausing a frame immediately before its final send checks.</summary>
+    internal Func<uint, Task>? BeforeControlFrameSendForTests { get; set; }
+
+    internal Task<bool> SendControlFrame(uint cobId, byte[] payload, CancellationToken cancellationToken = default,
         Action<CanOpenTransportException?>? onSendCompleted = null, bool rejectSuppression = false,
-        int? nodeIdGeneration = null)
+        int? nodeIdGeneration = null, Func<bool>? canTransmit = null)
     {
         // CiA 305 §6.5: during the second switch-delay period the slave transmits nothing.
         // NMT and heartbeat are sent when the delay ends. Anything else is dropped, and an
@@ -2590,20 +2601,25 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         // The gate either finishes the frame (held or dropped) or reserves the send so silence
         // cannot start until this frame has been handed to the driver.
         // Validate the frame before reserving: a construction failure never owns a send slot.
-        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+        var frame = CanFrame.Classic(unchecked((int)(cobId & 0x1FFF_FFFF)), payload,
+            isExtendedFrame: (cobId & CanOpenCobId.ExtendedFrameBit) != 0);
         if (GateTransmit(cobId, payload, onSendCompleted, cancellationToken, rejectSuppression, nodeIdGeneration) is { } finished)
             return finished;
-        // We do not await SendConfirmedAsync for
-        // fire-and-forget flows (SYNC / heartbeat producer / TPDO / EMCY / SDO) because their
-        // callers do not need per-frame confirmation. A failed send always surfaces via
+        // The bool result distinguishes an accepted frame from a discarded attempt, so SYNC
+        // advances its counter only after confirmation. A failed send always surfaces via
         // BackgroundExceptionOccurred. An SDO client request also passes onSendCompleted, which
         // is told once how the send ended -- null when confirmed or cancelled, the failure
         // otherwise -- so the transfer can fail at once instead of by the SDO timeout (#197).
         var send = Task.Run(async () =>
         {
             CanOpenTransportException? failure = null;
+            bool sendStarted = false;
             try
             {
+                if (BeforeControlFrameSendForTests is { } before) await before(cobId).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (canTransmit is not null && !canTransmit()) return false;
+                sendStarted = true;
                 var conf = await SendReservedFrame(frame, cancellationToken).ConfigureAwait(false);
                 if (!conf.Confirmed)
                 {
@@ -2611,6 +2627,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {conf.FailureReason}.");
                     RaiseBackgroundException(failure);
                 }
+                return conf.Confirmed;
             }
             catch (OperationCanceledException oce)
             {
@@ -2637,9 +2654,11 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     ?? new CanOpenTransportException(
                         $"CANopen frame TX on COB-ID 0x{cobId:X3} failed: {ex.Message}", ex);
                 RaiseBackgroundException(failure);
+                return false;
             }
             finally
             {
+                if (!sendStarted) ReleaseTransmit();
                 onSendCompleted?.Invoke(failure);
             }
         });
@@ -2811,7 +2830,8 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
                     // Reserved sends finish before a new silence can start.
                     try
                     {
-                        var frame = CanFrame.Classic(unchecked((int)cobId), payload, isExtendedFrame: false);
+                        var frame = CanFrame.Classic(unchecked((int)(cobId & 0x1FFF_FFFF)), payload,
+                            isExtendedFrame: (cobId & CanOpenCobId.ExtendedFrameBit) != 0);
                         if (!TryReserveTransmit(generation))
                         {
                             onFrameConfirmed?.Invoke();
@@ -2915,9 +2935,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         }, critical: true, EventKey.Emcy(msg), msg.ProducerNodeId, msg.ProducerNodeId);
     }
 
-    private void RaiseSyncReceived(DateTime ts)
+    private void RaiseSyncReceived(DateTime ts, byte? counter)
     {
-        var args = new SyncReceivedEventArgs(ts);
+        var args = new SyncReceivedEventArgs(ts, counter);
         EnqueueEvent(() =>
         {
             try { DeliverToSubscribers(SyncReceived, args); }
@@ -2932,7 +2952,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         {
             try { DeliverToSubscribers(RpdoReceived, args); }
             catch (Exception ex) { RaiseBackgroundException(ex); }
-        });
+        }, critical: false, key: null, emcyProducer: -1, producer: EventKey.RpdoProducerSlot(pdoIndex));
     }
 
     /// <summary>Synchronous, on the actor loop, before the boot-up: the application restores

@@ -172,24 +172,31 @@ internal sealed partial class CanOpenNode
     /// call, not half-way through this one. Built from one reading of the description
     /// (<see cref="DescribedObjects"/>, the same one an expectation derived from the description
     /// is built from); only what the transaction reads is kept: the declared pairs of the safety
-    /// area 1300h–13FFh (the only objects its transfers touch), the highest SRDO record the file
-    /// declares (the implied records), and the described entries the pre-check reads (the mapped
-    /// objects of a configuration).
+    /// area 1300h–13FFh, of 1018h and of 1010h (the only objects its transfers touch), the
+    /// file's identity (CiA 319 §5.2), which communication records the file declares without an
+    /// SRVT (CiA 319 §6.2), the highest SRDO record the file declares (the implied records), and
+    /// the described entries the pre-check reads (the mapped objects of a configuration).
     /// </summary>
     private sealed class PeerDescriptionBinding
     {
-        private readonly HashSet<(ushort, byte)> _safetyPairs = new();
+        private readonly HashSet<(ushort, byte)> _pairs = new();
+        private readonly Dictionary<int, SrvtDeclaration> _srvtDeclarations = new(); // declared communication records only
         private readonly Dictionary<(ushort, byte), DescribedEntry> _mapped = new();
 
         public PeerDescriptionBinding(DescribedObjects? description, IEnumerable<(ushort Index, byte Subindex)> mappedObjects)
         {
             IsBound = description is not null;
             if (description is null) return;
-            foreach (var (index, entries) in description.Ordered(static i => i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum))
+            foreach (var (index, entries) in description.Ordered(static i =>
+                         i is >= SrdoRecords.GfcParameter and <= SrdoRecords.Checksum || i == Co.Identity || i == Co.StoreParameters))
             {
-                foreach (var entry in entries) _safetyPairs.Add((index, entry.Subindex));
+                foreach (var entry in entries) _pairs.Add((index, entry.Subindex));
+                if (SrdoRecords.IsCommunicationRecord(index))
+                    _srvtDeclarations[index - SrdoRecords.CommunicationBase] = SrvtDeclarationOf(entries);
             }
             DescribedSrdoCount = description.SrdoCount;
+            DeclaredIdentity = description.DeclaredIdentity;
+            DeviceInfoIdentity = description.DeviceInfoIdentity;
             foreach (var (index, subindex) in mappedObjects)
             {
                 if (!description.TryGet(index, out var entries)) continue;
@@ -203,12 +210,40 @@ internal sealed partial class CanOpenNode
 
         public int DescribedSrdoCount { get; }
 
-        /// <summary>The pair as declared at the start; a transaction transfers safety objects only.</summary>
-        public bool Declares(ushort index, byte subindex) => _safetyPairs.Contains((index, subindex));
+        /// <summary>The identity the file declares in 1018h:01–03 at the start (<see cref="DescribedObjects.DeclaredIdentity"/>); nulls when nothing was bound.</summary>
+        public (uint? VendorId, uint? ProductCode, uint? RevisionNumber) DeclaredIdentity { get; }
+
+        /// <summary>The file's <c>[DeviceInfo]</c> numbers at the start (<see cref="DescribedObjects.DeviceInfoIdentity"/>); zeros when nothing was bound.</summary>
+        public (uint VendorId, uint ProductCode, uint RevisionNumber) DeviceInfoIdentity { get; }
+
+        /// <summary>The pair as declared at the start; a transaction transfers the safety objects, 1018h and 1010h only.</summary>
+        public bool Declares(ushort index, byte subindex) => _pairs.Contains((index, subindex));
+
+        /// <summary>What the file declares for sub-index 3 of the communication record of SRDO
+        /// <paramref name="srdoNumber"/> — what the file says, nothing more. CiA 319 v2.0.0 §6.2
+        /// has an SRD's EDS "include the SRVT parameter for all supported SRDOs", so a record
+        /// declared without it is one whose SRVT the SRD is taken not to implement, and one
+        /// declared with it read-only (or const) one whose SRVT the SRD holds but will not take;
+        /// the peer's own answer decides in the end. <see cref="SrvtDeclaration.Writable"/> for a
+        /// record declared with it writable — and for one the file does not declare at all,
+        /// which a higher record implies (<see cref="IsImpliedSrdoRecordEntry"/>) and a device
+        /// provides whole, at its defaults.</summary>
+        public SrvtDeclaration ValidationTimeDeclaration(int srdoNumber)
+            => _srvtDeclarations.TryGetValue(srdoNumber, out var declaration) ? declaration : SrvtDeclaration.Writable;
+
+        private static SrvtDeclaration SrvtDeclarationOf(List<DescribedEntry> entries)
+        {
+            foreach (var entry in entries.Where(e => e.Subindex == 0x03))
+                return (MapAccess(entry.Access) & OdAccess.WriteOnly) != 0 ? SrvtDeclaration.Writable : SrvtDeclaration.ReadOnly;
+            return SrvtDeclaration.Undeclared;
+        }
 
         /// <summary>A mapped object's entry as described at the start, for the pre-check.</summary>
         public bool TryGetMappedEntry(ushort index, byte subindex, out DescribedEntry entry) => _mapped.TryGetValue((index, subindex), out entry);
     }
+
+    /// <summary>How a bound file declares the SRVT (sub-index 3) of an SRDO's communication record.</summary>
+    private enum SrvtDeclaration { Writable, ReadOnly, Undeclared }
 
     /// <summary>The description bound for the peer at this moment, or null.</summary>
     private CanOpenDeviceDescription? BoundPeerDescription(byte peerNodeId)

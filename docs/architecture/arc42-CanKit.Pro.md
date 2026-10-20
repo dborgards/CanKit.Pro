@@ -35,7 +35,7 @@
 > | L3 ISO-TP (ISO 15765-2), Kodierer und aktorgetriebener `IIsoTpChannel` (§5.4, §6.4, §6.7, ADR-4) | `CanKit.Pro.IsoTp` |
 > | L3 J1939-TP (BAM/CM) (§6.6) | `CanKit.Pro.J1939Tp` |
 > | L4 UDS-Client über ISO-TP (§6.5) | `CanKit.Pro.Uds` |
-> | L4 CANopen (CiA 301, CiA 304, CiA 305 LSS master and slave) | `CanKit.Pro.CANopen` |
+> | L4 CANopen (CiA 301, CiA 304, CiA 305 LSS master, slave and commissioning) | `CanKit.Pro.CANopen` |
 > | L4 J1939-Applikation | `CanKit.Pro.J1939` |
 >
 > Der Frame-Ownership-/Lifetime-Vertrag (§8.1, ADR-9) ist die eine Ausnahme: er wurde im Fork
@@ -1250,7 +1250,8 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   Fristen, Engine ohne Bus testbar; − das CANopen-Paket wächst; − Normbasis ist DSP 304 V1.0, der
   Abgleich gegen EN 50325-5 steht aus (#289). Entscheidungsakte:
   `docs/reviews/2026-10-09-canopen-safety-scope.md`.
-- **Status:** Umgesetzt als FR-CO-035..046.
+- **Status:** Umgesetzt als FR-CO-035..046; die Konfigurationsinstanz nach CiA 319 v2.0.0
+  (Identitätsprüfung, Speichern, SRVT-Vorgabe) als FR-CO-051 (17.10.2026).
 
 ---
 

@@ -7,7 +7,7 @@ against the specifications; they are unlisted and deprecated on nuget.org and sh
 
 ## What is validated, and what is not
 
-**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0, and LSS master and slave as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is also validated against a scripted slave in that suite, not against a third-party LSS slave.
+**Validated:** The communication profile as this repository reads CiA 301 — SDO server and client, PDO, NMT, heartbeat, node and life guarding, SYNC, EMCY, EDS/DCF loading — CANopen Safety as it reads CiA DSP 304 V1.0 and, for the configuration entity, CiA 319 v2.0.0, and LSS master, slave and commissioning as it reads CiA 305 v3.0.0, by the test suite in `tests/CanKit.Pro.Tests`, between instances of this implementation and against raw frames the tests send, over `CanKit.Adapter.Virtual`. The LSS master is also validated against a scripted slave in that suite, not against a third-party LSS slave.
 
 **Not validated:** CiA 301 conformance as a tester would judge it, and any real CANopen device or third-party master. Device descriptions are tested against files and descriptions written for the tests, not against ones shipped by real devices. Nothing in this package has run against real CAN hardware, a conformance tester or a third-party implementation: the test project references `CanKit.Adapter.Virtual` and no hardware adapter.
 
@@ -38,8 +38,11 @@ scope (#132); FR-CO-029 to FR-CO-034 are the master and tool role decided for #1
 Safety after CiA DSP 304 V1.0, decided on 9 October 2026
 (`docs/reviews/2026-10-09-canopen-safety-scope.md`). FR-CO-047 is the LSS master after CiA 305
 v3.0.0. FR-CO-048 is the LSS slave in the node, including the pending node-id and
-`LSS_Supported` in a device description. The SRS's "Quelle" column says for each of them whether a standard requires it, the
-architecture does, or a maintainer decision does.
+`LSS_Supported` in a device description. FR-CO-049 is commissioning on the master: Fastscan,
+node-id assignment, bit timing, store and inquire. FR-CO-050 is CiA 801 automatic bit-rate
+detection, the procedure behind table 0 index 9. FR-CO-051 is the configuration entity after CiA 319 v2.0.0 (17 October 2026). FR-CO-052 to FR-CO-057 add the PDO extensions. The SRS's "Quelle"
+column says for each of them whether a standard requires it, the architecture does, or a
+maintainer decision does.
 
 | SRS id | Feature |
 | --- | --- |
@@ -47,7 +50,7 @@ architecture does, or a maintainer decision does.
 | FR-CO-002 | SDO expedited transfer (payloads ≤ 4 bytes) |
 | FR-CO-003 | SDO segmented transfer (payloads > 4 bytes, toggle-bit protocol) |
 | FR-CO-004 | SDO block transfer (CiA 301 §7.2.4.3.15) — client + server, download + upload, blksize negotiation, optional CRC-16/XMODEM |
-| FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`1603h` / `1A00h`–`1A03h`: byte-aligned, up to 8 bytes, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
+| FR-CO-005 | TPDO/RPDO mapping held in the mapping records `1600h`–`17FFh` / `1A00h`–`1BFFh`: bit-granular, up to 64 bits, written through `ConfigureTpdo`/`ConfigureRpdo` or over SDO by the CiA 301 §7.5.2.36/§7.5.2.38 re-mapping procedure |
 | FR-CO-006 | Event-driven, timer-driven and SYNC-triggered TPDO transmission; change-of-state emission on application OD writes (`CanOpenNodeOptions.EnableChangeOfStateTpdo`, default on; bus-originated writes never re-trigger, so no echo loops) |
 | FR-CO-007 | NMT master + slave state machine (Start / Stop / Pre-Op / Reset Node / Reset Communication) |
 | FR-CO-008 | Heartbeat producer + consumer timeout event |
@@ -55,14 +58,14 @@ architecture does, or a maintainer decision does.
 | FR-CO-010 | SYNC producer and consumer |
 | FR-CO-011 | EMCY encode/decode + structured receive event |
 | FR-CO-012 | Uses the L2 `ICanBusService` demux (subscription with COB-ID filter) |
-| FR-CO-013 | Communication-profile objects created at their CiA 301 defaults (`1000h`, `1001h`, `1018h`, `1005h`, `1006h`, `100Ch`, `100Dh`, `1010h`, `1011h`, `1014h`, `1016h`, `1017h`, `1200h`, the four RPDO and four TPDO records); PDO records read-only on the bus unless `WritableCommunicationParameters`; sub-index `04h` of the PDO communication records absent (`0609 0011h`) |
+| FR-CO-013 | Communication-profile objects created at their CiA 301 defaults (`1000h`, `1001h`, `1018h`, `1005h`, `1006h`, `1007h`, `1019h`, `100Ch`, `100Dh`, `1010h`, `1011h`, `1014h`, `1016h`, `1017h`, `1200h`, four RPDO and four TPDO records by default); PDO records read-only on the bus unless `WritableCommunicationParameters`; sub-index `04h` of the PDO communication records absent (`0609 0011h`) |
 | FR-CO-014 | The object dictionary is the single source of truth: an accepted SDO download and a local write reach the service alike, the configuration methods are OD writes, managed objects cannot be re-declared |
 | FR-CO-015 | TPDO transmission types `00h`, `01h`–`F0h`, `FCh`, `FDh`, `FEh`/`FFh`; reserved values rejected with `0609 0030h` |
 | FR-CO-016 | Inhibit time `1800h:03` (100 µs units, minimum interval) and event timer `1800h:05` (ms, maximum interval) for event-driven TPDOs |
 | FR-CO-017 | Synchronous RPDOs (`1400h:02` = `00h`–`F0h`): received data actuated with the next SYNC |
-| FR-CO-018 | COB-ID control bits valid/RTR/frame in `1400h:01`, `1800h:01`, `1005h` and `1014h`; restricted CAN-IDs of Table 40 and 29-bit frames rejected |
+| FR-CO-018 | COB-ID control bits valid/RTR/frame in `1400h:01`, `1800h:01`, `1005h` and `1014h`; restricted CAN-IDs of Table 40 rejected; PDOs support base and extended frames |
 | FR-CO-019 | Reset Node / Reset Communication restore the power-on values; `1010h:01` "save" and `1011h:01` "load" (in-memory); wrong signature `0800 0020h` |
-| FR-CO-020 | Mapping validation: existence, mappability, direction, width, byte alignment, 8-byte limit, sub-index position, `sub0` as UNSIGNED8, dummy mapping `0002h`–`0007h` |
+| FR-CO-020 | Mapping validation: existence, mappability, direction, width, bit lengths, 64-bit limit, sub-index position, `sub0` as UNSIGNED8, dummy mapping `0001h`–`0007h` |
 | FR-CO-021 | Producer-side life guarding from `100Ch`/`100Dh` with `LifeGuardingEvent` (occurred / resolved); heartbeat takes precedence |
 | FR-CO-022 | NMT state semantics of Table 37: no SDO, SYNC or EMCY in Stopped, PDO only in Operational, state-change heartbeat only with the producer on, guarding toggle reset on reset |
 | FR-CO-023 | Heartbeat consumer and producer from `1016h`/`1017h`; `1016h` grows per consumer; duplicate node-id `0604 0043h` |
@@ -91,21 +94,21 @@ architecture does, or a maintainer decision does.
 | FR-CO-046 | `ObserveForeignSrdoAsync`: live record before file, pair check, split into an `IForeignPdoSink` as `ForeignPdoKind.Srdo`, no timing judged ([Observing a peer SRDO](#observing-a-peer-srdo)) |
 | FR-CO-047 | LSS master (CiA 305): switch state global and selective, configure node-id and bit timing, activate with both switch delays, store, inquire identity and node-id, identify remote and non-configured slaves, Fastscan ([Layer setting services](#layer-setting-services-cia-305)) |
 | FR-CO-048 | LSS slave in the node: waiting and configuration, identity from `1018h`, pending node-id applied on NMT reset communication, unconfigured `FFh` does not boot, store through `ILssConfigurationStore`, `LSS_Supported` in an EDS/DCF ([Layer setting services](#layer-setting-services-cia-305)) |
+| FR-CO-049 | LSS commissioning on the master: Fastscan of unconfigured slaves, batch and single node-id assignment, bit timing, store, inquire, and `1018h` of configured nodes ([Layer setting services](#layer-setting-services-cia-305)) |
+| FR-CO-050 | CiA 801 automatic bit-rate detection: listen at each candidate in listen-only mode, a received frame confirms the rate, errors or a degraded bus state rule it out, the table is walked over the passes allowed ([Automatic bit-rate detection](#automatic-bit-rate-detection-cia-801)) |
+| FR-CO-051 | `ConfigurePeerSafetyAsync` as the configuration entity of CiA 319 v2.0.0: the identity of §5.2 first, the steps of §5.3 with the storage of step 5 (`PeerSafetyConfiguration.Storage`, `PeerSafetyResult.Stored`), and the §6.2 default for the SRVT of a tx SRDO the peer does not implement, in the verification too ([Configuring a peer](#configuring-a-peer)) |
+| FR-CO-052 | SYNC counter (`1019h`), producer wrap/reset and one-time TPDO start gate (`1800h:06`) |
+| FR-CO-053 | Synchronous window (`1007h`) for RPDO acceptance and TPDO driver hand-off |
+| FR-CO-054 | RPDO deadline (`1400h:05`), one-shot application indication and EMCY `8250h` |
+| FR-CO-055 | Bit mapping, one-bit BOOLEAN/dummy and native 24/40/48/56-bit integer widths |
+| FR-CO-056 | Configurable PDO count up to 512 per direction and 29-bit PDO identifiers |
+| FR-CO-057 | SAM/DAM MPDO, scanner/dispatcher blocks and inhibit queue |
 
 ## Not built, and why
 
 Deliberate omissions, each checked against the norm text:
 
-* **TIME (`1012h`) and synchronous window length (`1007h`)** — both `Category: Optional` (scope
-  item 10). A synchronous TPDO is transmitted at the SYNC and is never suppressed for a closed
-  window, because there is no window.
-* **Bit-granular PDO mapping** — bit lengths must be multiples of 8. Over SDO another length is
-  rejected with `0607 0010h`; `PdoMappingEntry` refuses it in its constructor, and
-  `PdoMapping.Add(entry)` and the collection constructor refuse an entry that never passed it —
-  `default(PdoMappingEntry)`, a struct with 0 bits — before anything reaches the node, so a
-  configured PDO is not destroyed by an attempt with such a mapping (#292).
-* **MPDO** (`sub0` = `FEh`/`FFh` of a mapping record) — rejected with `0609 0030h`, like every
-  count above `40h`.
+* **TIME (`1012h`)** — `Category: Optional`; no clock service is implemented behind it.
 * **SRDO mapping of objects without a fixed width** — a `VISIBLE_STRING`, `OCTET_STRING`,
   `UNICODE_STRING` or `DOMAIN` cannot be mapped into an SRDO (`0604 0041h`; a finding for a
   device description; refused before the first frame of a peer configuration). DSP 304 has no
@@ -114,9 +117,8 @@ Deliberate omissions, each checked against the norm text:
 * **Non-volatile storage behind `1010h`** — "save" takes the current communication parameters
   as the power-on values a reset restores, for the lifetime of the process. A device whose
   configuration must survive a restart persists it itself and replays it after `OpenNode`.
-* **29-bit COB-IDs** — the node sends and receives CAN base frames only; bit 29 of any COB-ID
-  word is rejected with `0609 0030h`, as CiA 301 prescribes for such devices, and
-  `ConfigureTpdo`/`ConfigureRpdo` throw for it.
+* **29-bit SYNC, EMCY and SRDO COB-IDs** — these services remain base-frame-only;
+  PDO communication records support extended identifiers through bit 29.
 * **The DLC-1 guarding RTR** — CiA 301 Figure 44 draws the node-guarding request with DLC 1.
   CanKit derives a frame's DLC from its data and refuses data on a remote frame, so the RTR this
   node sends carries DLC 0 (#59). Producers answer a guarding RTR by CAN-ID; what the consumer
@@ -136,13 +138,29 @@ Deliberate omissions, each checked against the norm text:
   MSB-first here) and the `ro`/`rw` conflict of `13FFh` (`rw` here, as the records are: always
   locally, on the bus with `WritableCommunicationParameters` or a file that declares it `rw`;
   §9.2 needs the tool to write it). To be reconciled against EN 50325-5:2010 in #289.
-* **Bit-granular SRDO mapping, more than 8 objects per SRDO, 29-bit SRDO COB-IDs** — as for PDOs.
+* **Bit-granular SRDO mapping and more than 8 objects per SRDO** — the safety mapping retains its own narrower limits; the PDO extensions do not widen them.
+* **The safety application layer of CiA 319 clauses 7 and 8** — the *Safety application
+  configuration valid* and *… signature* objects a CiA profile or a manufacturer-specific profile
+  places in its own area, and the data set they sign. Which objects, in which order, is the
+  profile's to say, and no profile with safety provisions is implemented here. What they share
+  with the SRDO signature is the polynomial: `SrdoCrc.Crc16Xmodem`, suitable for up to 2048 bytes,
+  with the choices V1.0 leaves open (#289).
+* **The device side of CiA 319** — step 4 of its §5.3 at the write of `A5h` (a device here checks
+  the checksums at the transition to Operational, FR-CO-038, and keeps `A5h` until then), the
+  `13FEh` rules §5.3 states for the download indication, the periodic recalculation, and the
+  start-up check of §5.4 against what was stored. Tracked in #308.
 * **Timing in `ObserveForeignSrdoAsync`** — the caller holds the timestamps and judges SRVT and
   SCT.
-* **The LSS commissioning tool** — FR-CO-047 is the master and FR-CO-048 the slave. A tool that
-  scans and assigns node-ids on top of the master is not in this package yet.
-* **Automatic bit-rate detection** — table 0 index 9 (CiA 801). The master sends the index; it
-  does not search for a rate itself.
+* **Automatic bit-rate detection as an LSS command** — table 0 index 9 names CiA 801 detection,
+  but configure bit timing cannot make a device run it: the master only sends the index, and the
+  slave here rejects index 9 (`BitTimingNotSupported`), because it cannot reopen its own channel
+  at another rate on command. The CiA 801 procedure itself is built as a separate call,
+  [`LssBitRateDetection`](#automatic-bit-rate-detection-cia-801), which a device runs at startup
+  before it has a node-id.
+* **CiA 801 single-dominant-bit timing (§5.2.2), the external AND/OR-gate variant (§5.2.4), and
+  the default fallback bit rate (§5.1)** — the first needs a timer on the receive line that no
+  adapter exposes, the second is hardware, and the third is the approach the report rejects.
+  `LssBitRateDetection` is the listen-only method of §5.2.3 only.
 * **Switching the open channel's bit rate** — `ActivateBitTimingAsync` waits both switch-delay
   periods and, when the caller names a rate and sets `LssMasterOptions.BitRateSwitch`, calls
   that callback between them. The callback must retune the channel this master is already
@@ -151,7 +169,7 @@ Deliberate omissions, each checked against the norm text:
   omit `returnToWaiting`, dispose this master after the call returns, and send switch state
   global from a new master on the new bus.
 
-What a device description declares beyond this — a `1012h`, a 24-bit integer, a fifth PDO —
+What a device description declares beyond this — a TIME service behind `1012h` —
 is not built either; [Device descriptions](#device-descriptions-eds-dcf) says what the node does
 with such an entry instead of ignoring it.
 
@@ -167,8 +185,8 @@ vendor-id 0 = "no vendor-ID assigned"), `1005h`/`1006h` (SYNC on `080h`, not gen
 constant) and four RPDO plus four TPDO records (`1400h`–`1403h`, `1600h`–`1603h`,
 `1800h`–`1803h`, `1A00h`–`1A03h`) at their pre-defined connection set CAN-IDs, "not valid" until
 configured. `1000h` and `1018h` are placeholders the application replaces with `AddU32` — they
-stay outside the PDOs: the communication profile area is never a mapping target, whatever an
-entry's mappability flag says. The other objects are managed by the node and take values, not
+stay outside the PDOs: those objects are not mapping targets, whatever an entry's flag says.
+Other communication objects are mappable where CiA 301 explicitly permits it, as described below. The other objects are managed by the node and take values, not
 re-declarations — an `Add*` on one
 of them throws `InvalidOperationException`, whether it would replace a sub-index or add one the
 node does not implement (`1016h` grows through `AddHeartbeatConsumer`, not by hand).
@@ -195,10 +213,10 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0604 0041h` | Target not PDO-mappable, not accessible in the PDO's direction, or of another width than mapped; dummy entry with the wrong width |
 | `0604 0042h` | Mapping longer than 8 bytes |
 | `0604 0043h` | Second `1016h` entry for a node-id already monitored |
-| `0607 0010h` | Mapping bit length 0, above 64 or not a multiple of 8 |
+| `0607 0010h` | Mapping bit length 0 or above 64 |
 | `0607 0012h` / `0607 0013h` | Download of the wrong width for the object — `sub0` of a mapping record is UNSIGNED8 |
 | `0609 0011h` | Sub-index `04h` of a PDO communication record, or any other absent sub-index |
-| `0609 0030h` | Reserved transmission type; bit 29 (frame) set; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time changed while the PDO is valid; mapping count above `40h`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
+| `0609 0030h` | Reserved transmission type; bit 29 set on SYNC/EMCY; bit 30 of `1014h` set; restricted CAN-ID; CAN-ID changed while the object is valid; inhibit time or SYNC start changed while the PDO is valid; reserved mapping count `41h`–`FDh`; flying-master priority above 2; device time slot 0; a priority time slot that is not greater than 127 times the device time slot; a `1F82h` request that is not a known NMT state, or that names a node which is not assigned |
 | `0800 0020h` | Wrong signature written to `1010h:01` / `1011h:01` |
 | `0800 0022h` | SDO server session open when the node entered Stopped or was reset; `1F82h` written while this node is not the active NMT master |
 
@@ -268,9 +286,9 @@ its abort code:
 
 | Outcome | Meaning |
 | --- | --- |
-| `Omitted` | Not created: a data type the dictionary does not represent (24/40/48/56-bit integers), a fifth PDO, an unparsable value, a sub-index of a fixed record the node does not implement |
+| `Omitted` | Not created: a data type the dictionary does not represent, an unparsable value, a sub-index of a fixed record the node does not implement |
 | `Corrected` | Created with the CiA 301 default instead of the described value, which the rule an SDO download hits rejected (a reserved transmission type, a second `1016h` entry for one producer) |
-| `PdoDisabled` | The PDO stays destroyed (bit 31 set) because its communication record or its mapping could not be applied — a 29-bit COB-ID, a mapping onto an object the file does not declare |
+| `PdoDisabled` | The PDO stays destroyed (bit 31 set) because its communication record or its mapping could not be applied — an invalid COB-ID, a mapping onto an object the file does not declare |
 | `NotImplemented` | Created with the described value as data, with no behaviour behind it: `1012h` (TIME), a `1200h` that differs from the default SDO server |
 | `SuppliedDefault` | A mandatory object (`1000h`, `1001h`, `1018h`) the file does not declare; the node keeps its placeholder |
 
@@ -374,15 +392,20 @@ peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID 
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
 by the peer-SDO gate, or does not return a word.
 
-The mapping is read live from `1600h`–`1603h` / `1A00h`–`1A03h` through the same SDO client, so
+The mapping is read live from `1600h`–`17FFh` / `1A00h`–`1BFFh` through the same SDO client, so
 the peer description bound for that node applies. A read that aborts, times out, is refused by
-that gate, or is not a mapping of at most eight byte-aligned entries uses the mapping in the
+that gate, or is not a mapping of at most 64 bits uses the mapping in the
 file passed to the call — and so does a value of another width than its type: sub-index `00h` must
 be exactly one byte (UNSIGNED8) and each entry exactly four (UNSIGNED32); a longer one is not cut
-to its low bytes. The SRDO observer reads its live mapping the same way. Observations of one peer run one after another. A CAN-ID CiA 301
+to its low bytes. The SRDO observer reads its live mapping the same way. Observations of one peer run one after another. A base-frame CAN-ID CiA 301
 restricts (`CanOpenCobId.IsRestricted`) is not taken as a PDO, from the device or from the file.
-A payload shorter than the mapping writes nothing; a dummy entry `0002h`–`0007h` consumes its
-bytes and writes no signal.
+A payload shorter than the mapping writes nothing; a dummy entry `0001h`–`0007h` consumes its
+bits and writes no signal.
+
+A local SDO timeout or transport failure switches the remaining reads of that observation to
+file fallback. An offline peer therefore costs one failed live request, even when the file
+declares 512 PDOs. The next observation retries live reads. A peer-sent SDO abort or a gate
+refusal applies only to the requested entry; cancellation still propagates.
 
 The live reads of one observation — COB-IDs, mapping — are one snapshot of the peer: the observer
 takes the peer's SDO channel, without waiting, and holds it to the end, so a safety transaction
@@ -438,6 +461,84 @@ Opening the client transmits its boot-up, which is one reason the scan is not th
 
 ## PDO engine
 
+```csharp
+using CanKit.Pro.CANopen.Pdo;
+
+node.ObjectDictionary.WriteUnsigned(0x1019, 0, 12); // set before a non-zero 1006h
+node.ConfigureTpdo(1, mapping, TpdoTransmission.Synchronous);
+var od = node.ObjectDictionary;
+uint cob = od.ReadUnsigned(0x1800, 1);
+od.WriteUnsigned(0x1800, 1, cob | CanOpenCobId.InvalidBit);
+od.WriteUnsigned(0x1800, 2, CanOpenTransmissionType.SynchronousEveryNthSync(3));
+od.WriteUnsigned(0x1800, 6, 5); // count first SYNC at 5, transmit at 7, 10, 1, ...
+od.WriteUnsigned(0x1800, 1, cob);
+
+node.Pdo().RpdoTimeout += (_, e) => Console.WriteLine($"RPDO{e.PdoIndex} timed out");
+```
+
+The default is four PDOs per direction. `CanOpenNodeOptions.PdoCount` selects 1..512
+(or clone existing options with `options.With(pdoCount: 8)`);
+an EDS/DCF raises the allocation to its highest declared PDO. Only PDOs 1..4 have a
+pre-defined COB-ID: higher PDOs need an explicit identifier. Bit 29 of `cobId` selects
+an extended frame; base and extended frames with the same numeric ID route independently.
+SYNC, EMCY and the safety services keep their existing frame-format limits.
+
+Mappings contain up to 64 bits in sub-index order, LSB first across byte boundaries.
+`BOOLEAN` may use one bit (the existing eight-bit form is also accepted); fixed-width
+integers must use their full declared width. Dummy `0001h:00` consumes one bit.
+Communication targets are allowed where CiA 301 marks them optionally mappable
+(`1001h`/`1002h`/`1013h:00`, `1026h:01`–`03`, `1200h`–`12FFh:01`–`02`), subject to
+their own mappability and access flags. The final byte is zero-padded. Native 24/40/48/56-bit integers are available through
+`ObjectDictionary.AddRaw` and EDS/DCF loading; `ReadRaw`/`WriteRaw` retain their exact widths.
+The existing `ReadUnsigned`/`WriteUnsigned` convenience methods remain U8/U16/U32.
+
+**SYNC counter and start value.** The start gate applies to cyclic TPDO types 1..240;
+acyclic TPDOs (0) and synchronous RTR sampling (252) use each accepted SYNC. `1019h:00` = 0 uses DLC-0 SYNC; 2..240 enables a
+one-byte counter that starts at 1 and wraps to 1. Boot-up, leaving NMT Stopped, enabling
+the producer and resuming a zero communication period reset it to 1. Only confirmed sends
+advance it; cancellation, rejection and stale queued ticks retain the value. A late
+confirmation cannot override a configuration reset. Values 1 and 241..255 are rejected. A change while `1006h` is non-zero
+is rejected with `0800 0022h`, even with the periodic producer disabled. The consumer
+uses `1019h` to select DLC but ignores its numeric overflow value; an unexpected length
+is ignored and reports EMCY `8240h`. `SyncReceivedEventArgs.Counter` carries the counter.
+TPDO `1800h:06` = 1..240 waits for that counter after entering Operational; the matching
+SYNC is the **first counted SYNC**, so type 3 with start 5 first transmits on counter 7.
+Start 0, or a disabled counter, preserves ordinary counting. The start value cannot
+change while the PDO is valid. RPDO sub-index 6 remains absent as the specification requires.
+
+**Synchronous window.** `1007h:00` is the window length in microseconds; 0 disables it.
+With a window enabled, synchronous RPDOs outside it are discarded, including before the
+first SYNC. Data accepted inside the window is applied at the next SYNC. Synchronous
+TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
+outlived its window or was superseded by another SYNC is discarded. This is software
+scheduling; it cannot withdraw a frame already handed to the CAN driver.
+
+**RPDO deadline.** `1400h:05` is a timeout in milliseconds; 0 disables it. The next valid
+reception arms it, each later reception refreshes it, and expiry raises
+`node.Pdo().RpdoTimeout` once and emits EMCY `8250h` when its EMCY producer is enabled. A short frame does not refresh it. Reconfiguration and
+leaving Operational cancel it; re-entry waits for a reception. `1400h:03` is retained as
+an implementation-specific RPDO inhibit parameter, without suppressing reception.
+
+**MPDO.** `node.Pdo()` exposes `ConfigureMultiplexedTpdo`/`ConfigureMultiplexedRpdo`
+with `MpdoAddressMode.Source` (`FEh` in the mapping count) or `Destination` (`FFh`).
+These are event-driven only: no SYNC, RTR or TPDO event timer, and at most one valid
+SAM producer per node. `SendSourceMpdoAsync` reads a local object; `SendDestinationMpdoAsync`
+takes the remote node-id (0 = broadcast), multiplexer and 1..4 data bytes. Values are
+padded to the four-byte MPDO data field. Both follow NMT Operational and the inhibit time.
+DAM consumers write the addressed local object, or report EMCY `8230h` when it is unavailable.
+SAM consumers use the object dispatching arrays `1FD0h`–`1FFFh`, including consecutive
+sub-index blocks. SAM producers use the scanner arrays `1FA0h`–`1FCFh`: an application
+write emits that scanned object; `TriggerTpdoAsync` scans the whole configured list.
+Declare these optional arrays before enabling the MPDO, either in the EDS/DCF or with
+`AddRaw`/`AddU32` and a UNSIGNED8 sub0 announcing the highest supported slot (1..254).
+Scanner slots are UNSIGNED32, dispatcher slots UNSIGNED64, in the §7.5.2.39/40 layout;
+writing existing scanner slots refreshes the producer. Mapping/communication records
+are writable over SDO under the same access rules as ordinary PDOs.
+
+`ObserveForeignPdoAsync` also accepts extended PDO keys (bit 29 set) and bit mappings;
+`ForeignPdoSignal.BitLength` reports the exact width. For MPDO it returns the transmitted
+multiplexer and four data bytes, rather than applying the observed peer's dispatcher.
+
 Every TPDO and RPDO is rebuilt from its communication and mapping records whenever one of them
 changes. The transmission type byte in `1800h:02` decides how a TPDO fires:
 
@@ -484,9 +585,9 @@ EMCY `8210h` (if `1014h` is valid); a longer one is read up to the mapped length
 **Mapping validation** runs on every entry, whether it arrives over SDO or through
 `ConfigureTpdo`/`ConfigureRpdo`: the target must exist, be PDO-mappable (`pdoMappable` on the
 `Add*` methods — default `true` for application objects, `false` for the communication
-profile), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
-must fit 8 bytes; entries occupy the payload in sub-index order. A **dummy entry** — index
-`0002h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
+profile, except entries CiA 301 marks optionally mappable), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
+must fit 64 bits; entries occupy the payload in sub-index order. A **dummy entry** — index
+`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
 without touching the dictionary, which pads an RPDO to a peer's layout. `ConfigureTpdo` and
 `ConfigureRpdo` copy the `PdoMapping` into the record; mutating the instance afterwards changes
 nothing. A rejection throws `ArgumentException` naming the abort code and leaves the PDO
@@ -587,6 +688,14 @@ be reconciled in #289. Sections cited here are those of DSP 304 V1.0. Everything
 namespace `CanKit.Pro.CANopen.Safety` and is reached through `node.Safety()`, an extension on
 `ICanOpenNode` (the interface is not widened); on a node this library did not create it throws
 `NotSupportedException`.
+
+The tool side — configuring a device as its *configuration entity* — follows **CiA 319 version
+2.0.0** (draft specification proposal, 2 December 2025), the implementation and configuration
+specification for safety-related devices: the identity verification of its §5.2, the sequence of
+§5.3 with the storage of step 5, and the rule of §6.2 for the checksum of an SRVT the device does
+not implement. Its clauses 7 and 8, the safety application layer of CiA profiles and of
+manufacturer-specific profiles, and what it says the device does are not built — see
+[Not built](#not-built-and-why). "CiA 319" in this section means that version.
 
 ### Opening a safety node
 
@@ -817,7 +926,33 @@ COB-IDs of SRDO 1 for a node-id 1..64, §8.3.3); an SRDO whose creation the devi
 COB-IDs that are not a consecutive pair or that another existing SRDO holds, no mapping record,
 a mapping that does not apply (§8.4.2.2) — is left out, as the device leaves it deleted.
 
-The call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
+The call is the *configuration entity* of CiA 319 clause 5. Before its first frame it runs the
+peer-SDO gate over every transfer it will make whatever the peer answers — `1018h:01`–`03`,
+`13FFh:00`, `1300h`, `13FFh:n` of each SRDO named, `13FEh`, the `1010h` sub-index asked for — so a
+file that does not declare one of them is refused with nothing sent (`PeerSdoAccessException`),
+not mid-transaction with the peer part-way through its configuration; an SRDO named above the
+file's highest SRDO record, which the gate could never let through, is refused likewise
+(`ArgumentException`). Its first frames verify the peer's identity (§5.2): `1018h:01`
+(vendor-ID), `:02` (product code) and `:03` (revision number) are uploaded and compared with the
+bound EDS/DCF's own `1018h:01`–`03` — "the entries in the EDS", as declared: the ParameterValue,
+the DefaultValue where none. All three are read; a peer that is not the device the file describes
+ends the call with those entries as its `Mismatches` — the four bytes the file's entry encodes
+to, the bytes the peer returned, whatever their number — and nothing written. §5.2 requires all
+three of an SRD, where CiA 301 makes `:02` and `:03` optional: the file must declare each with a
+value, and the peer must implement them; one that aborts an upload of them is not an SRD this
+procedure can configure, and the abort propagates — unless an earlier entry already differed, when
+the peer is another device and that answer is reported as a mismatch with no bytes read. The
+file's `[DeviceInfo]` numbers are a second source: where set, they must agree with the `1018h`
+entries, and a file that contradicts itself is refused before the first frame
+(`InvalidOperationException`), as is one whose three entries are all 0, which carries no
+identity, or one declaring an entry without a value this implementation reads (a plain number; a
+`$NODEID` formula is no identity); an absent `[DeviceInfo]` key, which EdsDcfNet reads as 0, is
+none of these. Without a bound
+description the call is refused before any frame, naming `1018h:01` — the first transfer, which
+would have nothing to be compared with. The further checks the note of §5.2 names (firmware and
+hardware version, serial number, physical location) are the application's.
+
+Then the call reads the peer's SRDO count from `13FFh:00` and refuses a configuration naming an SRDO
 above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` is not exactly one
 byte — it is UNSIGNED8, so none, two or four bytes are refused rather than read by their low byte —
 or a count above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
@@ -840,15 +975,51 @@ use; a slot above the count is no part of the SRDO and is neither written nor re
 file need not declare it. It reads all of it back and compares byte for byte.
 Only without a difference does it write `13FEh` = `A5h` and read that back too.
 
+That is §5.3 of CiA 319, steps 1 to 3: the configuration data, then the checksums, then the
+readback, then `A5h`. Step 4 is the peer's — it recalculates the checksums itself and, where one
+does not match, sets `13FEh` back to 0 — and the readback of `A5h` shows it, so a peer whose
+checksum convention differs from this implementation's (#289) fails the result instead of running
+on a configuration it did not accept. Step 5 is optional and asked for with
+`PeerSafetyConfiguration.Storage`: `AllParameters` downloads the "save" signature to `1010h:01`,
+`CommunicationParameters` to `1010h:02`, after the acknowledgement, so that what the peer stores
+includes `13FEh` = `A5h` and `13FFh`; `PeerSafetyResult.Stored` says the peer confirmed it, and
+nothing is stored when the readback differed. `Storage` is settable, so a configuration from
+`FromDeviceDescription` can ask for it too. A sub-index the bound file does not declare is
+refused before the first frame (`PeerSdoAccessException`), as the gate would refuse the transfer —
+but then after the acknowledgement; a store the peer aborts comes after the acknowledgement,
+which stands, and the result says so: `Succeeded`, not `Stored`, the abort in
+`PeerSafetyResult.StorageAbort` rather than thrown away with the acknowledged state.
+
+An SRD need not implement the SRVT of a tx SRDO, and its EDS "should include the SRVT parameter
+for all supported SRDOs" (CiA 319 §6.2): a tx SRDO whose communication record the bound file
+declares *without* sub-index `03h` is one the peer is taken not to hold an SRVT for, and one whose
+`03h` the file declares read-only (or `const`) is one the peer holds and will not take. The
+configuration must say 20 ms for such an SRDO — the value §6.2 prescribes for the calculation,
+and what such a peer computes; another value is refused before the first frame
+(`ArgumentException`), because it cannot be put on the peer, and a checksum over it would not be
+the peer's. The file is not trusted alone where it says nothing: an undeclared sub-index is
+written all the same (the gate lets it through as an implied record entry), so that a peer which
+does hold it writable ends with 20 ms rather than with a value from an earlier configuration — a
+delete writes sub-index `01h` only. A peer that aborts that write with `0609 0011h` (sub-index
+does not exist) does not implement it and is not asked to read it back; one that aborts it with
+`0601 0002h` (read-only) holds it, and is read back and compared like every other value — so a
+peer holding another value than 20 ms is a mismatch. A peer that *took* the write answers for it:
+an abort on its readback propagates. A sub-index the file declares read-only is not written, only
+read back. A consumer's SRVT is not optional, and neither is one the file declares writable: their
+aborts propagate. A record the file does not declare at all, implied by a higher one, counts as
+whole, as a device provides it. The verification applies the same rule, so a DCF without the
+sub-index verifies against what the device holds.
+
 `PeerSafetyResult.Succeeded` means acknowledged. Otherwise `Mismatches` lists each
-(index, sub-index) with the bytes written and the bytes read, and the result is not `Succeeded`:
+(index, sub-index) with the bytes written and the bytes read — or, for `1018h`, the bytes the
+file's identity encodes to and the bytes the peer returned, with nothing written — and the result is not `Succeeded`:
 `A5h` is written only after a clean readback, and a readback of `A5h` that differs fails the
 result too. An SDO abort, a timeout or a refusal by the peer-SDO gate propagates as from
 `SdoDownloadAsync`. `13FEh` is 0 once at least one parameter write has been accepted, because
 every such write clears it; an abort before that — for example `0800 0022h` from an Operational
 peer, which refuses the first write — leaves it unchanged. Every transfer
 passes the peer-SDO gate, so the peer's EDS or DCF must be bound (`BindPeerDeviceDescription`).
-One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also works from the peer description as it was when it started — the moment it owns the peer's channel, after any call it waited for: its pre-check and the gate of each of its transfers read a snapshot taken then — the declared pairs of the safety area 1300h–13FFh, the highest SRDO record, and the described entries of the mapped objects — not the bound instance, which is publicly mutable. Rebinding, unbinding or editing the bound description in place during it takes effect for the next call — an edit landing while the snapshot is being taken is the one case the snapshot does not cover ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)). The same holds for the configuration or expectation passed in: a copy taken at that moment is what is checked, written and compared, so an SRDO added to the caller's instance meanwhile is not part of the transaction.
+One configuration or verification per peer runs at a time, and it reserves the peer's SDO channel for the whole transaction: it waits for a call to that peer already in flight (its cancellation token ends the wait), and while it runs another SDO call of this node to that peer is refused as already in flight, so nothing interleaves between two of its transfers (a write after the readback could otherwise stale the checksum it acknowledges). It also works from the peer description as it was when it started — the moment it owns the peer's channel, after any call it waited for: its pre-check, the identity and the gate of each of its transfers read a snapshot taken then — the declared pairs of the safety area 1300h–13FFh, of 1018h and of 1010h, the file's identity, the records declared without an SRVT, the highest SRDO record, and the described entries of the mapped objects — not the bound instance, which is publicly mutable. Rebinding, unbinding or editing the bound description in place during it takes effect for the next call — an edit landing while the snapshot is being taken is the one case the snapshot does not cover ([SDO client and a peer's device description](#sdo-client-and-a-peers-device-description)). The same holds for the configuration or expectation passed in: a copy taken at that moment is what is checked, written and compared, so an SRDO added to the caller's instance meanwhile is not part of the transaction.
 
 ### Verifying, and the boot-up
 
@@ -857,7 +1028,13 @@ it uploads `13FEh` (must be `A5h`), `13FFh:n` of every expected SRDO (must equal
 of the expected record) and the records, and compares them with what a configuration with
 `expected` would have written (`1300h` aside, which step D does not list). An SRDO the
 expectation does not name must be deleted (sub-index `01h` = 0); its checksum is not compared,
-because the device checks the checksums of existing SRDOs only (§9.5).
+because the device checks the checksums of existing SRDOs only (§9.5). A tx SRDO whose record the
+bound file declares without a writable sub-index `03h` is expected at the checksum over 20 ms, and
+a peer that aborts the upload of a sub-index `03h` the file does not declare with `0609 0011h` does
+not implement it — no difference (CiA 319 §6.2, as for a configuration); every other abort
+propagates. `13FFh:00`, the checksums of the SRDOs expected and `13FEh` pass the gate before the
+first frame. The identity of CiA 319 §5.2 is not read: it
+belongs to the configuration, and the boot-up binds a DCF for a node-id.
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
 least one SRDO is a safety slave; an EDS carries no parameter values and never makes one. Before
@@ -1056,6 +1233,103 @@ using var node = CanOpen.OpenNode(bus, nodeId: 0xFF, new CanOpenNodeOptions
 // node.State is Initializing and node.NodeId is 0xFF until a master configures 1..127.
 ```
 
+### Commissioning
+
+`LssCommissioning` (FR-CO-049) runs the master as a commissioning sequence. A scan without a
+node-id parks each unconfigured slave in configuration so Fastscan does not return it twice,
+then switches every slave back to waiting. A scan that assigns node-ids switches every slave
+to waiting first, then configures the slave Fastscan left in configuration. Switch state
+selective is not repeated after Fastscan. The scan switches back to waiting after each slave,
+unless activation already sent that frame before the switch delay. Bit timing is activated
+during a scan only when `Limit` is 1. A scan that can select more than one slave configures
+the table and leaves the rate unchanged, so a slave that already has a node-id stays on the
+bitrate the next Fastscan still uses. Activating one selectively switched slave is valid when
+it is the only LSS slave, or every other node already runs the new rate. A slave that rejects
+a service stops the batch; its result carries the code. Slaves configured earlier keep the
+pending bit rate, and the stored rate when store already succeeded. This tool does not roll
+them back to the rate the network is still using; the caller does that before a power cycle.
+A confirmed service that times out stops the scan and returns the slaves that already received
+a node-id, including the slave whose configure node-id succeeded before a later service timed out. Configure node-id writes the pending node-id. On a slave that already has an active
+node-id it takes effect at the next NMT reset communication, which this tool does not send.
+`ConfigureSlaveAsync` throws on a timeout; a previously confirmed pending node-id can still
+be written. The exception identifies the service that timed out and preserves its stack trace.
+Supplying `ActivateBitRate` requires the master's `BitRateSwitch` callback. Commissioning
+checks activation arguments before selecting or writing any slave.
+Configure, inquire and scan sequences sharing a master are serialized through their cleanup,
+including calls from different `LssCommissioning` instances. Direct calls to that master must
+not overlap a commissioning sequence.
+
+Configured slaves do not take part in Fastscan. `ReadIdentitiesAsync` reads `1018h:01`–`04`
+from a node that has already booted. A missing later sub-index is 0. A timeout or any other
+abort is not reported as a zero LSS number. Switching the slaves back to waiting after a
+service is best-effort: if that frame fails, the configuration result is still returned.
+
+```csharp
+var tool = new LssCommissioning(master);
+var scan = await tool.ScanUnconfiguredAsync(new LssUnconfiguredScan
+{
+    AssignFromNodeId = 0x10,
+    Store = true,
+});
+// scan.Slaves lists each address and the node-id it was given. scan.Stop says why it ended.
+
+var one = await tool.ConfigureSlaveAsync(scan.Slaves[0].Address, new LssSlaveConfiguration
+{
+    BitTimingSelector = 0,
+    BitTimingIndex = 2,
+    ActivateDelayMilliseconds = 100,
+    ActivateBitRate = 500_000,
+});
+```
+
+The sample `samples/CanKit.Pro.Sample.CanOpenLss` is that sequence as a command-line tool.
+`--demo` needs no hardware. Activating bit timing still does not reconfigure the open channel.
+
+### Automatic bit-rate detection (CiA 801)
+
+`LssBitRateDetection` (FR-CO-050) is the method behind table 0 index 9: a device that does not
+know the bit rate of the bus finds it before it is given a node-id, by listening at each
+candidate in turn. It is the listen-only approach of CiA 801 §5.2.3, Figure 1.
+
+For each candidate the caller's factory opens the controller **in listen-only mode**, so the
+search acknowledges nothing and transmits no error frame (§5.2.1). The detection then waits for
+the first of: a received frame — the controller delivers one only at the right rate, so the
+candidate is detected; enough error frames to rule the rate out (two by default, so a single
+corrupted frame at the right rate does not move the search on, §5.2.3/§7); or the end of the
+window. A window that ends with the controller no longer error-active rejects the candidate too,
+for adapters that move `BusState` without raising an error frame.
+
+```csharp
+// On CanKit, the factory opens each candidate listen-only, accepting every id.
+var result = await LssBitRateDetection.DetectAsync(rate => CanBus.Open(endpoint, cfg =>
+    cfg.Baud(rate).SetWorkMode(ChannelWorkMode.ListenOnly).EnableErrorInfo()));
+
+if (result.Detected)
+{
+    // result.BitsPerSecond is the rate; result.TableIndex is its CiA 301 table index when
+    // the table lists it. Reopen the bus at that rate for normal operation.
+}
+```
+
+The method needs traffic (§6): at least one frame has to be on the bus while the correct
+candidate is open. A CANopen manager produces it with its heartbeat, with SYNC, or with SDO
+reads of `1000h`, `1001h` or `1018h`. The factory opens each candidate afresh because adapters
+generally cannot change the bit rate of an open channel; the number of frames the search
+consumes depends on how many candidates precede the right one and on the adapter's close/reopen
+time (Figure 2). `LssBitRateDetectionOptions` sets the candidates and their order (500/250/125
+kbit/s first by default), the per-candidate window, the error threshold and the number of
+passes. `RequireListenOnly` only relaxes the detection's own check that each probe was opened
+listen-only; it does not change how your factory opens the bus. For an adapter that accepts
+listen-only but does not report the mode back, turning it off is enough and the factory keeps
+opening listen-only. For an adapter that rejects listen-only but is silent in normal mode, turn
+it off **and** have your factory open each probe in normal mode — which is reactive, so a wrong
+candidate may emit error frames, against §5.2.1. The sample's `detect` verb does exactly this
+under `--allow-non-listen-only`, and is otherwise this call on the command line, with `--demo`.
+
+The single-dominant-bit timing of §5.2.2, the external AND/OR-gate variant of §5.2.4 for
+controllers without a listen-only mode, and the default fallback bit rate of §5.1 are not built;
+see [Not built](#not-built-and-why).
+
 ## Flying master
 
 A master application joins the NMT flying-master election with `StartFlyingMaster`. The binding
@@ -1245,7 +1519,7 @@ CanKit.Pro.CANopen/
   CanOpenNode.PeerSdo.cs              // partial: peer EDS/DCF binding and the client SDO gate
   CanOpenNode.ForeignPdo.cs           // partial: splitting a peer's PDO
   CanOpenNode.Safety.cs               // partial: CiA 304 objects, their validation, ICanOpenSafety, the SRDO send chain
-  CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2) and verifying (step D) a peer's safety parameters
+  CanOpenNode.PeerSafety.cs           // partial: configuring (§9.2, as the CiA 319 configuration entity) and verifying (step D) a peer's safety parameters
   CanOpenNode.ForeignSrdo.cs          // partial: splitting a peer's SRDO pair
   CanOpenDiscovery.cs                 // listen-only discovery and the scan on request
   CanOpenNodeOptions.cs
@@ -1258,7 +1532,8 @@ CanKit.Pro.CANopen/
   Pdo/PdoMapping.cs                   // mapping entries, transmission-type enums and byte constants
   Emcy/EmcyMessage.cs                 // 8-byte encode/decode
   Safety/                             // CiA 304: SrdoEngine, SrdoCrc, SrdoFrames, SrdoRecords, ICanOpenSafety, value types
-  Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan
+  Lss/                                // CiA 305: LSS master and slave options, frame codec, Fastscan;
+                                      //   CiA 801 automatic bit-rate detection (LssBitRateDetection.cs)
 ```
 
 ## Migrating from 1.2.x
@@ -1344,10 +1619,23 @@ Each item names what a caller does about it.
 
 ## Changes since 1.3.0
 
+* **`ConfigurePeerSafetyAsync` is the configuration entity of CiA 319 v2.0.0** (FR-CO-051): it
+  reads the peer's `1018h:01`–`03` first and compares them with the bound file's own `1018h`
+  entries, so a file that does not declare them with a value, contradicts them in `[DeviceInfo]`
+  or declares them all 0 is refused before the first frame, and a peer that is another device ends
+  the call with those entries as mismatches; every transfer the call makes whatever the peer
+  answers passes the gate before the first frame; `PeerSafetyConfiguration.Storage` (settable)
+  asks for the step-5 store through `1010h`, reported in `PeerSafetyResult.Stored`, with a peer's
+  abort in `PeerSafetyResult.StorageAbort`; and a tx SRDO whose record the file declares without
+  a writable sub-index `03h` must say 20 ms, which is written as optional where the file says
+  nothing — a peer's `0609 0011h` or `0601 0002h` is tolerated — and checksummed (§6.2).
 * **`CanOpenNodeOptions.With(...)` validates the copy it returns**, as the node does when it is
   opened: an out-of-range value now throws `ArgumentOutOfRangeException` from `With` rather than
   from `OpenNode`. It gained `srdoCount` and `enableChangeOfStateSrdo`; the 1.3.0 signature is
   kept beside it, so compiled callers keep working.
+* **Layer setting services (CiA 305) and CiA 801 bit-rate detection** are new: the LSS master,
+  the LSS slave in the node, commissioning, and `LssBitRateDetection` (see
+  [Layer setting services](#layer-setting-services-cia-305)).
 
 ## Install
 

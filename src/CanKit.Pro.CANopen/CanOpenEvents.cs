@@ -79,10 +79,17 @@ public sealed class SyncReceivedEventArgs : EventArgs
     public DateTime Timestamp { get; }
 
     /// <summary>Constructs a new event.</summary>
-    public SyncReceivedEventArgs(DateTime timestamp)
+    public SyncReceivedEventArgs(DateTime timestamp) : this(timestamp, null) { }
+
+    /// <summary>Constructs a SYNC event with its optional counter.</summary>
+    public SyncReceivedEventArgs(DateTime timestamp, byte? counter)
     {
         Timestamp = timestamp;
+        Counter = counter;
     }
+
+    /// <summary>The counter carried by a DLC-1 SYNC, or null for DLC 0.</summary>
+    public byte? Counter { get; }
 }
 
 /// <summary>
@@ -91,10 +98,10 @@ public sealed class SyncReceivedEventArgs : EventArgs
 /// </summary>
 public sealed class RpdoReceivedEventArgs : EventArgs
 {
-    /// <summary>RPDO index (1..4).</summary>
+    /// <summary>RPDO index (1..512, within this node's configured count).</summary>
     public int PdoIndex { get; }
 
-    /// <summary>Raw 11-bit COB-ID the frame arrived on.</summary>
+    /// <summary>PDO routing key the frame arrived on; bit 29 identifies an extended frame.</summary>
     public uint CobId { get; }
 
     /// <summary>The full incoming RPDO payload (0..8 bytes).</summary>

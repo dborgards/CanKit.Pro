@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using CanKit.Pro.CANopen.Emcy;
 using CanKit.Pro.CANopen.Nmt;
@@ -47,6 +48,8 @@ internal sealed partial class CanOpenNode
         public const ushort ErrorRegister = 0x1001;
         public const ushort SyncCobId = 0x1005;
         public const ushort CyclePeriod = 0x1006;
+        public const ushort SyncWindow = 0x1007;
+        public const ushort SyncCounterOverflow = 0x1019;
         public const ushort GuardTime = 0x100C;
         public const ushort LifeTimeFactor = 0x100D;
         public const ushort StoreParameters = 0x1010;
@@ -65,7 +68,7 @@ internal sealed partial class CanOpenNode
         public const ushort RpdoMap = 0x1600;
         public const ushort TpdoComm = 0x1800;
         public const ushort TpdoMap = 0x1A00;
-        public const int PdoCount = 4;
+        public const int PdoCount = 512;
         public const ushort GfcParameter = Safety.SrdoRecords.GfcParameter;
         public const ushort SrdoConfigurationValid = Safety.SrdoRecords.ConfigurationValid;
         public const ushort SrdoChecksum = Safety.SrdoRecords.Checksum;
@@ -111,20 +114,22 @@ internal sealed partial class CanOpenNode
         var pdo = _options.WritableCommunicationParameters ? OdAccess.ReadWrite : OdAccess.ReadOnly;
         const OdAccess ro = OdAccess.ReadOnly;
         const OdAccess rw = OdAccess.ReadWrite;
-        const bool nm = false; // communication-profile objects are not PDO-mappable (CiA 301 §7.5.2)
+        const bool nm = false; // default for non-mappable communication entries (CiA 301 §7.5.2)
 
         // §7.5.2.1 / §7.5.2.2 / §7.5.2.21: the three mandatory objects. 1000h = 0 is "a logical
         // device that does not follow a standardized profile"; 1018h with sub0 = 01h and
         // vendor-id 0 is "no vendor-ID assigned" — both defined values, not inventions. The
         // application replaces them with its own (Add* on 1000h / 1018h is permitted).
         _od.AddU32(Co.DeviceType, 0x00, 0, ro, nm);
-        _od.AddU8(Co.ErrorRegister, 0x00, 0, ro, nm);
+        _od.AddU8(Co.ErrorRegister, 0x00, 0, ro, pdoMappable: true);
         _od.AddU8(Co.Identity, 0x00, 0x01, ro, nm);
         _od.AddU32(Co.Identity, 0x01, 0, ro, nm);
 
         // §7.5.2.5 / §7.5.2.6: SYNC. Default 0000 0080h — SYNC on 080h, not generated.
         _od.AddU32(Co.SyncCobId, 0x00, CanOpenCobId.Sync, rw, nm);
         _od.AddU32(Co.CyclePeriod, 0x00, 0, rw, nm);
+        _od.AddU32(Co.SyncWindow, 0x00, 0, rw, nm);
+        _od.AddU8(Co.SyncCounterOverflow, 0x00, 0, rw, nm);
 
         // §7.5.2.11 / §7.5.2.12: guard time and life time factor, 0 = life guarding disabled.
         _od.AddU16(Co.GuardTime, 0x00, 0, rw, nm);
@@ -175,29 +180,31 @@ internal sealed partial class CanOpenNode
         // §7.5.2.33: the default SDO server, all const — the node serves 600h/580h + node-id
         // and nothing else, and the record says so.
         _od.AddU8(Co.SdoServer, 0x00, 0x02, ro, nm);
-        _od.AddU32(Co.SdoServer, 0x01, CanOpenCobId.SdoRx(_nodeId), ro, nm);
-        _od.AddU32(Co.SdoServer, 0x02, CanOpenCobId.SdoTx(_nodeId), ro, nm);
+        _od.AddU32(Co.SdoServer, 0x01, CanOpenCobId.SdoRx(_nodeId), ro, pdoMappable: true);
+        _od.AddU32(Co.SdoServer, 0x02, CanOpenCobId.SdoTx(_nodeId), ro, pdoMappable: true);
 
-        // §7.5.2.35–§7.5.2.38: four RPDOs and four TPDOs at their pre-defined connection set
-        // CAN-IDs, "not valid" until configured. TPDO sub0 = 05h (inhibit time and event timer
-        // supported); RPDO sub0 = 02h. Sub-index 04h is reserved and deliberately absent, so an
+        // §7.5.2.35–§7.5.2.38: the configured number of PDOs; the first four use the
+        // pre-defined connection set, higher records are disabled until assigned a CAN-ID. TPDO sub0 = 06h (inhibit time, event timer and SYNC start); RPDO sub0 = 05h. Sub-index 04h is reserved and deliberately absent, so an
         // access yields 0609 0011h as §7.5.2.37 prescribes.
-        for (int n = 1; n <= Co.PdoCount; n++)
+        for (int n = 1; n <= _pdoCount; n++)
         {
             var rc = (ushort)(Co.RpdoComm + n - 1);
             var rm = (ushort)(Co.RpdoMap + n - 1);
             var tc = (ushort)(Co.TpdoComm + n - 1);
             var tm = (ushort)(Co.TpdoMap + n - 1);
 
-            _od.AddU8(rc, 0x00, 0x02, ro, nm);
-            _od.AddU32(rc, 0x01, CanOpenCobId.InvalidBit | CanOpenCobId.RpdoDefault(_nodeId, n), pdo, nm);
+            _od.AddU8(rc, 0x00, 0x05, ro, nm);
+            _od.AddU32(rc, 0x01, CanOpenCobId.InvalidBit | (n <= 4 ? CanOpenCobId.RpdoDefault(_nodeId, n) : 0), pdo, nm);
             _od.AddU8(rc, 0x02, CanOpenTransmissionType.EventDrivenManufacturer, pdo, nm);
+            _od.AddU16(rc, 0x03, 0, pdo, nm);
+            _od.AddU16(rc, 0x05, 0, pdo, nm);
 
-            _od.AddU8(tc, 0x00, 0x05, ro, nm);
-            _od.AddU32(tc, 0x01, CanOpenCobId.InvalidBit | CanOpenCobId.NoRtrBit | CanOpenCobId.TpdoDefault(_nodeId, n), pdo, nm);
+            _od.AddU8(tc, 0x00, 0x06, ro, nm);
+            _od.AddU32(tc, 0x01, CanOpenCobId.InvalidBit | CanOpenCobId.NoRtrBit | (n <= 4 ? CanOpenCobId.TpdoDefault(_nodeId, n) : 0), pdo, nm);
             _od.AddU8(tc, 0x02, CanOpenTransmissionType.EventDrivenManufacturer, pdo, nm);
             _od.AddU16(tc, 0x03, 0, pdo, nm);
             _od.AddU16(tc, 0x05, 0, pdo, nm);
+            _od.AddU8(tc, 0x06, 0, pdo, nm);
 
             _od.AddU8(rm, 0x00, 0, pdo, nm);
             _od.AddU8(tm, 0x00, 0, pdo, nm);
@@ -248,7 +255,7 @@ internal sealed partial class CanOpenNode
     /// rather than re-declares.</summary>
     private bool IsManagedCommunicationObject(ushort index) => index switch
     {
-        Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.GuardTime or Co.LifeTimeFactor
+        Co.ErrorRegister or Co.SyncCobId or Co.CyclePeriod or Co.SyncWindow or Co.SyncCounterOverflow or Co.GuardTime or Co.LifeTimeFactor
             or Co.StoreParameters or Co.RestoreDefaults or Co.EmcyCobId or Co.ConsumerHeartbeat
             or Co.ProducerHeartbeat or Co.SdoServer or Co.NmtStartup or Co.SlaveAssignment
             or Co.RequestNmt or Co.BootTime or Co.FlyingMasterTiming => true,
@@ -291,6 +298,8 @@ internal sealed partial class CanOpenNode
         {
             case Co.SyncCobId:
                 return ValidateSyncCobIdWrite(value);
+            case Co.SyncCounterOverflow:
+                return ValidateSyncCounterOverflow(value[0]);
             case Co.EmcyCobId:
                 return ValidateEmcyCobIdWrite(value);
             case Co.ConsumerHeartbeat:
@@ -342,14 +351,14 @@ internal sealed partial class CanOpenNode
     private bool IsCanIdOfTheValidEmcy(uint canId)
     {
         uint word = _od.ReadUnsigned(Co.EmcyCobId, 0x00);
-        return (word & CanOpenCobId.InvalidBit) == 0 && (word & CanOpenCobId.CanIdMask) == canId;
+        return (word & CanOpenCobId.InvalidBit) == 0 && PdoFrameKey(word) == canId;
     }
 
     private bool IsTheSyncCanId(uint canId) => (_od.ReadUnsigned(Co.SyncCobId, 0x00) & CanOpenCobId.CanIdMask) == canId;
 
     private bool IsCanIdOfAValidPdo(uint canId)
     {
-        for (int n = 1; n <= Co.PdoCount; n++)
+        for (int n = 1; n <= _pdoCount; n++)
         {
             if (IsValidPdoOn((ushort)(Co.RpdoComm + n - 1), canId) || IsValidPdoOn((ushort)(Co.TpdoComm + n - 1), canId))
                 return true;
@@ -360,7 +369,7 @@ internal sealed partial class CanOpenNode
     private bool IsValidPdoOn(ushort comm, uint canId)
         => _od.TryReadUnsigned(comm, 0x01, out var word)
            && (word & CanOpenCobId.InvalidBit) == 0
-           && (word & CanOpenCobId.CanIdMask) == canId;
+           && PdoFrameKey(word) == canId;
 
     // §7.5.2.17 Table 59: bit 31 valid, bit 30 reserved (always 0b), bit 29 frame. "The bits 0
     // to 29 shall not be changed, while the object exists and is valid (bit 31 = 0b)."
@@ -468,11 +477,43 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// The checks every COB-ID word shares: this node speaks CAN base frames only, so bit 29
+    /// The checks for base-frame-only services (SYNC and EMCY): bit 29
     /// (frame) is rejected with 0609 0030h as §7.5.2.5, §7.5.2.17, §7.5.2.35 and §7.5.2.37
     /// prescribe; bits 28..11 must be zero for an 11-bit CAN-ID; and the CAN-ID must not be one
     /// CiA 301 §7.3.5 restricts.
     /// </summary>
+    // Keep bit 29 in the routing key: base and extended frames with the same numeric ID
+    // are distinct communication objects. Control bits 31/30 never become part of a frame ID.
+    private void RefreshExtendedPdoFilter()
+    {
+        var ids = new HashSet<uint>();
+        for (int n = 1; n <= _pdoCount; n++)
+        {
+            foreach (uint word in new[] { (ushort)(Co.TpdoComm + n - 1), (ushort)(Co.RpdoComm + n - 1) }
+                .Select(comm => _od.TryReadUnsigned(comm, 1, out var word) ? word : CanOpenCobId.InvalidBit)
+                .Where(word => (word & (CanOpenCobId.InvalidBit | CanOpenCobId.ExtendedFrameBit)) == CanOpenCobId.ExtendedFrameBit))
+                ids.Add(word & 0x1FFF_FFFF);
+        }
+        _extendedPdoIds = ids;
+    }
+
+    // CiA 301 explicitly marks these communication entries as optionally PDO-mappable.
+    // All still need their own PDOMapping flag and direction/access check.
+    private static bool IsCommunicationPdoTarget(ushort index, byte subindex)
+    {
+        if (index is 0x1001 or 0x1002 or 0x1013) return subindex == 0;
+        if (index == 0x1026) return subindex is >= 1 and <= 3;
+        return index is >= 0x1200 and <= 0x12FF && subindex is 1 or 2;
+    }
+
+    private static uint PdoFrameKey(uint word) => word & 0x3FFF_FFFF;
+
+    private static bool IsUsablePdoCobIdWord(uint word)
+    {
+        if ((word & CanOpenCobId.ExtendedFrameBit) != 0) return true;
+        return (word & 0x1FFF_F800) == 0 && !CanOpenCobId.IsRestricted(word & CanOpenCobId.CanIdMask);
+    }
+
     private static bool IsUsableCobIdWord(uint word)
     {
         if ((word & CanOpenCobId.ExtendedFrameBit) != 0) return false;
@@ -486,7 +527,25 @@ internal sealed partial class CanOpenNode
 
     private void OnOdEntryWrittenForCommunicationProfile(ushort index, byte subindex)
     {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        if (index is >= 0x1FA0 and <= 0x1FCF)
+        {
+            RebuildCosRelevantEntries();
+            RunOnActor(() =>
+            {
+                foreach (var rt in _tpdos.Where(rt => rt is not null && rt.MappingKind == (byte)MpdoAddressMode.Source))
+                    RebuildTpdo(rt!.PdoIndex);
+            });
+            return;
+        }
+        if (index is >= 0x1FD0 and <= 0x1FFF)
+        {
+            RunOnActor(RebuildMpdoDispatcher);
+            return;
+        }
         if (!IsManagedCommunicationObject(index)) return;
+        if (subindex == 1 && (index is >= Co.RpdoComm and < Co.RpdoComm + Co.PdoCount
+            or >= Co.TpdoComm and < Co.TpdoComm + Co.PdoCount)) RefreshExtendedPdoFilter();
         if (Volatile.Read(ref _disposed) != 0) return;
         // A TPDO record changed: the change-of-state pre-filter is refreshed here, on the writing
         // thread and still inside the write gate, so that the writer's next write — the first
@@ -564,11 +623,12 @@ internal sealed partial class CanOpenNode
     private void ApplyAllCommunicationObjects()
     {
         ApplySyncConfiguration();
+        ApplySyncTimingConfiguration();
         ApplyEmcyConfiguration();
         ApplyHeartbeatProducerConfiguration();
         RebuildHeartbeatConsumers();
         ApplyLifeGuardingConfiguration();
-        for (int n = 1; n <= Co.PdoCount; n++)
+        for (int n = 1; n <= _pdoCount; n++)
         {
             RebuildRpdo(n);
             RebuildTpdo(n);
@@ -589,6 +649,10 @@ internal sealed partial class CanOpenNode
             case Co.SyncCobId:
             case Co.CyclePeriod:
                 ApplySyncConfiguration();
+                return;
+            case Co.SyncWindow:
+            case Co.SyncCounterOverflow:
+                ApplySyncTimingConfiguration();
                 return;
             case Co.EmcyCobId:
                 ApplyEmcyConfiguration();
@@ -628,12 +692,18 @@ internal sealed partial class CanOpenNode
     {
         uint word = _od.ReadUnsigned(Co.SyncCobId, 0x00);
         _syncCobId = word & CanOpenCobId.CanIdMask;
+        bool wasGenerating = _syncGenerate;
         _syncGenerate = (word & CanOpenCobId.SyncGenerateBit) != 0;
         uint periodMicroseconds = _od.ReadUnsigned(Co.CyclePeriod, 0x00);
+        bool startsProducer = !wasGenerating && _syncGenerate;
+        bool startsPeriod = _configuredSyncCyclePeriod == 0 && periodMicroseconds != 0;
+        if (startsProducer || startsPeriod) ResetSyncCounter();
+        _configuredSyncCyclePeriod = periodMicroseconds;
         var interval = TimeSpan.FromTicks(periodMicroseconds * (TimeSpan.TicksPerMillisecond / 1000));
 
         if (!_syncGenerate || periodMicroseconds == 0)
         {
+            _syncProducerGeneration++;
             _syncProducerHandle?.Dispose();
             _syncProducerHandle = null;
             _syncProducerInterval = TimeSpan.Zero;
@@ -641,6 +711,7 @@ internal sealed partial class CanOpenNode
         }
         if (_syncProducerHandle is not null && _syncProducerInterval == interval) return;
         _syncProducerHandle?.Dispose();
+        _syncProducerGeneration++;
         _syncProducerInterval = interval;
         ScheduleSyncProducerTick();
     }
@@ -693,6 +764,9 @@ internal sealed partial class CanOpenNode
     private void ApplyNmtTransition(NmtState target)
     {
         var previous = _state;
+        if (target == NmtState.Stopped) _syncProducerGeneration++;
+        if (previous == NmtState.Stopped && target is NmtState.PreOperational or NmtState.Operational)
+            ResetSyncCounter();
         if (target == NmtState.Operational && previous != NmtState.Operational)
         {
             // CiA DSP 304 §8.3.2.4 note 1: no safety entry is written in Operational. A direct
@@ -756,6 +830,9 @@ internal sealed partial class CanOpenNode
         // §7.2.8.3.2.1: "The toggle bit in the guarding protocol shall be reset to 0 when the NMT
         // sub-state reset communication is passed."
         _nodeGuardingProducerToggle = false;
+        ResetSyncCounter();
+        _syncProducerGeneration++;
+        _hasSync = false;
         ResetLifeGuardingState();
         // Reset node reloads the persistent node-id into the pending one. Reset communication
         // keeps the pending node-id. Neither command reloads the bit timing (CiA 305 §8.3).

@@ -18,9 +18,10 @@ using Xunit;
 namespace CanKit.Pro.Tests.TestCases.CANopen.Safety;
 
 /// <summary>A master configures a device's safety parameters over SDO (CiA DSP 304 V1.0 §9.2,
-/// Figure 9) and verifies them (§8.3.1 step D). The device is a real node; the mismatch path
-/// uses a fake expedited SDO server on a raw channel that answers one readback wrongly
-/// (FR-CO-044).</summary>
+/// Figure 9) as the configuration entity of CiA 319 v2.0.0 clause 5 — identity first, the steps
+/// of §5.3, the storage of step 5, the SRVT rule of §6.2 — and verifies them (§8.3.1 step D).
+/// The device is a real node; the mismatch path uses a fake expedited SDO server on a raw
+/// channel that answers one readback wrongly (FR-CO-044, FR-CO-051).</summary>
 public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 {
     private const byte Master = 0x01;
@@ -31,10 +32,35 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         $"virtual://{session}/{channel}",
         cfg => cfg.SetProtocolMode(CanProtocolMode.Can20).Baud(VirtualAdapterFixture.Bitrate));
 
+    /// <summary>The fixture's text, line endings normalised: what the files below derive from.</summary>
+    private static string FixtureText() => CanOpenFixtures.Text("safety.dcf").Replace("\r\n", "\n");
+
+    /// <summary>Replaces the first <paramref name="old"/> inside <paramref name="section"/> of <paramref name="text"/>.</summary>
+    private static string PatchedSection(string text, string section, string old, string replacement)
+    {
+        int at = text.IndexOf(section, StringComparison.Ordinal);
+        at.Should().BeGreaterThan(-1, section);
+        int hit = text.IndexOf(old, at, StringComparison.Ordinal);
+        hit.Should().BeGreaterThan(-1, old);
+        int next = text.IndexOf("\n[", at + 1, StringComparison.Ordinal);
+        (next < 0 || hit < next).Should().BeTrue("{0} is in {1}", old, section);
+        return text[..hit] + replacement + text[(hit + old.Length)..];
+    }
+
+    /// <summary>The fixture without the section of variable <paramref name="index"/>.</summary>
+    private static CanOpenDeviceDescription PeerFileWithoutVariable(ushort index)
+    {
+        var text = FixtureText();
+        int at = text.IndexOf($"\n[{index:X4}]\n", StringComparison.Ordinal);
+        at.Should().BeGreaterThan(-1);
+        int next = text.IndexOf("\n[", at + 1, StringComparison.Ordinal);
+        var file = CanOpenDeviceDescription.ParseDcf(text[..at] + text[next..]);
+        file.Contains(index, 0x00).Should().BeFalse();
+        return file;
+    }
+
     /// <summary>The file that lists every safety object of node 5 (the peer gate reads it).</summary>
-    private static CanOpenDeviceDescription PeerFile()
-        => CanOpenDeviceDescription.ParseDcf(System.IO.File.ReadAllText(
-            System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")));
+    private static CanOpenDeviceDescription PeerFile() => CanOpenDeviceDescription.ParseDcf(FixtureText());
 
     /// <summary>The master on a virtual clock: its SDO client deadline runs on the node's time
     /// source, which only the test moves, so a transfer waits for the peer's reply however long the
@@ -46,16 +72,86 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     private static CanOpenNode OpenOnVirtualClock(ICanBus bus, byte nodeId, CanOpenNodeOptions options, CanOpenDeviceDescription? description = null)
         => new(new CanKit.Pro.RawCan.CanBusService(bus), nodeId, options, ownsService: true, new ManualTimeSource(), description);
 
+    /// <summary>What a transaction has read when it refuses at the count: a configuration the
+    /// identity first (CiA 319 §5.2), a verification only the count.</summary>
+    private static (ushort, byte)[] ReadsUpToTheCount(bool verify) => verify
+        ? new[] { ((ushort)0x13FF, (byte)0x00) }
+        : new[] { ((ushort)0x1018, (byte)0x01), ((ushort)0x1018, (byte)0x02), ((ushort)0x1018, (byte)0x03), ((ushort)0x13FF, (byte)0x00) };
+
     private static PeerSafetyConfiguration Configuration() => new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true }
         .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
             new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
 
+    /// <summary>The identity the fixture's <c>[DeviceInfo]</c> gives node 5 — what CiA 319 §5.2
+    /// compares 1018h:01–03 with before anything is configured.</summary>
+    private const uint VendorId = 0x0000_0100, ProductCode = 0x0000_1001, RevisionNumber = 0x0001_0000;
+
     private static ICanOpenNode OpenDevice(ICanBus bus)
     {
         var device = OpenOnVirtualClock(bus, Device, new CanOpenNodeOptions { SrdoCount = 2, WritableCommunicationParameters = true });
+        device.ObjectDictionary.AddU32(0x1018, 0x01, VendorId, OdAccess.ReadOnly);
+        device.ObjectDictionary.AddU32(0x1018, 0x02, ProductCode, OdAccess.ReadOnly);
+        device.ObjectDictionary.AddU32(0x1018, 0x03, RevisionNumber, OdAccess.ReadOnly);
         device.ObjectDictionary.AddU16(0x2000, 0x00, 0x1234);
         device.ObjectDictionary.AddU8(0x2001, 0x00, 0x5A);
         return device;
+    }
+
+    /// <summary>The fixture with 1010h declared — sub-indices 0 and 1 ("save all parameters"), and
+    /// 2 ("save communication parameters") when asked — as a device that stores on command
+    /// lists it. The test device implements sub-index 1 only (CiA 301 §7.5.2.13).</summary>
+    private static CanOpenDeviceDescription PeerFileWith1010(bool withSub2)
+    {
+        var text = FixtureText();
+        text = text.Replace("[OptionalObjects]\nSupportedObjects=7\n", "[OptionalObjects]\nSupportedObjects=8\n").Replace("7=0x13FF\n", "7=0x13FF\n8=0x1010\n");
+        text.Should().Contain("8=0x1010");
+        var sections = new System.Text.StringBuilder();
+        sections.Append($"\n[1010]\nParameterName=Store parameters\nObjectType=0x8\nSubNumber={(withSub2 ? 3 : 2)}\n");
+        sections.Append($"\n[1010sub0]\nParameterName=Highest sub-index supported\nObjectType=0x7\nDataType=0x0005\nAccessType=ro\nDefaultValue={(withSub2 ? 2 : 1)}\nPDOMapping=0\n");
+        sections.Append("\n[1010sub1]\nParameterName=Save all parameters\nObjectType=0x7\nDataType=0x0007\nAccessType=rw\nDefaultValue=1\nPDOMapping=0\n");
+        if (withSub2) sections.Append("\n[1010sub2]\nParameterName=Save communication parameters\nObjectType=0x7\nDataType=0x0007\nAccessType=rw\nDefaultValue=1\nPDOMapping=0\n");
+        var file = CanOpenDeviceDescription.ParseDcf(text.TrimEnd('\n') + "\n" + sections);
+        file.Contains(0x1010, 0x01).Should().BeTrue();
+        file.Contains(0x1010, 0x02).Should().Be(withSub2);
+        return file;
+    }
+
+    /// <summary>The fixture with its 1018h:01–03 declared as 0, and its <c>[DeviceInfo]</c> numbers
+    /// with them: a file that describes no device.</summary>
+    private static CanOpenDeviceDescription PeerFileWithoutAnIdentity()
+    {
+        var text = FixtureText().Replace("VendorNumber=0x00000100", "VendorNumber=0").Replace("ProductNumber=0x00001001", "ProductNumber=0").Replace("RevisionNumber=0x00010000", "RevisionNumber=0");
+        text = PatchedSection(text, "[1018sub1]", "DefaultValue=0x00000100", "DefaultValue=0");
+        text = PatchedSection(text, "[1018sub2]", "DefaultValue=0x00001001", "DefaultValue=0");
+        text = PatchedSection(text, "[1018sub3]", "DefaultValue=0x00010000", "DefaultValue=0");
+        var file = CanOpenDeviceDescription.ParseDcf(text);
+        (file.DeviceInfo.VendorNumber, file.DeviceInfo.ProductNumber, file.DeviceInfo.RevisionNumber).Should().Be((0u, 0u, 0u));
+        return file;
+    }
+
+    /// <summary>The fixture without the three identity keys of <c>[DeviceInfo]</c>: the lines are
+    /// gone, not set to 0.</summary>
+    private static CanOpenDeviceDescription PeerFileWithoutDeviceInfoNumbers()
+    {
+        var text = FixtureText().Replace("VendorNumber=0x00000100\n", "").Replace("ProductNumber=0x00001001\n", "").Replace("RevisionNumber=0x00010000\n", "");
+        text.Should().NotContain("VendorNumber=").And.NotContain("ProductNumber=").And.NotContain("RevisionNumber=");
+        return CanOpenDeviceDescription.ParseDcf(text);
+    }
+
+    /// <summary>The fixture with record 1301h declared without sub-index 3: a device that does
+    /// not implement the SRVT of its tx SRDO 1 (CiA 319 §6.2) — or whose file says so.</summary>
+    private static CanOpenDeviceDescription PeerFileWithoutSrvtOfSrdo1()
+    {
+        var text = FixtureText();
+        int start = text.IndexOf("[1301sub3]", StringComparison.Ordinal);
+        int end = text.IndexOf("[1301sub4]", StringComparison.Ordinal);
+        start.Should().BeGreaterThan(-1);
+        end.Should().BeGreaterThan(start);
+        text = (text[..start] + text[end..]).Replace("SRDO communication parameter 1\nSubNumber=7", "SRDO communication parameter 1\nSubNumber=6");
+        var file = CanOpenDeviceDescription.ParseDcf(text);
+        file.Contains(0x1301, 0x03).Should().BeFalse();
+        file.Contains(0x1301, 0x02).Should().BeTrue();
+        return file;
     }
 
     [Fact]
@@ -81,6 +177,556 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue();
     }
 
+    /// <summary>CiA 319 §5.2: "Prior to the configuration of an SRD, the configuration entity
+    /// shall perform a verification of the identity of the SRD based on object 1018h", entries
+    /// 01h–03h, against the EDS. A device that is not the one the bound file describes is
+    /// reported with the entry that differs, and nothing is written to it.</summary>
+    [Theory]
+    [InlineData((byte)0x01)]
+    [InlineData((byte)0x02)]
+    [InlineData((byte)0x03)]
+    public async Task Configure_Verifies_The_Peers_Identity_Before_Writing_Anything(byte subindex)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenDevice(busB);
+        device.ObjectDictionary.AddU32(0x1018, subindex, 0x0BAD_0000, OdAccess.ReadOnly); // another device
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        result.Stored.Should().BeFalse();
+        var mismatch = result.Mismatches.Should().ContainSingle().Which;
+        mismatch.Index.Should().Be(0x1018);
+        mismatch.Subindex.Should().Be(subindex);
+        mismatch.Expected.Should().Equal(BitConverter.GetBytes(subindex switch { 1 => VendorId, 2 => ProductCode, _ => RevisionNumber }));
+        mismatch.Actual.Should().Equal(0x00, 0x00, 0xAD, 0x0B);
+        var od = device.ObjectDictionary;
+        od.ReadUnsigned(0x1300, 0).Should().Be(0u, "nothing was written");
+        od.ReadUnsigned(0x1301, 2).Should().Be(25u, "nothing was written");
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+    }
+
+    /// <summary>All three identity entries are read and reported, and they are the only transfers
+    /// of a configuration that ends there: no count, no write.</summary>
+    [Fact]
+    public async Task An_Identity_That_Differs_Is_The_Only_Thing_Read_And_Every_Difference_Is_Reported()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Written)
+        {
+            fake.Written[(0x1018, 1)] = BitConverter.GetBytes(VendorId + 1);
+            fake.Written[(0x1018, 2)] = BitConverter.GetBytes(ProductCode + 1);
+            fake.Written[(0x1018, 3)] = new byte[] { 0x00, 0x00, 0x01 }; // three bytes, not UNSIGNED32: still a difference
+        }
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        result.Mismatches.Select(m => (m.Index, m.Subindex)).Should().Equal(((ushort)0x1018, (byte)1), ((ushort)0x1018, (byte)2), ((ushort)0x1018, (byte)3));
+        result.Mismatches[2].Actual.Should().Equal(0x00, 0x00, 0x01);
+        lock (fake.Requests) fake.Requests.Should().Equal(((ushort)0x1018, (byte)1), ((ushort)0x1018, (byte)2), ((ushort)0x1018, (byte)3));
+        lock (fake.Written) fake.Written.Keys.Where(k => k.Item1 != 0x1018 && k != (0x13FF, 0)).Should().BeEmpty("nothing was written");
+    }
+
+    /// <summary>CiA 319 §5.2 needs all three identity entries, which CiA 301 makes optional past
+    /// the vendor-ID: a bound file that leaves 1018h:02 out is refused before any frame, as the
+    /// gate would refuse that upload — one frame in, otherwise.</summary>
+    [Fact]
+    public async Task A_File_That_Leaves_An_Identity_Entry_Out_Is_Refused_Before_Any_Frame()
+    {
+        var text = FixtureText();
+        int start = text.IndexOf("[1018sub2]", StringComparison.Ordinal);
+        int end = text.IndexOf("[1018sub3]", StringComparison.Ordinal);
+        (start > -1 && end > start).Should().BeTrue();
+        var file = CanOpenDeviceDescription.ParseDcf(text[..start] + text[end..]);
+        file.Contains(0x1018, 0x02).Should().BeFalse();
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, file);
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x1018, (byte)0x02, true));
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>CiA 319 §5.2 compares the peer with "the entries in the EDS": the file's own
+    /// 1018h:01–03, not <c>[DeviceInfo]</c>, whose keys EdsDcfNet reads as 0 when the file leaves
+    /// them out. A file without those keys still configures the device its entries describe.</summary>
+    [Fact]
+    public async Task The_Identity_Comes_From_The_Files_1018h_Entries()
+    {
+        var file = PeerFileWithoutDeviceInfoNumbers();
+        (file.DeviceInfo.VendorNumber, file.DeviceInfo.ProductNumber, file.DeviceInfo.RevisionNumber).Should().Be((0u, 0u, 0u), "absent keys read as 0");
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, file);
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+    }
+
+    /// <summary>A file whose <c>[DeviceInfo]</c> numbers are set and disagree with its 1018h entries
+    /// describes no one device: refused before any frame rather than verified against either.</summary>
+    [Fact]
+    public async Task A_File_Whose_DeviceInfo_Contradicts_Its_1018h_Entries_Is_Refused_Before_Any_Frame()
+    {
+        var file = CanOpenDeviceDescription.ParseDcf(FixtureText().Replace("RevisionNumber=0x00010000", "RevisionNumber=0x00020000"));
+        file.DeviceInfo.RevisionNumber.Should().Be(0x00020000u);
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, file);
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("contradicts itself").And.Contain("RevisionNumber").And.Contain("1018h:03");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>A file that declares 1018h:02 but gives it no value has no product code to compare
+    /// with: refused before any frame.</summary>
+    [Fact]
+    public async Task A_File_Declaring_An_Identity_Entry_Without_A_Value_Is_Refused_Before_Any_Frame()
+    {
+        var text = PatchedSection(FixtureText(), "[1018sub2]", "DefaultValue=0x00001001\n", "");
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, CanOpenDeviceDescription.ParseDcf(text));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("1018h:02").And.Contain("without a value");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>A <c>$NODEID</c> formula is no identity: resolved with any node-id it would make
+    /// up a value to verify the peer against — with 0, the fixture's own vendor-ID, which this
+    /// peer answers. Refused before any frame, like an entry without a value.</summary>
+    [Fact]
+    public async Task A_File_Declaring_An_Identity_Entry_As_A_Node_Id_Formula_Is_Refused_Before_Any_Frame()
+    {
+        var text = PatchedSection(FixtureText(), "[1018sub1]", "DefaultValue=0x00000100", "DefaultValue=$NODEID+0x100");
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, CanOpenDeviceDescription.ParseDcf(text));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("1018h:01").And.Contain("without a value").And.Contain("$NODEID");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>A file whose 1018h:01, :02 and :03 are all 0 describes no device: comparing a peer
+    /// with it would prove nothing. Refused before any frame.</summary>
+    [Fact]
+    public async Task A_File_Without_An_Identity_Is_Refused_Before_Any_Frame()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutAnIdentity());
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("no identity").And.Contain("CiA 319 §5.2");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>Once 1018h:01 differed, the peer is another device, and its "sub-index does not
+    /// exist" for :02 is part of that answer: a mismatch with no bytes read, not an abort that
+    /// hides the vendor difference. All three entries are still reported.</summary>
+    [Fact]
+    public async Task An_Identity_Entry_The_Peer_Lacks_After_A_Difference_Is_A_Mismatch_Not_An_Abort()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Written) fake.Written[(0x1018, 1)] = BitConverter.GetBytes(VendorId + 1);
+        lock (fake.Requests) fake.AbortAt[(0x1018, 2)] = (uint)SdoAbortCode.SubIndexDoesNotExist;
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        result.Mismatches.Select(m => (m.Index, m.Subindex)).Should().Equal(((ushort)0x1018, (byte)1), ((ushort)0x1018, (byte)2));
+        result.Mismatches[1].Actual.Should().BeEmpty("the peer has no such entry");
+        lock (fake.Requests) fake.Requests.Should().Equal(((ushort)0x1018, (byte)1), ((ushort)0x1018, (byte)2), ((ushort)0x1018, (byte)3));
+    }
+
+    /// <summary>With the vendor-ID matching, a peer that lacks 1018h:02 is not an SRD CiA 319 §5.2
+    /// can be run against: the abort propagates, as every abort does.</summary>
+    [Fact]
+    public async Task An_Identity_Entry_The_Peer_Lacks_Propagates_When_No_Earlier_Entry_Differed()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Requests) fake.AbortAt[(0x1018, 2)] = (uint)SdoAbortCode.SubIndexDoesNotExist;
+        master.BindPeerDeviceDescription(Device, PeerFile());
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.AbortCode).Should().Be(((ushort)0x1018, (byte)2, (uint)SdoAbortCode.SubIndexDoesNotExist));
+    }
+
+    /// <summary>Every transfer a transaction makes whatever the peer answers passes the gate
+    /// before the first frame: a file that does not declare 13FEh or 1300h is refused with nothing
+    /// sent, not after the peer holds a configuration it cannot be told is valid.</summary>
+    [Theory]
+    [InlineData((ushort)0x13FE, false)]
+    [InlineData((ushort)0x13FE, true)]
+    [InlineData((ushort)0x1300, false)]
+    public async Task A_Fixed_Transfer_The_File_Does_Not_Declare_Is_Refused_Before_Any_Frame(ushort index, bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutVariable(index));
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => (verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration())
+            : master.Safety().ConfigurePeerSafetyAsync(Device, Configuration())).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be((index, (byte)0x00, true));
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>CiA 319 §5.3 step 5: with <see cref="PeerSafetyConfiguration.Storage"/> asked for,
+    /// the "save" signature goes to 1010h after the acknowledgement, so what the peer stores
+    /// includes 13FEh = A5h, and a reset of the peer brings the configuration back. Without it,
+    /// the reset brings the power-on values back.</summary>
+    [Theory]
+    [InlineData(PeerSafetyStorage.AllParameters)]
+    [InlineData(PeerSafetyStorage.None)]
+    public async Task Configure_Stores_The_Acknowledged_Configuration_When_Asked(PeerSafetyStorage storage)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false));
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true, Storage = storage }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        result.Stored.Should().Be(storage != PeerSafetyStorage.None);
+        var od = device.ObjectDictionary;
+        od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u);
+
+        var reset = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.NmtCommandReceived += (_, e) => { if (e.Command == NmtCommand.ResetCommunication) reset.TrySetResult(true); }; // raised after the node acted on it
+        await master.SendNmtCommandAsync(NmtCommand.ResetCommunication, Device);
+        await reset.Task.WithTimeoutAsync(ShortTimeout);
+        device.State.Should().Be(NmtState.PreOperational);
+        if (storage == PeerSafetyStorage.None)
+        {
+            od.ReadUnsigned(0x1301, 1).Should().Be(0u, "the power-on values are back: nothing was stored");
+            od.ReadUnsigned(0x13FE, 0).Should().Be(0u);
+        }
+        else
+        {
+            od.ReadUnsigned(0x1301, 1).Should().Be(1u, "the stored configuration is back");
+            od.ReadUnsigned(0x1301, 2).Should().Be(30u);
+            od.ReadUnsigned(0x1300, 0).Should().Be(1u);
+            od.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "the acknowledgement was stored with it");
+            SrdoRecords.IsConfigurationValid(od, 1).Should().BeTrue();
+        }
+    }
+
+    /// <summary>The store is the last transfer: it is not sent when the readback differs, and
+    /// a configuration that ends there reports neither acknowledged nor stored.</summary>
+    [Fact]
+    public async Task No_Store_Without_The_Acknowledgement()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0x1301, 0x02));
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false));
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true, Storage = PeerSafetyStorage.AllParameters }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        result.Stored.Should().BeFalse();
+        lock (fake.Written)
+        {
+            fake.Written.Should().NotContainKey((0x13FE, 0));
+            fake.Written.Should().NotContainKey((0x1010, 1));
+        }
+    }
+
+    /// <summary>A storage sub-index the bound file does not declare is refused before any frame,
+    /// as the gate would refuse the transfer — but then, after the acknowledgement.</summary>
+    [Fact]
+    public async Task A_Storage_The_Bound_File_Does_Not_Declare_Is_Refused_Before_Any_Frame()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false));
+        var configuration = new PeerSafetyConfiguration { Storage = PeerSafetyStorage.CommunicationParameters }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x1010, (byte)0x02, true));
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
+    /// <summary>A store the peer refuses — here 1010h:02, which the device does not implement —
+    /// comes after the acknowledgement, which stands: the result says acknowledged, not stored,
+    /// and carries the abort, instead of throwing the acknowledged state away.</summary>
+    [Fact]
+    public async Task A_Store_The_Peer_Refuses_Is_Reported_With_The_Acknowledgement()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: true));
+        var configuration = new PeerSafetyConfiguration { Storage = PeerSafetyStorage.CommunicationParameters }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        result.Stored.Should().BeFalse();
+        var abort = result.StorageAbort.Should().NotBeNull().And.Subject.As<SdoAbortException>();
+        (abort.Index, abort.Subindex, abort.AbortCode).Should().Be(((ushort)0x1010, (byte)0x02, (uint)SdoAbortCode.SubIndexDoesNotExist));
+        device.ObjectDictionary.ReadUnsigned(0x13FE, 0).Should().Be(0xA5u, "the acknowledgement stands; only the store failed");
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 1).Should().BeTrue();
+    }
+
+    /// <summary>The store goes to the sub-index asked for and to no other, with the "save" signature.</summary>
+    [Theory]
+    [InlineData(PeerSafetyStorage.AllParameters)]
+    [InlineData(PeerSafetyStorage.CommunicationParameters)]
+    public async Task Configure_Stores_Through_The_Sub_Index_Asked_For(PeerSafetyStorage storage)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: true));
+        var configuration = new PeerSafetyConfiguration { Storage = storage }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        result.Stored.Should().BeTrue();
+        result.StorageAbort.Should().BeNull();
+        lock (fake.Written)
+        {
+            fake.Written[(0x1010, (byte)storage)].Should().Equal(0x73, 0x61, 0x76, 0x65); // "evas": UNSIGNED32 65 76 61 73h, little-endian
+            fake.Written.Should().NotContainKey((0x1010, (byte)(storage == PeerSafetyStorage.AllParameters ? 2 : 1)));
+        }
+    }
+
+    /// <summary>Storage can be asked for on a configuration built from a description, which the
+    /// factory cannot set; a value that is no sub-index of 1010h is refused when set.</summary>
+    [Fact]
+    public void Storage_Can_Be_Set_On_A_Configuration_Built_From_A_Description()
+    {
+        var configuration = PeerSafetyConfiguration.FromDeviceDescription(PeerFile(), Device);
+        configuration.Storage.Should().Be(PeerSafetyStorage.None);
+        configuration.Storage = PeerSafetyStorage.AllParameters;
+        configuration.Storage.Should().Be(PeerSafetyStorage.AllParameters);
+        configuration.Snapshot().Storage.Should().Be(PeerSafetyStorage.AllParameters, "a transaction works from the copy");
+        Action set = () => configuration.Storage = (PeerSafetyStorage)3;
+        set.Should().Throw<ArgumentOutOfRangeException>();
+        configuration.Storage.Should().Be(PeerSafetyStorage.AllParameters, "a refused value changes nothing");
+    }
+
+    /// <summary>CiA 319 §6.2: "SRVT for SRDOs with Tx transmission direction – For the calculation
+    /// the default value of 20d shall be used" when the SRD does not implement it, and the EDS
+    /// "should include the SRVT parameter for all supported SRDOs". A tx SRDO whose record the
+    /// bound file declares without sub-index 3 says 20 ms, and the sub-index is written and read
+    /// back all the same: a peer that aborts it with 0609 0011h does not implement it, which both
+    /// tolerate; one that accepts it holds the 20 ms. The checksum is over 20 ms either way. A
+    /// consumer's SRVT is not optional: written whatever the file says.</summary>
+    [Theory]
+    [InlineData(SrdoDirection.Transmit, true)]
+    [InlineData(SrdoDirection.Transmit, false)]
+    [InlineData(SrdoDirection.Receive, false)]
+    public async Task A_Transmit_Srdos_Srvt_The_File_Does_Not_Declare_Is_Written_As_Optional_And_Checksummed_At_The_Default(SrdoDirection direction, bool peerLacksSrvt)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        if (peerLacksSrvt) fake.AbortAt[(0x1301, 3)] = (uint)SdoAbortCode.SubIndexDoesNotExist;
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutSrvtOfSrdo1());
+        var parameter = new SrdoCommunicationParameter(direction, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A);
+        // The fixture's process objects are ro, which a consumer cannot map; an empty mapping is allowed (L = 0).
+        var mapping = direction == SrdoDirection.Transmit ? new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8) : new SrdoMapping();
+        var configuration = new PeerSafetyConfiguration().Add(1, parameter, mapping);
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        ushort crc = SrdoCrc.Compute(parameter, mapping);
+        lock (fake.Written)
+        {
+            fake.Written.ContainsKey((0x1301, 3)).Should().Be(!peerLacksSrvt, "a peer that holds the sub-index gets the 20 ms");
+            if (!peerLacksSrvt) fake.Written[(0x1301, 3)].Should().Equal(20);
+            fake.Written[(0x13FF, 1)].Should().Equal((byte)crc, (byte)(crc >> 8));
+        }
+        lock (fake.Requests) fake.Requests.Count(r => r == (0x1301, 3)).Should().Be(2, "written and read back, whatever the peer answers");
+        lock (fake.Requests) fake.Requests.Clear();
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+        lock (fake.Requests) fake.Requests.Should().Contain((0x1301, 3));
+    }
+
+    /// <summary>Only the SRVT of a tx SRDO whose record the file declares without it is optional:
+    /// the abort of a consumer's SRVT, or of one the file declares, propagates as every abort
+    /// does — on the configuration's write and on the verification's readback alike.</summary>
+    [Theory]
+    [InlineData(true, false)]   // a consumer, on a file without sub-index 3
+    [InlineData(false, false)]  // a producer, on the file that declares it
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task An_Srvt_The_File_Declares_Or_A_Consumer_Needs_Is_Not_Optional(bool consumer, bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        fake.AbortAt[(0x1301, 3)] = (uint)SdoAbortCode.SubIndexDoesNotExist;
+        master.BindPeerDeviceDescription(Device, consumer ? PeerFileWithoutSrvtOfSrdo1() : PeerFile());
+        var configuration = consumer
+            ? new PeerSafetyConfiguration().Add(1, new SrdoCommunicationParameter(SrdoDirection.Receive, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A), new SrdoMapping())
+            : Configuration();
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => (verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, configuration)).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.AbortCode).Should().Be(((ushort)0x1301, (byte)3, (uint)SdoAbortCode.SubIndexDoesNotExist));
+    }
+
+    /// <summary>A tx SRDO's SRVT the file declares read-only is one the peer holds and will not
+    /// take: not written — a write would be refused loudly here — but read back and compared
+    /// with the 20 ms the checksum covers.</summary>
+    [Fact]
+    public async Task A_Read_Only_Srvt_The_File_Declares_Is_Read_Back_Not_Written()
+    {
+        var file = CanOpenDeviceDescription.ParseDcf(PatchedSection(FixtureText(), "[1301sub3]", "AccessType=rw", "AccessType=ro"));
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Requests) fake.AbortDownloadAt[(0x1301, 3)] = (uint)SdoAbortCode.AttemptWriteReadOnly;
+        lock (fake.Written) fake.Written[(0x1301, 3)] = new byte[] { 20 };
+        master.BindPeerDeviceDescription(Device, file);
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        lock (fake.Requests) fake.Requests.Count(r => r == (0x1301, 3)).Should().Be(1, "read back once, never written");
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+    }
+
+    /// <summary>The same against a device: its sub-index 3 is left at the 20 ms it holds, and its
+    /// own checksum agrees.</summary>
+    [Fact]
+    public async Task A_Device_Whose_File_Declares_The_Srvt_Read_Only_Is_Configured_Around_It()
+    {
+        var file = CanOpenDeviceDescription.ParseDcf(PatchedSection(FixtureText(), "[1301sub3]", "AccessType=rw", "AccessType=ro"));
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenDevice(busB);
+        master.BindPeerDeviceDescription(Device, file);
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 1).Should().BeTrue();
+    }
+
+    /// <summary>A peer that holds, read-only, the SRVT its file leaves out refuses the optional
+    /// write with "attempt to write a read-only object": tolerated, since the 20 ms it holds are
+    /// what the checksum covers — and read back, so a peer holding another value is a mismatch.</summary>
+    [Theory]
+    [InlineData(20, true)]
+    [InlineData(30, false)]
+    public async Task A_Read_Only_Srvt_The_File_Leaves_Out_Is_Tolerated_On_The_Write_And_Read_Back(byte held, bool succeeds)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Requests) fake.AbortDownloadAt[(0x1301, 3)] = (uint)SdoAbortCode.AttemptWriteReadOnly;
+        lock (fake.Written) fake.Written[(0x1301, 3)] = new[] { held };
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutSrvtOfSrdo1());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().Be(succeeds, string.Join("\n", result.Mismatches));
+        if (!succeeds) result.Mismatches.Should().ContainSingle(m => m.Index == 0x1301 && m.Subindex == 3);
+        lock (fake.Requests) fake.Requests.Count(r => r == (0x1301, 3)).Should().Be(2, "the write the peer refused, and the readback");
+    }
+
+    /// <summary>A peer that took the optional SRVT answers for it: an abort on its readback is
+    /// not the "not implemented" of a peer that declined the write, and propagates.</summary>
+    [Fact]
+    public async Task A_Peer_That_Took_The_Optional_Srvt_Answers_Its_Readback()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        lock (fake.Requests) fake.AbortUploadAt[(0x1301, 3)] = (uint)SdoAbortCode.SubIndexDoesNotExist;
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutSrvtOfSrdo1());
+        var ex = await Assert.ThrowsAsync<SdoAbortException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex).Should().Be(((ushort)0x1301, (byte)3));
+        lock (fake.Written) fake.Written.Should().NotContainKey((0x13FE, 0), "nothing was acknowledged");
+    }
+
+    /// <summary>The file is not trusted alone. A device that holds sub-index 3 although its file
+    /// leaves it out — here at 30 ms from an earlier configuration, which a delete (sub-index 1
+    /// only) does not clear — gets the 20 ms written that the checksum covers, so its own
+    /// checksum agrees with the one it was given.</summary>
+    [Fact]
+    public async Task A_Device_Holding_An_Srvt_Its_File_Leaves_Out_Gets_The_Default_Written()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var busB = Open(session, 2);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var device = OpenDevice(busB);
+        device.ObjectDictionary.WriteUnsigned(0x1301, 3, 30);
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutSrvtOfSrdo1());
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeTrue(string.Join("\n", result.Mismatches));
+        device.ObjectDictionary.ReadUnsigned(0x1301, 3).Should().Be(20u, "written although the file leaves it out");
+        SrdoRecords.IsConfigurationValid(device.ObjectDictionary, 1).Should().BeTrue("the device checksums the 20 ms it holds");
+        var verified = await master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout);
+        verified.Succeeded.Should().BeTrue(string.Join("\n", verified.Mismatches));
+    }
+
+    /// <summary>An SRVT other than 20 ms for a tx SRDO the peer holds no SRVT for cannot be
+    /// written, and a checksum over it would not be the peer's: refused before any frame, by the
+    /// configuration and the verification alike.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Another_Srvt_For_A_Transmit_Srdo_Without_One_On_The_Peer_Is_Refused_Before_Any_Frame(bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutSrvtOfSrdo1());
+        var configuration = new PeerSafetyConfiguration()
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(30), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => (verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, configuration)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, configuration)).WithTimeoutAsync(ShortTimeout));
+        ex.ParamName.Should().Be(verify ? "expected" : "configuration");
+        ex.Message.Should().Contain("CiA 319 §6.2");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
+    }
+
     [Fact]
     public async Task Configure_Is_Refused_Without_A_Bound_Description()
     {
@@ -89,8 +735,25 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var busB = Open(session, 2);
         using var master = OpenMasterOnVirtualClock(busA);
         using var device = OpenDevice(busB);
-        await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x1018, (byte)0x01, false), "the first transfer, which has nothing to be compared with");
+        ex.Message.Should().Contain("CiA 319 §5.2");
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+    }
+
+    /// <summary>A verification reads no identity, so without a bound description it is the gate
+    /// that refuses its first transfer, 13FFh:00, before any frame — not a pre-check reading the
+    /// absent file as a description of zero SRDO records.</summary>
+    [Fact]
+    public async Task Verify_Is_Refused_Without_A_Bound_Description()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x13FF, (byte)0x00, false), "the first transfer of a verification");
+        lock (fake.Requests) fake.Requests.Should().BeEmpty("nothing was sent");
     }
 
     [Fact]
@@ -369,8 +1032,37 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, tooMany).WithTimeoutAsync(ShortTimeout)
             : master.Safety().ConfigurePeerSafetyAsync(Device, tooMany).WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain("SRDO 3").And.Contain("2 SRDO");
+        ex.ParamName.Should().Be(verify ? "expected" : "configuration", "the public method's own parameter, whichever pre-check refuses");
         device.ObjectDictionary.ReadUnsigned(0x1300, 0).Should().Be(0u, "nothing was sent");
         device.ObjectDictionary.ReadUnsigned(0x1301, 1).Should().Be(0u, "nothing was sent");
+    }
+
+    /// <summary>The file may declare more SRDO records than the peer reports in 13FFh:00. An SRDO
+    /// the file has a record for but the peer has not is refused once the count is read, before
+    /// any further frame — the peer could never hold it, and writing the others would report a
+    /// configuration with that SRDO missing.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_Srdo_Within_The_Files_Records_But_Above_The_Peers_Count_Is_Refused_After_The_Count(bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: 1);
+        master.BindPeerDeviceDescription(Device, PeerFile()); // declares records 1301h and 1302h
+        List<(ushort, byte)> seeded;
+        lock (fake.Written) seeded = fake.Written.Keys.ToList();
+        var second = Configuration()
+            .Add(2, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x10B, 0x10C),
+                new SrdoMapping().Add(0x2001, 0x00, 8));
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, second).WithTimeoutAsync(ShortTimeout)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, second).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("SRDO 2").And.Contain("only 1 SRDO").And.Contain("13FFh:00");
+        ex.ParamName.Should().Be(verify ? "expected" : "configuration");
+        lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify), "nothing after the count");
+        lock (fake.Written) fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
     }
 
     /// <summary>13FFh:00 is the number of SRDOs, at most 64 (§8.4.2.2). A peer reporting more is
@@ -392,7 +1084,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)
             : master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain(count.ToString(System.Globalization.CultureInfo.InvariantCulture)).And.Contain("64");
-        lock (fake.Requests) fake.Requests.Should().Equal(new[] { ((ushort)0x13FF, (byte)0) }, "nothing after the count");
+        lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify), "nothing after the count");
     }
 
     /// <summary>64 is the maximum and is taken: the verification reaches 1340h with a file whose
@@ -422,9 +1114,11 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var master = OpenMasterOnVirtualClock(busA);
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), emptyCount: true);
         master.BindPeerDeviceDescription(Device, PeerFile());
+        List<(ushort, byte)> seeded;
+        lock (fake.Written) seeded = fake.Written.Keys.ToList();
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain("13FFh:00");
-        fake.Written.Keys.Should().OnlyContain(k => k.Item1 == 0x13FF, "nothing was written");
+        lock (fake.Written) fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
     }
 
     /// <summary>13FFh:00 is UNSIGNED8 (§8.4.2.2): a response of any other length — none, two or
@@ -454,7 +1148,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)
             : master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
         ex.Message.Should().Contain("13FFh:00").And.Contain($"{length} byte");
-        lock (fake.Requests) fake.Requests.Should().Equal(new[] { ((ushort)0x13FF, (byte)0x00) }, "nothing after the count");
+        lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify), "nothing after the count");
     }
 
     /// <summary>A safety transaction uses one description for its whole length: the one bound at
@@ -515,17 +1209,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     }
 
     /// <summary>The fixture without object 1300h (section and optional-object entry).</summary>
-    private static CanOpenDeviceDescription PeerFileWithout1300()
-    {
-        var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n");
-        int at = text.IndexOf("\n[1300]\n", StringComparison.Ordinal);
-        at.Should().BeGreaterThan(-1);
-        int next = text.IndexOf("\n[", at + 1, StringComparison.Ordinal);
-        text = text[..at] + text[next..];
-        var file = CanOpenDeviceDescription.ParseDcf(text);
-        file.Contains(0x1300, 0x00).Should().BeFalse();
-        return file;
-    }
+    private static CanOpenDeviceDescription PeerFileWithout1300() => PeerFileWithoutVariable(0x1300);
 
     /// <summary>The fixture with mapping record 1381h declaring only sub-indices 0..4 — the two
     /// objects of <see cref="Configuration"/>, plain and inverted — as a conforming DCF may: the
@@ -739,7 +1423,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
     [InlineData("visible string")]   // 2008h:00, VISIBLE_STRING: no fixed width
     [InlineData("domain")]           // 2009h:00, DOMAIN: no fixed width
     [InlineData("no data type")]     // 200Ah:00 declared without DataType: width unknown
-    [InlineData("unknown type")]     // 200Bh:00, DataType 0x0010 (INTEGER24), a code this implementation does not map
+    [InlineData("unknown type")]     // 200Bh:00, DataType 0x000C (TIME_OF_DAY), a code this implementation does not map
     public async Task Configure_Refuses_A_Mapping_The_Bound_File_Rules_Out_Before_Any_Frame(string what)
     {
         var session = VirtualAdapterFixture.NewSession("co-peer-safety");
@@ -748,7 +1432,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0));
         var file = PeerFileWith(((ushort)0x2006, "0x0005", "rw", false), ((ushort)0x2007, "0x0005", "wo", true),
             ((ushort)0x2008, "0x0009", "rw", true), ((ushort)0x2009, "0x000F", "rw", true),
-            ((ushort)0x200A, "", "rw", true), ((ushort)0x200B, "0x0010", "rw", true));
+            ((ushort)0x200A, "", "rw", true), ((ushort)0x200B, "0x000C", "rw", true));
         if (what == "flag absent")
         {
             var text = System.IO.File.ReadAllText(System.IO.Path.Combine(AppContext.BaseDirectory, "TestCases", "CANopen", "Fixtures", "safety.dcf")).Replace("\r\n", "\n")
@@ -922,7 +1606,7 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         lock (fake.Requests)
         {
             fake.Requests[0].Should().Be(((ushort)0x1000, (byte)0x00));
-            fake.Requests[1].Should().Be(((ushort)0x13FF, (byte)0x00), "the transaction's first frame comes after the call it waited for");
+            fake.Requests[1].Should().Be(((ushort)0x1018, (byte)0x01), "the transaction's first frame — the identity — comes after the call it waited for");
         }
     }
 
@@ -953,8 +1637,8 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
 
     /// <summary>The transaction works from the configuration as it was when it started — when it
     /// owns the peer's channel, before its first frame: an SRDO added to the caller's instance
-    /// while the count upload is held is neither checked, written nor compared, for Configure and
-    /// Verify alike.</summary>
+    /// while the count upload is held (for a configuration, after its three identity reads) is
+    /// neither checked, written nor compared, for Configure and Verify alike.</summary>
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -1068,6 +1752,12 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         private readonly (ushort, byte) _lieAt;
         public readonly Dictionary<(ushort, byte), byte[]> Written = new();
         public readonly List<(ushort Index, byte Subindex)> Requests = new();
+        /// <summary>Pairs whose download and upload are answered with this abort code: what the fake does not implement.</summary>
+        public readonly Dictionary<(ushort, byte), uint> AbortAt = new();
+        /// <summary>Pairs whose download alone is answered with this abort code: what the fake holds but will not take.</summary>
+        public readonly Dictionary<(ushort, byte), uint> AbortDownloadAt = new();
+        /// <summary>Pairs whose upload alone is answered with this abort code.</summary>
+        public readonly Dictionary<(ushort, byte), uint> AbortUploadAt = new();
         /// <summary>The first request to this pair is answered only on <see cref="ReleaseHeld"/>.</summary>
         public (ushort, byte)? HoldAt { get; init; }
         private Action? _heldReply;
@@ -1090,6 +1780,10 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
             _nodeId = nodeId;
             _lieAt = lieAt;
             Written[(0x13FF, 0)] = emptyCount ? Array.Empty<byte>() : new byte[] { srdoCount };
+            // The identity of the fixture: CiA 319 §5.2 reads it before anything else.
+            Written[(0x1018, 1)] = BitConverter.GetBytes(VendorId);
+            Written[(0x1018, 2)] = BitConverter.GetBytes(ProductCode);
+            Written[(0x1018, 3)] = BitConverter.GetBytes(RevisionNumber);
             _bus = Open(session, channel);
             _bus.FrameObserved += (_, e) =>
             {
@@ -1100,7 +1794,18 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
                 byte sub = d[3];
                 if ((d[0] & 0xE0) is 0x20 or 0x40) lock (Requests) Requests.Add((index, sub));
                 byte[] reply;
-                if ((d[0] & 0xE0) == 0x20)
+                uint abort;
+                lock (Requests)
+                {
+                    if (!AbortAt.TryGetValue((index, sub), out abort))
+                    {
+                        if ((d[0] & 0xE0) == 0x20) AbortDownloadAt.TryGetValue((index, sub), out abort);
+                        else if (d[0] == 0x40) AbortUploadAt.TryGetValue((index, sub), out abort);
+                    }
+                }
+                if ((d[0] & 0xE0) is 0x20 or 0x40 && abort != 0)
+                    reply = new byte[] { 0x80, d[1], d[2], d[3], (byte)abort, (byte)(abort >> 8), (byte)(abort >> 16), (byte)(abort >> 24) };
+                else if ((d[0] & 0xE0) == 0x20)
                 {
                     int n = (d[0] & 0x01) != 0 ? 4 - ((d[0] >> 2) & 0x03) : 4;
                     lock (Written) Written[(index, sub)] = d.Skip(4).Take(n).ToArray();
