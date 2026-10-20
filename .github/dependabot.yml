@@ -90,6 +90,13 @@ updates:
           - "actions/upload-pages-artifact"
           - "actions/deploy-pages"
           - "actions/configure-pages"
+      # init and analyze have to run the same CodeQL Action version: with init on 4.39.0 and
+      # analyze on 4.38.2 the analyze post step fails ("Loaded a configuration file for version
+      # '4.39.0', but running version '4.38.2'"), so separate bumps of either half (#325, #327)
+      # can never pass CI on their own.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
 
   - package-ecosystem: pip
     # eng/docs-requirements.txt: the website build (MkDocs + Material). Not "build(deps)" for the
