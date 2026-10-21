@@ -1906,7 +1906,7 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         // Dispose while SendAsync still holds _sendGate (awaiting confirmation / idle drain).
         Action dispose = () => sender.Dispose();
-        dispose.Should().NotThrow("Dispose must wait out the send-gate holder before disposing it");
+        dispose.Should().NotThrow("Dispose must leave the send gate to its holder (#339: it is never disposed)");
 
         holdConfirm.Release();
 
@@ -1914,6 +1914,101 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         // Clean shutdown: FailTx's ObjectDisposedException, not a secondary ODE from Release.
         (await send.Should().ThrowAsync<ObjectDisposedException>())
             .Which.ObjectName.Should().Be("IsoTpChannel");
+    }
+
+    // --------------------------------------------------------------------------------
+    // #339 (deep review I-1/I-6) — a SendAsync queued on the send gate behind an in-flight send
+    // must fail with ObjectDisposedException as soon as the channel is disposed, even with
+    // CancellationToken.None, and even while the actor cannot run the cleanup Dispose posts to
+    // it. Before the fix, Dispose waited 2 s for the gate and then disposed it, and
+    // SemaphoreSlim.Dispose does not complete pending WaitAsync waiters: the queued send hung
+    // for ever (here: send2.WaitAsync(ShortTimeout) threw TimeoutException).
+    //
+    // The actor is an injected one held busy, so the in-flight send keeps the gate for the whole
+    // test and the queued send can only be released by the disposal itself. Both variants of the
+    // gate wait are covered: a caller without a token, and one whose (never cancelled) token is
+    // linked to the channel's lifetime.
+    // --------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Send_Queued_On_The_Gate_Fails_On_Dispose_Although_The_Actor_Is_Busy(
+        bool queuedSendHasToken)
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var release = new ManualResetEventSlim();
+        using var callerCts = new CancellationTokenSource();
+        var busy = actor.PostAsync(() => release.Wait(TimeSpan.FromSeconds(30)));
+
+        // send1 takes the gate synchronously and parks on the actor; send2 parks on the gate --
+        // SendAsync returns only once it is queued there, so no sleep is needed.
+        var send1 = channel.SendAsync(new byte[] { 0x01 });
+        var send2 = channel.SendAsync(new byte[] { 0x02 },
+            queuedSendHasToken ? callerCts.Token : CancellationToken.None);
+        send1.IsCompleted.Should().BeFalse();
+        send2.IsCompleted.Should().BeFalse();
+
+        var disposal = Task.Run(channel.Dispose);
+        try
+        {
+            // Released by the disposal, not by the actor: the actor is still held here.
+            var queued = await Assert.ThrowsAsync<ObjectDisposedException>(() => send2.WaitAsync(ShortTimeout));
+            queued.ObjectName.Should().Be(nameof(IsoTpChannel));
+        }
+        finally
+        {
+            release.Set();
+            await busy;
+            await disposal.WaitAsync(ShortTimeout);
+        }
+
+        // The in-flight send ends with the channel once the actor runs the cleanup.
+        var inFlight = await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
+        inFlight.ObjectName.Should().Be(nameof(IsoTpChannel));
+    }
+
+    // Review on #339: the gate wait is linked to the channel's lifetime now, and the linked
+    // token is not the caller's. A send queued on the gate that its caller cancels must still
+    // end with the caller's OperationCanceledException -- carrying the caller's token, as it did
+    // when the wait took that token directly, and as CancelInFlightSend reports a cancellation
+    // after the gate -- and must not be taken for a disposal.
+    [Fact]
+    public async Task A_Send_Queued_On_The_Gate_That_Its_Caller_Cancels_Reports_The_Callers_Token()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var release = new ManualResetEventSlim();
+        using var callerCts = new CancellationTokenSource();
+        var busy = actor.PostAsync(() => release.Wait(TimeSpan.FromSeconds(30)));
+
+        var send1 = channel.SendAsync(new byte[] { 0x01 });
+        var send2 = channel.SendAsync(new byte[] { 0x02 }, callerCts.Token);
+        send2.IsCompleted.Should().BeFalse();
+
+        try
+        {
+            callerCts.Cancel();
+            var queued = await Assert.ThrowsAsync<OperationCanceledException>(() => send2.WaitAsync(ShortTimeout));
+            queued.CancellationToken.Should().Be(callerCts.Token);
+        }
+        finally
+        {
+            var disposal = Task.Run(channel.Dispose);
+            release.Set();
+            await busy;
+            await disposal.WaitAsync(ShortTimeout);
+        }
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
     }
 
     // --------------------------------------------------------------------------------
