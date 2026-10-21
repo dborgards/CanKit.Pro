@@ -292,6 +292,24 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             }
             catch (OperationCanceledException)
             {
+                // Leave the cancelling thread before failing (#339, review on #364). Where the
+                // wait was cancelled by Dispose, this catch can be running on the disposing
+                // thread itself: on .NET Framework (the netstandard2.0 build), SemaphoreSlim's
+                // cancellation path completes the waiter inline from _lifetimeCts.Cancel(), so
+                // the exception below -- and every continuation the caller has queued after this
+                // send -- would run synchronously inside Dispose. Called from an actor callback,
+                // that thread is the actor loop. .NET 10's SemaphoreSlim already forces the
+                // waiter's continuation asynchronous; the hop makes every target behave alike.
+                // It applies to the caller's cancellation as well, since that may race Dispose
+                // and arrive on the same thread. The cost is one thread-pool hop per released
+                // sender, on the cancellation path only.
+                //
+                // A thread-pool hop rather than Task.Yield: Task.Yield resumes on the current
+                // SynchronizationContext or TaskScheduler, which here is the disposing thread's --
+                // the actor's own UI context in ActorExecutionMode.SynchronizationContext -- and
+                // which the ConfigureAwait(false) on the wait above deliberately does not capture.
+                await ThreadPoolHop.Instance;
+
                 // Only two things cancel this wait: the caller's token, or the channel's
                 // lifetime, which Dispose cancels after it has marked the channel disposed.
                 cancellationToken.ThrowIfCancellationRequested();
@@ -607,6 +625,31 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
     }
 
+    // Awaiting this always resumes on a thread-pool thread, ignoring the current
+    // SynchronizationContext and TaskScheduler -- what Task.Yield would be with
+    // ConfigureAwait(false), which it does not offer. Used by SendAsync so that a sender released
+    // by Dispose never continues on the disposing thread (#339).
+    private sealed class ThreadPoolHop : ICriticalNotifyCompletion
+    {
+        public static readonly ThreadPoolHop Instance = new();
+
+        private static readonly WaitCallback RunContinuation = static state => ((Action)state!)();
+
+        private ThreadPoolHop() { }
+
+        public ThreadPoolHop GetAwaiter() => this;
+
+        public bool IsCompleted => false;
+
+        public void GetResult() { }
+
+        public void OnCompleted(Action continuation) =>
+            ThreadPool.QueueUserWorkItem(RunContinuation, continuation);
+
+        public void UnsafeOnCompleted(Action continuation) =>
+            ThreadPool.UnsafeQueueUserWorkItem(RunContinuation, continuation);
+    }
+
     private static byte[] UnwrapInboxItem(RxInboxItem item)
     {
         if (item.Error is not null)
@@ -619,11 +662,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
-        // First: every SendAsync queued on the send gate is let go now, from this thread, as
-        // ObjectDisposedException (#339). Nothing below depends on the actor for that, which
-        // matters when the actor cannot run -- a Dispose called from one of its own callbacks,
-        // or an injected actor that is busy -- and the in-flight send keeps the gate until the
-        // cleanup posted below fails it.
+        // First: every SendAsync queued on the send gate is released now, by this thread, and
+        // fails with ObjectDisposedException (#339). Nothing below depends on the actor for that,
+        // which matters when the actor cannot run -- a Dispose called from one of its own
+        // callbacks, or an injected actor that is busy -- and the in-flight send keeps the gate
+        // until the cleanup posted below fails it. Released senders do not continue on this
+        // thread, on any target: SendAsync hops to the thread pool before it throws, because on
+        // .NET Framework SemaphoreSlim would otherwise resume them inline inside this Cancel().
         try { _lifetimeCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
 
         // Order matters: stop pulling frames off the subscription so nothing new is queued to the
