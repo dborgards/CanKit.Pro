@@ -1813,6 +1813,111 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #340 — the sibling of the test above, for a late answer that is *not* queued yet when
+    // the next request goes out: request A (DID F190) times out, request B (DID F191) is
+    // sent, and only then does A's answer arrive -- after B's handoff, so the arrival-stamp
+    // rule does not reject it. Its SID is B's positive SID; its DID is not B's. The DID echo
+    // check used to run in ReadDataByIdentifierAsync, after the receive loop had returned
+    // the stray, and threw UdsProtocolException for it -- aborting B, whose own answer was
+    // still due. The check is the receive loop's now: the stray keeps the wait going, and B
+    // returns its own answer.
+    //
+    // On a virtual clock (#171): A's answer is held by the ECU until the test lets it go,
+    // which it does once B's P2 is armed -- so "after B's handoff" is an order of events,
+    // not a sleep landing on the right side of a send.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Late_Answer_To_The_Previous_Request_For_Another_Did_Is_Not_This_Requests()
+    {
+        var p2 = TimeSpan.FromMilliseconds(300);
+        using var answerFirst = new ManualResetEventSlim();
+        int calls = 0;
+        using var pair = new ClockPair(
+            e => e.On(0x22, req =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    // Blocks the ECU's loop: the second request is queued at its channel
+                    // until the first answer has gone out, which orders the two answers.
+                    answerFirst.Wait(ShortTimeout);
+                    return new byte[] { 0xF1, 0x90, 0xAA };
+                }
+                return new byte[] { req[1], req[2], 0xBB };
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2);
+        await pair.Clock.AdvanceAsync(p2); // silence: A times out at P2
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<UdsTimeoutException>();
+
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF191, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2); // B is on the wire and its P2 armed
+        // A's answer, after B's handoff: 62 F1 90 AA, B's positive SID with A's DID.
+        await pair.DeliverAsync(answerFirst.Set,
+            data => data.Length >= 4 && data[1] == 0x62 && data[2] == 0xF1 && data[3] == 0x90);
+
+        var data = await Within(second);
+        data.Should().Equal(new byte[] { 0xBB }, "A's late answer is a stray; B's own answer followed it");
+        pair.Ecu.RequestsHandled.Should().Be(2);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #340 — per service: a positive response with this service's SID that echoes another
+    // request's parameter bytes -- sub-function, DID, routine identifier, block sequence
+    // counter, periodic identifier, address and size -- is a stray in the receive loop, not a
+    // UdsProtocolException from the service method. The ECU puts the stray on the bus as a
+    // raw Single Frame before it answers, so the stray is read first; the request returns
+    // the answer that follows. Through SendRawAsync so every row of UdsResponseEcho's table
+    // takes the same path the typed methods take. Rows: the stray, then the ECU's answer
+    // (without the response SID, as SimulatedUdsEcu handlers return it).
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(new byte[] { 0x10, 0x03 }, new byte[] { 0x50, 0x02, 0x00, 0x32, 0x01, 0xF4 }, new byte[] { 0x03, 0x00, 0x32, 0x01, 0xF4 })]
+    [InlineData(new byte[] { 0x11, 0x01 }, new byte[] { 0x51, 0x03 }, new byte[] { 0x01 })]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x62, 0xF1, 0x91, 0xBB }, new byte[] { 0xF1, 0x90, 0xAA })]
+    // Multi-DID: the stray names a DID not requested; the answer leaves the first requested
+    // DID out and starts with the second (#252), which is this request's.
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x87 }, new byte[] { 0x62, 0xF1, 0x88, 0x01 }, new byte[] { 0xF1, 0x87, 0x02 })]
+    [InlineData(new byte[] { 0x24, 0xF1, 0x90 }, new byte[] { 0x64, 0xF1, 0x91, 0x00 }, new byte[] { 0xF1, 0x90, 0x00 })]
+    [InlineData(new byte[] { 0x27, 0x01 }, new byte[] { 0x67, 0x03, 0x11, 0x22 }, new byte[] { 0x01, 0x11, 0x22 })]
+    [InlineData(new byte[] { 0x2A, 0x01, 0xE3 }, new byte[] { 0x6A, 0xE4, 0x01 }, new byte[] { 0xE3, 0x01 })]
+    [InlineData(new byte[] { 0x2C, 0x01, 0xF3, 0x00, 0x01, 0xF1, 0x90, 0x01, 0x01 }, new byte[] { 0x6C, 0x01, 0xF3, 0x01 }, new byte[] { 0x01, 0xF3, 0x00 })]
+    [InlineData(new byte[] { 0x2E, 0xF1, 0x90, 0x01 }, new byte[] { 0x6E, 0xF1, 0x91 }, new byte[] { 0xF1, 0x90 })]
+    [InlineData(new byte[] { 0x2F, 0xF1, 0x90, 0x03 }, new byte[] { 0x6F, 0xF1, 0x91, 0x03 }, new byte[] { 0xF1, 0x90, 0x03 })]
+    [InlineData(new byte[] { 0x31, 0x01, 0x02, 0x01 }, new byte[] { 0x71, 0x01, 0x02, 0x02 }, new byte[] { 0x01, 0x02, 0x01, 0x00 })]
+    [InlineData(new byte[] { 0x31, 0x01, 0x02, 0x01 }, new byte[] { 0x71, 0x03, 0x02, 0x01 }, new byte[] { 0x01, 0x02, 0x01, 0x00 })]
+    [InlineData(new byte[] { 0x36, 0x01, 0xAA }, new byte[] { 0x76, 0x02 }, new byte[] { 0x01 })]
+    [InlineData(new byte[] { 0x38, 0x01, 0x00, 0x01, 0x41 }, new byte[] { 0x78, 0x02 }, new byte[] { 0x01 })]
+    [InlineData(new byte[] { 0x3D, 0x12, 0x10, 0x00, 0x01, 0xDD }, new byte[] { 0x7D, 0x12, 0x10, 0x01, 0x01 }, new byte[] { 0x12, 0x10, 0x00, 0x01 })]
+    [InlineData(new byte[] { 0x3E, 0x00 }, new byte[] { 0x7E, 0x01 }, new byte[] { 0x00 })]
+    public async Task A_Positive_Response_Echoing_Another_Request_Is_A_Stray(byte[] request, byte[] stray, byte[] answer)
+    {
+        ClockPair? stack = null;
+        using var pair = stack = new ClockPair(e => e.On(request[0], _ =>
+        {
+            // The stray first, as a raw padded Single Frame on the ECU's bus; the answer
+            // follows through the ECU's channel once the handler has returned.
+            var frame = new byte[8];
+            frame[0] = (byte)stray.Length;
+            Buffer.BlockCopy(stray, 0, frame, 1, stray.Length);
+            for (int i = 1 + stray.Length; i < frame.Length; i++) frame[i] = 0xCC;
+            stack!.EcuBus.Transmit(CanFrame.Classic(0x7E8, frame, isExtendedFrame: false));
+            return answer;
+        }));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var response = await Within(pair.Client.SendRawAsync(request, cts.Token));
+
+        var expected = new byte[1 + answer.Length];
+        expected[0] = (byte)(request[0] + 0x40);
+        Buffer.BlockCopy(answer, 0, expected, 1, answer.Length);
+        response.Should().Equal(expected, "the stray echoes another request and keeps the wait going");
+    }
+
+    // -----------------------------------------------------------------------------------
     // FR-UDS-007 — TesterPresent (0x3E): keep-alive fires periodically without blocking.
     // -----------------------------------------------------------------------------------
     [Fact]
