@@ -2734,6 +2734,51 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             ">8-byte payload must route through J1939-TP (a TP.CM announce must appear on the bus)");
     }
 
+    // A > 8-byte payload to one destination MUST run as a connection-mode session (TP.CM RTS
+    // to that address, not a BAM), on the node's shared channel, and reassemble at the peer.
+    // The BAM test above leaves this branch of the multi-frame path unmeasured (#368).
+    [Fact]
+    public async Task Send_LargePayload_Directed_UsesJ1939TpCmPath()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var spectator = Open(session, 2);
+
+        using var sender = J1939Node.Open(busA, new J1939NodeOptions(Name(1)));
+        using var receiver = J1939Node.Open(busB, new J1939NodeOptions(Name(2)));
+
+        await sender.ClaimAddressAsync(0x91).WithTimeout(ShortTimeout);
+        await receiver.ClaimAddressAsync(0x92).WithTimeout(ShortTimeout);
+
+        int rtsToReceiver = 0, bams = 0;
+        spectator.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 1) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != 0x91 || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            if (J1939Pgn.IsBamControlByte(e.CanFrame.Data.Span[0])) Interlocked.Increment(ref bams);
+            else if (fields.DestinationAddress == 0x92) Interlocked.Increment(ref rtsToReceiver);
+        };
+
+        var payload = new byte[20];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)(0x60 + i);
+
+        var recvTask = WaitForMessageAsync(receiver,
+            m => m.Pgn == 0xEF00u && m.Payload.Length == 20 && m.SourceAddress == 0x91, ShortTimeout);
+
+        await sender.SendAsync(new J1939Message(0xEF00u, payload,
+            destinationAddress: 0x92)).WithTimeout(ShortTimeout);
+
+        var received = await recvTask;
+        received.Payload.ToArray().Should().Equal(payload);
+        received.DestinationAddress.Should().Be(0x92);
+        received.WasMultiFrame.Should().BeTrue();
+        Volatile.Read(ref rtsToReceiver).Should().BeGreaterThan(0,
+            "a directed >8-byte payload opens a TP.CM session addressed to the receiver");
+        Volatile.Read(ref bams).Should().Be(0, "a directed payload is not broadcast");
+    }
+
     // ---------------------------------------------------------------------------------------
     // Bugbot 3600377721 regression: after a successful address claim the node MUST accept
     // directed TP.CM traffic to the claimed SA. Before the fix J1939NodeImpl kept its internal
