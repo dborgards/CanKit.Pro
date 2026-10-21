@@ -1919,14 +1919,14 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
 
     // -----------------------------------------------------------------------------------
     // #340 — the echo table itself, for the rows the theory above cannot put through the
-    // simulated ECU (it masks the SID with 0x7F, so 0x85 and 0x87 cannot be served) and for
+    // simulated ECU (it masks the SID with 0x7F, so 0x83 to 0x87 cannot be served) and for
     // the verdicts it does not exercise: a service with a sub-function and nothing more behind
-    // it (0x19, 0x28, 0x85, 0x87) is correlated on that byte alone; a service whose positive
-    // response echoes nothing (0x14, 0x23, 0x34, 0x35, 0x37, 0x84) is never a stray on its
-    // own SID, whatever follows it -- a wrong rule here would turn every RequestDownload
-    // answer into a stray and the download into a timeout; a response too short for its echo
-    // is Truncated, not Stray, so the service's length check sees it; and bit 7 is masked on
-    // a sub-function only, not on a block sequence counter.
+    // it (0x19, 0x28, 0x29, 0x83, 0x85, 0x86, 0x87) is correlated on that byte alone; a
+    // service whose positive response echoes nothing (0x14, 0x23, 0x34, 0x35, 0x37, 0x84) is
+    // never a stray on its own SID, whatever follows it -- a wrong rule here would turn every
+    // RequestDownload answer into a stray and the download into a timeout; a response too
+    // short for its echo is Truncated, not Stray, so the service's length check sees it; and
+    // bit 7 is masked on a sub-function only, not on a block sequence counter.
     // -----------------------------------------------------------------------------------
     [Theory]
     // Sub-function only: the byte, with suppressPosRspMsgIndication cleared from the request.
@@ -1939,6 +1939,14 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(new byte[] { 0x85, 0x02 }, new byte[] { 0xC5, 0x01 }, "Stray")]
     [InlineData(new byte[] { 0x87, 0x01, 0x01 }, new byte[] { 0xC7, 0x01 }, "Mine")]
     [InlineData(new byte[] { 0x87, 0x01, 0x01 }, new byte[] { 0xC7, 0x02 }, "Stray")]
+    [InlineData(new byte[] { 0x29, 0x08 }, new byte[] { 0x69, 0x08, 0x12 }, "Mine")]
+    [InlineData(new byte[] { 0x29, 0x08 }, new byte[] { 0x69, 0x01, 0x12 }, "Stray")]
+    [InlineData(new byte[] { 0x83, 0x01 }, new byte[] { 0xC3, 0x01, 0x00, 0x32 }, "Mine")]
+    [InlineData(new byte[] { 0x83, 0x01 }, new byte[] { 0xC3, 0x03 }, "Stray")]
+    // ResponseOnEvent: the eventType echoes bits 6..0 (storageState included); the final
+    // answer of an event window set up earlier is not this start request's.
+    [InlineData(new byte[] { 0x86, 0xC5 }, new byte[] { 0xC6, 0x45, 0x00, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x86, 0x05 }, new byte[] { 0xC6, 0x01, 0x01, 0x02 }, "Stray")]
     // No echo: the SID is the whole correlation; the bytes behind it are the answer's own.
     [InlineData(new byte[] { 0x14, 0xFF, 0xFF, 0xFF }, new byte[] { 0x54 }, "Mine")]
     [InlineData(new byte[] { 0x14, 0xFF, 0xFF, 0xFF }, new byte[] { 0x54, 0x01 }, "Mine")]
