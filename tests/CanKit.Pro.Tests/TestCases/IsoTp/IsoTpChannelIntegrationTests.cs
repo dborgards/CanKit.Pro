@@ -372,6 +372,131 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // --------------------------------------------------------------------------------
+    // Test gap of the 2026-10-21 review (#353, mutation isotp-M1): Wait → CTS resume. The WFT
+    // counter is reset by every CTS, so a peer that answers each block with WftMax Waits and
+    // then a CTS is conforming, and the transfer completes. Without the reset the second
+    // block's first Wait would already exceed the limit. The sender runs on a clock the test
+    // never moves, so N_Bs cannot expire however loaded the host (#92). BS = 1: a FC after the
+    // FF and after each CF, which gives two blocks to send Waits against.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task MultiFrame_Send_Resumes_After_Waits_And_Counts_Them_Per_Block()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epAB = IsoTpEndpoint.Normal(0x410, 0x411);
+        var epBA = IsoTpEndpoint.Normal(0x411, 0x410);
+
+        const int wftMax = 2;
+        using var clock = new VirtualClock();
+        using var service = new CanBusService(busA);
+        using var sender = new IsoTpChannel(service, epAB, FastOptions(wftMax: wftMax),
+            ownsService: false, clock.NewActor());
+
+        // The peer by hand: every FF or CF it sees is signalled; the test answers them.
+        using var blockEnded = new SemaphoreSlim(0);
+        var framesFromSender = new List<byte[]>();
+        busB.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x410) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length == 0) return;
+            lock (framesFromSender) framesFromSender.Add(payload);
+            if ((payload[0] >> 4) is 0x1 or 0x2) blockEnded.Release();
+        };
+        using var fcArrived = new SemaphoreSlim(0);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x411) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x3) fcArrived.Release();
+        };
+
+        async Task AnswerAsync(FlowStatus status)
+        {
+            var fc = IsoTpFrameCodec.BuildFlowControl(epBA, status, blockSize: 1, stMinRaw: 0,
+                isCanFd: false, padding: true);
+            busB.Transmit(CanFrame.Classic(0x411, fc));
+            (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue($"the sender's bus must see FC({status})");
+            await sender.SettleAsync().WaitAsync(ShortTimeout);
+        }
+
+        // 20 bytes classic: FF(6) + CF1(7) + CF2(7); two FCs to answer, after the FF and after CF1.
+        byte[] pdu = Enumerable.Range(0, 20).Select(i => (byte)(i + 1)).ToArray();
+        var sendTask = sender.SendAsync(pdu);
+
+        for (int block = 1; block <= 2; block++)
+        {
+            (await blockEnded.WaitAsync(ShortTimeout)).Should().BeTrue($"the frame ending block {block} must be on the wire");
+            for (int wait = 1; wait <= wftMax; wait++)
+                await AnswerAsync(FlowStatus.Wait);
+            await AnswerAsync(FlowStatus.ClearToSend);
+        }
+
+        await sendTask.WaitAsync(ShortTimeout);
+        lock (framesFromSender)
+            framesFromSender.Select(f => f[0] >> 4).Should().Equal(new[] { 0x1, 0x2, 0x2 }, "FF, CF1, CF2 and nothing else");
+    }
+
+    // --------------------------------------------------------------------------------
+    // Test gap of the 2026-10-21 review (#353, mutation isotp-M2): a single Wait re-arms N_Bs.
+    // The WftMax test above sends Waits until the send aborts, and the deferred-Wait test
+    // re-arms through the tail of ApplyDeferredFlowControlsOrArmNBs; a lone Wait met in
+    // WaitFcInitial, then silence, has to end in an N_Bs timeout rather than a hang. The sender
+    // runs on a clock the test drives: the FF confirmation is known to have armed N_Bs before
+    // the Wait is sent (the actor is asked, not the wire), the re-armed timer is read back off
+    // the actor, and the clock is then moved past it.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Single_Wait_Rearms_NBs_And_Silence_After_It_Times_Out()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epAB = IsoTpEndpoint.Normal(0x420, 0x421);
+        var epBA = IsoTpEndpoint.Normal(0x421, 0x420);
+
+        var nBs = TimeSpan.FromMilliseconds(500);
+        using var clock = new VirtualClock();
+        using var service = new CanBusService(busA);
+        var senderActor = clock.NewActor();
+        using var sender = new IsoTpChannel(service, epAB, FastOptions(nBs: nBs),
+            ownsService: false, senderActor);
+
+        using var fcArrived = new SemaphoreSlim(0);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x421) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x3) fcArrived.Release();
+        };
+
+        byte[] pdu = Enumerable.Range(0, 20).Select(i => (byte)i).ToArray();
+        var sendTask = sender.SendAsync(pdu);
+
+        // N_Bs armed from the FF's confirmation: the sender is in WaitFcInitial, so the Wait
+        // below is handled at once rather than deferred behind the confirmation.
+        await clock.WaitUntilTimerArmedAsync(senderActor, nBs, ShortTimeout);
+
+        var fc = IsoTpFrameCodec.BuildFlowControl(epBA, FlowStatus.Wait, blockSize: 0, stMinRaw: 0,
+            isCanFd: false, padding: true);
+        busB.Transmit(CanFrame.Classic(0x421, fc));
+        (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue("the sender's bus must see the Wait");
+        await sender.SettleAsync().WaitAsync(ShortTimeout);
+
+        // The Wait completed the running N_Bs and armed a fresh one; the clock has not moved,
+        // so the fresh one is the full interval away. (A completed entry is skipped, not read.)
+        (await senderActor.NextTimerDelayAsync()).Should().Be(nBs, "a Wait re-arms N_Bs");
+
+        await clock.AdvanceAsync(nBs + TimeSpan.FromMilliseconds(1));
+        Func<Task> act = () => sendTask.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<IsoTpTimeoutException>()).Which.Timer.Should().Be(IsoTpTimer.NBs);
+    }
+
+    // --------------------------------------------------------------------------------
     // FR-TP-012 — Overflow FC aborts the send with a reported failure.
     // --------------------------------------------------------------------------------
     [Fact]
@@ -1947,6 +2072,60 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await recvOnAlice).Should().Equal(b2a);
     }
 
+    // Test gap of the 2026-10-21 review (#353, mutation isotp-M4): the test above exchanges
+    // Single Frames only, so the address-extension byte of the Flow Control -- the one frame
+    // the *receiver* builds -- was pinned by nothing at channel level. A multi-frame transfer in
+    // each direction needs the FC to carry the sender's source address, or the sender drops it
+    // and times out on N_Bs. The sniffer checks the byte itself, so a swap that happened to
+    // round-trip would still be caught.
+    [Fact]
+    public async Task ExtendedAddressing_With_Distinct_Source_And_Target_Transfers_MultiFrame_Both_Ways()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var snifferBus = OpenClassic(session, 2);
+
+        var alice = IsoTpEndpoint.Extended(txCanId: 0x310, rxCanId: 0x311,
+            sourceAddress: 0xAA, targetAddress: 0xBB);
+        var bob = IsoTpEndpoint.Extended(txCanId: 0x311, rxCanId: 0x310,
+            sourceAddress: 0xBB, targetAddress: 0xAA);
+
+        var flowControls = new List<(uint CanId, byte AddressExtension)>();
+        snifferBus.FrameObserved += (_, e) =>
+        {
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length >= 2 && (payload[1] >> 4) == 0x3)
+                lock (flowControls) flowControls.Add(((uint)e.CanFrame.ID, payload[0]));
+        };
+
+        using var aliceChannel = IsoTpFactory.Open(busA, alice, FastOptions());
+        using var bobChannel = IsoTpFactory.Open(busB, bob, FastOptions());
+
+        // 30 bytes with an AE byte: FF carries 5, CFs 6 each -- five frames and one FC per way.
+        byte[] a2b = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
+        var recvOnBob = bobChannel.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        await aliceChannel.SendAsync(a2b).WaitAsync(ShortTimeout);
+        (await recvOnBob).Should().Equal(a2b);
+
+        byte[] b2a = Enumerable.Range(100, 30).Select(i => (byte)i).ToArray();
+        var recvOnAlice = aliceChannel.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        await bobChannel.SendAsync(b2a).WaitAsync(ShortTimeout);
+        (await recvOnAlice).Should().Equal(b2a);
+
+        // Bob's FC addresses Alice (AE = Alice's source address, Bob's target); Alice's FC
+        // addresses Bob. The sniffer is one more hub delivery, ordered against nothing above, so
+        // its second frame is waited for rather than assumed.
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < ShortTimeout)
+        {
+            lock (flowControls) if (flowControls.Count >= 2) break;
+            await Task.Delay(5);
+        }
+        lock (flowControls)
+            flowControls.Should().Equal((0x311u, (byte)0xAA), (0x310u, (byte)0xBB));
+    }
+
     // --------------------------------------------------------------------------------
     // Bugbot 3596468541 (MEDIUM) — Dispose must not tear down _sendGate while an in-flight
     // SendAsync still holds it. Otherwise Release in SendAsync's finally throws
@@ -2333,6 +2512,67 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         var ex = (await act.Should().ThrowAsync<IsoTpWaitFrameLimitExceededException>()).Which;
         ex.Limit.Should().Be(wftMax);
         ex.WaitFramesReceived.Should().BeGreaterThan(wftMax);
+    }
+
+    // --------------------------------------------------------------------------------
+    // Test gap of the 2026-10-21 review (#353): an FC(OVFLW) that arrives while the FF's
+    // TX-confirm is still outstanding is deferred like a Wait, and applied when the confirm
+    // completes. The Wait path above is pinned; the Overflow entry of the same list was not.
+    // The send must fail with the overflow, not time out on N_Bs.
+    // --------------------------------------------------------------------------------
+    [Fact]
+    public async Task MultiFrame_Send_Applies_An_Overflow_FlowControl_Deferred_During_Ff_Confirm()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+
+        var epAB = IsoTpEndpoint.Normal(0x280, 0x281);
+        var epBA = IsoTpEndpoint.Normal(0x281, 0x280);
+
+        using var inner = new CanBusService(busA);
+        using var holdConfirm = new SemaphoreSlim(0, 1);
+        using var confirmStarted = new ManualResetEventSlim(false);
+        var delaying = new DelayingConfirmService(inner, holdConfirm, confirmStarted,
+            holdAfterTransmit: true);
+        using var sender = IsoTpFactory.Open(delaying, epAB,
+            FastOptions(nBs: TimeSpan.FromSeconds(2)), leaveOpen: true);
+
+        var ffSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        busB.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x280) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x1)
+                ffSeen.TrySetResult(true);
+        };
+        using var fcArrived = new SemaphoreSlim(0);
+        busA.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x281) return;
+            var payload = e.CanFrame.Data.ToArray();
+            if (payload.Length > 0 && (payload[0] >> 4) == 0x3) fcArrived.Release();
+        };
+
+        byte[] pdu = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
+        var sendTask = sender.SendAsync(pdu);
+
+        confirmStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue(
+            "FF SendConfirmedAsync must be parked so the Overflow arrives during SingleOrFirstInFlight");
+        await ffSeen.Task.WaitAsync(ShortTimeout);
+
+        var fc = IsoTpFrameCodec.BuildFlowControl(epBA, FlowStatus.Overflow,
+            blockSize: 0, stMinRaw: 0, isCanFd: false, padding: true);
+        busB.Transmit(CanFrame.Classic(0x281, fc));
+        (await fcArrived.WaitAsync(ShortTimeout)).Should().BeTrue("the sender's bus must see the Overflow FC");
+        // The actor round-trip after the frame: it is queued as a deferred FC before the confirm
+        // is released, which is what makes this the deferred path and not the direct one.
+        await sender.SettleAsync().WaitAsync(ShortTimeout);
+
+        holdConfirm.Release();
+
+        Func<Task> act = () => sendTask.WaitAsync(ShortTimeout);
+        await act.Should().ThrowAsync<IsoTpOverflowException>();
     }
 
     // --------------------------------------------------------------------------------
