@@ -641,6 +641,54 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
             "the BusOff path must resolve the confirmation immediately, not via the 30 s timeout");
     }
 
+    // The other half of the guard the test above exercises only one side of: a fault reported
+    // while the controller is *not* off the bus is not a bus-off, and must not fail the outstanding
+    // confirmation as one. The test above sets BusState = BusOff *and* raises the fault, so the
+    // BusState check in OnFaultOccurred could be deleted without it going red (mutation R-M1 in
+    // docs/reviews/2026-10-21-deep-review/rawcan-addressing.md, #348). Here the state stays
+    // ErrActive, the fault is raised, and the send's own echo -- parked until after the fault --
+    // must still confirm it: with the guard gone the sweep would have resolved it as BusOff first.
+    [Fact]
+    public async Task A_Fault_While_The_Bus_Is_Not_Off_Leaves_The_Send_Pending()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        sender.BusState.Should().Be(BusState.ErrActive, "the double reports a healthy controller until a test moves it");
+        sender.RaiseFault(new InvalidOperationException("poll loop died, controller still on the bus"));
+
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        var result = await send.WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue("a fault that is not a bus-off leaves the send to its own echo");
+        result.IsApproximated.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.None);
+    }
+
+    // #348 (R-9): the only fault a CanKit 0.5.6 adapter raises is its receive loop dying, after
+    // which nothing will ever arrive -- and until this change the service swallowed it unless the
+    // bus was also off. It now goes through the service's one fault channel, as the adapter's own
+    // exception, so a consumer holding nothing but an ISubscription can learn the bus is dead.
+    // FaultOccurred is raised synchronously by the double, so the relay has run when RaiseFault
+    // returns; nothing here waits on a clock.
+    [Fact]
+    public void A_Bus_Fault_Is_Relayed_Through_BackgroundExceptionOccurred()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+
+        Exception? relayed = null;
+        service.BackgroundExceptionOccurred += (_, ex) => relayed = ex;
+
+        var fault = new InvalidOperationException("poll loop died");
+        sender.RaiseFault(fault);
+
+        relayed.Should().BeSameAs(fault, "the adapter's exception is relayed as itself, not wrapped");
+    }
+
     // Echo matching runs for every echo frame the adapter reports while any send is outstanding,
     // and it used to copy that frame's payload into the lookup key just to ask whether anything
     // was waiting for it. The key never leaves the lookup, so it can borrow the payload instead.

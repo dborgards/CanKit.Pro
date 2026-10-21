@@ -87,6 +87,15 @@ namespace CanKit.Pro.RawCan
         /// (delivery to the other subscriptions continues), and the exception is surfaced here
         /// instead of being silently swallowed. Invoked synchronously on the bus's dispatch
         /// thread, so handlers must return quickly and must not call back into the service.
+        /// <para>
+        /// Also raised, with the adapter's own exception, whenever the bus reports a fault through
+        /// <see cref="ICanBus.FaultOccurred"/>. The only fault a CanKit 0.5.6 adapter raises is its
+        /// receive loop dying, after which no further frame arrives on this bus: outstanding
+        /// <see cref="SendConfirmedAsync"/> calls end as <see cref="TxConfirmFailureReason.Timeout"/>
+        /// and <see cref="ISubscription.Frames"/> streams stay open until disposed. This event is
+        /// how a consumer that holds only an <see cref="ISubscription"/> learns of it (#348).
+        /// Invoked synchronously on whichever thread the adapter raises its fault on.
+        /// </para>
         /// </summary>
         event EventHandler<Exception>? BackgroundExceptionOccurred;
 

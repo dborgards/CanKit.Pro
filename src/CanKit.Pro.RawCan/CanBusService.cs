@@ -678,10 +678,21 @@ namespace CanKit.Pro.RawCan
 
         private void OnFaultOccurred(object? sender, Exception ex)
         {
+            // Relayed first and unconditionally, before the bus-off sweep below decides anything.
+            // The only fault a CanKit 0.5.6 adapter ever raises is its receive loop dying (the six
+            // `severity: Fault` reports upstream are all poll-loop catch blocks), after which no
+            // frame will ever arrive: pending sends end as Timeout, and every Frames stream stays
+            // open because ISubscription promises completion only on dispose. A consumer holding
+            // nothing but an ISubscription had no way to learn that the bus was dead (#348). The
+            // service already has one fault channel, so the bus's fault goes through it rather
+            // than a second one; the exception is the adapter's own, unwrapped.
+            RaiseBackgroundException(ex);
+
             // Scoped strictly to FR-RAW-033's named "Bus-Off" failure mode: FaultOccurred fires for
             // other fault severities too (see CanBusExceptionDispatcher), which aren't necessarily
             // a reason to fail every outstanding confirmation -- BusState is the authoritative
-            // signal for whether this specific fault means the bus actually went off.
+            // signal for whether this specific fault means the bus actually went off. Pinned by
+            // TxConfirmTests.A_Fault_While_The_Bus_Is_Not_Off_Leaves_The_Send_Pending (#348).
             if (_bus.BusState != BusState.BusOff) return;
 
             PendingSend[] pending;
