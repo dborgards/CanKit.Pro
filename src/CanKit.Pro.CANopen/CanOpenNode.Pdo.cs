@@ -116,7 +116,9 @@ internal sealed partial class CanOpenNode
     /// The CiA 301 §7.5.2.38 re-mapping procedure as OD writes: destroy the PDO (bit 31), disable
     /// the mapping (sub0 = 0), write the entries, enable the mapping (sub0 = N), set the
     /// communication parameters, create the PDO. Each write is validated like an SDO download;
-    /// a rejection surfaces as <see cref="ArgumentException"/> and leaves the PDO destroyed.
+    /// a rejection surfaces as <see cref="ArgumentException"/> and leaves the PDO destroyed —
+    /// except the checks ahead of step 1 (records present, optional sub-indices the value needs),
+    /// which refuse with the same exception and leave the PDO as it was.
     /// Runs on the actor loop (<see cref="RunOnActorAndWait"/>) and holds the dictionary's write
     /// gate throughout (<see cref="ObjectDictionary.Transaction"/>), so the sequence is one
     /// transaction: the SDO server writes on the same loop, a second configuration queues behind
