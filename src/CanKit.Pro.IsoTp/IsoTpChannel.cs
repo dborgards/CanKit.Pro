@@ -628,8 +628,9 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // Awaiting this always resumes on a thread-pool thread, ignoring the current
     // SynchronizationContext and TaskScheduler -- what Task.Yield would be with
     // ConfigureAwait(false), which it does not offer. Used by SendAsync so that a sender released
-    // by Dispose never continues on the disposing thread (#339).
-    private sealed class ThreadPoolHop : ICriticalNotifyCompletion
+    // by Dispose never continues on the disposing thread (#339). Internal rather than private so
+    // the tests can reach OnCompleted, which an await never calls (it takes UnsafeOnCompleted).
+    internal sealed class ThreadPoolHop : ICriticalNotifyCompletion
     {
         public static readonly ThreadPoolHop Instance = new();
 
