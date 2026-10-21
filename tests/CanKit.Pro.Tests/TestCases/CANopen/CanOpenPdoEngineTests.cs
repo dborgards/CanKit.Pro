@@ -1354,9 +1354,12 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
 
     // FR-CO-024 (C13) — a producer that keeps sending short frames raises EMCY 8210h once, not once
     // per frame: the EMCY traffic would otherwise be a multiple of the fault it reports. A frame
-    // that fits ends the run, so the next short one is reported again. The count is read when the
-    // third EMCY arrives, after which every EMCY the second short frame could have raised is
-    // already in the list: the bus delivers them in order.
+    // that fits ends the run, so the next short one is reported again. The count is read only once
+    // a witness EMCY has arrived: the witness is sent after a fitting frame behind the last short
+    // one was actuated, so the actor had handled every short frame by then, and every EMCY goes
+    // out through one chain in the order the actor decided — whatever the short frames raised is
+    // in the list before the witness (#358 addendum: reading at the second arrival let the
+    // fourth frame's EMCY still be in flight, and the test stayed green without the latch).
     [Fact]
     public async Task Rpdo_Shorter_Than_Its_Mapping_Raises_Emcy_Once_Per_Run_Of_Short_Frames()
     {
@@ -1380,22 +1383,29 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
             arrived.Add(emcys.Count);
         };
         var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fittedAgain = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         device.RpdoReceived += (_, e) =>
         {
-            if (e.CobId == Rpdo1) received.TrySetResult(e.Payload);
+            if (e.CobId != Rpdo1) return;
+            if (e.Payload[0] == 0x08) fittedAgain.TrySetResult(e.Payload);
+            else received.TrySetResult(e.Payload);
         };
         await StartAsync(wire, device);
 
+        const ushort Witness = 0xFF00;
         wire.Transmit(Rpdo1, new byte[] { 0x01 });
         arrived.Take(timeout.Token);
         wire.Transmit(Rpdo1, new byte[] { 0x02 });
         wire.Transmit(Rpdo1, new byte[] { 0x03, 0x04, 0x05, 0x06 });
         await received.Task.WithTimeoutAsync(ShortTimeout);
         wire.Transmit(Rpdo1, new byte[] { 0x07 });
-        arrived.Take(timeout.Token);
+        wire.Transmit(Rpdo1, new byte[] { 0x08, 0x09, 0x0A, 0x0B });
+        await fittedAgain.Task.WithTimeoutAsync(ShortTimeout);
+        await device.SendEmcyAsync(Witness, 0);
+        while (!emcys.Any(m => m.ErrorCode == Witness)) arrived.Take(timeout.Token);
 
-        emcys.Should().HaveCount(2, "the second short frame continues the run the first one reported");
-        emcys.Should().OnlyContain(m => m.ErrorCode == 0x8210);
+        emcys.Where(m => m.ErrorCode != Witness).Should().HaveCount(2, "the second short frame continues the run the first one reported");
+        emcys.Where(m => m.ErrorCode != Witness).Should().OnlyContain(m => m.ErrorCode == 0x8210);
     }
 
     // FR-CO-024 (C13) — with the EMCY switched off (1014h bit 31) a short frame raises nothing, and
