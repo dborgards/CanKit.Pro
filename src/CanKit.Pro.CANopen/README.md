@@ -385,7 +385,10 @@ disposed counts as failed.
 written to this node's object dictionary, and a frame that is not one of this node's own RPDOs
 is still not applied when it arrives.
 
-The COB-ID is read live from `1400h:01` / `1800h:01`. A word that comes back is used ahead of the
+The COB-ID is read live from `1400h:01` / `1800h:01` when a peer description bound for that node
+(`BindPeerDeviceDescription`) declares the record. Without a binding the peer-SDO gate refuses
+every PDO record before a frame is sent, and the whole observation — COB-ID and mapping — is
+decoded from the file passed to the call. A word that comes back is used ahead of the
 peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID the file does
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
 by the peer-SDO gate, or does not return a word.
@@ -586,7 +589,7 @@ EMCY `8210h` (if `1014h` is valid); a longer one is read up to the mapped length
 `Add*` methods — default `true` for application objects, `false` for the communication
 profile, except entries CiA 301 marks optionally mappable), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
 must fit 64 bits; entries occupy the payload in sub-index order. A **dummy entry** — index
-`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
+`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bits
 without touching the dictionary, which pads an RPDO to a peer's layout. `ConfigureTpdo` and
 `ConfigureRpdo` copy the `PdoMapping` into the record; mutating the instance afterwards changes
 nothing. A rejection throws `ArgumentException` naming the abort code and leaves the PDO

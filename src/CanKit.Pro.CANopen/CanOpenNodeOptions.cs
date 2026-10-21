@@ -139,8 +139,9 @@ public sealed class CanOpenNodeOptions
 
     /// <summary>
     /// When <c>true</c>, the PDO communication and mapping records of the node's built-in object
-    /// dictionary (<c>1400h</c>–<c>1403h</c>, <c>1600h</c>–<c>1603h</c>, <c>1800h</c>–<c>1803h</c>,
-    /// <c>1A00h</c>–<c>1A03h</c>) are writable over SDO, so a master or configuration tool can
+    /// dictionary (<c>1400h</c>/<c>1600h</c>/<c>1800h</c>/<c>1A00h</c> + n − 1 for every PDO up to
+    /// <see cref="PdoCount"/>; <c>1400h</c>–<c>1403h</c> … <c>1A00h</c>–<c>1A03h</c> for the default
+    /// four) are writable over SDO, so a master or configuration tool can
     /// configure this node's PDOs over the bus; every accepted write takes effect in the PDO
     /// engine. When <c>false</c> (default) those records are read-only on the bus: the
     /// application configures its PDOs through <c>ConfigureTpdo</c> / <c>ConfigureRpdo</c>, and

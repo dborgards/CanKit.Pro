@@ -300,9 +300,11 @@ internal sealed partial class CanOpenNode
     }
 
     /// <summary>
-    /// Step 3 of the re-mapping procedure: the mapped object must exist (else <c>0602 0000h</c>),
-    /// be mappable, accessible in the PDO's direction and of the mapped width (else
-    /// <c>0604 0041h</c>); the width itself must be a byte multiple of at most 64 bits.
+    /// Step 3 of the re-mapping procedure: the width must be 1..64 bits (else <c>0607 0010h</c>);
+    /// the mapped object must exist (else <c>0602 0000h</c>), be mappable, accessible in the PDO's
+    /// direction and of the mapped width (else <c>0604 0041h</c>). A fixed-width object is mapped
+    /// at its full width, a BOOLEAN also as 1 bit, a variable-length object at any width; a dummy
+    /// entry <c>0001h</c>–<c>0007h</c> must carry the width of its data type.
     /// </summary>
     private SdoAbortCode? ValidateMappingEntry(uint raw, bool isTpdo)
     {
