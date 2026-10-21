@@ -197,8 +197,9 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
         var value = new byte[target.Size];
         Array.Copy(payload, 4, value, 0, value.Length);
         // The entry is resolved again for the write: re-declared since with another width, gone,
-        // or refused by a write validator, it is a target that is not available (8230h, latched
-        // by the caller) rather than an exception out of the frame handler (#358, P-5).
+        // or refused by a write validator, it is a target that is not available rather than an
+        // exception out of the frame handler (#358, P-5). A DAM caller reports that as the latched
+        // 8230h; a SAM caller skips the dispatcher entry, as it does a target that fails the check.
         return _od.TryWriteRaw(index, subindex, value, out _);
     }
 

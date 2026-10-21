@@ -773,9 +773,8 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
     }
 
     // #358 (test gap) — bit 30 of an RPDO COB-ID (the RTR bit of Table 66) is accepted over SDO
-    // and ignored for reception: the RPDO still matches its 11-bit CAN-ID. Whether the validator
-    // should refuse it instead is an open question of the 2026-10-21 review; this pins the
-    // behaviour as it stands.
+    // and ignored for reception: the RPDO still matches its 11-bit CAN-ID. The maintainer's
+    // decision on #358 is to document that rather than refuse it (README § RTR, ConfigureRpdo).
     [Fact]
     public async Task Rpdo_Cob_Id_With_Bit_30_Set_Over_Sdo_Is_Accepted_And_Still_Receives()
     {
