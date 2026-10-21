@@ -64,6 +64,7 @@ namespace CanKit.Pro.J1939Tp
         public int MaxRetransmitRequests { get; init; }
         public byte Priority { get; init; }
         public int ReceiveBufferCapacity { get; init; }
+        public bool SendConnectionAbortRole { get; init; }
         public System.TimeSpan T1 { get; init; }
         public System.TimeSpan T2 { get; init; }
         public System.TimeSpan T3 { get; init; }

@@ -377,8 +377,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // J1939-21 §5.10.3 requires exactly one CM connection per (SA, DA) pair, so the fix is to
     // refuse the second RTS with SessionAlreadyOpen and keep the first session's DT stream
     // running to completion. This test replays that scenario end-to-end via raw frame injection.
-    [Fact]
-    public async Task SecondRtsFromSamePeer_DifferentPgn_IsAbortedAndDtRoutesToActiveSession()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SecondRtsFromSamePeer_DifferentPgn_IsAbortedAndDtRoutesToActiveSession(bool sendRole)
     {
         var session = NewSession();
         using var receiverBus = Open(session, 0);
@@ -396,7 +398,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // injects a second RTS and asserts the Abort *before* sending DTs; a short T2 could
         // expire on a slow Windows/net48 runner and emit Abort(Timeout) for the active PGN, which
         // is correct protocol behavior but unrelated to the intruder-RTS rejection under test.
-        var opts = new J1939TpOptions().With(t2: TimeSpan.FromSeconds(5));
+        var opts = new J1939TpOptions { SendConnectionAbortRole = sendRole }.With(t2: TimeSpan.FromSeconds(5));
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         // Observe every TP.CM frame the receiver emits so we can inspect CTS / EOM / Abort.
@@ -461,8 +463,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
                  && J1939TpFrames.ReadDataPgn(d) == intruderPgn,
             ShortTimeout);
         abort[1].Should().Be(1, "J1939-21 table 7: already in a session (#33)");
-        J1939TpFrames.ReadAbortRole(abort).Should().Be(J1939TpAbortRole.Responder,
-            "the node an RTS is sent to aborts as the responder (#350)");
+        // Byte 3: the responder's role, 01 in bits 2..1, when asked for; the first edition's
+        // reserved 0xFF otherwise (#350).
+        abort.Should().Equal(new byte[] { 0xFF, 1, sendRole ? (byte)0xFD : (byte)0xFF, 0xFF, 0xFF, 0x76, 0xF8, 0x00 });
 
         // Receiver must not have started tearing down / re-CTSing the active session.
         lock (observed)
@@ -648,8 +651,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Bugbot 3596025922: canceling an in-flight TP.CM after RTS must send Connection Abort.
-    [Fact]
-    public async Task SendCm_CancelInFlight_SendsConnectionAbort()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendCm_CancelInFlight_SendsConnectionAbort(bool sendRole)
     {
         var session = NewSession();
         using var senderBus = Open(session, 0);
@@ -659,7 +664,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x72;
         const uint pgn = 0xFE71u;
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa,
+            options: new J1939TpOptions { SendConnectionAbortRole = sendRole });
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -690,9 +696,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<OperationCanceledException>();
 
         var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        abort[1].Should().Be((byte)J1939TpAbortReason.NoResourcesAvailable);
-        J1939TpFrames.ReadAbortRole(abort).Should().Be(J1939TpAbortRole.Originator,
-            "the sender of the RTS aborts as the originator (#350)");
+        // Byte 3: the originator's role, 00 in bits 2..1, when asked for; the first edition's
+        // reserved 0xFF otherwise (#350).
+        abort.Should().Equal(new byte[] { 0xFF, (byte)J1939TpAbortReason.NoResourcesAvailable,
+            sendRole ? (byte)0xFC : (byte)0xFF, 0xFF, 0xFF, 0x71, 0xFE, 0x00 });
     }
 
     // Bugbot 3596025929: MaxPacketsPerCts=0 must fail fast, not crash later in BuildCts.
@@ -2414,6 +2421,43 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await none.Should().ThrowAsync<OperationCanceledException>("no CTS answers an RTS that permits none");
 
         // Served, because no session lingers for the malformed one.
+        peer.SendCm(peerSa, J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn));
+        var ctsFrame = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlCts, ShortTimeout);
+        ctsFrame[1].Should().BeGreaterThan(0);
+    }
+
+    // #33: an RTS announcing more than the 1785 bytes a TP message can carry is the one way the
+    // totals go wrong that table 7 has a code for (9, message size exceeded). The abort names
+    // the RTS's PGN and, with SendConnectionAbortRole, goes out in the responder's role (#350); no
+    // session is opened, so the next well-formed RTS from the same peer is served.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_Rts_Beyond_The_Maximum_Message_Size_Is_Refused_With_Reason_9(bool sendRole)
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x22, peerSa = 0x11;
+        const uint pgn = 0xFBCDu;
+        using var receiver = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa,
+            options: new J1939TpOptions { SendConnectionAbortRole = sendRole });
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        // BuildRts refuses the size, as a sender should; the peer's frame is written by hand.
+        const int totalBytes = J1939TpFrames.MaxTpPayloadLength + 1;
+        var rts = J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn);
+        rts[1] = (byte)(totalBytes & 0xFF);
+        rts[2] = (byte)(totalBytes >> 8);
+        rts[3] = 255;
+        peer.SendCm(peerSa, rts);
+
+        var abort = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlAbort, ShortTimeout);
+        abort.Should().Equal(new byte[] { 0xFF, (byte)J1939TpAbortReason.MessageSizeExceeded,
+            sendRole ? (byte)0xFD : (byte)0xFF, 0xFF, 0xFF, 0xCD, 0xFB, 0x00 },
+            "J1939-21 table 7, code 9 (#33), for the RTS's PGN, as the responder when the role is sent (#350)");
+
+        // Served, because no session lingers for the refused one.
         peer.SendCm(peerSa, J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn));
         var ctsFrame = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlCts, ShortTimeout);
         ctsFrame[1].Should().BeGreaterThan(0);

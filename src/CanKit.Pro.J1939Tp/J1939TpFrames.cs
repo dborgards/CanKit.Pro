@@ -160,7 +160,9 @@ internal static class J1939TpFrames
     /// <summary>
     /// Builds an 8-byte TP.CM Connection Abort with reason <paramref name="reason"/>, sent in
     /// <paramref name="role"/> -- the role this node has in the session it aborts. Byte 3 carries
-    /// the role in its two low bits, the rest of it and bytes 4..5 stay 0xFF (#350).
+    /// the role in its two low bits, the rest of it and bytes 4..5 stay 0xFF;
+    /// <see cref="J1939TpAbortRole.NotAvailable"/> leaves byte 3 at 0xFF as well, which is what
+    /// the channel sends unless <see cref="J1939TpOptions.SendConnectionAbortRole"/> is set (#350).
     /// </summary>
     public static byte[] BuildAbort(J1939TpAbortReason reason, uint dataPgn, J1939TpAbortRole role)
     {

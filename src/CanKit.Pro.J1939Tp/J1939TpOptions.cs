@@ -102,6 +102,21 @@ public sealed class J1939TpOptions
     public int MaxQueuedSendsPerDestination { get; init; } = 8;
 
     /// <summary>
+    /// Whether a TP.CM Connection Abort this channel sends carries its Connection Abort Role:
+    /// the role this node has in the session it aborts, in bits 2..1 of byte 3 (J1939-21, second
+    /// edition: 00 = originator, the node that sent the RTS; 01 = responder, the node the RTS was
+    /// sent to), with the other six bits of the byte left at 1. A peer that runs a TP.CM transfer
+    /// of the same PGN in both directions with this node needs it to tell which of the two one
+    /// abort ends. Default <see langword="false"/>: byte 3 stays 0xFF, the first edition's
+    /// reserved value, which is also what the Linux kernel's j1939 stack sends -- a strict or
+    /// first-edition peer may refuse an abort whose reserved byte is not 0xFF and then keep its
+    /// session until its own timeout. Turn it on for a network whose peers implement the second
+    /// edition. Receiving does not depend on it: an abort's role is read when present and only
+    /// decides between two sessions its PGN matches, and 0xFF reads as no role (#350).
+    /// </summary>
+    public bool SendConnectionAbortRole { get; init; }
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
     /// tests that want to tweak one field of a shared default template.
     /// </summary>
@@ -143,6 +158,7 @@ public sealed class J1939TpOptions
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
             MaxRetransmitRequests = maxRetransmitRequests ?? MaxRetransmitRequests,
             MaxQueuedSendsPerDestination = maxQueuedSendsPerDestination ?? MaxQueuedSendsPerDestination,
+            SendConnectionAbortRole = SendConnectionAbortRole,
         };
     }
 

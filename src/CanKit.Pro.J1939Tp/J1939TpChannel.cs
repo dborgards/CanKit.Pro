@@ -323,7 +323,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // Peer already has (or is about to have) an open CM session with us — tell it to
                 // tear down. Reason 2 ("resources needed for another task") is the closest
                 // standard code for an application-initiated local cancel.
-                SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn, J1939TpAbortRole.Originator),
+                SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn, SentRole(J1939TpAbortRole.Originator)),
                     destinationAddress: key.DestinationAddress);
             }
             // Complete with the caller's token (do not go through TxSession.Cancel, which would
@@ -616,7 +616,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     var cmKey = new RxSessionKey(sa, J1939TpKind.Cm);
                     if (_rxSessions.ContainsKey(cmKey))
                     {
-                        SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.SessionAlreadyOpen, dataPgn, J1939TpAbortRole.Responder),
+                        SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.SessionAlreadyOpen, dataPgn, SentRole(J1939TpAbortRole.Responder)),
                             destinationAddress: sa);
                         return;
                     }
@@ -632,7 +632,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                         // is ignored, and the originator's T3 closes its side.
                         if (totalBytes > J1939TpFrames.MaxTpPayloadLength)
                         {
-                            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.MessageSizeExceeded, dataPgn, J1939TpAbortRole.Responder),
+                            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.MessageSizeExceeded, dataPgn, SentRole(J1939TpAbortRole.Responder)),
                                 destinationAddress: sa);
                         }
                         return;
@@ -747,7 +747,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 : J1939TpAbortReason.BadSequenceNumber;
             if (match.Kind == J1939TpKind.Cm)
             {
-                SendTpCm(J1939TpFrames.BuildAbort(snReason, pgn, J1939TpAbortRole.Responder),
+                SendTpCm(J1939TpFrames.BuildAbort(snReason, pgn, SentRole(J1939TpAbortRole.Responder)),
                     destinationAddress: sa);
             }
             match.Cancel();
@@ -821,7 +821,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.Cancel();
         if (session.Kind == J1939TpKind.Cm)
         {
-            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, session.Pgn, J1939TpAbortRole.Responder),
+            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, session.Pgn, SentRole(J1939TpAbortRole.Responder)),
                 destinationAddress: session.PeerAddress);
         }
         // Fault blocked ReceiveAsync as well as BackgroundExceptionOccurred.
@@ -1286,7 +1286,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.Deadline?.Dispose();
         session.Deadline = null;
         // Notify peer.
-        SendTpCm(J1939TpFrames.BuildAbort(reason, session.Key.Pgn, J1939TpAbortRole.Originator),
+        SendTpCm(J1939TpFrames.BuildAbort(reason, session.Key.Pgn, SentRole(J1939TpAbortRole.Originator)),
             destinationAddress: session.Key.DestinationAddress);
         session.Tcs.TrySetException(new J1939TpAbortException(reason, session.Key.Pgn, message));
         EndTx(session.Key);
@@ -1295,6 +1295,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
+
+    // The Connection Abort Role goes on the wire only when the options ask for it; otherwise
+    // byte 3 of the abort stays the first edition's reserved 0xFF (#350).
+    private J1939TpAbortRole SentRole(J1939TpAbortRole role)
+        => _options.SendConnectionAbortRole ? role : J1939TpAbortRole.NotAvailable;
+
     private void SendTpCm(byte[] payload, byte destinationAddress, TxSession? session = null,
         Action? onConfirmed = null)
         => SendControlFrame(J1939Pgn.TpCm, payload, destinationAddress, session, onConfirmed);
