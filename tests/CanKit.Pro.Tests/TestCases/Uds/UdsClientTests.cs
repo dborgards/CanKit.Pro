@@ -1918,6 +1918,103 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #340 — the echo table itself, for the rows the theory above cannot put through the
+    // simulated ECU (it masks the SID with 0x7F, so 0x85 and 0x87 cannot be served) and for
+    // the verdicts it does not exercise: a service with a sub-function and nothing more behind
+    // it (0x19, 0x28, 0x85, 0x87) is correlated on that byte alone; a service whose positive
+    // response echoes nothing (0x14, 0x23, 0x34, 0x35, 0x37, 0x84) is never a stray on its
+    // own SID, whatever follows it -- a wrong rule here would turn every RequestDownload
+    // answer into a stray and the download into a timeout; a response too short for its echo
+    // is Truncated, not Stray, so the service's length check sees it; and bit 7 is masked on
+    // a sub-function only, not on a block sequence counter.
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    // Sub-function only: the byte, with suppressPosRspMsgIndication cleared from the request.
+    [InlineData(new byte[] { 0x19, 0x02, 0xFF }, new byte[] { 0x59, 0x02, 0xFF, 0x01, 0x02, 0x03, 0x04 }, "Mine")]
+    [InlineData(new byte[] { 0x19, 0x82, 0xFF }, new byte[] { 0x59, 0x02, 0xFF }, "Mine")]
+    [InlineData(new byte[] { 0x19, 0x02, 0xFF }, new byte[] { 0x59, 0x01, 0xFF }, "Stray")]
+    [InlineData(new byte[] { 0x28, 0x00, 0x01 }, new byte[] { 0x68, 0x00 }, "Mine")]
+    [InlineData(new byte[] { 0x28, 0x00, 0x01 }, new byte[] { 0x68, 0x01 }, "Stray")]
+    [InlineData(new byte[] { 0x85, 0x02 }, new byte[] { 0xC5, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x85, 0x02 }, new byte[] { 0xC5, 0x01 }, "Stray")]
+    [InlineData(new byte[] { 0x87, 0x01, 0x01 }, new byte[] { 0xC7, 0x01 }, "Mine")]
+    [InlineData(new byte[] { 0x87, 0x01, 0x01 }, new byte[] { 0xC7, 0x02 }, "Stray")]
+    // No echo: the SID is the whole correlation; the bytes behind it are the answer's own.
+    [InlineData(new byte[] { 0x14, 0xFF, 0xFF, 0xFF }, new byte[] { 0x54 }, "Mine")]
+    [InlineData(new byte[] { 0x14, 0xFF, 0xFF, 0xFF }, new byte[] { 0x54, 0x01 }, "Mine")]
+    [InlineData(new byte[] { 0x23, 0x12, 0x10, 0x00, 0x02 }, new byte[] { 0x63, 0xAA, 0xBB }, "Mine")]
+    [InlineData(new byte[] { 0x34, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00 }, new byte[] { 0x74, 0x20, 0x0F, 0xFF }, "Mine")]
+    [InlineData(new byte[] { 0x35, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00 }, new byte[] { 0x75, 0x20, 0x0F, 0xFF }, "Mine")]
+    [InlineData(new byte[] { 0x37 }, new byte[] { 0x77 }, "Mine")]
+    [InlineData(new byte[] { 0x37, 0x01 }, new byte[] { 0x77, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x84, 0x01, 0x02 }, new byte[] { 0xC4, 0x03 }, "Mine")]
+    // Too short for the echo: returned to the service's length check, not dropped.
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x62 }, "Truncated")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x62, 0xF1 }, "Truncated")]
+    [InlineData(new byte[] { 0x10, 0x03 }, new byte[] { 0x50 }, "Truncated")]
+    [InlineData(new byte[] { 0x2A, 0x01, 0xE3 }, new byte[] { 0x6A }, "Truncated")]
+    [InlineData(new byte[] { 0x36, 0x01, 0xAA }, new byte[] { 0x76 }, "Truncated")]
+    [InlineData(new byte[] { 0x3D, 0x12, 0x10, 0x00, 0x01, 0xDD }, new byte[] { 0x7D, 0x12, 0x10 }, "Truncated")]
+    // A block sequence counter is not a sub-function: bit 7 is part of it.
+    [InlineData(new byte[] { 0x36, 0x81, 0xAA }, new byte[] { 0x76, 0x81 }, "Mine")]
+    [InlineData(new byte[] { 0x36, 0x81, 0xAA }, new byte[] { 0x76, 0x01 }, "Stray")]
+    // A clear of every dynamically defined DID names none; the echo stops where the request does.
+    [InlineData(new byte[] { 0x2C, 0x03 }, new byte[] { 0x6C, 0x03 }, "Mine")]
+    [InlineData(new byte[] { 0x2C, 0x03 }, new byte[] { 0x6C, 0x01 }, "Stray")]
+    // Any requested identifier, not only the first (#252; 0x2A likewise).
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x87 }, new byte[] { 0x62, 0xF1, 0x87, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x87 }, new byte[] { 0x62, 0xF1, 0x88, 0x02 }, "Stray")]
+    [InlineData(new byte[] { 0x2A, 0x01, 0xE3, 0xE4 }, new byte[] { 0x6A, 0xE4, 0x01 }, "Mine")]
+    // Another service's SID, and a negative response, are strays to the echo whatever follows.
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x50, 0x03 }, "Stray")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x7F, 0x22, 0x31 }, "Stray")]
+    // Nothing to correlate on: an empty request or response is nobody's (the loop never
+    // passes either; the functional client's raw frames could). A bare 0x3D names no
+    // address and size, so nothing is echoed.
+    [InlineData(new byte[0], new byte[] { 0x62, 0xF1, 0x90 }, "Stray")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[0], "Stray")]
+    [InlineData(new byte[] { 0x3D }, new byte[] { 0x7D, 0x12 }, "Mine")]
+    public void The_Echo_Table_Correlates_Per_Service(byte[] request, byte[] response, string expected)
+    {
+        // By name: the enum is internal, and a public test method cannot take it.
+        UdsResponseEcho.Correlate(request, response).Should().Be(Enum.Parse<UdsEchoMatch>(expected));
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #340 — a positive response too short to carry the echo is Truncated to the receive
+    // loop, which returns it; the typed method's own length check then reports it as
+    // malformed. The alternative -- dropping it as a stray -- would turn a malformed answer
+    // into a timeout. One row per typed method whose echo check moved into the loop, two
+    // for SecurityAccess (the seed's answer, then the key's with the seed answered in
+    // full); the ECU answers with the response SID and nothing behind it.
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(0x10, false)]
+    [InlineData(0x11, false)]
+    [InlineData(0x27, false)]
+    [InlineData(0x27, true)]
+    [InlineData(0x31, false)]
+    [InlineData(0x3E, false)]
+    public async Task A_Positive_Response_Too_Short_For_Its_Echo_Is_Malformed_Not_A_Stray(int service, bool seedAnswered)
+    {
+        var (client, _, dispose) = BuildPair(e => e.On((byte)service, req =>
+            seedAnswered && req[1] == 0x01 ? new byte[] { 0x01, 0x11, 0x22 } : Array.Empty<byte>()));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            Func<Task> act = service switch
+            {
+                0x10 => () => client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token),
+                0x11 => () => client.EcuResetAsync(UdsEcuResetType.HardReset, cts.Token),
+                0x27 => () => client.SecurityAccessAsync(0x01, seed => new byte[] { 0x33 }, cts.Token),
+                0x31 => () => client.RoutineControlAsync(UdsRoutineControlType.StartRoutine, 0x0201, default, cts.Token),
+                _ => () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token),
+            };
+            await act.Should().ThrowAsync<UdsProtocolException>().WithMessage("*too short*");
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
     // FR-UDS-007 — TesterPresent (0x3E): keep-alive fires periodically without blocking.
     // -----------------------------------------------------------------------------------
     [Fact]
