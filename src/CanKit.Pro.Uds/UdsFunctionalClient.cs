@@ -221,8 +221,9 @@ public sealed class UdsFunctionalClient : IDisposable
                 "The collection window exceeds what a timer can measure (about 49 days).");
 
         // A read for more than one DID is answered with all of them in one PDU, which a Single
-        // Frame cannot hold with their data; and only the first DID would be correlated here,
-        // so two such reads sharing it could take each other's late answers (Codex on #150).
+        // Frame cannot hold with their data; and an answer is correlated on its first DID alone
+        // (any requested one, UdsResponseEcho), so two such reads sharing a DID could take
+        // each other's late answers (Codex on #150).
         if (sid == (byte)UdsServiceId.ReadDataByIdentifier && request.Length > 3)
             throw new ArgumentException(
                 "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
