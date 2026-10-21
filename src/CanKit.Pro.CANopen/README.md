@@ -547,10 +547,10 @@ changes. The transmission type byte in `1800h:02` decides how a TPDO fires:
 | `TpdoTransmission` | `1800h:02` | Behaviour |
 | --- | --- | --- |
 | `SynchronousAcyclic` | `00h` | A change of state of a mapped object or `TriggerTpdoAsync` latches one transmission for the next SYNC |
-| `Synchronous` | `01h` | Transmitted at every SYNC |
-| *(write the byte)* | `02h`–`F0h` | Transmitted at every n-th SYNC. `CanOpenTransmissionType.SynchronousEveryNthSync(n)` gives the byte; write it to `1800h:02` through the object dictionary |
-| `RtrOnlySynchronous` | `FCh` | Sampled at every SYNC into a buffer; the buffered sample answers an RTR — nothing answers before the first SYNC |
-| `RtrOnlyEventDriven` | `FDh` | Sampled and transmitted when an RTR arrives |
+| `Synchronous` | `01h` | Transmitted at every SYNC; `TriggerTpdoAsync` sends nothing |
+| *(write the byte)* | `02h`–`F0h` | Transmitted at every n-th SYNC; `TriggerTpdoAsync` sends nothing. `CanOpenTransmissionType.SynchronousEveryNthSync(n)` gives the byte; write it to `1800h:02` through the object dictionary |
+| `RtrOnlySynchronous` | `FCh` | Sampled at every SYNC into a buffer; the buffered sample answers an RTR — nothing answers before the first SYNC; `TriggerTpdoAsync` sends nothing |
+| `RtrOnlyEventDriven` | `FDh` | Sampled and transmitted when an RTR arrives; `TriggerTpdoAsync` sends nothing |
 | `EventDriven`, `EventTimer` | `FEh` | Transmitted on change of state and on `TriggerTpdoAsync`, rate-limited by the inhibit time; `EventTimer` additionally sets `1800h:05` |
 | *(write the byte)* | `FFh` | As `FEh` |
 

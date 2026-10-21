@@ -586,9 +586,12 @@ internal sealed partial class CanOpenNode
             if (rt.MappingKind == (byte)MpdoAddressMode.Source) TriggerSourceMpdo(rt);
             return;
         }
+        // An application trigger is an event (Table 72). Only the types that react to events take
+        // it: 00h latches a transmission for the next SYNC, FEh/FFh transmit subject to the
+        // inhibit time. A cyclic TPDO (01h-F0h) is transmitted by the SYNC and an RTR-only one
+        // (FCh/FDh) by an RTR; a trigger sends neither, so it is a no-op for them (#358, P-3).
         if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
         else if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)) RequestEventDrivenTransmission(rt);
-        else EmitTpdo(rt);
     }
 
     // =========================================================================================

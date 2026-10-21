@@ -442,9 +442,13 @@ public interface ICanOpenNode : IDisposable
         RpdoTransmission transmission = RpdoTransmission.EventDriven);
 
     /// <summary>Requests a TPDO transmission from the application (CiA 301 "internal event").
-    /// Event-driven TPDOs transmit subject to their inhibit time; a synchronous-acyclic TPDO
-    /// transmits after the next SYNC; the other modes transmit immediately. The node still
-    /// respects the current NMT state (only fires in <see cref="NmtState.Operational"/>).</summary>
+    /// Event-driven TPDOs (<c>FEh</c>/<c>FFh</c>) transmit subject to their inhibit time; a
+    /// synchronous-acyclic TPDO (<c>00h</c>) transmits after the next SYNC. The other types do
+    /// not react to an event, so the call sends nothing for them: a cyclic TPDO
+    /// (<c>01h</c>–<c>F0h</c>) is transmitted by the SYNC, and an RTR-only TPDO
+    /// (<c>FCh</c>/<c>FDh</c>) by an RTR. The node still respects the current NMT state (only
+    /// fires in <see cref="NmtState.Operational"/>); a call that sends nothing completes
+    /// normally, as for a PDO that is not valid.</summary>
     Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default);
 
     /// <summary>

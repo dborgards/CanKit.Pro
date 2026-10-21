@@ -359,6 +359,39 @@ public partial class CanOpenPdoEngineTests
         received.Should().ContainSingle("only the frame that landed is reported as received");
     }
 
+    // #358 (P-3) — an application trigger is an event (CiA 301 Table 72). A cyclic TPDO
+    // (01h-F0h) is sent by the SYNC and an RTR-only one (FCh/FDh) by an RTR, so a trigger sends
+    // neither. The witness is an event-driven TPDO2 triggered afterwards on the same actor and
+    // sent through the same bus: once its frame is on the wire, a frame the first trigger had
+    // sent would be there before it.
+    [Theory]
+    [InlineData(0x01)]
+    [InlineData(0x05)]
+    [InlineData(0xF0)]
+    [InlineData(0xFC)]
+    [InlineData(0xFD)]
+    public async Task Trigger_Sends_Nothing_For_A_Cyclic_Or_Rtr_Only_Tpdo(int type)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Device);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x2000, 0, 0x5A);
+        node.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0, 8), TpdoTransmission.Synchronous);
+        node.ConfigureTpdo(2, new PdoMapping().Add(0x2000, 0, 8));
+        uint cobId = od.ReadUnsigned(0x1800, 1);
+        od.WriteUnsigned(0x1800, 1, cobId | CanOpenCobId.InvalidBit);
+        od.WriteUnsigned(0x1800, 2, (uint)type);
+        od.WriteUnsigned(0x1800, 1, cobId);
+        await StartAsync(wire, node);
+
+        await node.TriggerTpdoAsync(1);
+        await node.TriggerTpdoAsync(2);
+        await wire.WaitForCountAsync(Tpdo2, 1);
+        wire.Count(Tpdo1).Should().Be(0, "transmission type {0:X2}h does not react to an application trigger", type);
+    }
+
     [Fact]
     public async Task Sync_Length_Emergency_Is_Latched_Until_A_Valid_Sync()
     {
