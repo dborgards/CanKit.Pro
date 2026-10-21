@@ -506,8 +506,9 @@ change while the PDO is valid. RPDO sub-index 6 remains absent as the specificat
 
 **Synchronous window.** `1007h:00` is the window length in microseconds; 0 disables it.
 With a window enabled, synchronous RPDOs outside it are discarded, including before the
-first SYNC. Data accepted inside the window is applied at the next SYNC. Synchronous
-TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
+first SYNC. That discard is a policy this implementation chose (FR-CO-053: "chosen optional
+discard policy"), not a reception rule quoted from CiA 301 §7.5.2.7. Data accepted inside
+the window is applied at the next SYNC. Synchronous TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
 outlived its window or was superseded by another SYNC is discarded. This is software
 scheduling; it cannot withdraw a frame already handed to the CAN driver.
 
