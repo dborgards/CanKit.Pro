@@ -159,6 +159,12 @@ public class ProtocolActorTests
         await task;
     }
 
+    private static async Task<T> WithinTenSeconds<T>(Task<T> task)
+    {
+        await WithinTenSeconds((Task)task);
+        return await task;
+    }
+
     [Fact]
     public async Task PostAsync_With_A_Live_Token_Behaves_Like_Without_One()
     {
@@ -293,6 +299,125 @@ public class ProtocolActorTests
         // completed.Task above resolves.
         Action postAfter = () => actor.Post(() => { });
         postAfter.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Theory]
+    [InlineData(ActorExecutionMode.DedicatedThread)]
+    [InlineData(ActorExecutionMode.ThreadPool)]
+    public async Task A_Second_Dispose_After_A_Reentrant_One_Waits_For_The_Loop(ActorExecutionMode mode)
+    {
+        // Regression (#338): Dispose returned at once for every caller but the one that flipped
+        // the flag. A callback that disposes the actor from the loop is that first caller and
+        // (rightly) skips the join -- so the owner's using/finally afterwards, the second caller,
+        // returned while the callback was still running and FinalDrain had not happened, and
+        // then tore down whatever the callback was still using.
+        var actor = new ProtocolActor(mode);
+        using var callbackEntered = new ManualResetEventSlim(false);
+        using var releaseCallback = new ManualResetEventSlim(false);
+        using var ownerStarted = new ManualResetEventSlim(false);
+        var callbackFinished = 0;
+
+        actor.Post(() =>
+        {
+            actor.Dispose(); // reentrant: the first caller
+            callbackEntered.Set();
+            releaseCallback.Wait(TimeSpan.FromSeconds(30));
+            Volatile.Write(ref callbackFinished, 1);
+        });
+
+        callbackEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        // The owner: Dispose on a thread of its own, capturing at the moment it returns whether
+        // the callback had finished by then. The gate is released only once the owner is inside
+        // Dispose, so a Dispose that returns at once is caught with the callback still blocked.
+        var owner = Task.Run(() =>
+        {
+            ownerStarted.Set();
+            actor.Dispose(); // the second caller
+            return Volatile.Read(ref callbackFinished) == 1;
+        });
+
+        ownerStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        releaseCallback.Set();
+
+        (await WithinTenSeconds(owner)).Should().BeTrue(
+            "the owner's Dispose must not return while the callback that disposed the actor from the loop is still running");
+    }
+
+    [Fact]
+    public async Task Two_Off_Loop_Dispose_Callers_Both_Wait_For_The_Loop()
+    {
+        // Regression (#338), the other shape: two owners racing on Dispose. The one that loses
+        // the flag flip returned immediately while the winner was still joining the loop, so its
+        // "after Dispose" code ran concurrently with the callback still on the loop.
+        var actor = new ProtocolActor();
+        using var callbackEntered = new ManualResetEventSlim(false);
+        using var releaseCallback = new ManualResetEventSlim(false);
+        using var bothStarted = new CountdownEvent(2);
+        var callbackFinished = 0;
+
+        actor.Post(() =>
+        {
+            callbackEntered.Set();
+            releaseCallback.Wait(TimeSpan.FromSeconds(30));
+            Volatile.Write(ref callbackFinished, 1);
+        });
+
+        callbackEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        Task<bool> Owner() => Task.Run(() =>
+        {
+            bothStarted.Signal();
+            actor.Dispose();
+            return Volatile.Read(ref callbackFinished) == 1;
+        });
+
+        var first = Owner();
+        var second = Owner();
+
+        bothStarted.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        releaseCallback.Set();
+
+        (await WithinTenSeconds(Task.WhenAll(first, second))).Should().AllBeEquivalentTo(true,
+            "neither caller's Dispose may return while the loop is still inside a callback");
+    }
+
+    [Fact]
+    public void A_Second_Dispose_Reports_The_Timeout_The_Reentrant_First_One_Could_Not()
+    {
+        // Regression (#338), deterministic by construction: the callback disposes the actor from
+        // the loop (no join possible there) and then never returns within the shortened shutdown
+        // timeout. Before the fix the owner's Dispose hit the idempotency guard and returned at
+        // once, so the loop stayed stuck inside a callback and nobody was ever told; now the
+        // owner joins, gives up after the timeout and reports it through the one defined channel.
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100));
+        using var callbackEntered = new ManualResetEventSlim(false);
+        using var releaseCallback = new ManualResetEventSlim(false);
+        var reports = new List<Exception>();
+        actor.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            lock (reports) reports.Add(ex);
+        };
+
+        actor.Post(() =>
+        {
+            actor.Dispose();
+            callbackEntered.Set();
+            releaseCallback.Wait(TimeSpan.FromSeconds(30));
+        });
+
+        callbackEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        actor.Dispose();
+        actor.Dispose(); // a third caller: the timeout is reported once, not once per caller
+
+        lock (reports)
+        {
+            reports.Should().ContainSingle().Which.Should().BeOfType<TimeoutException>(
+                "the second Dispose must join and, failing that, say so (FR-RAW-023); a third must not repeat the report");
+        }
+
+        // Let the stuck callback finish so the loop tears itself down instead of leaking a thread.
+        releaseCallback.Set();
     }
 
     [Fact]
