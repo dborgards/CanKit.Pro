@@ -291,19 +291,12 @@ internal sealed partial class CanOpenNode
         if (_od.ReadUnsigned(index, 0x00) != 0) return OdWriteDecision.Reject(SdoAbortCode.UnsupportedAccess);
         uint entry = ObjectDictionary.DecodeU32(value);
         if (entry == 0) return OdWriteDecision.Accept; // clears the slot
+        // The entry is judged on its own. The total length is checked once, when step 4 enables
+        // the mapping (sub0 = N, above): while it is disabled the other slots may still hold a
+        // previous, wider mapping, and a master may write the new entries in any order, so
+        // counting them here would refuse a mapping whose final form fits (#358, P-4).
         var reason = ValidateMappingEntry(entry, isTpdo);
-        if (reason is { } r) return OdWriteDecision.Reject(r);
-        // "a wrong length for the PDO at all" is a step-3 rejection too: with the entries before
-        // this slot, the mapping would already exceed 8 bytes. Slots after it may still hold a
-        // previous mapping and do not count.
-        int precedingBits = 0;
-        for (byte s = 1; s < subindex; s++)
-        {
-            if (_od.TryReadUnsigned(index, s, out var earlier)) precedingBits += (int)(earlier & 0xFF);
-        }
-        return precedingBits + (int)(entry & 0xFF) > 64
-            ? OdWriteDecision.Reject(SdoAbortCode.PdoMappingLengthExceeded)
-            : OdWriteDecision.Accept;
+        return reason is { } r ? OdWriteDecision.Reject(r) : OdWriteDecision.Accept;
     }
 
     /// <summary>

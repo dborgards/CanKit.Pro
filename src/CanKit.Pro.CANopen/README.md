@@ -209,7 +209,7 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0601 0002h` | Download to a read-only object: the PDO records without `WritableCommunicationParameters`, `1200h`, `1000h`, `1001h`, `1018h`, `1F81h:00`, `1F82h:00`, `1F90h:00` |
 | `0602 0000h` | Mapping entry whose target object does not exist; `sub0` enabling a mapping with an empty slot |
 | `0604 0041h` | Target not PDO-mappable, not accessible in the PDO's direction, or of another width than mapped; dummy entry with the wrong width |
-| `0604 0042h` | Mapping longer than 8 bytes |
+| `0604 0042h` | Mapping longer than 8 bytes — for a PDO, checked when `sub0` enables it, over the entries it names |
 | `0604 0043h` | Second `1016h` entry for a node-id already monitored |
 | `0607 0010h` | Mapping bit length 0 or above 64 |
 | `0607 0012h` / `0607 0013h` | Download of the wrong width for the object — `sub0` of a mapping record is UNSIGNED8 |
@@ -595,7 +595,10 @@ invalid.
 `WritableCommunicationParameters`: destroy the PDO (bit 31 of `1800h:01` to 1) → disable the
 mapping (`1A00h:00` = 0) → write the entries (`1A00h:01`…) → enable the mapping (`1A00h:00` = N)
 → set transmission type, inhibit time, event timer → create the PDO (bit 31 to 0). The engine
-picks the record up at the last step.
+picks the record up at the last step. Each entry is checked on its own when it is written; the
+length of the whole mapping is checked when it is enabled (`0604 0042h` on `1A00h:00` = N), over
+the entries N names. While the mapping is disabled the slots keep what they held, and the entries
+may be written in any order, so a slot not yet overwritten does not count against a new one.
 
 ## Error control
 

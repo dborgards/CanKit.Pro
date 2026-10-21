@@ -1105,6 +1105,39 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
             "sub-index 01h is the first object, 02h the second, and the dummy in 03h is a zero byte");
     }
 
+    // FR-CO-020 (#358, P-4) — while the mapping is disabled the slots keep a previous mapping, and
+    // the write order is free. A master remapping {01h = 64 bits} to {01h = 8, 02h = 8} that
+    // writes slot 02h first must not be refused for the stale 64 bits still in slot 01h: the
+    // length of the mapping is judged when step 4 enables it, over the entries it names.
+    [Fact]
+    public async Task Mapping_Slot_Write_Does_Not_Count_A_Stale_Preceding_Slot()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        var od = device.ObjectDictionary;
+        od.AddRaw(0x2000, 0x00, OdDataType.Unsigned64, new byte[8]);
+        od.AddU8(0x2001, 0x00, 0x11);
+        od.AddU8(0x2002, 0x00, 0x22);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 64));
+
+        await DownloadAsync(master, 0x1800, 0x01, U32Bytes(Tpdo1 | CanOpenCobId.InvalidBit));
+        await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x00 });
+        (await UploadAsync(master, 0x1A00, 0x01)).Should().Equal(MappingEntryBytes(0x2000, 0x00, 64), "slot 01h still holds the previous 64-bit entry");
+        await DownloadAsync(master, 0x1A00, 0x02, MappingEntryBytes(0x2002, 0x00, 8));
+        await DownloadAsync(master, 0x1A00, 0x01, MappingEntryBytes(0x2001, 0x00, 8));
+        await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x02 });
+        await DownloadAsync(master, 0x1800, 0x01, U32Bytes(Tpdo1));
+
+        await StartAsync(wire, device);
+        await device.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+        wire.Payloads(Tpdo1)[0].Should().Equal(0x11, 0x22);
+    }
+
     // FR-CO-020 — sub-index 00h: step 4 "the mapping is not valid or not possible" (0602 0000h /
     // 0604 0042h) for a count that names an empty slot or more entries than fit; the reserved and
     // MPDO values of Table 73 are not supported (0609 0030h).
