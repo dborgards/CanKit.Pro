@@ -328,8 +328,14 @@ public class ProtocolActorTests
         callbackEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
 
         // The owner: Dispose on a thread of its own, capturing at the moment it returns whether
-        // the callback had finished by then. The gate is released only once the owner is inside
-        // Dispose, so a Dispose that returns at once is caught with the callback still blocked.
+        // the callback had finished by then. The gate is released only once the owner has
+        // signalled, which is the last thing it does before calling Dispose -- no signal exists
+        // for "inside the join", so a Dispose that returns at once is caught with the callback
+        // still blocked whenever it gets there before the release has travelled through the test
+        // thread, the callback and FinalDrain, which is every observed run but not a guarantee.
+        // The deterministic pin for this shape is
+        // A_Second_Dispose_Reports_The_Timeout_The_Reentrant_First_One_Could_Not, whose
+        // callback is never released before the assertion.
         var owner = Task.Run(() =>
         {
             ownerStarted.Set();
@@ -349,7 +355,9 @@ public class ProtocolActorTests
     {
         // Regression (#338), the other shape: two owners racing on Dispose. The one that loses
         // the flag flip returned immediately while the winner was still joining the loop, so its
-        // "after Dispose" code ran concurrently with the callback still on the loop.
+        // "after Dispose" code ran concurrently with the callback still on the loop. The same
+        // signal-before-Dispose window as in A_Second_Dispose_After_A_Reentrant_One_Waits_For_The_Loop
+        // applies: the release follows both callers' signals, not their joins.
         var actor = new ProtocolActor();
         using var callbackEntered = new ManualResetEventSlim(false);
         using var releaseCallback = new ManualResetEventSlim(false);
@@ -417,6 +425,48 @@ public class ProtocolActorTests
         }
 
         // Let the stuck callback finish so the loop tears itself down instead of leaking a thread.
+        releaseCallback.Set();
+    }
+
+    [Fact]
+    public void A_Subscriber_Disposing_From_Inside_The_Timeout_Report_Returns_And_Hears_It_Once()
+    {
+        // A BackgroundExceptionOccurred subscriber that answers the shutdown-timeout report by
+        // disposing the actor is off-loop, so with every off-loop caller joining (#338) its nested
+        // Dispose would join the stuck loop a second time; the nested call must instead return at
+        // once, inside the report, and the report must stay single. Pinned here: the nested
+        // call returns while the callback is still blocked (the gate is released only after the
+        // outer Dispose has returned), the subscriber runs exactly once, and the outer Dispose
+        // returns. That the nested call did not spend a second _shutdownTimeout in a join is a
+        // duration, not a signal -- a wall-clock bound would be the kind of assertion this suite
+        // does not make -- so that half is not mutation-pinned here.
+        using var actor = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100));
+        using var callbackEntered = new ManualResetEventSlim(false);
+        using var releaseCallback = new ManualResetEventSlim(false);
+        var reports = 0;
+        var nestedDisposeReturned = false;
+        actor.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            Interlocked.Increment(ref reports);
+            if (ex is TimeoutException)
+            {
+                actor.Dispose(); // nested, off-loop, from inside the report
+                nestedDisposeReturned = true;
+            }
+        };
+
+        actor.Post(() =>
+        {
+            callbackEntered.Set();
+            releaseCallback.Wait(TimeSpan.FromSeconds(30));
+        });
+
+        callbackEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        actor.Dispose(); // the outer caller: joins, gives up after 100 ms, reports
+
+        nestedDisposeReturned.Should().BeTrue("the subscriber's nested Dispose must return inside the report");
+        Volatile.Read(ref reports).Should().Be(1, "the nested Dispose must not add a second report");
+
         releaseCallback.Set();
     }
 
