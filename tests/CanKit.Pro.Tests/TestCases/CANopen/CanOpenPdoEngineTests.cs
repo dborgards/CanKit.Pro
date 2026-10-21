@@ -731,6 +731,79 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
         od.ReadUnsigned(0x1800, 0x03).Should().Be(10u);
     }
 
+    // #358 (test gap) — 1400h:03 is retained on an RPDO as an implementation-specific inhibit
+    // parameter (README § PDO engine): it follows the TPDO rule for sub-index 03h — no change while
+    // the PDO exists — and does not suppress reception. Two frames sent back to back under an
+    // inhibit of 6.5535 s are both actuated within the 5 s wait, which a suppressing node could
+    // only meet by letting the second one through.
+    [Fact]
+    public async Task Rpdo_Inhibit_Sub_Index_Follows_The_Valid_Pdo_Rule_And_Does_Not_Suppress_Reception()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2100, 0x00, 0);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, 8));
+
+        (await DownloadShouldAbortAsync(master, 0x1400, 0x03, new byte[] { 0xFF, 0xFF }))
+            .AbortCode.Should().Be((uint)SdoAbortCode.ValueRangeExceeded, "the RPDO exists");
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1 | CanOpenCobId.InvalidBit));
+        await DownloadAsync(master, 0x1400, 0x03, new byte[] { 0xFF, 0xFF });
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1));
+        (await UploadAsync(master, 0x1400, 0x03)).Should().Equal(new byte[] { 0xFF, 0xFF });
+
+        var received = new System.Collections.Concurrent.ConcurrentQueue<byte>();
+        var second = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId != Rpdo1) return;
+            received.Enqueue(e.Payload[0]);
+            if (e.Payload[0] == 0x02) second.TrySetResult(true);
+        };
+        await StartAsync(wire, device);
+        wire.Transmit(Rpdo1, new byte[] { 0x01 });
+        wire.Transmit(Rpdo1, new byte[] { 0x02 });
+        await second.Task.WithTimeoutAsync(ShortTimeout);
+        received.Should().Equal(0x01, 0x02);
+        od.ReadUnsigned(0x2100, 0x00).Should().Be(0x02u);
+    }
+
+    // #358 (test gap) — bit 30 of an RPDO COB-ID (the RTR bit of Table 66) is accepted over SDO
+    // and ignored for reception: the RPDO still matches its 11-bit CAN-ID. Whether the validator
+    // should refuse it instead is an open question of the 2026-10-21 review; this pins the
+    // behaviour as it stands.
+    [Fact]
+    public async Task Rpdo_Cob_Id_With_Bit_30_Set_Over_Sdo_Is_Accepted_And_Still_Receives()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2100, 0x00, 0);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, 8));
+
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1 | CanOpenCobId.InvalidBit));
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1 | CanOpenCobId.NoRtrBit));
+        (await UploadAsync(master, 0x1400, 0x01)).Should().Equal(U32Bytes(Rpdo1 | CanOpenCobId.NoRtrBit));
+
+        var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId == Rpdo1) received.TrySetResult(e.Payload);
+        };
+        await StartAsync(wire, device);
+        wire.Transmit(Rpdo1, new byte[] { 0x5A });
+        (await received.Task.WithTimeoutAsync(ShortTimeout)).Should().Equal(0x5A);
+        od.ReadUnsigned(0x2100, 0x00).Should().Be(0x5Au);
+    }
+
     // =========================================================================================
     // FR-CO-017 — RPDO transmission type (CiA 301 §7.5.2.35 Table 68).
     // =========================================================================================
