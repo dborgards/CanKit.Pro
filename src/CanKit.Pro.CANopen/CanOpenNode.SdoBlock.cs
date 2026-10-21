@@ -711,12 +711,18 @@ internal sealed partial class CanOpenNode
         // Block upload start (0xA3), sub-block ack (0xA2), end response (0xA1). Each is taken in
         // its own phase only: a start repeated once the sub-block is out used to re-run the
         // sender and reset the phase, so after the end frame the end response no longer matched
-        // and the session only ended in its timeout (#341). Outside its phase it falls through
-        // to the classic server, which answers the unexpected command specifier with an abort.
-        if (cs == SdoBlockFrames.CcsBlockUploadStart
-            && _sdoBlockServer is { InDownload: false, Phase: SdoBlockServerPhase.AwaitStart } up)
+        // and the session only ended in its timeout (#341). CiA 301 defines no repeat of the
+        // start -- a sub-block is re-requested through the ack's ackseq -- so outside its phase
+        // it is a command specifier the open session does not expect, and the session is
+        // aborted with 0504 0001h as the client side aborts its own (AbortBlockClient in the
+        // phase handlers' default arms). Not left to the classic server's abort: a 0xA3 frame
+        // carries no multiplexer, so that abort would name 0000:00 -- not this transfer, in the
+        // eyes of a client that matches aborts by object -- and the session would stay in the
+        // slot until its timeout aborted it a second time.
+        if (cs == SdoBlockFrames.CcsBlockUploadStart && _sdoBlockServer is { InDownload: false } up)
         {
-            HandleBlockUploadServerStart(up);
+            if (up.Phase == SdoBlockServerPhase.AwaitStart) HandleBlockUploadServerStart(up);
+            else AbortBlockServer(up, SdoAbortCode.CommandSpecifierInvalid);
             return true;
         }
         if (cs == SdoBlockFrames.CcsBlockUploadSubBlockAck

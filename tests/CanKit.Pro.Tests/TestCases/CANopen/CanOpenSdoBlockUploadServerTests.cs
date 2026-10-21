@@ -116,7 +116,7 @@ public class CanOpenSdoBlockUploadServerTests
     public async Task A_Block_Upload_Of_An_Empty_Object_Sends_One_Empty_Last_Segment()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-server-empty-{Guid.NewGuid():N}");
-        var toClient = new BlockingCollection<byte[]>();
+        using var toClient = new BlockingCollection<byte[]>();
         bus.OnTransmitting = frame =>
         {
             if ((uint)frame.ID == CanOpenCobId.SdoTx(ServerNodeId)) toClient.Add(frame.Data.ToArray());
@@ -161,12 +161,17 @@ public class CanOpenSdoBlockUploadServerTests
     // "Block upload start" (0xA3) belongs to the phase after the initiate response and nowhere
     // else. Repeated after the end frame it used to run the sender again and reset the phase,
     // so the end response no longer matched and the session only ended in its timeout; now it
-    // is a command specifier the open session does not expect, and is answered as one.
+    // is a command specifier the open session does not expect, and is answered as one: an
+    // abort naming the session's object (a 0xA3 frame carries no multiplexer of its own, so
+    // the classic path's abort would name 0000:00, which this package's client ignores as
+    // somebody else's) -- and the session is gone with it, as the client side's
+    // CommandSpecifierInvalid abort takes its session down. A next initiate is answered
+    // directly, with no supersede abort for a session that was already aborted.
     [Fact]
     public async Task A_Repeated_Block_Upload_Start_Is_Refused_Outside_Its_Phase()
     {
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-server-restart-{Guid.NewGuid():N}");
-        var toClient = new BlockingCollection<byte[]>();
+        using var toClient = new BlockingCollection<byte[]>();
         bus.OnTransmitting = frame =>
         {
             if ((uint)frame.ID == CanOpenCobId.SdoTx(ServerNodeId)) toClient.Add(frame.Data.ToArray());
@@ -187,6 +192,13 @@ public class CanOpenSdoBlockUploadServerTests
         var answer = Next(toClient);
         answer[0].Should().Be(SdoFrames.CsAbort, "an unexpected command specifier is aborted, not acted on");
         SdoFrames.ReadAbortCode(answer).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid);
+        SdoFrames.ReadIndex(answer).Should().Be((Index, (byte)0x00), "the abort names the transfer it ends");
+
+        // The abort ended the session: the next initiate is answered as the only open thing,
+        // not preceded by a supersede abort for the one just aborted.
+        FromClient(bus, SdoBlockFrames.BuildBlockUploadInit(Index, 0x00, clientCrcSupported: false, blockSize: 3, pst: 0));
+        var next = Next(toClient);
+        (next[0] & 0xE0).Should().Be(SdoBlockFrames.ScsBlockUploadInitResponseBase, "no session was left to supersede");
     }
 
     private static void FromClient(ControllableBus bus, byte[] payload)
