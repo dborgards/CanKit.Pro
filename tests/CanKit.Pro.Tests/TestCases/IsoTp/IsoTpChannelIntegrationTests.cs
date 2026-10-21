@@ -1972,6 +1972,45 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         inFlight.ObjectName.Should().Be(nameof(IsoTpChannel));
     }
 
+    // Review on #339: the gate wait is linked to the channel's lifetime now, and the linked
+    // token is not the caller's. A send queued on the gate that its caller cancels must still
+    // end with the caller's OperationCanceledException -- carrying the caller's token, as it did
+    // when the wait took that token directly, and as CancelInFlightSend reports a cancellation
+    // after the gate -- and must not be taken for a disposal.
+    [Fact]
+    public async Task A_Send_Queued_On_The_Gate_That_Its_Caller_Cancels_Reports_The_Callers_Token()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var release = new ManualResetEventSlim();
+        using var callerCts = new CancellationTokenSource();
+        var busy = actor.PostAsync(() => release.Wait(TimeSpan.FromSeconds(30)));
+
+        var send1 = channel.SendAsync(new byte[] { 0x01 });
+        var send2 = channel.SendAsync(new byte[] { 0x02 }, callerCts.Token);
+        send2.IsCompleted.Should().BeFalse();
+
+        try
+        {
+            callerCts.Cancel();
+            var queued = await Assert.ThrowsAsync<OperationCanceledException>(() => send2.WaitAsync(ShortTimeout));
+            queued.CancellationToken.Should().Be(callerCts.Token);
+        }
+        finally
+        {
+            var disposal = Task.Run(channel.Dispose);
+            release.Set();
+            await busy;
+            await disposal.WaitAsync(ShortTimeout);
+        }
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
+    }
+
     // --------------------------------------------------------------------------------
     // Bugbot 3596212788 (HIGH) — cancelling SendAsync must not release _sendGate while a
     // SendConfirmedAsync started by SendFrameOnBus is still outstanding. Otherwise a subsequent
