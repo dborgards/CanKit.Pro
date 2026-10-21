@@ -74,13 +74,23 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     // it retains into an inbox that is still open.
     private readonly Channel<RxInboxItem> _pduInbox;
     private volatile Exception? _inboxLost;
-    // Set while a discard has taken the items it retains out of the inbox and not yet put them
+    // Odd while a discard has taken the items it retains out of the inbox and not yet put them
     // back: a receiver meeting an empty inbox then must not read that as "nothing more to come".
-    private int _discarding;
+    // Counted rather than flagged, so that a reader can tell that no discard began or ended
+    // around its own read (TryReceiveWithArrival): every discard adds two.
+    private int _discardSequence;
 
     /// <summary>For tests: runs between a discard taking the retained items out of the inbox and
     /// putting them back, on the actor.</summary>
     internal Action? DiscardGapObserver { get; set; }
+
+    /// <summary>For tests: runs in <see cref="TryReceiveWithArrival"/> on the calling thread,
+    /// after the discard count was taken and before the inbox is read.</summary>
+    internal Action? InboxReadStartingObserver { get; set; }
+
+    /// <summary>For tests: runs in <see cref="TryReceiveWithArrival"/> on the calling thread,
+    /// after a read found the inbox empty and before that read is judged.</summary>
+    internal Action? EmptyInboxReadObserver { get; set; }
     private readonly TaskCompletionSource<bool> _inboxLostSignal =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -414,19 +424,26 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         var spin = new SpinWait();
         while (true)
         {
+            var before = Volatile.Read(ref _discardSequence);
+            InboxReadStartingObserver?.Invoke();
             if (_pduInbox.Reader.TryRead(out var item))
             {
                 pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
                 return true;
             }
 
+            EmptyInboxReadObserver?.Invoke();
+
             // A discard has the items it retains out of the inbox for a moment, on the actor: an
             // empty inbox then says nothing about what is pending, and "false" would be wrong for
-            // that instant (#353, I-3). Waited out as TakeNextAsync does. The gap is a drain and a
-            // write-back with no callback in between, so the spin is short, and it cannot be on
-            // this thread: the discard runs on the actor, and a caller on the actor is not inside
-            // it.
-            if (Volatile.Read(ref _discarding) == 0)
+            // that instant (#353, I-3). An empty read counts only if no discard was in its gap
+            // when it began and none began or ended before it was judged -- a discard that ends
+            // in between has put its items back after the read looked (Bugbot on #376). Anything
+            // else is read again. The gap is a drain and a write-back with no callback in
+            // between, so the spin is short, and it cannot be on this thread: the discard runs on
+            // the actor, and a caller on the actor is not inside it.
+            Thread.MemoryBarrier();
+            if ((before & 1) == 0 && Volatile.Read(ref _discardSequence) == before)
             {
                 pdu = default;
                 return false;
@@ -527,7 +544,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // opposite of the reset intent. Items from after it go back in their order; this runs
         // on the inbox's single writer.
         var kept = new List<RxInboxItem>();
-        Volatile.Write(ref _discarding, 1);
+        Interlocked.Increment(ref _discardSequence);
         try
         {
             while (_pduInbox.Reader.TryRead(out var item))
@@ -547,7 +564,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         finally
         {
-            Volatile.Write(ref _discarding, 0);
+            Interlocked.Increment(ref _discardSequence);
         }
         return discarded;
     }
@@ -585,7 +602,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             if (lost is not null || _inboxClosed)
             {
                 // A discard has the retained items out of the inbox for a moment: wait it out.
-                if (Volatile.Read(ref _discarding) != 0)
+                if ((Volatile.Read(ref _discardSequence) & 1) != 0)
                 {
                     lossConfirmed = false;
                     await Task.Yield();
