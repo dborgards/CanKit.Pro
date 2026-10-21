@@ -1200,6 +1200,33 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the demux broke");
     }
 
+    // I-2 of the 2026-10-21 review (#353): the reader took every OperationCanceledException for
+    // the channel's own Dispose and returned without publishing anything. The shipped service
+    // only cancels the wait for the channel's token, but IsoTp.Open takes any ICanBusService,
+    // and one that ends its subscription by cancelling the wait left every receiver waiting for
+    // ever -- I6 again, through another exception type. It is the loss like any other failure.
+    [Fact]
+    public async Task A_Subscription_Ending_With_A_Foreign_Cancellation_Ends_The_Inbox_With_It()
+    {
+        var fault = new OperationCanceledException("the service shut down");
+        var service = new StarvedReaderBusService { ReaderFault = fault };
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        var waiting = channel.ReceiveAsync();
+        service.WakeReader();
+
+        Func<Task> act = () => waiting.WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<OperationCanceledException>()).Which.Should().BeSameAs(fault);
+        (await reported.Task.WaitAsync(ShortTimeout)).Should().BeSameAs(fault);
+
+        Func<Task> later = () => channel.ReceiveAsync().WaitAsync(ShortTimeout);
+        (await later.Should().ThrowAsync<OperationCanceledException>()).Which.Should().BeSameAs(fault);
+    }
+
     // The reader's generic-catch filter does not handle these. They are still reader failures:
     // a receive that is already waiting, and one that starts afterwards, both have to observe
     // the same exception, and it has to be raised once. The subscription throws the instance,

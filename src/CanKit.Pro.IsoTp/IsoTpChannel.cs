@@ -732,10 +732,15 @@ internal sealed class IsoTpChannel : IIsoTpChannel
             lost = new ObjectDisposedException(nameof(ICanBusService),
                 "The bus service was disposed while the ISO-TP channel was open.");
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_readerCts.IsCancellationRequested)
         {
             return; // expected on Dispose
         }
+        // An OperationCanceledException the channel did not ask for is a foreign ICanBusService
+        // ending its subscription its own way (#353, I-2): the shipped service only cancels the
+        // wait for _readerCts, but IsoTp.Open takes any implementation. It is the loss, like any
+        // other failure of the reader, and falls through to the generic branch below; swallowed
+        // as "our Dispose", it left every receiver waiting for ever.
         catch (Exception ex) when (ex is not OutOfMemoryException
             and not StackOverflowException
             and not AccessViolationException
