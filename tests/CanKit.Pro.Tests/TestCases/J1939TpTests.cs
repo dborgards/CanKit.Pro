@@ -2039,6 +2039,13 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         J1939TpFrames.ReadAbortRole(frame).Should().Be(role);
     }
 
+    [Fact]
+    public void Abort_Role_Is_Not_Read_From_A_Short_Payload()
+    {
+        var act = () => J1939TpFrames.ReadAbortRole(new byte[7]);
+        act.Should().Throw<ArgumentException>().WithParameterName("tpCmPayload");
+    }
+
     // A CTS asking for a packet already sent is a retransmit request; with
     // MaxRetransmitRequests = 0 this stack serves none, so the limit is reached at once
     // (table 7, code 5). Before #33 it went out as 5 by coincidence of a different meaning
@@ -3828,6 +3835,143 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
                 J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
             await send.WithTimeout(ShortTimeout);
         }
+    }
+
+    // #350: a peer abort while a TP.DT of ours is still unconfirmed. In that state the session
+    // runs no deadline -- the confirmation is what it waits for -- and the abort must fail the
+    // send at once rather than leave it to the confirmation. The confirmation then arrives for a
+    // session that is gone, and the same key is free for the next send, which runs to completion.
+    [Fact]
+    public async Task A_Peer_Abort_While_A_Dt_Is_Unconfirmed_Fails_The_Send_At_Once()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 353); // three packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            if (J1939Id.Decompose((uint)f.ID).Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var first = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, J1939TpAbortRole.Responder)), isEcho: false);
+        Func<Task> failed = async () => await first.WithTimeout(ShortTimeout);
+        (await failed.Should().ThrowAsync<J1939TpAbortException>("the peer, as responder, aborted the send mid-block"))
+            .Which.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+
+        bus.DeferredEchoes.ReleaseNext(); // DT 1's confirmation, for a session that is gone
+
+        // The key is free: the next send is admitted (a session still registered would refuse it
+        // as "already in flight") and runs through on its own confirmations.
+        var second = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the new RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        for (int sent = 0; sent < 3; sent++)
+        {
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(4 + sent, ShortTimeout);
+            bus.DeferredEchoes.ReleaseNext();
+        }
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+        await second.WithTimeout(ShortTimeout);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 1, 2, 3 }, "the aborted session's DT 1, then the new session's own three");
+    }
+
+    // #152: a CTS for the next block that arrives while the current block's last TP.DT is still
+    // unconfirmed -- a fast peer on a Virtual loopback does this -- is stashed and applied the
+    // moment that confirmation runs, and the next block goes out from there. DeferredEchoes
+    // fixes the order: the CTS has reached the actor before the confirmation is released.
+    [Fact]
+    public async Task A_Cts_For_The_Next_Block_Arriving_Before_The_Last_Confirmation_Of_This_One_Is_Applied_With_It()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 152); // three packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            if (J1939Id.Decompose((uint)f.ID).Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var send = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, the block's only packet, unconfirmed
+
+        // The next block's CTS, in hand before DT 1 is confirmed.
+        var nextBlock = J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 2, dataPgn: pgn);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(nextBlock));
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, nextBlock), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1 }, "DT 2 waits for DT 1's confirmation, CTS or no CTS");
+
+        bus.DeferredEchoes.ReleaseNext(); // DT 1 confirmed: the stashed CTS takes effect
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // DT 2
+        bus.DeferredEchoes.ReleaseNext();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout); // DT 3
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+        await send.WithTimeout(ShortTimeout);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 2, 3 });
+    }
+
+    // #350: a Connection Abort ends a TP.CM session only. A BAM is registered under the global
+    // address, so the one abort whose (source, PGN) can name it comes from source 0xFF -- not
+    // an address a node may send from, but nothing filters it before the abort is routed. The
+    // BAM has no abort channel (§5.10.3) and must run to completion regardless.
+    [Fact]
+    public async Task A_Connection_Abort_From_The_Global_Address_Does_Not_End_A_Bam()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10;
+        const uint pgn = 0xFECBu;
+        var payload = RandomPayload(14, seed: 3501); // two packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa,
+            new J1939TpOptions().With(bamPacketSpacing: TimeSpan.Zero), ownsService: false, actor);
+
+        var send = sender.SendBamAsync(pgn, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the BAM announce, unconfirmed
+
+        var abort = J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, J1939TpAbortRole.Responder);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(abort));
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, J1939Pgn.GlobalAddress, subjectSa),
+            abort, isExtendedFrame: true), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+        send.IsCompleted.Should().BeFalse("an abort ends a TP.CM session, and this is a BAM");
+
+        for (int confirmed = 0; confirmed < 3; confirmed++) // the announce, then DT 1 and DT 2
+        {
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(confirmed + 1, ShortTimeout);
+            bus.DeferredEchoes.ReleaseNext();
+        }
+        await send.WithTimeout(ShortTimeout);
     }
 
     [Theory]
