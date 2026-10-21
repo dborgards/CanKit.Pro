@@ -699,13 +699,21 @@ namespace CanKit.Pro.RawCan
             // adapter's ThrowIfDisposed does). A read that fails so counts as "not off": the sweep
             // is skipped, exactly as it was while the exception escaped into the adapter's
             // raiseFault lambda, and the relay still happens. Anything else is not a failed state
-            // read and escapes into that lambda as before, without a relay. Pinned by
-            // TxConfirmTests.A_BusState_Read_That_Fails_Skips_The_Sweep_But_Not_The_Relay.
+            // read and is not swallowed: it escapes into that lambda as before -- but only after
+            // the fault has been relayed, so the README's "relayed either way" holds for a
+            // third-party getter that throws something else, too (Codex on #369). Pinned by
+            // TxConfirmTests.A_BusState_Read_That_Fails_Skips_The_Sweep_But_Not_The_Relay and
+            // A_BusState_Read_That_Throws_Anything_Else_Still_Relays_The_Fault.
             bool busOff;
             try { busOff = _bus.BusState == BusState.BusOff; }
             catch (Exception readFailure) when (readFailure is CanKitException or ObjectDisposedException)
             {
                 busOff = false;
+            }
+            catch
+            {
+                RaiseBackgroundException(ex);
+                throw;
             }
 
             // Relayed unconditionally, before the bus-off sweep below decides anything. Under the

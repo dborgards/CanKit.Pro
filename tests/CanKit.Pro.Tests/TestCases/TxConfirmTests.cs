@@ -760,6 +760,39 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         result.Confirmed.Should().BeTrue("the send is left to its own echo");
     }
 
+    // A getter that throws something other than a failed state read (a third-party bus's own
+    // bug, say) is not swallowed -- it still escapes into the adapter's raiseFault -- but the
+    // fault is relayed before it does, so "relayed either way" (README § TX-Confirm) holds for it
+    // too (Codex on #369). No sweep runs: the exception leaves OnFaultOccurred first, and the
+    // send is left to its own echo. Synchronous throughout, nothing waits on a clock.
+    [Fact]
+    public async Task A_BusState_Read_That_Throws_Anything_Else_Still_Relays_The_Fault()
+    {
+        using var sender = OpenDeferredEcho();
+        var unexpected = new InvalidOperationException("third-party getter bug");
+        sender.BusStateFailureOnceDisposed = () => unexpected;
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x127, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        Exception? relayed = null;
+        service.BackgroundExceptionOccurred += (_, ex) => relayed = ex;
+
+        sender.BusState = BusState.BusOff;
+        sender.Dispose();
+        var fault = new InvalidOperationException("poll loop died");
+        sender.Invoking(s => s.RaiseFault(fault)).Should().Throw<InvalidOperationException>()
+            .Which.Should().BeSameAs(unexpected, "an exception that is not a failed state read is not swallowed");
+
+        relayed.Should().BeSameAs(fault, "the fault is relayed before the getter's exception escapes");
+
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        var result = await send.WaitAsync(ShortTimeout);
+        result.FailureReason.Should().Be(TxConfirmFailureReason.None, "no sweep ran");
+        result.Confirmed.Should().BeTrue("the send is left to its own echo");
+    }
+
     // #349, a characterisation of the matching as it stands, not a contract: the maintainer's
     // decision there is whether a late echo of a send that already timed out is absorbed for a
     // bounded time (the J1939 node's ClaimEchoGrace model, #180) or left as a documented limit of
