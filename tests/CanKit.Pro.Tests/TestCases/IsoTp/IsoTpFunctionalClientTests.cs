@@ -668,6 +668,29 @@ public class IsoTpFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
         seen.Should().Be(0, "nothing was transmitted");
     }
 
+    // I-5 of the 2026-10-21 review (#353): CollectResponsesAsync took the window unchecked and
+    // let the collector's timer refuse it -- after subscribing, with the BCL's parameter name --
+    // while SendAndCollectAsync refuses it before doing anything; and a window of exactly -1 ms
+    // was taken for "no timer" and collected for ever. The wrapped service fails the first
+    // Subscribe, so a check that comes after it cannot pass.
+    [Theory]
+    [InlineData(-1.0)]                   // CancelAfter's "infinite"
+    [InlineData(-2.0)]                   // below CancelAfter's bound
+    [InlineData(double.PositiveInfinity)] // TimeSpan.MaxValue: beyond a timer's reach
+    public async Task Functional_Collect_Refuses_A_Window_A_Timer_Cannot_Measure_Before_Subscribing(double milliseconds)
+    {
+        var window = double.IsPositiveInfinity(milliseconds) ? TimeSpan.MaxValue : TimeSpan.FromMilliseconds(milliseconds);
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var inner = new CanBusService(bus);
+        var service = new ThrowingSubscribeService(inner, failOnCall: 1);
+        using var client = IsoTpFactory.OpenFunctional(service, 0x7DF, 0x7E8, 0x7EF, FastOptions());
+
+        Func<Task> act = () => client.CollectResponsesAsync(window).WaitAsync(ShortTimeout);
+        (await act.Should().ThrowAsync<ArgumentOutOfRangeException>()).Which.ParamName.Should().Be("window");
+        service.SubscribeCalls.Should().Be(0, "the window is refused before the subscription is made");
+    }
+
     [Fact]
     public async Task Functional_Listener_Disposal_Ends_A_Collection_In_Progress()
     {
