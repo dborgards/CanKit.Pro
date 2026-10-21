@@ -192,7 +192,12 @@ public sealed class ControllableBus : ICanBus
         => FrameObserved?.Invoke(this, new CanReceiveDataView(
             new CanReceiveData(frame) { ReceiveTimestamp = receiveTimestamp, IsEcho = isEcho }));
 
-    /// <summary>Raises <see cref="FaultOccurred"/>, the signal a bus-off surfaces through.</summary>
+    /// <summary>
+    /// Raises <see cref="FaultOccurred"/>. Under the default <c>CanExceptionPolicy</c> a CanKit
+    /// 0.5.6 adapter does so only when its receive loop dies, and under no policy for a bus-off
+    /// (#348); paired with <see cref="BusState"/> it drives the service's bus-off sweep, which
+    /// only this double reaches.
+    /// </summary>
     public void RaiseFault(Exception error) => FaultOccurred?.Invoke(this, error);
 
     /// <summary>

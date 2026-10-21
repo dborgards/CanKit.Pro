@@ -94,9 +94,11 @@ namespace CanKit.Pro.RawCan
         /// only fault a CanKit 0.5.6 adapter raises is its receive loop dying, after which no
         /// further frame arrives on this bus: outstanding
         /// <see cref="SendConfirmedAsync"/> calls end as <see cref="TxConfirmFailureReason.Timeout"/>
-        /// and <see cref="ISubscription.Frames"/> streams stay open until disposed. This event is
-        /// how a consumer that holds only an <see cref="ISubscription"/> learns of it (#348).
-        /// Invoked synchronously on whichever thread the adapter raises its fault on.
+        /// and <see cref="ISubscription.Frames"/> streams stay open until disposed. A consumer that
+        /// only reads subscriptions learns of it here, not from its stream: an
+        /// <see cref="ISubscription"/> carries no fault signal of its own, so such a consumer keeps
+        /// the service it subscribed on and handles this event (#348). Invoked synchronously on
+        /// whichever thread the adapter raises its fault on.
         /// </para>
         /// </summary>
         event EventHandler<Exception>? BackgroundExceptionOccurred;

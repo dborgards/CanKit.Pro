@@ -673,7 +673,8 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     // #348 (R-9): the only fault a CanKit 0.5.6 adapter raises is its receive loop dying, after
     // which nothing will ever arrive -- and until this change the service swallowed it unless the
     // bus was also off. It now goes through the service's one fault channel, as the adapter's own
-    // exception, so a consumer holding nothing but an ISubscription can learn the bus is dead.
+    // exception, so a consumer that only reads subscriptions can learn, on the service it
+    // subscribed on, that the bus is dead.
     // FaultOccurred is raised synchronously by the double, so the relay has run when RaiseFault
     // returns; nothing here waits on a clock.
     [Fact]

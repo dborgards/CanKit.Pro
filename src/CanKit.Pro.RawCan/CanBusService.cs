@@ -713,10 +713,11 @@ namespace CanKit.Pro.RawCan
             // receive loop dying (the six `severity: Fault` reports upstream are all poll-loop
             // catch blocks), after which no frame will ever arrive: pending sends end as Timeout,
             // and every Frames stream stays open because ISubscription promises completion only on
-            // dispose. A consumer holding nothing but an ISubscription had no way to learn that the
-            // bus was dead (#348). The service already has one fault channel, so the bus's fault
-            // goes through it rather than a second one; the exception is the adapter's own,
-            // unwrapped.
+            // dispose. A consumer that only reads subscriptions had no way to learn that the bus was
+            // dead (#348); it learns it here, on the service it subscribed on -- an ISubscription
+            // still carries no fault signal of its own. The service already has one fault channel,
+            // so the bus's fault goes through it rather than a second one; the exception is the
+            // adapter's own, unwrapped.
             RaiseBackgroundException(ex);
 
             if (!busOff) return;

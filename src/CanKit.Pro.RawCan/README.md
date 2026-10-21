@@ -117,8 +117,9 @@ else
 `BusOff`. No CanKit 0.5.6 adapter does that — they surface a bus-off through `BusState` and error
 frames, and under the default `CanExceptionPolicy` raise a fault only when their receive loop dies —
 so on those adapters a send outstanding during a bus-off ends as `Timeout` (#348). A bus fault is
-relayed through `BackgroundExceptionOccurred` either way, so a consumer holding only a subscription
-learns of it.
+relayed through `BackgroundExceptionOccurred` either way, so a consumer that only reads
+subscriptions learns of it there — on the service: a subscription carries no fault signal of its
+own, and its `Frames` stream stays open.
 
 Byte-identical sends pending at the same time are matched to their own confirmation in FIFO
 order, never cross-matched (FR-RAW-031). The matching is by content: the echo of a send that has
