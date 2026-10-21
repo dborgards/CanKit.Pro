@@ -169,7 +169,9 @@ no special handling. Upstream fix plus a doc correction here. Confidence: high (
 **B-1 · The post-#314 release chain has never run; 1.4.0 is waiting on it** — #346. `release.yml`
 and `.releaserc.json` gained the SBOM hand-over, `verify-sboms.py` in `prepareCmd`, the asset
 upload and the `attest` job on 2026-10-20; the last release run is from 2026-09-30. A failure in the
-asset upload would land after `dotnet nuget push`. Dry run first, then cut.
+asset upload would land after `dotnet nuget push`. Dry run first — it covers `verify` and the
+artifact download but not `prepareCmd`, which semantic-release skips in dry-run mode, so the SBOM
+hand-over check belongs in `verifyReleaseCmd` if it is to be rehearsed — then cut.
 
 ## 3. Minor findings
 
