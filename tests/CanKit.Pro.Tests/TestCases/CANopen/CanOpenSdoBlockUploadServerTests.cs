@@ -8,6 +8,7 @@ using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -46,9 +47,14 @@ public class CanOpenSdoBlockUploadServerTests
         {
             if ((uint)frame.ID == CanOpenCobId.SdoTx(ServerNodeId)) lock (toClient) toClient.Add(frame.Data.ToArray());
         };
-        // The idle timeout is the ending under test in one row and far off in the others.
-        var serverTimeout = ending == "the server times out" ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromSeconds(30);
-        using var server = CanOpen.OpenNode(bus, ServerNodeId, new CanOpenNodeOptions { SdoServerTimeout = serverTimeout });
+        // The idle timeout is the ending under test in one row. It is measured on a clock the
+        // test moves (#92): on the wall clock a short timeout races the thread pool from the
+        // start frame to segment 1 -- fired first, it aborts a session with no batch running,
+        // segment 1 never comes and the row fails without testing anything.
+        var clock = new ManualTimeSource();
+        var serverTimeout = TimeSpan.FromSeconds(30);
+        using var server = new CanOpenNode(new CanBusService(bus), ServerNodeId,
+            new CanOpenNodeOptions { SdoServerTimeout = serverTimeout }, ownsService: true, timeSource: clock);
         var nmtSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         server.NmtCommandReceived += (_, e) =>
         {
@@ -79,6 +85,11 @@ public class CanOpenSdoBlockUploadServerTests
                 expected = 2; // the initiate response and segment 1
                 break;
             case "the server times out":
+                // The start frame re-armed the deadline before the batch was handed segment 1, so
+                // it is armed by now. Past it, any frame wakes the actor, which then fires it.
+                clock.Advance(serverTimeout + TimeSpan.FromMilliseconds(1));
+                bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.NmtCommand),
+                    new byte[] { (byte)NmtCommand.EnterPreOperational, ServerNodeId }), isEcho: false);
                 await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout); // the timeout's abort
                 expected = 3;
                 break;
