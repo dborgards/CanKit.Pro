@@ -444,7 +444,7 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
                 e.On(0x10, req => req[1] == (byte)UdsSessionType.Programming
                     ? new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray()
                     : new byte[] { req[1] });
-                e.On(0x11, req => new byte[] { req[1] });
+                e.On(0x11, req => new byte[] { req[1], 0x0A }); // powerDownTime 10 s
                 e.On(0x22, _ => throw new EcuSilent());
             },
             options: new UdsClientOptions { P2ClientMax = configured });
@@ -452,7 +452,8 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         using var cts = new CancellationTokenSource(ShortTimeout);
         await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
         if (reset)
-            await Within(pair.Client.EcuResetAsync(UdsEcuResetType.HardReset, cts.Token));
+            (await Within(pair.Client.EcuResetAsync(UdsEcuResetType.HardReset, cts.Token)))
+                .Should().Equal(new byte[] { 0x0A }, "the powerDownTime is returned as before");
         else
             await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token));
 
