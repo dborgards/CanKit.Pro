@@ -878,7 +878,10 @@ takes a path around `Add*`; it is the guard behind that rule.
 `GetSrdoState(n)` of a producer is valid while the node is Operational with a
 valid configuration. The state is a snapshot of the actor's view: right after `OpenNode` the
 records are taken on the actor's first turn, so a read before any call that round-trips the actor
-(`State`, say) has returned may still show direction `None`.
+(`State`, say) has returned may still show direction `None`. Its `LastValidAt` is wall-clock UTC
+(`DateTime.UtcNow`), not the node's time source: cycles, SCT and SRVT run on the time source, so
+under a `ManualTimeSource` they move with the virtual clock while `LastValidAt` moves with the
+real one.
 
 ### Consumer
 
@@ -1670,7 +1673,8 @@ Each item names what a caller does about it.
   entries, so a file that does not declare them with a value, contradicts them in `[DeviceInfo]`
   or declares them all 0 is refused before the first frame, and a peer that is another device ends
   the call with those entries as mismatches; every transfer the call makes whatever the peer
-  answers passes the gate before the first frame; `PeerSafetyConfiguration.Storage` (settable)
+  answers passes the gate before the first frame, and those that depend on the peer's SRDO count
+  pass it once the count is read, before the first write; `PeerSafetyConfiguration.Storage` (settable)
   asks for the step-5 store through `1010h`, reported in `PeerSafetyResult.Stored`, with a peer's
   abort in `PeerSafetyResult.StorageAbort`; and a tx SRDO whose record the file declares without
   a writable sub-index `03h` must say 20 ms, which is written as optional where the file says
