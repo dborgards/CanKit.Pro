@@ -314,6 +314,51 @@ public partial class CanOpenPdoEngineTests
         wire.Payloads(emcy).Select(p => p[0]).Should().BeEquivalentTo(new byte[] { 0x10, 0x30, 0x10, 0x30 });
     }
 
+    // #358 (P-5): the DAM target passed the target check, and then the write itself is refused —
+    // here by a write validator, in practice by a re-declaration in between. That is a target
+    // that is not available (8230h), not an exception out of the frame handler; nothing is
+    // actuated, and the next frame the target takes lands as usual.
+    [Fact]
+    public async Task Mpdo_Target_That_Refuses_The_Write_Raises_8230h_Instead_Of_Throwing()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Device);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x2000, 0, 0);
+        node.Pdo().ConfigureMultiplexedRpdo(1, MpdoAddressMode.Destination, Rpdo1);
+        var background = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => background.Enqueue(ex);
+        var received = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
+        var landed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId != Rpdo1) return;
+            received.Enqueue(e.Payload);
+            if (e.Payload[4] == 43) landed.TrySetResult(true);
+        };
+        await StartAsync(wire, node);
+
+        var inner = od.WriteValidator!;
+        bool refuse = true;
+        od.WriteValidator = (index, subindex, value) => refuse && index == 0x2000
+            ? OdWriteDecision.Reject(CanKit.Pro.CANopen.Sdo.SdoAbortCode.General)
+            : inner(index, subindex, value);
+        uint emcy = CanOpenCobId.Emcy(Device);
+        wire.Transmit(Rpdo1, new byte[] { 0x80, 0x00, 0x20, 0x00, 42, 0, 0, 0 });
+        await wire.WaitForCountAsync(emcy, 1);
+        wire.Payloads(emcy)[0].Take(2).Should().Equal(0x30, 0x82);
+        od.ReadUnsigned(0x2000, 0).Should().Be(0u, "the refused write did not land");
+
+        refuse = false;
+        wire.Transmit(Rpdo1, new byte[] { 0x80, 0x00, 0x20, 0x00, 43, 0, 0, 0 });
+        await landed.Task.WithTimeoutAsync(ShortTimeout);
+        od.ReadUnsigned(0x2000, 0).Should().Be(43u);
+        background.Should().BeEmpty("a refused MPDO target is reported as 8230h, not thrown");
+        received.Should().ContainSingle("only the frame that landed is reported as received");
+    }
+
     [Fact]
     public async Task Sync_Length_Emergency_Is_Latched_Until_A_Valid_Sync()
     {

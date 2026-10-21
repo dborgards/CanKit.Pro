@@ -196,8 +196,10 @@ internal sealed partial class CanOpenNode : ICanOpenPdo
         if (!IsMpdoTarget(index, subindex, isTpdo: false, out var target)) return false;
         var value = new byte[target.Size];
         Array.Copy(payload, 4, value, 0, value.Length);
-        _od.WriteRaw(index, subindex, value);
-        return true;
+        // The entry is resolved again for the write: re-declared since with another width, gone,
+        // or refused by a write validator, it is a target that is not available (8230h, latched
+        // by the caller) rather than an exception out of the frame handler (#358, P-5).
+        return _od.TryWriteRaw(index, subindex, value, out _);
     }
 
     private IEnumerable<ulong> MpdoListWords(ushort first, ushort last, int width)
