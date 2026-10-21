@@ -82,8 +82,10 @@ the loop to actually finish; if a callback is still running when that elapses it
 shutdown from a loop still mutating state it believes it now owns. That wait holds for every
 caller, not only the first: a second `Dispose` — the owner's `using` after a callback disposed
 the actor from the loop, or two owners racing — also returns only once the loop has stopped (or
-the same timeout has elapsed; it is reported once). The one call that does not wait is the
-reentrant one from inside a callback, which would otherwise deadlock on its own loop.
+the same timeout has elapsed; it is reported once). Two calls do not wait: the reentrant one from
+inside a callback, which would otherwise deadlock on its own loop, and one a
+`BackgroundExceptionOccurred` subscriber makes from inside that `TimeoutException` report, which
+would otherwise stretch the reporting `Dispose` to twice the timeout.
 
 `IsOnCurrentActor` answers "is *this thread* currently running one of my callbacks?", which is
 what makes a public sync API able to run inline instead of dead-locking on its own loop. It is

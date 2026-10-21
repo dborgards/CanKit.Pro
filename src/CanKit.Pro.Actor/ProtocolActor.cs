@@ -165,6 +165,18 @@ namespace CanKit.Pro.Actor
         // through BackgroundExceptionOccurred once rather than once per caller (see Dispose).
         private int _shutdownTimeoutReported;
 
+        // The actor whose shutdown-timeout report the *current thread* is inside, if any. A
+        // BackgroundExceptionOccurred subscriber that answers the TimeoutException by disposing
+        // the actor -- an ordinary cleanup reflex -- is off-loop, so without this mark its nested
+        // Dispose would join the stuck loop a second time and the outer Dispose would take twice
+        // _shutdownTimeout, past the bound the README states. Thread-static for the same reason
+        // t_runningActors is; a plain reference rather than a push onto t_runningActors because
+        // the loop is *not* on this thread -- it is stuck in a callback elsewhere -- so
+        // IsOnCurrentActor must stay false here. Saved and restored around the report so a
+        // report nested inside another actor's report leaves the outer one's mark intact.
+        [ThreadStatic]
+        private static ProtocolActor? t_reportingShutdownTimeout;
+
         // How many entries the timer machinery is carrying that have been cancelled but not yet
         // dropped. Maintained with Interlocked because TimerHandle.Dispose runs on arbitrary
         // caller threads; only ever read by the loop, and only as a heuristic (see
@@ -510,6 +522,15 @@ namespace CanKit.Pro.Actor
                 return;
             }
 
+            if (ReferenceEquals(t_reportingShutdownTimeout, this))
+            {
+                // Nested in this thread's own timeout report below: the subscriber is reacting to
+                // "the loop did not stop within _shutdownTimeout" by disposing the actor. The
+                // outer Dispose on this very thread has already joined and given up; joining
+                // again would only stretch its return to twice the documented bound.
+                return;
+            }
+
             // Every off-loop caller joins, not just the one that flipped the flag (#338). The
             // second call is the common one -- a callback disposed the actor reentrantly and the
             // owner's using/finally then disposes it again, or two owners race -- and returning at
@@ -530,8 +551,17 @@ namespace CanKit.Pro.Actor
                 // Dispose must stay safe to call from a finally/using block. Reported once, by
                 // whichever caller gives up first: the subscribers are the same for every caller,
                 // and a second report would describe the same stuck callback.
-                RaiseBackgroundException(new TimeoutException(
-                    $"The {nameof(ProtocolActor)} loop did not finish within {_shutdownTimeout}. A work item or timer callback is still running; Dispose returned without joining it, and the loop will tear itself down whenever that callback eventually returns."));
+                var outerReport = t_reportingShutdownTimeout;
+                t_reportingShutdownTimeout = this;
+                try
+                {
+                    RaiseBackgroundException(new TimeoutException(
+                        $"The {nameof(ProtocolActor)} loop did not finish within {_shutdownTimeout}. A work item or timer callback is still running; Dispose returned without joining it, and the loop will tear itself down whenever that callback eventually returns."));
+                }
+                finally
+                {
+                    t_reportingShutdownTimeout = outerReport;
+                }
             }
 
             // _stopCts/_signal are disposed by the loop itself once it actually finishes (see
