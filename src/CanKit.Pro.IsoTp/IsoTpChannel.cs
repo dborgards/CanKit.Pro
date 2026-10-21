@@ -308,7 +308,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                 // SynchronizationContext or TaskScheduler, which here is the disposing thread's --
                 // the actor's own UI context in ActorExecutionMode.SynchronizationContext -- and
                 // which the ConfigureAwait(false) on the wait above deliberately does not capture.
-                await ThreadPoolHop.Instance;
+                // MUTATION: hop removed
 
                 // Only two things cancel this wait: the caller's token, or the channel's
                 // lifetime, which Dispose cancels after it has marked the channel disposed.
