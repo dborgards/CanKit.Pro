@@ -471,6 +471,99 @@ public class ProtocolActorTests
     }
 
     [Fact]
+    public void Timeout_Reports_Nested_Across_Two_Actors_Keep_Both_Marked()
+    {
+        // The report mark is a stack, not a slot: A's report (on the test thread) disposes a
+        // stuck B, B's report runs on the same thread, and B's subscriber disposes A again. A is
+        // still being reported one frame up, so that innermost Dispose(A) must return at once
+        // rather than join A a second time. A second join is only a duration, so the mark is
+        // asked directly: inside B's report both A and B must be marked, and once the outer
+        // Dispose has returned neither may be (the test thread is reused by later tests).
+        using var a = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100));
+        using var b = new ProtocolActor(ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100));
+        using var bothEntered = new CountdownEvent(2);
+        using var release = new ManualResetEventSlim(false);
+        var reportsA = 0;
+        var reportsB = 0;
+        bool? aMarkedInsideBsReport = null;
+        bool? bMarkedInsideBsReport = null;
+        var innermostDisposeOfAReturned = false;
+        var disposeOfBReturned = false;
+
+        b.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            Interlocked.Increment(ref reportsB);
+            if (ex is TimeoutException)
+            {
+                aMarkedInsideBsReport = a.IsInsideOwnShutdownTimeoutReport;
+                bMarkedInsideBsReport = b.IsInsideOwnShutdownTimeoutReport;
+                a.Dispose(); // innermost: A is still being reported one frame up
+                innermostDisposeOfAReturned = true;
+            }
+        };
+        a.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            Interlocked.Increment(ref reportsA);
+            if (ex is TimeoutException)
+            {
+                b.Dispose(); // B is stuck too: joins, gives up, reports -- nested inside A's report
+                disposeOfBReturned = true;
+            }
+        };
+
+        Action stuck = () =>
+        {
+            bothEntered.Signal();
+            release.Wait(TimeSpan.FromSeconds(30));
+        };
+        a.Post(stuck);
+        b.Post(stuck);
+        bothEntered.Wait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+
+        a.Dispose(); // outermost: joins A, gives up after 100 ms, reports
+
+        disposeOfBReturned.Should().BeTrue("A's subscriber must get B's Dispose back");
+        innermostDisposeOfAReturned.Should().BeTrue("B's subscriber must get the nested Dispose of A back");
+        aMarkedInsideBsReport.Should().BeTrue("B's report must not displace the mark of A's report one frame up");
+        bMarkedInsideBsReport.Should().BeTrue();
+        a.IsInsideOwnShutdownTimeoutReport.Should().BeFalse("the marks must unwind with the reports");
+        b.IsInsideOwnShutdownTimeoutReport.Should().BeFalse("the marks must unwind with the reports");
+        Volatile.Read(ref reportsA).Should().Be(1);
+        Volatile.Read(ref reportsB).Should().Be(1);
+
+        release.Set();
+    }
+
+    [Fact]
+    public async Task A_Later_Dispose_Does_Not_Join_Before_The_First_Has_Requested_The_Stop()
+    {
+        // The first caller flips the flag under the gate and requests the stop just after it. A
+        // later off-loop caller that got through the gate in between used to join at once --
+        // starting the _shutdownTimeout clock on a loop nobody had told to stop, and reporting a
+        // TimeoutException for nothing more than the first caller being descheduled. The seam
+        // holds the first caller in exactly that window. Pinned: the later Dispose cannot return
+        // while the window is held. Correct code can never fail this, whatever the host's load:
+        // the later caller cannot return before the stop is requested. A defect shows as that
+        // caller returning after its 100 ms join gives up, so a host stalled for most of the
+        // two-second hold could hide one, but never invent one.
+        Task? later = null;
+        var laterReturnedInsideTheWindow = true;
+        using var actor = new ProtocolActor(
+            ActorExecutionMode.DedicatedThread, null, null, TimeSpan.FromMilliseconds(100),
+            beforeStopRequested: self =>
+            {
+                later = Task.Run(self.Dispose);
+                laterReturnedInsideTheWindow = later.Wait(TimeSpan.FromSeconds(2));
+            });
+
+        actor.Dispose();
+
+        laterReturnedInsideTheWindow.Should().BeFalse(
+            "a later Dispose must not join, give up and return before the first caller has requested the stop");
+        await WithinTenSeconds(later!); // and it does return once the stop is requested
+    }
+
+    [Fact]
     public async Task PostAsync_Fails_Its_Task_Instead_Of_Hanging_When_SynchronizationContext_Send_Throws()
     {
         // Regression test: if Send itself throws before ever invoking the wrapped work, PostAsync's

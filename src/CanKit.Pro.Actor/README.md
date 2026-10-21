@@ -84,8 +84,9 @@ caller, not only the first: a second `Dispose` — the owner's `using` after a c
 the actor from the loop, or two owners racing — also returns only once the loop has stopped (or
 the same timeout has elapsed; it is reported once). Two calls do not wait: the reentrant one from
 inside a callback, which would otherwise deadlock on its own loop, and one a
-`BackgroundExceptionOccurred` subscriber makes from inside that `TimeoutException` report, which
-would otherwise stretch the reporting `Dispose` to twice the timeout.
+`BackgroundExceptionOccurred` subscriber makes from inside that `TimeoutException` report — also
+when another actor's report has nested inside it since — which would otherwise stretch the
+reporting `Dispose` to twice the timeout.
 
 `IsOnCurrentActor` answers "is *this thread* currently running one of my callbacks?", which is
 what makes a public sync API able to run inline instead of dead-locking on its own loop. It is

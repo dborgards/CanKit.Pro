@@ -161,21 +161,51 @@ namespace CanKit.Pro.Actor
 
         private int _disposedFlag;
 
+        // Set by the first Dispose caller once its _stopCts.Cancel() has returned or thrown. Only
+        // the fallback for a loop that ended without being cancelled -- see Dispose for why later
+        // callers wait on IsCancellationRequested first and on this only second.
+        private int _stopRequestFinished;
+
+        // Test seam: runs in the first Dispose caller between the flag flip and the cancellation,
+        // which is the window a later caller must not join through. Null in production.
+        private readonly Action<ProtocolActor>? _beforeStopRequested;
+
         // Set by the first Dispose caller whose join timed out, so the TimeoutException goes
         // through BackgroundExceptionOccurred once rather than once per caller (see Dispose).
         private int _shutdownTimeoutReported;
 
-        // The actor whose shutdown-timeout report the *current thread* is inside, if any. A
-        // BackgroundExceptionOccurred subscriber that answers the TimeoutException by disposing
-        // the actor -- an ordinary cleanup reflex -- is off-loop, so without this mark its nested
-        // Dispose would join the stuck loop a second time and the outer Dispose would take twice
-        // _shutdownTimeout, past the bound the README states. Thread-static for the same reason
-        // t_runningActors is; a plain reference rather than a push onto t_runningActors because
-        // the loop is *not* on this thread -- it is stuck in a callback elsewhere -- so
-        // IsOnCurrentActor must stay false here. Saved and restored around the report so a
-        // report nested inside another actor's report leaves the outer one's mark intact.
+        // The actors whose shutdown-timeout reports the *current thread* is inside, outermost
+        // first. A BackgroundExceptionOccurred subscriber that answers the TimeoutException by
+        // disposing the actor -- an ordinary cleanup reflex -- is off-loop, so without this mark
+        // its nested Dispose would join the stuck loop a second time and the outer Dispose would
+        // take twice _shutdownTimeout, past the bound the README states. Thread-static for the
+        // same reason t_runningActors is; a list of its own rather than a push onto
+        // t_runningActors because the loop is *not* on this thread -- it is stuck in a callback
+        // elsewhere -- so IsOnCurrentActor must stay false here. A stack rather than one slot
+        // because reports nest: A's subscriber disposes a stuck B, B's report runs on this same
+        // thread, and B's subscriber may dispose A again -- A is still being reported one frame
+        // up and must not be joined again there either. Written only through the static
+        // accessor below, never from an instance member.
         [ThreadStatic]
-        private static ProtocolActor? t_reportingShutdownTimeout;
+        private static List<ProtocolActor>? t_reportingShutdownTimeouts;
+
+        private static List<ProtocolActor> ReportingShutdownTimeouts() => t_reportingShutdownTimeouts ??= new List<ProtocolActor>(1);
+
+        // Internal rather than private so a test can ask the mark directly: whether a nested
+        // Dispose joined the loop a second time is otherwise only a duration.
+        internal bool IsInsideOwnShutdownTimeoutReport
+        {
+            get
+            {
+                var reporting = t_reportingShutdownTimeouts;
+                if (reporting is null) return false;
+                for (var i = reporting.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(reporting[i], this)) return true;
+                }
+                return false;
+            }
+        }
 
         // How many entries the timer machinery is carrying that have been cancelled but not yet
         // dropped. Maintained with Interlocked because TimerHandle.Dispose runs on arbitrary
@@ -257,8 +287,10 @@ namespace CanKit.Pro.Actor
             SynchronizationContext? synchronizationContext,
             ITimeSource? timeSource,
             TimeSpan? shutdownTimeout,
-            Action<ProtocolActor>? beforeLoopStart = null)
+            Action<ProtocolActor>? beforeLoopStart = null,
+            Action<ProtocolActor>? beforeStopRequested = null)
         {
+            _beforeStopRequested = beforeStopRequested;
             if (mode == ActorExecutionMode.SynchronizationContext)
             {
                 _syncContext = synchronizationContext
@@ -504,11 +536,29 @@ namespace CanKit.Pro.Actor
                 first = Interlocked.Exchange(ref _disposedFlag, 1) == 0;
             }
 
-            // Wakes a blocked wait immediately; further Post/Schedule calls now throw
-            // ObjectDisposedException instead of silently queuing work nobody will run. Only the
-            // first caller cancels: the loop disposes _stopCts itself once it has stopped, and a
-            // later caller may well arrive after that.
-            if (first) _stopCts.Cancel();
+            if (first)
+            {
+                // Wakes a blocked wait immediately; further Post/Schedule calls now throw
+                // ObjectDisposedException instead of silently queuing work nobody will run. Only
+                // the first caller cancels: the loop disposes _stopCts itself once it has stopped,
+                // and a later caller may well arrive after that. Outside the gate on purpose:
+                // whether cancelling completes the async loop's pending semaphore wait inline is
+                // the runtime's choice, not ours (.NET 10 does not; the .NET Framework
+                // implementation behind netstandard2.0 completes it through Task.Delay/WhenAny
+                // continuations), and if it does, the loop's tail -- FinalDrain, i.e. due timer
+                // callbacks and in SynchronizationContext mode a blocking Send -- runs right here.
+                // Holding the gate across that user code would deadlock any thread blocked in
+                // Post/Schedule. Later callers instead wait below until the stop is requested.
+                _beforeStopRequested?.Invoke(this);
+                try
+                {
+                    _stopCts.Cancel();
+                }
+                finally
+                {
+                    Volatile.Write(ref _stopRequestFinished, 1);
+                }
+            }
 
             if (IsOnCurrentActor)
             {
@@ -522,13 +572,29 @@ namespace CanKit.Pro.Actor
                 return;
             }
 
-            if (ReferenceEquals(t_reportingShutdownTimeout, this))
+            if (IsInsideOwnShutdownTimeoutReport)
             {
                 // Nested in this thread's own timeout report below: the subscriber is reacting to
                 // "the loop did not stop within _shutdownTimeout" by disposing the actor. The
                 // outer Dispose on this very thread has already joined and given up; joining
                 // again would only stretch its return to twice the documented bound.
                 return;
+            }
+
+            // A later caller can get here while the first one, having flipped the flag, has not
+            // yet requested the stop -- descheduled between the gate and Cancel. Joining then
+            // would start the _shutdownTimeout clock on a loop nobody has told to stop and could
+            // report a timeout for nothing. IsCancellationRequested turns true as Cancel's first
+            // step, before any registration runs, so this waits only for the first caller to get
+            // through a few instructions of its own, never for user code; it reads a flag and
+            // stays valid after the loop has disposed _stopCts. _stopRequestFinished covers the
+            // one case where that flag never turns: a loop that ended without being cancelled
+            // has already disposed _stopCts, and the first caller's Cancel throws instead.
+            if (!_stopCts.IsCancellationRequested)
+            {
+                var spin = new SpinWait();
+                while (!_stopCts.IsCancellationRequested && Volatile.Read(ref _stopRequestFinished) == 0)
+                    spin.SpinOnce();
             }
 
             // Every off-loop caller joins, not just the one that flipped the flag (#338). The
@@ -551,8 +617,8 @@ namespace CanKit.Pro.Actor
                 // Dispose must stay safe to call from a finally/using block. Reported once, by
                 // whichever caller gives up first: the subscribers are the same for every caller,
                 // and a second report would describe the same stuck callback.
-                var outerReport = t_reportingShutdownTimeout;
-                t_reportingShutdownTimeout = this;
+                var reporting = ReportingShutdownTimeouts();
+                reporting.Add(this);
                 try
                 {
                     RaiseBackgroundException(new TimeoutException(
@@ -560,7 +626,7 @@ namespace CanKit.Pro.Actor
                 }
                 finally
                 {
-                    t_reportingShutdownTimeout = outerReport;
+                    reporting.RemoveAt(reporting.Count - 1);
                 }
             }
 
