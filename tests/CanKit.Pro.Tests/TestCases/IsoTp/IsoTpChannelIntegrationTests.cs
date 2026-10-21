@@ -1006,6 +1006,46 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await receive!.WaitAsync(ShortTimeout)).Should().Equal(0x0A, 0x0B);
     }
 
+    // I-3 of the 2026-10-21 review (#353): a discard has the PDUs it retains out of the inbox for
+    // a moment. TryReceiveWithArrival from another thread in that moment reported "empty", though
+    // the PDU that arrived after the discard's stamp was about to be put back; the async receive
+    // waits the gap out. The observer holds the gap open from the actor, so the call below is
+    // made with the inbox empty for certain, and the gap is released only from behind the call:
+    // an answer given before the write-back can only be "false", and the delay merely lengthens
+    // the wait of a call that does wait.
+    [Fact]
+    public async Task A_TryReceive_During_A_Discard_Waits_For_The_Pdu_The_Discard_Retains()
+    {
+        var session = NewSession();
+        using var busA = OpenClassic(session, 0);
+        using var busB = OpenClassic(session, 1);
+        using var service = new CanBusService(busA);
+        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
+        var concrete = (IsoTpChannel)channel;
+
+        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
+        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
+        await arrived.Task.WaitAsync(ShortTimeout);
+
+        using var inGap = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        concrete.DiscardGapObserver = () =>
+        {
+            inGap.Set();
+            release.Wait(ShortTimeout);
+        };
+        var discard = Task.Run(() => channel.DiscardPendingPdus(arrivedBefore: 1));
+        inGap.Wait(ShortTimeout).Should().BeTrue("the discard reached its gap");
+
+        var releasing = Task.Delay(TimeSpan.FromMilliseconds(100)).ContinueWith(_ => release.Set());
+        bool taken = channel.TryReceiveWithArrival(out var pdu);
+        await releasing;
+        taken.Should().BeTrue("the PDU the discard retains is pending, not gone");
+        pdu.Pdu.Should().Equal(0x0A, 0x0B);
+        (await discard.WaitAsync(ShortTimeout)).Should().Be(0);
+    }
+
     // #262: a Dispose that arrives while a discard has the retained PDU out of the inbox must not
     // lose it. The inbox used to be completed from the disposing thread, and the write-back that
     // followed found it completed.

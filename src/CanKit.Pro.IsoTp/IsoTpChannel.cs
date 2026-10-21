@@ -411,14 +411,29 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     /// <inheritdoc />
     public bool TryReceiveWithArrival(out IsoTpReceivedPdu pdu)
     {
-        if (_pduInbox.Reader.TryRead(out var item))
+        var spin = new SpinWait();
+        while (true)
         {
-            pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
-            return true;
-        }
+            if (_pduInbox.Reader.TryRead(out var item))
+            {
+                pdu = new IsoTpReceivedPdu(UnwrapInboxItem(item), item.ArrivalTimestamp, item.FirstFrameArrivalTimestamp);
+                return true;
+            }
 
-        pdu = default;
-        return false;
+            // A discard has the items it retains out of the inbox for a moment, on the actor: an
+            // empty inbox then says nothing about what is pending, and "false" would be wrong for
+            // that instant (#353, I-3). Waited out as TakeNextAsync does. The gap is a drain and a
+            // write-back with no callback in between, so the spin is short, and it cannot be on
+            // this thread: the discard runs on the actor, and a caller on the actor is not inside
+            // it.
+            if (Volatile.Read(ref _discarding) == 0)
+            {
+                pdu = default;
+                return false;
+            }
+
+            spin.SpinOnce();
+        }
     }
 
     /// <inheritdoc />
