@@ -3643,6 +3643,29 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         channel.GetReceptionsInProgress().Should().BeEmpty();
     }
 
+    // I-4 of the 2026-10-21 review (#353): an injected actor its owner disposed while the channel
+    // lives (#205). A caller-side pump that ingested a First Frame then announced it and failed
+    // to post it, and nothing withdrew the record until the channel's own Dispose: a deadline
+    // check would have kept finding a transfer nobody will complete. The reader is starved, so
+    // the pump below is the one that ingests the frame.
+    [Fact]
+    public void A_First_Frame_Pumped_After_The_Injected_Actor_Is_Gone_Is_Not_Left_Announced()
+    {
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service,
+            IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8), FastOptions(), ownsService: false, actor);
+        actor.Dispose();
+
+        int ffData = IsoTpFrameCodec.FirstFrameMaxDataLength(isCanFd: false, usesAddressExtension: false, useLongLength: false);
+        byte[] pdu = Enumerable.Range(0x30, 20).Select(i => (byte)i).ToArray();
+        var ff = IsoTpFrameCodec.BuildFirstFrame(IsoTpEndpoint.Normal(0x7E8, 0x7E0), pdu.Length, pdu.AsSpan(0, ffData), isCanFd: false);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8, ff, FrameFlags.None));
+
+        channel.GetReceptionsInProgress().Should().BeEmpty("nothing will handle a frame the actor cannot take");
+        channel.GetReceptionsInProgress().Should().BeEmpty("and a later look finds nothing either");
+    }
+
     // #206: a frame that was already on its way to the actor when the channel was disposed
     // completes no PDU and raises no DatagramReceived. The channel is disposed with the actor
     // held, and the frame -- pumped into the mailbox beforehand -- runs only afterwards.

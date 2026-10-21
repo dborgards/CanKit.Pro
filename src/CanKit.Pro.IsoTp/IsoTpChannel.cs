@@ -920,7 +920,19 @@ internal sealed class IsoTpChannel : IIsoTpChannel
                     Math.Max(0, payload.Length - pci.DataOffset)));
             PublishReception(announce);
         }
-        _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival, announce));
+        try
+        {
+            _actor.Post(() => HandleReceivedFrame(payload, isCanFd, frameArrival, announce));
+        }
+        catch (ObjectDisposedException) when (announce is not null)
+        {
+            // The actor is gone -- an injected one its owner disposed while the channel lives
+            // (#205) -- so nothing will ever handle the frame, and nothing would withdraw the
+            // record on its outcome: a caller-side pump would leave it published until the
+            // channel's own Dispose (#353, I-4). Withdrawn here, then the pump stops as before.
+            WithdrawReception(announce);
+            throw;
+        }
     }
 
     private void RaiseBackgroundException(Exception ex)
