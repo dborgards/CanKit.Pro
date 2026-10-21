@@ -169,8 +169,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// <c>J1939Tp.Open</c>, so a test can hand the transport reader a datagram at the instant a
     /// race needs it, after a rebind or after the actor is gone, instead of hoping the host
     /// lands there (#195). Null, the only value production passes, opens the real channel on
-    /// <paramref name="service"/>. The single-use channel of a send that races a rebind is
-    /// not opened through it.
+    /// <paramref name="service"/>. Every TP session the node sends runs on that channel: a send
+    /// that finds it bound to another address than the one it captured is refused, not given a
+    /// channel of its own (#347).
     /// </remarks>
     internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService,
         ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null)
@@ -1193,6 +1194,15 @@ internal sealed class J1939NodeImpl : IJ1939Node
         return SendCoreAsync(message, cancellationToken);
     }
 
+    /// <summary>
+    /// A seam for tests, null in production: runs on the sender's thread once a send has passed
+    /// the claim gate and before it reads <see cref="_transport"/>. A loss processed on the actor
+    /// in that window leaves the gate's verdict stale and the channel rebound to 0xFE; the window
+    /// is one actor turn wide, so a test holds the sender here while it feeds the actor the
+    /// stronger peer's claim, instead of hoping the host lands there (#347).
+    /// </summary>
+    internal Action? AfterSendGate;
+
     private async Task SendCoreAsync(J1939Message message, CancellationToken cancellationToken)
     {
         if (message.Priority > 7)
@@ -1210,6 +1220,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
             throw new J1939NoAddressException();
 
         byte sa = (byte)addr;
+        AfterSendGate?.Invoke();
         try
         {
             // Direct single-frame path (payload <= 8 bytes) — FR-J1939-006.
@@ -1244,25 +1255,22 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 var tpChannel = _transport;
                 if (tpChannel.SourceAddress != sa)
                 {
-                    // Rebind hasn't landed yet (would be a claim/send race on the actor loop)
-                    // — fall back to a single-use per-send TP channel bound to the currently-
-                    // claimed SA so the wire carries the right SA regardless.
-                    tpChannel = J1939Tp.J1939Tp.Open(_service, sourceAddress: sa,
-                        options: _options.TransportOptions, leaveOpen: true);
+                    // The channel does not carry the address the gate admitted. The commit path
+                    // cannot leave it so (RebindTransportOnLoop runs before the state turns
+                    // Claimed), so the actor gave the address up between the gate and here and
+                    // rebound the channel to the 0xFE placeholder: a stronger peer's claim was
+                    // processed, and the address is the peer's now (SAE J1939-81), or a re-claim
+                    // began and the wire already advertises another one. A single-use channel
+                    // on the captured address used to send the whole session under it
+                    // regardless, and HasReclaimCrossed below only threw once it had gone out
+                    // (#347). Refuse here, as the gate would have one turn earlier.
+                    throw new J1939NoAddressException();
                 }
-                try
-                {
-                    var payloadArr = message.Payload.ToArray();
-                    if (message.DestinationAddress == J1939Pgn.GlobalAddress)
-                        await tpChannel.SendBamAsync(message.Pgn, payloadArr, cancellationToken).ConfigureAwait(false);
-                    else
-                        await tpChannel.SendCmAsync(message.Pgn, message.DestinationAddress, payloadArr, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    if (!ReferenceEquals(tpChannel, _transport))
-                        tpChannel.Dispose();
-                }
+                var payloadArr = message.Payload.ToArray();
+                if (message.DestinationAddress == J1939Pgn.GlobalAddress)
+                    await tpChannel.SendBamAsync(message.Pgn, payloadArr, cancellationToken).ConfigureAwait(false);
+                else
+                    await tpChannel.SendCmAsync(message.Pgn, message.DestinationAddress, payloadArr, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (ObjectDisposedException) when (HasReclaimCrossed(sa))
