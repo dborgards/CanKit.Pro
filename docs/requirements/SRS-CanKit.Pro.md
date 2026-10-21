@@ -25,7 +25,7 @@ Review `docs/reviews/2026-07-14-deep-code-review.md`)
 > | `FR-TP-001..020` (ISO-TP) | `CanKit.Pro.IsoTp` |
 > | `FR-TP-030..035` (J1939-TP) | `CanKit.Pro.J1939Tp` |
 > | `FR-UDS-001..012` | `CanKit.Pro.Uds` |
-> | `FR-CO-001..057` | `CanKit.Pro.CANopen` |
+> | `FR-CO-001..059` | `CanKit.Pro.CANopen` |
 > | `FR-J1939-001..007` | `CanKit.Pro.J1939` |
 >
 > Damit ist jede Anforderungsfamilie dieses Dokuments einem Paket dieses Repositories zugeordnet
@@ -440,7 +440,7 @@ Verweise auf Architektur-Bausteine nutzen die in Abschnitt 2.1 definierten Schic
 | FR-TP-001..020 | L3 – ISO-TP-Transport, `CanKit.Pro.IsoTp` (`IsoTpChannel`, `IsoTpFrameCodec`, `Pci`; Deadlines aus `CanKit.Pro.Reliability`) | Unit-Test (Codec/Timing), Virtual-Loopback-Integrationstest, HIL-Stichprobe |
 | FR-TP-030..035 | L3 – J1939-Transport, ausgeliefert als `CanKit.Pro.J1939Tp` (`J1939TpChannel`, `J1939TpFrames`, `J1939TpAbortReason`) | Virtual-Loopback-Integrationstest |
 | FR-UDS-001..012 | L4 – UDS-Client, ausgeliefert als `CanKit.Pro.Uds` (`UdsClientImpl` auf `IIsoTpChannel`) | Virtual-Loopback-Integrationstest, HIL-Stichprobe |
-| FR-CO-001..057 | L4 – CANopen-Stack, ausgeliefert als `CanKit.Pro.CANopen` (`CanOpenNode` auf L2-Demultiplexing; Kommunikationsprofil und PDO-Engine werden aus dem Objektverzeichnis abgeleitet, `CanOpenNode.CommunicationProfile.cs` / `CanOpenNode.Pdo.cs`; das Objektverzeichnis aus einer EDS/DCF, `CanOpenNode.DeviceDescription.cs` auf `EdsDcfNet`; die Master-/Tool-Rolle in `CanOpenNode.PeerSdo.cs`, `CanOpenNode.ForeignPdo.cs`, `CanOpenNode.FlyingMaster.cs`, `CanOpenNode.BootUp.cs` und `CanOpenDiscovery.cs`; CiA 304 als `Safety/SrdoEngine` auf demselben Aktor, `CanOpenNode.Safety.cs` / `CanOpenNode.PeerSafety.cs` / `CanOpenNode.ForeignSrdo.cs` / `CanOpenNode.BootUp.cs`; CiA 305 LSS-Master, LSS-Slave und Inbetriebnahme in `Lss/` und `CanOpenNode.Lss.cs`) | Virtual-Loopback-Integrationstest, Unit-Test mit virtueller Uhr, HIL-Stichprobe |
+| FR-CO-001..059 | L4 – CANopen-Stack, ausgeliefert als `CanKit.Pro.CANopen` (`CanOpenNode` auf L2-Demultiplexing; Kommunikationsprofil und PDO-Engine werden aus dem Objektverzeichnis abgeleitet, `CanOpenNode.CommunicationProfile.cs` / `CanOpenNode.Pdo.cs`; das Objektverzeichnis aus einer EDS/DCF, `CanOpenNode.DeviceDescription.cs` auf `EdsDcfNet`; die Master-/Tool-Rolle in `CanOpenNode.PeerSdo.cs`, `CanOpenNode.ForeignPdo.cs`, `CanOpenNode.FlyingMaster.cs`, `CanOpenNode.BootUp.cs` und `CanOpenDiscovery.cs`; CiA 304 als `Safety/SrdoEngine` auf demselben Aktor, `CanOpenNode.Safety.cs` / `CanOpenNode.PeerSafety.cs` / `CanOpenNode.ForeignSrdo.cs` / `CanOpenNode.BootUp.cs`; CiA 305 LSS-Master, LSS-Slave und Inbetriebnahme in `Lss/` und `CanOpenNode.Lss.cs`) | Virtual-Loopback-Integrationstest, Unit-Test mit virtueller Uhr, HIL-Stichprobe |
 | FR-J1939-001..007 | L4 – J1939-Applikationsschicht, ausgeliefert als `CanKit.Pro.J1939` (`J1939NodeImpl`) | Virtual-Loopback-Integrationstest, HIL-Stichprobe |
 | NFR-001..003 | L2/L3 Timing-Infrastruktur, L1 `SoftwarePeriodicTx`/`PreciseDelay` (`src/core/CanKit.Core/Utils/SoftwarePeriodicTx.cs`) | Performance-/Timing-Test |
 | NFR-004, CON-001 | Alle Ebenen – Multi-Targeting (`src/Directory.Build.props`) | CI-Testmatrix |
