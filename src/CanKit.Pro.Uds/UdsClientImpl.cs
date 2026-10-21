@@ -27,9 +27,11 @@ namespace CanKit.Pro.Uds;
 /// <para>
 /// Before each send (and on abort paths) the client calls
 /// <see cref="IIsoTpChannel.DiscardPendingPdus(long)"/> so a late ECU reply from a cancelled or
-/// timed-out wait cannot be consumed as the answer to a later request. SID correlation during
-/// the wait loop remains as a second line of defense for stray frames that arrive while a
-/// request is still outstanding.
+/// timed-out wait cannot be consumed as the answer to a later request. Correlation during the
+/// wait loop -- on the SID, and on the request bytes the service's positive response echoes
+/// (<see cref="UdsResponseEcho"/>) -- remains as a second line of defense for stray frames
+/// that arrive while a request is still outstanding, among them a late answer to the previous
+/// request for the same service (#340).
 /// </para>
 /// </remarks>
 internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
@@ -169,10 +171,12 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         // Positive response layout (ISO 14229-1 §9.2.2.4):
         //   [0]=0x50 [1]=sessionType [2..5]=sessionParameterRecord (P2_server/P2*_server timing)
-        // Some ECUs omit the parameter record on legacy sessions; we accept >= 2 bytes.
-        if (response.Length < 2 || response[1] != sub)
+        // Some ECUs omit the parameter record on legacy sessions; we accept >= 2 bytes. The
+        // sub-function echo was checked in the receive loop: one for another session type is
+        // a stray there, not this request's answer (#340).
+        if (response.Length < 2)
             throw new UdsProtocolException(
-                $"DiagnosticSessionControl response sub-function mismatch (expected 0x{sub:X2}, got payload length {response.Length}).");
+                $"DiagnosticSessionControl response too short ({response.Length} bytes).");
 
         Volatile.Write(ref _currentSession, sub);
         int recordLength = response.Length - 2;
@@ -188,10 +192,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var response = await ExecuteAsync(UdsServiceId.EcuReset, request,
             cancellationToken).ConfigureAwait(false);
 
-        // Positive response layout: [0]=0x51 [1]=resetType [2]?=powerDownTime.
-        if (response.Length < 2 || response[1] != (byte)resetType)
+        // Positive response layout: [0]=0x51 [1]=resetType [2]?=powerDownTime. The reset-type
+        // echo was checked in the receive loop (#340).
+        if (response.Length < 2)
             throw new UdsProtocolException(
-                $"ECUReset response reset-type mismatch (expected 0x{(byte)resetType:X2}, got payload length {response.Length}).");
+                $"ECUReset response too short ({response.Length} bytes).");
 
         // ISO 14229-1: after a successful ECUReset the server returns to the default session.
         // Mirror that in CurrentSession so later calls do not assume a stale negotiated session.
@@ -215,14 +220,12 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var response = await ExecuteAsync(UdsServiceId.ReadDataByIdentifier, request,
             cancellationToken).ConfigureAwait(false);
 
-        // Positive response: [0]=0x62 [1..2]=DID [3..]=dataRecord.
+        // Positive response: [0]=0x62 [1..2]=DID [3..]=dataRecord. The DID echo was checked in
+        // the receive loop: a response for another DID -- a late answer to the previous
+        // request -- is a stray there, and the wait went on for this one's (#340).
         if (response.Length < 3)
             throw new UdsProtocolException(
                 $"ReadDataByIdentifier response too short ({response.Length} bytes).");
-        ushort echoed = (ushort)((response[1] << 8) | response[2]);
-        if (echoed != dataIdentifier)
-            throw new UdsProtocolException(
-                $"ReadDataByIdentifier response DID mismatch (requested 0x{dataIdentifier:X4}, got 0x{echoed:X4}).");
         int len = response.Length - 3;
         var data = new byte[len];
         if (len > 0) Buffer.BlockCopy(response, 3, data, 0, len);
@@ -322,14 +325,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var response = await ExecuteAsync(UdsServiceId.WriteDataByIdentifier, request,
             cancellationToken).ConfigureAwait(false);
 
-        // Positive response: [0]=0x6E [1..2]=DID.
+        // Positive response: [0]=0x6E [1..2]=DID. The DID echo was checked in the receive loop
+        // (#340).
         if (response.Length < 3)
             throw new UdsProtocolException(
                 $"WriteDataByIdentifier response too short ({response.Length} bytes).");
-        ushort echoed = (ushort)((response[1] << 8) | response[2]);
-        if (echoed != dataIdentifier)
-            throw new UdsProtocolException(
-                $"WriteDataByIdentifier response DID mismatch (wrote 0x{dataIdentifier:X4}, got 0x{echoed:X4}).");
     }
 
     public async Task<byte[]> RoutineControlAsync(UdsRoutineControlType routineType,
@@ -348,13 +348,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
 
         // Positive response: [0]=0x71 [1]=sub [2..3]=routineId [4..]=routineInfo+statusRecord.
-        if (response.Length < 4 || response[1] != (byte)routineType)
+        // The sub-function and routine-identifier echo was checked in the receive loop (#340).
+        if (response.Length < 4)
             throw new UdsProtocolException(
-                $"RoutineControl response sub-function mismatch (expected 0x{(byte)routineType:X2}).");
-        ushort echoed = (ushort)((response[2] << 8) | response[3]);
-        if (echoed != routineIdentifier)
-            throw new UdsProtocolException(
-                $"RoutineControl response routineId mismatch (requested 0x{routineIdentifier:X4}, got 0x{echoed:X4}).");
+                $"RoutineControl response too short ({response.Length} bytes).");
         int tail = response.Length - 4;
         var info = new byte[tail];
         if (tail > 0) Buffer.BlockCopy(response, 4, info, 0, tail);
@@ -390,10 +387,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             // means "already unlocked" per ISO 14229-1 §9.4.5.3 -- the length is the server's
             // usual seed length, the bytes are 0x00 -- and the client MUST NOT send the key
             // (#29): a key computed for that seed gets NRC 0x24 back. A zero-length seed is kept
-            // as the defensive reading of the same answer.
-            if (seedResponse.Length < 2 || seedResponse[1] != requestSeedLevel)
+            // as the defensive reading of the same answer. The sub-function echo was checked
+            // in the receive loop (#340).
+            if (seedResponse.Length < 2)
                 throw new UdsProtocolException(
-                    $"SecurityAccess seed response sub-function mismatch (expected 0x{requestSeedLevel:X2}).");
+                    $"SecurityAccess seed response too short ({seedResponse.Length} bytes).");
             int seedLen = seedResponse.Length - 2;
             if (seedLen == 0) return;
             if (IsAllZero(seedResponse, 2, seedLen)) return;
@@ -412,9 +410,9 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
             var keyResponse = await ExecuteCoreAsync(UdsServiceId.SecurityAccess, keyRequest,
                 linkedToken).ConfigureAwait(false);
-            if (keyResponse.Length < 2 || keyResponse[1] != sendKeyLevel)
+            if (keyResponse.Length < 2)
                 throw new UdsProtocolException(
-                    $"SecurityAccess sendKey response sub-function mismatch (expected 0x{sendKeyLevel:X2}).");
+                    $"SecurityAccess sendKey response too short ({keyResponse.Length} bytes).");
         }
         finally
         {
@@ -436,9 +434,10 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
 
         var response = await ExecuteAsync(UdsServiceId.TesterPresent, request,
             cancellationToken).ConfigureAwait(false);
-        if (response.Length < 2 || response[1] != 0x00)
+        // The zeroSubFunction echo was checked in the receive loop (#340).
+        if (response.Length < 2)
             throw new UdsProtocolException(
-                $"TesterPresent response sub-function mismatch (expected 0x00, got payload length {response.Length}).");
+                $"TesterPresent response too short ({response.Length} bytes).");
     }
 
     public IDisposable StartTesterPresentKeepAlive(TimeSpan? period = null)
@@ -647,14 +646,9 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     }
 
     // The services whose second byte is a sub-function parameter, and so carry the
-    // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column). Not 0x2A:
-    // its transmissionMode is a plain parameter (Codex on #150).
-    private static bool HasSubFunction(UdsServiceId sid) => (byte)sid switch
-    {
-        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2C or 0x31 or 0x3E
-            or 0x83 or 0x85 or 0x86 or 0x87 => true,
-        _ => false,
-    };
+    // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column). The table
+    // is UdsResponseEcho's, shared with the functional client.
+    private static bool HasSubFunction(UdsServiceId sid) => UdsResponseEcho.HasSubFunction((byte)sid);
 
     // ---------------------------------------------------------------------------------------
     // Upload / Download (SRS FR-UDS-012, ISO 14229-1 §14).
@@ -818,12 +812,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             linkedToken).ConfigureAwait(false);
 
         // Positive response: [0]=0x76 [1]=blockSequenceCounter [2..]=transferResponseParameterRecord.
+        // The block-sequence-counter echo was checked in the receive loop: the answer to the
+        // previous block, arriving late, is a stray there (#340).
         if (response.Length < 2)
             throw new UdsProtocolException(
                 $"TransferData response too short ({response.Length} bytes).");
-        if (response[1] != blockSequenceCounter)
-            throw new UdsProtocolException(
-                $"TransferData response blockSequenceCounter mismatch (sent 0x{blockSequenceCounter:X2}, got 0x{response[1]:X2}).");
 
         int tail = response.Length - 2;
         var record = new byte[tail];
@@ -1230,12 +1223,20 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                     throw new UdsNegativeResponseException(serviceId, nrc);
                 }
 
-                byte expectedPositiveSid = (byte)((byte)serviceId + PositiveResponseOffset);
-                if (response[0] != expectedPositiveSid)
-                {
-                    // Stray positive response for a different request; discard and keep waiting.
+                // A positive response for a different request is a stray; the wait goes on
+                // inside the same budget. For another service that is its SID. For this
+                // service it is the request bytes the response echoes -- sub-function, DID,
+                // routine identifier, block sequence counter -- which is what tells a late
+                // answer to the previous request for this service (timed out or cancelled,
+                // and so with no window of its own) from this request's answer (#340). Before
+                // this the service's own echo check threw a UdsProtocolException for it,
+                // aborting a request whose answer was still due. A positive response too
+                // short to carry the echo is returned as it was: the service's length check
+                // reports it as malformed rather than letting it vanish as a stray. The same
+                // echo for the same service -- a polled DID -- cannot be told apart here; a
+                // late answer with it is taken for this request's, as before.
+                if (UdsResponseEcho.Correlate(request, response) == UdsEchoMatch.Stray)
                     continue;
-                }
 
                 return response;
             }
