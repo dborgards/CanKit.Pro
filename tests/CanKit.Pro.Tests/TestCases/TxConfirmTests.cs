@@ -689,6 +689,33 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         relayed.Should().BeSameAs(fault, "the adapter's exception is relayed as itself, not wrapped");
     }
 
+    // Codex on #369: the relay runs before the bus-off sweep, and a listener may answer "the bus
+    // is dead" by disposing the bus -- after which the PCAN, Kvaser and SocketCAN BusState getters
+    // throw (ThrowIfDisposed). The state the sweep decides on is therefore read *before* any
+    // listener runs. Read afterwards, the getter throws out of OnFaultOccurred, the sweep never
+    // runs, and the outstanding send times out instead of resolving as BusOff. The double throws
+    // the same way on request; the fault is raised synchronously, so nothing here waits on a clock.
+    [Fact]
+    public async Task A_Listener_That_Disposes_The_Bus_On_The_Relayed_Fault_Does_Not_Defeat_The_BusOff_Sweep()
+    {
+        using var sender = OpenDeferredEcho();
+        sender.BusStateThrowsOnceDisposed = true;
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x125, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        service.BackgroundExceptionOccurred += (_, _) => sender.Dispose();
+        sender.BusState = BusState.BusOff;
+        sender.RaiseFault(new InvalidOperationException("poll loop died, controller off the bus"));
+
+        var result = await send.WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff,
+            "the sweep decides on the state read before the listener disposed the bus");
+    }
+
     // #349, a characterisation of the matching as it stands, not a contract: the maintainer's
     // decision there is whether a late echo of a send that already timed out is absorbed for a
     // bounded time (the J1939 node's ClaimEchoGrace model, #180) or left as a documented limit of

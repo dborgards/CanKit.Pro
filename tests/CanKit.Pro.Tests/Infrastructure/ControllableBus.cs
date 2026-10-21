@@ -206,7 +206,27 @@ public sealed class ControllableBus : ICanBus
 
     public IBusRTOptionsConfigurator Options => _options;
 
-    public BusState BusState { get; set; }
+    private BusState _busState;
+
+    /// <summary>
+    /// Whether reading <see cref="BusState"/> after <see cref="Dispose"/> throws, as the PCAN,
+    /// Kvaser and SocketCAN getters do (<c>ThrowIfDisposed()</c> before the driver status call).
+    /// Off by default so a test that tears the double down in any order keeps reading a plain
+    /// property; on for a test about what the service does when a listener disposes the bus
+    /// from inside a fault callback (#369).
+    /// </summary>
+    public bool BusStateThrowsOnceDisposed { get; set; }
+
+    public BusState BusState
+    {
+        get
+        {
+            if (BusStateThrowsOnceDisposed && Volatile.Read(ref _disposed) != 0)
+                throw new ObjectDisposedException(nameof(ControllableBus));
+            return _busState;
+        }
+        set => _busState = value;
+    }
 
     public BusNativeHandle NativeHandle => BusNativeHandle.Zero;
 
