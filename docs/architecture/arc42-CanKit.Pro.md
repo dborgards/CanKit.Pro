@@ -1053,8 +1053,12 @@ nicht mit `IsEcho` markiert, laufen Echo-abhängige Tests in drei „Echo-Welten
 (`Infrastructure/EchoWorlds.cs`: markiert, unmarkiert, markiert im Normal-Modus). Zeitabhängige
 Tests werden auf die virtuelle Uhr des Aktors umgestellt statt gegen die Wanduhr zu messen (#92, #171). Die Suite läuft
 auf `net10.0`; der Windows-Leg von `ci.yml` führt sie zusätzlich auf `net48` aus, wo die
-`netstandard2.0`-Assets tatsächlich laufen. `eng/verify-requirements-traceability.py` prüft, dass
-jede `Must`-Anforderung der SRS von mindestens einem Test referenziert wird.
+`netstandard2.0`-Assets tatsächlich laufen. `eng/verify-requirements-traceability.py` prüft, ob
+jede `Must`-Anforderung der SRS von mindestens einem Test referenziert wird; es lässt die in
+`WAIVERS` genannten Anforderungen mit nicht-testbarer Verifikation (Dokumentations-/Architektur-
+review, CI-Matrix) und die in `KNOWN_GAPS` geführten bekannten Lücken durch und schlägt nur bei
+einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „keine neue Lücke", nicht
+„alles belegt"; die offenen Posten stehen im Skript selbst.
 
 ---
 
@@ -1379,9 +1383,10 @@ Priorisierung: **K** = kritisch, **W** = wichtig, **G** = gering. Die Zeilen üb
 `docs/upstream-candidates.md`; die Ownership- und Virtual-Hub-Fixes sind es nicht, und das
 Echo-Verhalten von PCAN und Kvaser ist dort als gemessene Abweichung geführt (ADR-7, #249). Der ISO-TP-Prototyp des Forks ist durch den Neubau `CanKit.Pro.IsoTp` ersetzt (siehe die
 ✅-Zeilen oben). Von den vier strukturellen L2-Lücken ist der Frame-Ownership-Vertrag
-(FR-RAW-001..004) für L1-Kern und Virtual-Adapter upstream umgesetzt, FR-RAW-005 (TX-Lease der übrigen L0-Adapter, Should) ist noch offen (siehe §8.1); Demux,
-Threading/Aktor und TX-Confirm sind als `CanKit.Pro.RawCan` und `CanKit.Pro.Actor` umgesetzt und
-tragen die L3/L4-Pakete. Offen ist, was in dieser Tabelle ohne ✅ steht, sowie die Vorbehalte
+(FR-RAW-001..004) nur im Fork für L1-Kern und Virtual-Adapter umgesetzt — im konsumierten CanKit
+0.5.6 fehlt er, bis die Upstream-Kandidaten angenommen sind —, FR-RAW-005 (TX-Lease der übrigen
+L0-Adapter, Should) ist auch dort offen (siehe §8.1); Demux, Threading/Aktor und TX-Confirm sind
+als `CanKit.Pro.RawCan` und `CanKit.Pro.Actor` umgesetzt und tragen die L3/L4-Pakete. Offen ist, was in dieser Tabelle ohne ✅ steht, sowie die Vorbehalte
 des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
 
 ---

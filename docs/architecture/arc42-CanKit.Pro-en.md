@@ -1056,8 +1056,11 @@ echo-dependent tests run in three "echo worlds" (`Infrastructure/EchoWorlds.cs`:
 unflagged, flagged in normal mode). Time-dependent tests are being moved onto the actor's virtual
 clock instead of measuring against the wall clock (#92, #171). The suite runs on `net10.0`; the
 Windows leg of `ci.yml` additionally runs it on `net48`, where the `netstandard2.0` assets actually
-execute. `eng/verify-requirements-traceability.py` checks that every `Must` requirement of the SRS
-is referenced by at least one test.
+execute. `eng/verify-requirements-traceability.py` checks whether every `Must` requirement of the SRS
+is referenced by at least one test; it lets through the requirements named in `WAIVERS`, whose
+verification is not a test (documentation/architecture review, CI matrix), and the known gaps
+listed in `KNOWN_GAPS`, and fails only on a new, unrecorded gap. A green run therefore means "no
+new gap", not "everything proven"; the open items are listed in the script itself.
 
 ---
 
@@ -1378,10 +1381,11 @@ Whether a fix has arrived in the consumed CanKit 0.5.6 is stated by `docs/upstre
 the ownership and virtual-hub fixes have not, and the echo behaviour of PCAN and Kvaser is
 recorded there as a measured deviation (ADR-7, #249). The fork's ISO-TP prototype is replaced by
 the rewrite `CanKit.Pro.IsoTp` (see the ✅ rows above). Of the four structural L2 gaps, the frame
-ownership contract (FR-RAW-001..004) is implemented upstream for the L1 core and the Virtual
-adapter, FR-RAW-005 (TX lease of the remaining L0 adapters, Should) is still open (see §8.1);
-demux, threading/actor and TX confirm are implemented as `CanKit.Pro.RawCan` and
-`CanKit.Pro.Actor` and carry the L3/L4 packages. Open is whatever stands in this table without
+ownership contract (FR-RAW-001..004) is implemented only in the fork, for the L1 core and the
+Virtual adapter — the consumed CanKit 0.5.6 lacks it until the upstream candidates are accepted —,
+FR-RAW-005 (TX lease of the remaining L0 adapters, Should) is open there too (see §8.1); demux,
+threading/actor and TX confirm are implemented as `CanKit.Pro.RawCan` and `CanKit.Pro.Actor` and
+carry the L3/L4 packages. Open is whatever stands in this table without
 ✅, as well as the SRS's reservations (HIL runs, `KNOWN_GAPS` of the traceability check).
 
 ---
