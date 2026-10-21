@@ -264,6 +264,30 @@ public class SrdoEngineConsumerTests : IDisposable
             SrdoInvalidReason.NotOperational, SrdoInvalidReason.NotReceived, null);
     }
 
+    /// <summary>Codex on #380: a pair shorter than the mapping is not processed (§8.1.3.1) and
+    /// leaves the SRDO NotReceived, but it is a pair — the producer's order has been seen, so the
+    /// start-up exemption of <see cref="A_Lone_Inverted_Frame_Before_The_First_Pair_Is_No_Pair_And_No_Transition"/>
+    /// is over: a lone inverted frame after it is OutOfOrder, as after any other pair. Arming
+    /// again starts a new period, in which a lone inverted frame is again no pair.</summary>
+    [Fact]
+    public void A_Lone_Inverted_Frame_After_A_Short_Pair_Is_OutOfOrder()
+    {
+        StartConsumer();
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);   // short: EMCY 8210h, not processed
+        _host.Emcys.Should().Equal((ushort)0x8210);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived, "a short pair is not processed");
+        Frame(0x124, Inverse).Should().BeTrue();
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.OutOfOrder, "a pair has been seen: this frame's plain frame is missing");
+        _host.States.Should().Contain((1, false, SrdoInvalidReason.OutOfOrder));
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "nothing was written");
+
+        OnActor(() => { _engine.LeaveOperational(); _engine.EnterOperational(); }); // armed again: NotReceived
+        int events = _host.Log.Count;
+        Frame(0x124, Inverse);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived, "arming again forgets the pair seen before it");
+        _host.Log.Count.Should().Be(events, "no transition, no event");
+    }
+
     [Fact]
     public void A_Wrong_Inverse_Is_A_Mismatch()
     {
