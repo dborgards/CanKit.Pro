@@ -99,7 +99,20 @@ internal sealed class IsoTpChannel : IIsoTpChannel
 
     // Serializes SendAsync callers: one outbound PDU on the wire at a time, per ISO 15765-2's
     // "one N-USData at a time" model. Also avoids competition for _tx state across calls.
+    //
+    // Never disposed (#339): SemaphoreSlim.Dispose does not complete pending WaitAsync waiters,
+    // so a SendAsync queued on the gate with CancellationToken.None would hang for ever once the
+    // gate was disposed under it. A SemaphoreSlim whose AvailableWaitHandle is never touched owns
+    // no OS handle, so there is nothing to release; what Dispose has to do for the waiters is
+    // cancel _lifetimeCts, below.
     private readonly SemaphoreSlim _sendGate = new(1, 1);
+
+    // Cancelled first thing in Dispose so every SendAsync parked on _sendGate -- including one
+    // whose caller passed CancellationToken.None -- is released at once and fails with
+    // ObjectDisposedException, without waiting for the actor to run the cleanup (#339). Never
+    // disposed: a CancellationTokenSource without a timer or a WaitHandle owns no OS handle, and
+    // a late SendAsync must still be able to read its Token after Dispose has returned.
+    private readonly CancellationTokenSource _lifetimeCts = new();
 
     // TX state (only accessed on the actor loop). All null/zero while idle.
     private TxState? _tx;
@@ -263,7 +276,29 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // Serialize per-channel: peer state (SN, block, deadlines) is only valid for one PDU at
         // a time. A canceled wait leaves the previous PDU untouched -- exactly the standard
         // .NET-cancellation-of-a-queued-op semantics.
-        await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        //
+        // The wait is also linked to the channel's lifetime (#339): a Dispose while this caller
+        // is queued behind another send releases it at once, as ObjectDisposedException. The
+        // caller's own cancellation keeps its OperationCanceledException, carrying the caller's
+        // token rather than the linked one -- as the wait did before it was linked, and as
+        // CancelInFlightSend reports a cancellation after the gate.
+        using (var linkedGateWait = cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token)
+            : null)
+        {
+            try
+            {
+                await _sendGate.WaitAsync(linkedGateWait?.Token ?? _lifetimeCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Only two things cancel this wait: the caller's token, or the channel's
+                // lifetime, which Dispose cancels after it has marked the channel disposed.
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new ObjectDisposedException(nameof(IsoTpChannel));
+            }
+        }
+
         try
         {
             ThrowIfDisposed();
@@ -315,10 +350,8 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         }
         finally
         {
-            // Dispose may tear down the gate after FailTx unblocks us but before Release runs
-            //. Swallow ODE so shutdown stays clean.
-            try { _sendGate.Release(); }
-            catch (ObjectDisposedException) { /* channel disposed */ }
+            // The gate is never disposed (#339), so this cannot throw on a torn-down channel.
+            _sendGate.Release();
         }
     }
 
@@ -586,6 +619,13 @@ internal sealed class IsoTpChannel : IIsoTpChannel
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
+        // First: every SendAsync queued on the send gate is let go now, from this thread, as
+        // ObjectDisposedException (#339). Nothing below depends on the actor for that, which
+        // matters when the actor cannot run -- a Dispose called from one of its own callbacks,
+        // or an injected actor that is busy -- and the in-flight send keeps the gate until the
+        // cleanup posted below fails it.
+        try { _lifetimeCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
+
         // Order matters: stop pulling frames off the subscription so nothing new is queued to the
         // actor while it winds down, then complete the PDU inbox so pending ReceiveAsync callers
         // see graceful termination, then tear down the actor (which cancels any pending deadlines
@@ -666,14 +706,11 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         if (_ownsActor) _actor.Dispose();
         _readerCts.Dispose();
 
-        // Do not dispose _sendGate while an in-flight SendAsync still holds it — Release would
-        // then throw ObjectDisposedException. Wait briefly for that caller
-        // to finish its finally path; timed-out Wait leaves the gate held and Dispose still
-        // proceeds (Release then no-ops via the catch in SendAsync).
-        try { _sendGate.Wait(TimeSpan.FromSeconds(2)); }
-        catch (ObjectDisposedException) { /* already disposed */ }
-        try { _sendGate.Dispose(); }
-        catch (ObjectDisposedException) { /* already disposed */ }
+        // _sendGate is deliberately not disposed, and not waited for either (#339): the wait
+        // used to block for up to 2 s whenever the actor could not run FailInFlightSend first
+        // -- for a Dispose from an actor-side BackgroundExceptionOccurred handler that is the
+        // actor loop itself, stalled with every frame and timer on it -- and the disposal then
+        // stranded every SendAsync still queued on the gate. See the field.
 
         if (_ownsService)
             _service.Dispose();
