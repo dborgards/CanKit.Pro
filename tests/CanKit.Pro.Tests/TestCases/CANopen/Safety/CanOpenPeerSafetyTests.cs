@@ -832,6 +832,39 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         fake.Written.Should().NotContainKey((0x13FE, 0), "A5h is written only after a clean readback");
     }
 
+    /// <summary>CiA 319 §5.3 step 4 as the tool sees it: the SRD checks the checksums itself when
+    /// A5h is written, and one that found a mismatch has set 13FEh back to 0 — the only way a
+    /// checksum the SRD computes differently (#289) reaches the configuration entity. The readback
+    /// of 13FEh that is not A5h ends the call with that one mismatch, not acknowledged and not
+    /// stored: the step-5 store is not sent. Mutation safety-M2 of the 2026-10-21 review (the
+    /// readback comparison removed) is what this test catches (#344).</summary>
+    [Fact]
+    public async Task A_Readback_Of_13FEh_That_Is_Not_A5h_Is_A_Mismatch_And_Nothing_Is_Stored()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0x13FE, 0x00)); // answers the readback with A6h
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false));
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true, Storage = PeerSafetyStorage.AllParameters }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        result.Stored.Should().BeFalse();
+        result.StorageAbort.Should().BeNull("the store was never sent");
+        var mismatch = result.Mismatches.Should().ContainSingle().Which;
+        (mismatch.Index, mismatch.Subindex).Should().Be(((ushort)0x13FE, (byte)0x00));
+        mismatch.Expected.Should().Equal(0xA5);
+        mismatch.Actual.Should().Equal(0xA6);
+        lock (fake.Written)
+        {
+            fake.Written[(0x13FE, 0)].Should().Equal(new byte[] { 0xA5 }, "step 3 was taken: the acknowledgement was written and read back");
+            fake.Written.Should().NotContainKey((0x1010, 1), "no store after a readback that is not A5h");
+        }
+        lock (fake.Requests) fake.Requests.Last().Should().Be(((ushort)0x13FE, (byte)0x00), "the readback of 13FEh is the last transfer");
+    }
+
     [Theory]
     [InlineData(SrdoDirection.Transmit, 70000, 20)]
     [InlineData(SrdoDirection.Transmit, 0, 20)]

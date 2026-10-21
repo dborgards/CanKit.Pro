@@ -145,6 +145,43 @@ public class SrdoEngineConsumerTests : IDisposable
         _host.Log.IndexOf("state:1:valid").Should().BeLessThan(_host.Log.IndexOf("received:1"), "the state change precedes the payload event");
     }
 
+    /// <summary>FR-CO-038, the consumer half (§8.3.1 step D: "in case of mismatch ... the safety
+    /// controller shall enter (stay) in safe state"): a consumer whose checksum does not match
+    /// its record reports ConfigurationInvalid on entering Operational, and a correct pair on
+    /// its COB-IDs is swallowed — consumed as the SRDO's frames, nothing actuated, no
+    /// SrdoReceived, no state change, no SCT running — where a valid consumer would take it
+    /// (<see cref="Starts_Invalid_And_Becomes_Valid_With_A_Complete_Pair"/>). Mutation safety-M1
+    /// of the 2026-10-21 review (the ConfigurationValid gate of TryHandleFrame removed) is what
+    /// this test catches (#344).</summary>
+    [Fact]
+    public void A_Consumer_With_An_Invalid_Configuration_Reports_ConfigurationInvalid_And_Takes_No_Pair()
+    {
+        Populate(_od, NodeId, 2);
+        Configure(_od, 1, SrdoDirection.Receive, 50, 20, 0x123, 0x124);
+        _od.WriteUnsigned(SrdoRecords.Checksum, 1, 0xFFFF); // tampered: 13FEh stays A5h, the checksum does not match
+        SrdoRecords.IsConfigurationValid(_od, 1).Should().BeFalse();
+        _engine = new SrdoEngine(_actor, _clock, _deadlines, _od, NodeId, 2, _host);
+        OnActor(() => { _engine.Rebuild(1); _engine.Rebuild(2); _engine.EnterOperational(); });
+        Settle();
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+        _host.States.Should().Contain((1, false, SrdoInvalidReason.ConfigurationInvalid));
+        int states = _host.States.Count;
+
+        Frame(0x123, Plain).Should().BeTrue("the frame is on the SRDO's COB-ID: consumed, not passed on");
+        Frame(0x124, Inverse).Should().BeTrue();
+        _engine.GetState(1).IsValid.Should().BeFalse("a correct pair does not validate an SRDO whose configuration is invalid");
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "nothing was actuated");
+        _od.ReadUnsigned(0x2001, 0).Should().Be(0x5Au, "nothing was actuated");
+        _host.Received.Should().BeEmpty("no SrdoReceived");
+        _host.States.Should().HaveCount(states, "no state change");
+
+        Advance(TimeSpan.FromMilliseconds(60));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid, "no SCT runs for a consumer that was never armed");
+        _host.States.Should().HaveCount(states);
+    }
+
     [Fact]
     public void Leaving_Operational_Cancels_Sct_And_Srvt()
     {
