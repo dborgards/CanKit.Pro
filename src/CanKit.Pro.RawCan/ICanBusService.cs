@@ -89,8 +89,10 @@ namespace CanKit.Pro.RawCan
         /// thread, so handlers must return quickly and must not call back into the service.
         /// <para>
         /// Also raised, with the adapter's own exception, whenever the bus reports a fault through
-        /// <see cref="ICanBus.FaultOccurred"/>. The only fault a CanKit 0.5.6 adapter raises is its
-        /// receive loop dying, after which no further frame arrives on this bus: outstanding
+        /// <see cref="ICanBus.FaultOccurred"/>. Under the default <c>CanExceptionPolicy</c> (a lower
+        /// <c>FaultThreshold</c> or a custom <c>Classifier</c> can make any reported error one) the
+        /// only fault a CanKit 0.5.6 adapter raises is its receive loop dying, after which no
+        /// further frame arrives on this bus: outstanding
         /// <see cref="SendConfirmedAsync"/> calls end as <see cref="TxConfirmFailureReason.Timeout"/>
         /// and <see cref="ISubscription.Frames"/> streams stay open until disposed. This event is
         /// how a consumer that holds only an <see cref="ISubscription"/> learns of it (#348).

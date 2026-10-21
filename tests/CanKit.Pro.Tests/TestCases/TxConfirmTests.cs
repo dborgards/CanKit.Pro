@@ -624,9 +624,10 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         var pendingTask = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }),
             TimeSpan.FromSeconds(30));
 
-        // What a real adapter does when the controller drops off the bus: the state goes BusOff and
-        // a Fault-severity exception is reported through the bus's fault channel. The service's
-        // OnFaultOccurred must then fail every outstanding confirmation.
+        // The one combination that produces BusOff: the state reads BusOff and a fault is reported
+        // through the bus's fault channel. The service's OnFaultOccurred must then fail every
+        // outstanding confirmation. No CanKit 0.5.6 adapter raises a fault for a bus-off (#348);
+        // the double does, which is why this path is testable at all.
         sender.BusState = BusState.BusOff;
         sender.RaiseFault(new InvalidOperationException("simulated bus-off"));
 
