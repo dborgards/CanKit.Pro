@@ -36,6 +36,7 @@ namespace CanKit.Pro.Uds
         public static readonly System.TimeSpan DefaultP2;
         public static readonly System.TimeSpan DefaultP2Star;
         public static readonly System.TimeSpan DefaultTesterPresentPeriod;
+        public static readonly System.TimeSpan SessionTimingMargin;
         public UdsClientOptions() { }
         public System.TimeSpan BusyRepeatRequestDelay { get; init; }
         public bool KeepAliveSuppressPositiveResponse { get; init; }

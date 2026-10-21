@@ -95,7 +95,18 @@ await uds.DownloadAsync(
   end out by P2\*. Requests for other services are not held up. The price is up to P2\* of
   delay for that next request; an answer later still than the window is taken as before. A
   conformant server never answers later than the P2Server_max / P2\*Server_max it declares,
-  so keep `P2ClientMax` / `P2StarClientMax` at or above the session's values.
+  and the client applies those (next point).
+* A successful `DiagnosticSessionControlAsync` sets the client's budgets from the session
+  parameter record the server returns — P2Server_max (bytes 0..1, 1 ms units) and
+  P2\*Server_max (bytes 2..3, 10 ms units): P2 becomes the longer of `P2ClientMax` and
+  P2Server_max + `UdsClientOptions.SessionTimingMargin` (50 ms, the network latency ISO
+  14229-2 calls ΔP2), P2\* likewise the longer of `P2StarClientMax` and P2\*Server_max + the
+  margin. A budget you configured is only ever lengthened, never shortened, so the
+  `P2ClientMax = 50 ms` of the quick start still holds in a session that declares less, and a
+  programming session declaring P2\*Server_max = 10 s is waited for the 10 s it asks for. Each
+  successful session change starts again from the configured values (a record shorter than
+  4 bytes leaves them), and a successful `EcuResetAsync` returns to them; `Options` keeps
+  reporting what was configured (#340).
 * P2 and P2* end with the **first frame** of the response (ISO 14229-2), not its last: a
   multi-frame response whose First Frame arrived inside the budget — and whose first byte is
   this request's positive response SID — is waited for beyond it, and the remainder of the

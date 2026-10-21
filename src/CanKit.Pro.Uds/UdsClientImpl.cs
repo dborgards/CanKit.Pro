@@ -99,6 +99,30 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     }
 
     private byte _currentSession = (byte)UdsSessionType.Default;
+
+    // The P2 and P2* in force: the configured ones, lengthened to what the last successful
+    // DiagnosticSessionControl declared for its session plus a margin, and back to the configured
+    // ones after an ECUReset (#340, U2). One immutable pair behind one reference, so a reader
+    // never sees the P2 of one session with the P2* of another; written under the request lock.
+    private Budgets _budgets;
+
+    private sealed class Budgets
+    {
+        public Budgets(TimeSpan p2, TimeSpan p2Star)
+        {
+            P2 = p2;
+            P2Star = p2Star;
+        }
+
+        public TimeSpan P2 { get; }
+
+        public TimeSpan P2Star { get; }
+    }
+
+    private TimeSpan P2Budget => Volatile.Read(ref _budgets).P2;
+
+    private TimeSpan P2StarBudget => Volatile.Read(ref _budgets).P2Star;
+
     private TesterPresentKeepAlive? _keepAlive;
     private int _disposed;
 
@@ -140,6 +164,22 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             throw new ArgumentException("MaxResponsePendingCount must be non-negative.", nameof(options));
         if (options.TesterPresentPeriod <= TimeSpan.Zero || options.TesterPresentPeriod > MaxTimerSpan)
             throw new ArgumentException("TesterPresentPeriod must be positive and within a timer's reach (about 49 days).", nameof(options));
+
+        _budgets = ConfiguredBudgets();
+    }
+
+    private Budgets ConfiguredBudgets() => new(_options.P2ClientMax, _options.P2StarClientMax);
+
+    // Under the request lock, as the positive response is taken: a request queued behind the
+    // session change -- the keep-alive's TesterPresent -- runs on the new session's budgets. A
+    // record too short to carry the two parameters declares nothing, and the configured budgets
+    // stand; so they do for each new session before its own record is read (#340, U2).
+    private void ApplySessionTiming(ReadOnlySpan<byte> sessionParameterRecord)
+    {
+        var budgets = UdsSessionTiming.TryDecode(sessionParameterRecord, out var timing)
+            ? new Budgets(timing.ClientP2(_options.P2ClientMax), timing.ClientP2Star(_options.P2StarClientMax))
+            : ConfiguredBudgets();
+        Volatile.Write(ref _budgets, budgets);
     }
 
     // The longest span Task.Delay and CancellationTokenSource.CancelAfter accept.
@@ -168,46 +208,51 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 "Session type must be 0x01..0x7F; bit 7 is suppressPosRspMsgIndication and is not accepted here.");
         byte sub = sessionType;
         var request = new byte[] { (byte)UdsServiceId.DiagnosticSessionControl, sub };
-        var response = await ExecuteAsync(UdsServiceId.DiagnosticSessionControl, request,
-            cancellationToken).ConfigureAwait(false);
+        return await ExecuteAsync(UdsServiceId.DiagnosticSessionControl, request, response =>
+        {
+            // Positive response layout (ISO 14229-1 §9.2.2.4):
+            //   [0]=0x50 [1]=sessionType [2..5]=sessionParameterRecord (P2_server/P2*_server timing)
+            // Some ECUs omit the parameter record on legacy sessions; we accept >= 2 bytes. The
+            // sub-function echo was checked in the receive loop: one for another session type is
+            // a stray there, not this request's answer (#340).
+            if (response.Length < 2)
+                throw new UdsProtocolException(
+                    $"DiagnosticSessionControl response too short ({response.Length} bytes).");
 
-        // Positive response layout (ISO 14229-1 §9.2.2.4):
-        //   [0]=0x50 [1]=sessionType [2..5]=sessionParameterRecord (P2_server/P2*_server timing)
-        // Some ECUs omit the parameter record on legacy sessions; we accept >= 2 bytes. The
-        // sub-function echo was checked in the receive loop: one for another session type is
-        // a stray there, not this request's answer (#340).
-        if (response.Length < 2)
-            throw new UdsProtocolException(
-                $"DiagnosticSessionControl response too short ({response.Length} bytes).");
-
-        Volatile.Write(ref _currentSession, sub);
-        int recordLength = response.Length - 2;
-        var record = new byte[recordLength];
-        if (recordLength > 0) Buffer.BlockCopy(response, 2, record, 0, recordLength);
-        return record;
+            Volatile.Write(ref _currentSession, sub);
+            int recordLength = response.Length - 2;
+            var record = new byte[recordLength];
+            if (recordLength > 0) Buffer.BlockCopy(response, 2, record, 0, recordLength);
+            // The session's declared P2Server_max / P2*Server_max lengthen the client's budgets
+            // for every request from here on (#340, U2).
+            ApplySessionTiming(record);
+            return record;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<byte[]> EcuResetAsync(UdsEcuResetType resetType,
         CancellationToken cancellationToken = default)
     {
         var request = new byte[] { (byte)UdsServiceId.EcuReset, (byte)resetType };
-        var response = await ExecuteAsync(UdsServiceId.EcuReset, request,
-            cancellationToken).ConfigureAwait(false);
+        return await ExecuteAsync(UdsServiceId.EcuReset, request, response =>
+        {
+            // Positive response layout: [0]=0x51 [1]=resetType [2]?=powerDownTime. The reset-type
+            // echo was checked in the receive loop (#340).
+            if (response.Length < 2)
+                throw new UdsProtocolException(
+                    $"ECUReset response too short ({response.Length} bytes).");
 
-        // Positive response layout: [0]=0x51 [1]=resetType [2]?=powerDownTime. The reset-type
-        // echo was checked in the receive loop (#340).
-        if (response.Length < 2)
-            throw new UdsProtocolException(
-                $"ECUReset response too short ({response.Length} bytes).");
+            // ISO 14229-1: after a successful ECUReset the server returns to the default session.
+            // Mirror that in CurrentSession so later calls do not assume a stale negotiated
+            // session, and in the budgets, which are the configured ones again (#340, U2).
+            Volatile.Write(ref _currentSession, (byte)UdsSessionType.Default);
+            Volatile.Write(ref _budgets, ConfiguredBudgets());
 
-        // ISO 14229-1: after a successful ECUReset the server returns to the default session.
-        // Mirror that in CurrentSession so later calls do not assume a stale negotiated session.
-        Volatile.Write(ref _currentSession, (byte)UdsSessionType.Default);
-
-        int tail = response.Length - 2;
-        var record = new byte[tail];
-        if (tail > 0) Buffer.BlockCopy(response, 2, record, 0, tail);
-        return record;
+            int tail = response.Length - 2;
+            var record = new byte[tail];
+            if (tail > 0) Buffer.BlockCopy(response, 2, record, 0, tail);
+            return record;
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<byte[]> ReadDataByIdentifierAsync(ushort dataIdentifier,
@@ -513,7 +558,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             // confirmation, the frame is on the bus and may still be answered (Codex on #150).
             // Moved out to the transmit stamp afterwards.
             bool hadWindow = _suppressedWindows.TryGetDeadline(request[0], out var previousUntil);
-            _suppressedWindows.Note(request[0], Now(), _options.P2ClientMax, _time.Frequency);
+            _suppressedWindows.Note(request[0], Now(), P2Budget, _time.Frequency);
             IsoTpTransmitStamps stamps;
             try
             {
@@ -530,11 +575,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 // A send that leaves by exception -- cancelled, or a transport fault -- may
                 // have put the frame on the bus after the provisional window ran out; its P2
                 // from the transmission is at most P2 from now (Codex on #150).
-                _suppressedWindows.Note(request[0], Now(), _options.P2ClientMax, _time.Frequency);
+                _suppressedWindows.Note(request[0], Now(), P2Budget, _time.Frequency);
                 throw;
             }
             var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Now();
-            _suppressedWindows.Note(request[0], sent, _options.P2ClientMax, _time.Frequency);
+            _suppressedWindows.Note(request[0], sent, P2Budget, _time.Frequency);
         }
         finally
         {
@@ -633,7 +678,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var data = pdu.Pdu;
         if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending)
             return false;
-        var extendedUntil = pdu.FirstFrameArrivalTimestamp + Ticks(_options.P2StarClientMax);
+        var extendedUntil = pdu.FirstFrameArrivalTimestamp + Ticks(P2StarBudget);
         if (data[1] != sid)
         {
             // Another service's: only a window still open when the 0x78 arrived (Codex on #150).
@@ -1036,8 +1081,18 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     /// waiting inside P2* for as long as the ECU replies with NRC 0x78. Validates that the
     /// positive response SID matches (request SID + 0x40) and unpacks structured NRCs.
     /// </summary>
-    private async Task<byte[]> ExecuteAsync(UdsServiceId serviceId, byte[] request,
+    private Task<byte[]> ExecuteAsync(UdsServiceId serviceId, byte[] request,
         CancellationToken cancellationToken)
+        => ExecuteAsync(serviceId, request, static response => response, cancellationToken);
+
+    /// <summary>
+    /// As <see cref="ExecuteAsync(UdsServiceId, byte[], CancellationToken)"/>, running
+    /// <paramref name="complete"/> on the positive response before the request lock is released:
+    /// for a service whose answer changes what the next request runs with -- the session and its
+    /// budgets -- so a request queued behind it cannot start on the old state (#340).
+    /// </summary>
+    private async Task<T> ExecuteAsync<T>(UdsServiceId serviceId, byte[] request,
+        Func<byte[], T> complete, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
 
@@ -1048,7 +1103,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         await AcquireRequestLockAsync(linkedToken).ConfigureAwait(false);
         try
         {
-            return await ExecuteCoreAsync(serviceId, request, linkedToken).ConfigureAwait(false);
+            return complete(await ExecuteCoreAsync(serviceId, request, linkedToken).ConfigureAwait(false));
         }
         finally
         {
@@ -1139,7 +1194,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var notBefore = stamps.LastFrameHandoffTimestamp > 0
             ? stamps.LastFrameHandoffTimestamp
             : requestStarted;
-        var timeout = _options.P2ClientMax;
+        var timeout = P2Budget;
         var timerKind = UdsTimeoutTimer.P2;
         int pendingCount = 0;
 
@@ -1228,7 +1283,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                         // the same reason.
                         budgetStart = received.FirstFrameArrivalTimestamp;
                         notBefore = received.FirstFrameArrivalTimestamp;
-                        timeout = _options.P2StarClientMax;
+                        timeout = P2StarBudget;
                         timerKind = UdsTimeoutTimer.P2Star;
                         continue;
                     }
@@ -1281,7 +1336,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     private void QuarantineLateAnswers(UdsServiceId serviceId)
     {
         if (!_options.QuarantineLateResponses) return;
-        _suppressedWindows.Note((byte)serviceId, Now(), _options.P2StarClientMax, _time.Frequency);
+        _suppressedWindows.Note((byte)serviceId, Now(), P2StarBudget, _time.Frequency);
     }
 
     private static bool IsAllZero(byte[] data, int offset, int count)
@@ -1355,7 +1410,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         // Only a window still open when the 0x78 arrived: one that had run out is not revived
         // for a full P2* by a late frame (Codex on #150).
         _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp,
-            pdu.FirstFrameArrivalTimestamp + Ticks(_options.P2StarClientMax));
+            pdu.FirstFrameArrivalTimestamp + Ticks(P2StarBudget));
     }
 
     /// <summary>

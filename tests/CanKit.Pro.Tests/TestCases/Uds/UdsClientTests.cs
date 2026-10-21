@@ -336,6 +336,188 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #340 (c), carried-over finding U2 — the session parameter record's P2Server_max (1 ms
+    // units) and P2*Server_max (10 ms units) set the client's budgets: the longer of the
+    // configured one and the declared one plus SessionTimingMargin. On the virtual clock, so a
+    // budget is read off the timer the client arms rather than measured.
+    // -----------------------------------------------------------------------------------
+
+    // The programming session of these tests declares P2Server_max = 500 ms, P2*Server_max = 10 s.
+    private static readonly byte[] ProgrammingTiming = { 0x01, 0xF4, 0x03, 0xE8 };
+    private static readonly TimeSpan ProgrammingP2 = TimeSpan.FromMilliseconds(500) + UdsClientOptions.SessionTimingMargin;
+    private static readonly TimeSpan ProgrammingP2Star = TimeSpan.FromSeconds(10) + UdsClientOptions.SessionTimingMargin;
+
+    // The issue's case: P2*Server_max = 10 s, the next 0x78 after 8 s -- conformant -- against a
+    // configured P2* shorter than 8 s, which threw UdsTimeoutException(P2Star) while the
+    // record was returned raw and applied nowhere.
+    [Fact]
+    public async Task A_Session_Declaring_A_Longer_P2Star_Is_Waited_For_What_It_Declares()
+    {
+        var steps = new EcuSteps();
+        var finalAfter = TimeSpan.FromSeconds(8);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x10, req => new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray());
+                e.On(0x31, req => throw new EcuResponsePending(1, new byte[] { 0x01, 0x02, 0x01, 0x00 }, finalAfter));
+            },
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+            });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
+
+        var routine = pair.Client.RoutineControlAsync(UdsRoutineControlType.StartRoutine, 0x0201,
+            cancellationToken: cts.Token);
+        // The 0x78 is in: P2* armed, the session's -- not the configured 1500 ms.
+        await pair.WaitUntilWaitingAsync(ProgrammingP2Star);
+
+        await pair.Clock.AdvanceAsync(finalAfter);
+        await pair.DeliverAsync(() => steps.Release(finalAfter), data => data.Length >= 2 && data[1] == 0x71);
+
+        var info = await Within(routine);
+        info.Should().Equal(new byte[] { 0x00 }, "the final answer came 8 s after the 0x78, inside the session's P2*");
+    }
+
+    [Fact]
+    public async Task A_Session_Declaring_A_Longer_P2_Lengthens_The_Clients_P2()
+    {
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.On(0x10, req => new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray());
+                e.On(0x22, _ => throw new EcuSilent());
+            },
+            options: new UdsClientOptions { P2ClientMax = TimeSpan.FromMilliseconds(300) });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
+
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(ProgrammingP2);
+        await pair.Clock.AdvanceAsync(ProgrammingP2);
+        Func<Task> act = () => read;
+        (await act.Should().ThrowAsync<UdsTimeoutException>())
+            .Which.Elapsed.Should().Be(ProgrammingP2);
+    }
+
+    // A budget the caller configured is never shortened by a session that declares less.
+    [Fact]
+    public async Task A_Session_Declaring_A_Shorter_P2_Leaves_The_Configured_One()
+    {
+        var configured = TimeSpan.FromSeconds(1);
+        using var pair = new ClockPair(
+            e =>
+            {
+                // P2Server_max = 50 ms, P2*Server_max = 1 s: both below the configured budgets.
+                e.On(0x10, req => new byte[] { req[1], 0x00, 0x32, 0x00, 0x64 });
+                e.On(0x22, _ => throw new EcuSilent());
+            },
+            options: new UdsClientOptions { P2ClientMax = configured });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token));
+
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(configured);
+        await pair.Clock.AdvanceAsync(configured);
+        Func<Task> act = () => read;
+        (await act.Should().ThrowAsync<UdsTimeoutException>())
+            .Which.Elapsed.Should().Be(configured);
+    }
+
+    // Back to the configured budgets: after an ECUReset (the server is in the default session
+    // again), and on a session change whose response carries no timing record.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task The_Configured_P2_Returns_After_A_Reset_Or_A_Session_Without_A_Record(bool reset)
+    {
+        var configured = TimeSpan.FromMilliseconds(300);
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.On(0x10, req => req[1] == (byte)UdsSessionType.Programming
+                    ? new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray()
+                    : new byte[] { req[1] });
+                e.On(0x11, req => new byte[] { req[1] });
+                e.On(0x22, _ => throw new EcuSilent());
+            },
+            options: new UdsClientOptions { P2ClientMax = configured });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
+        if (reset)
+            await Within(pair.Client.EcuResetAsync(UdsEcuResetType.HardReset, cts.Token));
+        else
+            await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token));
+
+        var read = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(configured);
+        await pair.Clock.AdvanceAsync(configured);
+        Func<Task> act = () => read;
+        (await act.Should().ThrowAsync<UdsTimeoutException>())
+            .Which.Elapsed.Should().Be(configured);
+    }
+
+    // The quarantine (#340 (b)) lasts the P2* in force -- the session's, once one declared it.
+    [Fact]
+    public async Task The_Quarantine_Lasts_The_Sessions_P2Star()
+    {
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.On(0x10, req => new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray());
+                e.On(0x22, _ => throw new EcuSilent());
+            },
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+                QuarantineLateResponses = true,
+            });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
+
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(ProgrammingP2);
+        await pair.Clock.AdvanceAsync(ProgrammingP2);
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<UdsTimeoutException>();
+
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(ProgrammingP2Star); // the window, before the send
+        await pair.Clock.AdvanceAsync(ProgrammingP2Star);
+        await pair.WaitUntilWaitingAsync(ProgrammingP2);     // sent now, its P2 armed
+        await pair.Clock.AdvanceAsync(ProgrammingP2);
+        Func<Task> secondAct = () => second;
+        await secondAct.Should().ThrowAsync<UdsTimeoutException>();
+    }
+
+    [Theory]
+    [InlineData(new byte[] { 0x00, 0x32, 0x01, 0xF4 }, 50, 5_000)]
+    [InlineData(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, 65_535, 655_350)]
+    [InlineData(new byte[] { 0x00, 0x00, 0x00, 0x00 }, 0, 0)]
+    [InlineData(new byte[] { 0x01, 0xF4, 0x03, 0xE8, 0xAA }, 500, 10_000)] // trailing bytes ignored
+    public void The_Session_Parameter_Record_Decodes_P2_In_Ms_And_P2Star_In_10_Ms(byte[] record, int p2Ms, int p2StarMs)
+    {
+        UdsSessionTiming.TryDecode(record, out var timing).Should().BeTrue();
+        timing.P2ServerMax.Should().Be(TimeSpan.FromMilliseconds(p2Ms));
+        timing.P2StarServerMax.Should().Be(TimeSpan.FromMilliseconds(p2StarMs));
+    }
+
+    [Theory]
+    [InlineData(new byte[0])]
+    [InlineData(new byte[] { 0x00, 0x32, 0x01 })]
+    public void A_Session_Parameter_Record_Shorter_Than_Four_Bytes_Declares_Nothing(byte[] record)
+        => UdsSessionTiming.TryDecode(record, out _).Should().BeFalse();
+
+    // -----------------------------------------------------------------------------------
     // FR-UDS-002 — ReadDataByIdentifier (0x22) single DID.
     // -----------------------------------------------------------------------------------
     [Fact]
