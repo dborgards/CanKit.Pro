@@ -888,7 +888,11 @@ Then (§8.1.1, §8.1.3.1, §9.5):
 * the plain frame starts the SRVT; a second plain frame replaces the first and restarts it;
 * the inverted frame must follow within the SRVT (`ValidationTimeExpired` otherwise), must have
   a plain frame before it (`OutOfOrder`), and must be its bitwise inverse with the same length
-  (`Mismatch`);
+  (`Mismatch`) — except that an inverted frame arriving while the SRDO is still `NotReceived` as
+  armed, before any pair, expiry or mismatch of this Operational period, is no pair of this
+  consumer's and no violation: a producer already running when the consumer entered Operational
+  between its plain and its inverted frame. It is consumed without a transition, the SCT runs on,
+  and the next pair makes the SRDO valid;
 * both frames are classic CAN frames (§8.1): a CAN FD frame, or a payload over 8 bytes, on either
   id is no SRDO frame and is rejected as a wrong inverse is — `Mismatch`, a pending plain frame
   dropped, nothing written, no `SrdoReceived`, the SCT not restarted, no EMCY;

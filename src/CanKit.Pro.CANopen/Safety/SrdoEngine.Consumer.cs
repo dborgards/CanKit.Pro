@@ -102,7 +102,15 @@ internal sealed partial class SrdoEngine
     {
         if (rt.Pending is not { } first)
         {
-            // §9.5: "received in chronological order (high priority identifier first)".
+            // §9.5: "received in chronological order (high priority identifier first)" — a rule
+            // about a pair. While the SRDO is still NotReceived as armed — no pair taken, nothing
+            // found wrong since — an inverted frame with no plain one pending belongs to no pair
+            // of this consumer's: a producer already running when the consumer entered
+            // Operational between its plain and its inverted frame. That is no violation to
+            // report — the SRDO stays NotReceived, its SCT runs on, and the next pair makes it
+            // valid (#360). After a pair, an expiry or a mismatch, a lone inverted frame is
+            // OutOfOrder.
+            if (rt.Reason == SrdoInvalidReason.NotReceived) return;
             Invalidate(rt, SrdoInvalidReason.OutOfOrder);
             return;
         }
