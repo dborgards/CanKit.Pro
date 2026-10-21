@@ -43,7 +43,13 @@ public interface IIsoTpChannel : IDisposable
     /// the last frame of the PDU is TX-confirmed by the driver (SF) or when the peer has FC-cleared
     /// the entire multi-frame PDU and the last CF is confirmed (FF+CFs). It faults with an
     /// <see cref="IsoTpException"/> on protocol timeouts (FR-TP-010), an Overflow FC (FR-TP-012),
-    /// exceeding WFTmax (FR-TP-011), or a driver rejection.
+    /// exceeding WFTmax (FR-TP-011), or a driver rejection; with
+    /// <see cref="ObjectDisposedException"/> when the channel is disposed before or during the
+    /// send, including while the call is queued behind another send; with
+    /// <see cref="OperationCanceledException"/> when <paramref name="cancellationToken"/> is
+    /// cancelled; and with whatever the bus layer threw from the driver call, unwrapped. An
+    /// empty or over-long <paramref name="pdu"/> is refused before anything is queued, with
+    /// <see cref="ArgumentException"/> / <see cref="ArgumentOutOfRangeException"/>.
     /// </summary>
     /// <param name="pdu">User data, 1..4095 bytes for classic CAN, or up to
     /// <see cref="IsoTpFrameCodec.MaxFdFirstFrameLength"/> for CAN-FD. Must not be empty.</param>
@@ -78,12 +84,18 @@ public interface IIsoTpChannel : IDisposable
     /// <see cref="IsoTpException"/> when an in-progress multi-frame reassembly is aborted
     /// (N_Cr, CF sequence mismatch, or a superseding SF/FF — including when the new FF is
     /// refused with FC(OVFLW); FR-TP-010), so a caller waiting for that PDU does not hang
-    /// indefinitely.
+    /// indefinitely. A PDU queued before either end below is still delivered; only an empty
+    /// inbox meets the end. Faults with <see cref="InvalidOperationException"/> once the channel
+    /// is disposed, and with <see cref="ObjectDisposedException"/> -- or the failure itself --
+    /// once the bus service under the channel was disposed or its subscription failed: nothing
+    /// will arrive again, and every waiting and later receive gets that same exception. The
+    /// failure is also raised once through <see cref="BackgroundExceptionOccurred"/>.
     /// </summary>
     Task<byte[]> ReceiveAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// As <see cref="ReceiveAsync"/>, but also reports the monotonic instant the PDU was queued.
+    /// As <see cref="ReceiveAsync"/>, with the same ends and faults, but also reports the
+    /// monotonic instant the PDU was queued.
     /// </summary>
     /// <remarks>
     /// For callers that enforce a response deadline. <see cref="ReceiveAsync"/> can only tell
@@ -98,9 +110,12 @@ public interface IIsoTpChannel : IDisposable
     /// <summary>
     /// Takes the next inbound PDU if one is already queued, without waiting for one to arrive.
     /// Returns <see langword="false"/> — leaving <paramref name="pdu"/> at its default — when the
-    /// inbox is empty or the channel is disposed. Throws the recorded reassembly-abort exception
+    /// inbox is empty; a PDU queued before the channel was disposed, or before its bus service
+    /// was lost, is still returned afterwards. Throws the recorded reassembly-abort exception
     /// when the queued item is a fault, exactly as
-    /// <see cref="ReceiveWithArrivalAsync"/> would.
+    /// <see cref="ReceiveWithArrivalAsync"/> would; neither end of the inbox is reported here.
+    /// A <see cref="DiscardPendingPdus(long)"/> running concurrently is waited out, so a PDU it
+    /// retains is never reported as absent.
     /// </summary>
     /// <remarks>
     /// The companion to <see cref="ReceiveWithArrivalAsync"/> for a caller whose deadline has

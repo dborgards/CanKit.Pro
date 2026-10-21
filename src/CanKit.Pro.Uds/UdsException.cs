@@ -9,8 +9,11 @@ namespace CanKit.Pro.Uds;
 /// three families the MVP cares about: a well-formed negative response from the ECU
 /// (<see cref="UdsNegativeResponseException"/>), an ECU that failed to respond within its P2/P2*
 /// budget (<see cref="UdsTimeoutException"/>), and a malformed / mismatched response
-/// (<see cref="UdsProtocolException"/>). Transport-layer failures are re-thrown as-is (they are
-/// already typed as <see cref="IsoTp.IsoTpException"/> subclasses). Derives from
+/// (<see cref="UdsProtocolException"/>). Transport-layer failures are re-thrown as-is: the
+/// protocol errors are typed as <see cref="IsoTp.IsoTpException"/> subclasses, but the channel
+/// also throws <see cref="ObjectDisposedException"/> (disposed during a send, or its bus service
+/// lost), <see cref="InvalidOperationException"/> (disposed during a receive) and the bus
+/// layer's own exception from a failed driver call, and those pass through untyped. Derives from
 /// <see cref="CanKitException"/> so L2/L3/L4 failures can be caught uniformly across the
 /// library (NFR-006 error architecture, arc42 ADR-12).
 /// </summary>

@@ -38,9 +38,10 @@ namespace CanKit.Pro.IsoTp;
 /// </para>
 /// <para>
 /// <strong>Threading:</strong> <see cref="SendAndCollectAsync"/>, <see cref="SendAsync"/>, and
-/// <see cref="CollectResponsesAsync"/> are safe to call from any thread. They are not mutually
-/// concurrent — only one call at a time is meaningful because each creates a fresh subscription
-/// window; callers that need to serialise multiple rounds should await each call in turn.
+/// <see cref="CollectResponsesAsync"/> are safe to call from any thread, and concurrently: each
+/// call makes its own subscription and shares no state with another. Concurrent collections are
+/// merely redundant -- every one of them sees the same responses -- so callers that run several
+/// rounds against the same ECUs await each call in turn.
 /// <see cref="Dispose"/> is thread-safe and idempotent.
 /// </para>
 /// </remarks>
