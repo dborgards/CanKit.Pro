@@ -570,7 +570,9 @@ unless bit 30 of `1800h:01` ("no RTR allowed") is set — by the event-driven ty
 RTR-only types (see the table). A synchronous TPDO (`00h`–`F0h`) is transmitted after the SYNC
 and by nothing else, so its RTR is not answered: §7.2.2.3 defines the remote request for
 event-driven PDOs. The record's power-on default carries bit 30; `ConfigureTpdo` without an
-explicit `cobId` clears it.
+explicit `cobId` clears it. On an RPDO (`1400h:01`) bit 30 has no meaning — a consumer answers
+no RTR — so it is accepted, kept in the record and ignored: the RPDO
+matches its CAN-ID whether the bit is set or not.
 
 **PDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID, and a frame on it
 actuates each of them; two valid TPDO records may as well, and an RTR on it reads each of them.

@@ -434,7 +434,8 @@ public interface ICanOpenNode : IDisposable
     /// frames matching the COB-ID unpack into the local OD and raise <see cref="RpdoReceived"/> —
     /// immediately, or with the next SYNC for <see cref="RpdoTransmission.Synchronous"/>.
     /// <paramref name="cobId"/> is the <c>1400h:01</c> word (bit 31 set = configured but disabled;
-    /// bit 29 selects an extended CAN frame); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
+    /// bit 29 selects an extended CAN frame; bit 30, the RTR bit of a TPDO, has no meaning for an
+    /// RPDO and is accepted and ignored); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
     /// The writes are one transaction on the actor loop, as for <see cref="ConfigureTpdo"/>.
     /// </summary>
     /// <exception cref="ArgumentException">A value was rejected; see <see cref="ConfigureTpdo"/>.</exception>
