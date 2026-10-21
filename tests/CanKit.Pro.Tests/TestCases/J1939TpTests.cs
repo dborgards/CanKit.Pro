@@ -3837,6 +3837,51 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #350: the common case of a Connection Abort -- the peer, as originator, gives up on what it
+    // was sending us while nothing of ours goes the other way. With no TX session under the
+    // peer and PGN the RX match alone decides, the role is not consulted, and the reassembly
+    // ends with the peer's reason.
+    [Fact]
+    public async Task A_Peer_Abort_Of_Its_Transfer_To_Us_Ends_The_Reassembly_With_Its_Reason()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        // A frozen clock: T2 runs from our CTS, and its expiry would end the reassembly too --
+        // with Timeout, so the abort below carries a reason T2 cannot produce, and T2 never fires.
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var subject = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+        var background = new List<Exception>();
+        subject.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+
+        var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            var data = f.Data.ToArray();
+            if (J1939Pgn.IsTransportCm(fields.Pgn) && data[0] == J1939TpFrames.ControlCts)
+                ctsSeen.TrySetResult(data);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildRts(totalBytes: 21, totalPackets: 3, maxPacketsPerCts: 0xFF, dataPgn: pgn)), isEcho: false);
+        await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, J1939TpAbortRole.NotAvailable)), isEcho: false);
+
+        Func<Task> faulted = async () => await subject.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        var ex = (await faulted.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+        ex.Pgn.Should().Be(pgn);
+        lock (background) background.Should().ContainSingle().Which.Should().BeSameAs(ex);
+    }
+
     // #350: a peer abort while a TP.DT of ours is still unconfirmed. In that state the session
     // runs no deadline -- the confirmation is what it waits for -- and the abort must fail the
     // send at once rather than leave it to the confirmation. The confirmation then arrives for a
