@@ -7,6 +7,7 @@ using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -691,16 +692,17 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex on #369: the relay runs before the bus-off sweep, and a listener may answer "the bus
-    // is dead" by disposing the bus -- after which the PCAN, Kvaser and SocketCAN BusState getters
-    // throw (ThrowIfDisposed). The state the sweep decides on is therefore read *before* any
-    // listener runs. Read afterwards, the getter throws out of OnFaultOccurred, the sweep never
-    // runs, and the outstanding send times out instead of resolving as BusOff. The double throws
-    // the same way on request; the fault is raised synchronously, so nothing here waits on a clock.
+    // is dead" by disposing the bus -- after which the PCAN, Kvaser, SocketCAN and ZLG BusState
+    // getters throw CanBusDisposedException (ThrowIfDisposed). The state the sweep decides
+    // on is therefore read *before* any listener runs. Read afterwards, the getter throws out of
+    // OnFaultOccurred, the sweep never runs, and the outstanding send times out instead of
+    // resolving as BusOff. The double throws the same way on request; the fault is raised
+    // synchronously, so nothing here waits on a clock.
     [Fact]
     public async Task A_Listener_That_Disposes_The_Bus_On_The_Relayed_Fault_Does_Not_Defeat_The_BusOff_Sweep()
     {
         using var sender = OpenDeferredEcho();
-        sender.BusStateThrowsOnceDisposed = true;
+        sender.BusStateFailureOnceDisposed = () => new CanBusDisposedException();
         using var service = new CanBusService(sender);
 
         var send = service.SendConfirmedAsync(CanFrame.Classic(0x125, new byte[] { 1 }), TimeSpan.FromSeconds(30));
@@ -715,6 +717,46 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         result.Confirmed.Should().BeFalse();
         result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff,
             "the sweep decides on the state read before the listener disposed the bus");
+    }
+
+    // The other side of the read above: OnFaultOccurred runs on the poll thread that just died, and
+    // the BusState getter there may itself throw -- CanBusDisposedException from the adapters'
+    // ThrowIfDisposed once the bus is disposed, ObjectDisposedException from a bus that follows
+    // .NET's own convention. A read that fails that way counts as "not off": the sweep is skipped
+    // even though the state was set to BusOff before the bus went away, and the relay still
+    // happens. An unguarded read throws out of OnFaultOccurred before any listener runs. The send's
+    // own echo, parked until after the fault, then confirms it -- had the sweep run, it would have
+    // resolved the send as BusOff first. The fault is raised synchronously by the double, so the
+    // relay has run when RaiseFault returns; nothing here waits on a clock.
+    [Theory]
+    [InlineData(typeof(CanBusDisposedException))]
+    [InlineData(typeof(ObjectDisposedException))]
+    public async Task A_BusState_Read_That_Fails_Skips_The_Sweep_But_Not_The_Relay(Type failure)
+    {
+        using var sender = OpenDeferredEcho();
+        sender.BusStateFailureOnceDisposed = () => failure == typeof(ObjectDisposedException)
+            ? new ObjectDisposedException(nameof(ControllableBus))
+            : new CanBusDisposedException();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x126, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        Exception? relayed = null;
+        service.BackgroundExceptionOccurred += (_, ex) => relayed = ex;
+
+        sender.BusState = BusState.BusOff;
+        sender.Dispose();
+        var fault = new InvalidOperationException("poll loop died");
+        sender.Invoking(s => s.RaiseFault(fault)).Should().NotThrow();
+
+        relayed.Should().BeSameAs(fault, "a BusState read that fails must not swallow the relay");
+
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        var result = await send.WaitAsync(ShortTimeout);
+        result.FailureReason.Should().Be(TxConfirmFailureReason.None,
+            "a state that could not be read is not a bus-off, so the send is not resolved as one");
+        result.Confirmed.Should().BeTrue("the send is left to its own echo");
     }
 
     // #349, a characterisation of the matching as it stands, not a contract: the maintainer's

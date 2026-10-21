@@ -6,6 +6,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 
 namespace CanKit.Pro.Tests.Infrastructure;
 
@@ -209,20 +210,22 @@ public sealed class ControllableBus : ICanBus
     private BusState _busState;
 
     /// <summary>
-    /// Whether reading <see cref="BusState"/> after <see cref="Dispose"/> throws, as the PCAN,
-    /// Kvaser and SocketCAN getters do (<c>ThrowIfDisposed()</c> before the driver status call).
-    /// Off by default so a test that tears the double down in any order keeps reading a plain
-    /// property; on for a test about what the service does when a listener disposes the bus
-    /// from inside a fault callback (#369).
+    /// When set, what reading <see cref="BusState"/> after <see cref="Dispose"/> throws. The PCAN,
+    /// Kvaser, SocketCAN and ZLG getters in CanKit 0.5.6 call <c>ThrowIfDisposed()</c> before the
+    /// driver status call, which throws <see cref="CanBusDisposedException"/>; a bus following
+    /// .NET's own convention throws <see cref="ObjectDisposedException"/> instead. Unset by
+    /// default so a test that tears the double down in any order keeps reading a plain property;
+    /// set for a test about what the service does when the read fails inside a fault callback
+    /// (#369).
     /// </summary>
-    public bool BusStateThrowsOnceDisposed { get; set; }
+    public Func<Exception>? BusStateFailureOnceDisposed { get; set; }
 
     public BusState BusState
     {
         get
         {
-            if (BusStateThrowsOnceDisposed && Volatile.Read(ref _disposed) != 0)
-                throw new ObjectDisposedException(nameof(ControllableBus));
+            if (BusStateFailureOnceDisposed is { } failure && Volatile.Read(ref _disposed) != 0)
+                throw failure();
             return _busState;
         }
         set => _busState = value;
