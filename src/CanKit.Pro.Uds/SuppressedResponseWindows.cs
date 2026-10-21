@@ -7,8 +7,10 @@ namespace CanKit.Pro.Uds;
 
 /// <summary>
 /// The response windows still open from earlier sends, per service: how long a peer may still
-/// answer a request whose answer nobody is waiting for -- a suppressed send, or a functional
-/// request whose collection window ended before the peer's P2 did. The next request for the
+/// answer a request whose answer nobody is waiting for -- a suppressed send, a functional
+/// request whose collection window ended before the peer's P2 did, or, with
+/// <see cref="UdsClientOptions.QuarantineLateResponses"/>, a physical request that timed out or
+/// was cancelled (#340). The next request for the
 /// same service waits such a window out rather than taking the late answer as its own.
 /// One entry per service, since a send for another service in between must not
 /// shorten the first's window; a later window for the same service replaces an earlier one

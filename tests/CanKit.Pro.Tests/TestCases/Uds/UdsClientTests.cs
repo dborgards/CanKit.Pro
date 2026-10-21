@@ -1865,6 +1865,151 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #340 (b) — what the echo cannot tell apart: request A (DID F190) times out and B asks
+    // for the same DID, so A's late 62 F1 90 echoes B's request exactly. With
+    // QuarantineLateResponses, A's timeout quarantines 0x22 for P2* from the timeout: B is
+    // sent only once the window has passed, and A's answer, arriving inside it, is dropped.
+    // On the virtual clock, A's answer held by the ECU until the test lets it go.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task With_The_Quarantine_A_Late_Answer_To_The_Same_Request_Is_Not_The_Next_Requests()
+    {
+        var p2 = TimeSpan.FromMilliseconds(300);
+        var p2Star = TimeSpan.FromMilliseconds(1500);
+        var lateBy = TimeSpan.FromMilliseconds(100);
+        using var answerFirst = new ManualResetEventSlim();
+        int calls = 0;
+        using var pair = new ClockPair(
+            e => e.On(0x22, req =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    answerFirst.Wait(ShortTimeout);
+                    return new byte[] { 0xF1, 0x90, 0xAA };
+                }
+                return new byte[] { 0xF1, 0x90, 0xBB };
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2Star, QuarantineLateResponses = true });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2);
+        await pair.Clock.AdvanceAsync(p2); // silence: A times out at P2
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<UdsTimeoutException>();
+
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        // B is held for the quarantine -- P2* from A's timeout -- rather than sent with its P2.
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.Clock.AdvanceAsync(lateBy);
+        await pair.DeliverAsync(answerFirst.Set, data => data.Length >= 5 && data[1] == 0x62 && data[4] == 0xAA);
+
+        await pair.Clock.AdvanceAsync(p2Star - lateBy); // the window closes; B goes out
+        var data = await Within(second);
+        data.Should().Equal(new byte[] { 0xBB }, "A's late answer arrived inside the quarantine and was dropped");
+        Volatile.Read(ref calls).Should().Be(2);
+    }
+
+    // #340 (b) — A's late NRC 0x78 inside the window must not restart P2* for B: B is not on the
+    // wire yet, and the 0x78 moves the window out by P2* from its arrival instead, so A's final
+    // answer -- which a conformant server sends within P2* of the 0x78 -- is dropped too.
+    [Fact]
+    public async Task With_The_Quarantine_A_Late_Pending_Answer_Moves_The_Window_Instead_Of_Restarting_P2Star()
+    {
+        var p2 = TimeSpan.FromMilliseconds(300);
+        var p2Star = TimeSpan.FromMilliseconds(1500);
+        var pendingAfter = TimeSpan.FromMilliseconds(100); // after A's timeout
+        var finalAfter = TimeSpan.FromMilliseconds(400);   // after the 0x78
+        var steps = new EcuSteps();
+        using var answerFirst = new ManualResetEventSlim();
+        int calls = 0;
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x22, req =>
+                {
+                    if (Interlocked.Increment(ref calls) == 1)
+                    {
+                        answerFirst.Wait(ShortTimeout);
+                        throw new EcuResponsePending(1, new byte[] { 0xF1, 0x90, 0xAA }, finalAfter);
+                    }
+                    return new byte[] { 0xF1, 0x90, 0xBB };
+                });
+            },
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2Star, QuarantineLateResponses = true });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2);
+        await pair.Clock.AdvanceAsync(p2);
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<UdsTimeoutException>();
+
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.Clock.AdvanceAsync(pendingAfter);
+        await pair.DeliverAsync(answerFirst.Set, Negative(0x22, 0x78));
+        // The window now ends P2* from the 0x78's arrival -- a full P2* from here.
+        await pair.WaitUntilWaitingAsync(p2Star);
+
+        await pair.Clock.AdvanceAsync(finalAfter);
+        await pair.DeliverAsync(() => steps.Release(finalAfter),
+            data => data.Length >= 5 && data[1] == 0x62 && data[4] == 0xAA);
+
+        await pair.Clock.AdvanceAsync(p2Star - finalAfter); // the moved window closes; B goes out
+        var data = await Within(second);
+        data.Should().Equal(new byte[] { 0xBB }, "A's 0x78 and final answer both arrived inside the quarantine");
+    }
+
+    // #340 (b) — a cancelled request is abandoned as a timed-out one is: its answer may still
+    // come, and the quarantine holds the next request for the service as well.
+    [Fact]
+    public async Task With_The_Quarantine_A_Cancelled_Request_Holds_The_Next_One_For_P2Star()
+    {
+        var p2 = TimeSpan.FromMilliseconds(300);
+        var p2Star = TimeSpan.FromMilliseconds(1500);
+        using var answerFirst = new ManualResetEventSlim();
+        int calls = 0;
+        using var pair = new ClockPair(
+            e => e.On(0x22, req =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    answerFirst.Wait(ShortTimeout);
+                    return new byte[] { 0xF1, 0x90, 0xAA };
+                }
+                return new byte[] { 0xF1, 0x90, 0xBB };
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2Star, QuarantineLateResponses = true });
+
+        using var abandon = new CancellationTokenSource();
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, abandon.Token);
+        await pair.WaitUntilWaitingAsync(p2);
+        abandon.Cancel();
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<OperationCanceledException>();
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2Star);
+        await pair.DeliverAsync(answerFirst.Set, data => data.Length >= 5 && data[1] == 0x62 && data[4] == 0xAA);
+
+        await pair.Clock.AdvanceAsync(p2Star);
+        var data = await Within(second);
+        data.Should().Equal(new byte[] { 0xBB }, "the cancelled request's answer arrived inside the quarantine");
+    }
+
+    [Fact]
+    public void The_Quarantine_Is_Off_By_Default_And_Options_With_Carries_It()
+    {
+        new UdsClientOptions().QuarantineLateResponses.Should().BeFalse();
+        new UdsClientOptions { QuarantineLateResponses = true }
+            .With(p2ClientMax: TimeSpan.FromMilliseconds(50))
+            .QuarantineLateResponses.Should().BeTrue();
+    }
+
+    // -----------------------------------------------------------------------------------
     // #340 — per service: a positive response with this service's SID that echoes another
     // request's parameter bytes -- sub-function, DID, routine identifier, block sequence
     // counter, periodic identifier, address and size -- is a stray in the receive loop, not a

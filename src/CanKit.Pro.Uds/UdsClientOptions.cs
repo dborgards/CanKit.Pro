@@ -86,8 +86,28 @@ public sealed class UdsClientOptions
     public TimeSpan BusyRepeatRequestDelay { get; init; } = TimeSpan.Zero;
 
     /// <summary>
+    /// When <c>true</c>, a request that times out (<see cref="UdsTimeoutException"/>) or is
+    /// cancelled after it may have reached the bus quarantines its service for the P2* budget in
+    /// force, counted from the abort: the next request for that service is not sent until the
+    /// window has passed, and whatever arrives meanwhile is discarded -- among it the aborted
+    /// request's late positive answer, which for a repeated request (a polled DID) echoes the
+    /// same bytes as the next request's own and could not be told from it, and its NRC 0x78,
+    /// which would otherwise restart P2* for the next request. A 0x78 for the service inside
+    /// the window moves the window's end out by P2* from the 0x78's arrival: the server has
+    /// said its answer is still coming. Requests for other services are not held up (#340).
+    /// </summary>
+    /// <remarks>
+    /// Defaults to <c>false</c>. The cost is a delay of up to P2* -- 5 s by default -- before
+    /// the next request for a service whose previous request was abandoned. A late answer
+    /// that arrives after the window is over is taken for the next request's, as it is
+    /// without the quarantine.
+    /// </remarks>
+    public bool QuarantineLateResponses { get; init; }
+
+    /// <summary>
     /// Convenience clone that returns a new instance with the provided overrides. Useful for
-    /// tests that only want to tweak one field of a shared default template.
+    /// tests that only want to tweak one field of a shared default template. Settings it takes
+    /// no parameter for -- <see cref="QuarantineLateResponses"/> -- are carried over unchanged.
     /// </summary>
     public UdsClientOptions With(
         TimeSpan? p2ClientMax = null,
@@ -106,5 +126,8 @@ public sealed class UdsClientOptions
             KeepAliveSuppressPositiveResponse = keepAliveSuppressPositiveResponse ?? KeepAliveSuppressPositiveResponse,
             MaxBusyRepeatRequests = maxBusyRepeatRequests ?? MaxBusyRepeatRequests,
             BusyRepeatRequestDelay = busyRepeatRequestDelay ?? BusyRepeatRequestDelay,
+            // Not a parameter: one more optional parameter would change the method's signature,
+            // which is a binary break since 1.3.0 (package validation).
+            QuarantineLateResponses = QuarantineLateResponses,
         };
 }

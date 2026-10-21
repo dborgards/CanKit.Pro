@@ -31,7 +31,9 @@ namespace CanKit.Pro.Uds;
 /// wait loop -- on the SID, and on the request bytes the service's positive response echoes
 /// (<see cref="UdsResponseEcho"/>) -- remains as a second line of defense for stray frames
 /// that arrive while a request is still outstanding, among them a late answer to the previous
-/// request for the same service (#340).
+/// request for the same service (#340). What the echo cannot tell apart -- the late answer to
+/// the same request repeated -- is kept off the next request by
+/// <see cref="UdsClientOptions.QuarantineLateResponses"/>, when it is on.
 /// </para>
 /// </remarks>
 internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
@@ -1106,8 +1108,19 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         // reports no handoff instant: nothing that reached the wire after this reading can be
         // an earlier request's response.
         var requestStarted = Now();
-        var stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken)
-            .ConfigureAwait(false);
+        IsoTpTransmitStamps stamps;
+        try
+        {
+            stamps = await _channel.SendWithTransmitStampAsync(request, linkedToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelled between the driver's acceptance and the confirmation, the request may be
+            // on the bus and be answered, as a suppressed send cancelled there may (Codex on #150).
+            QuarantineLateAnswers(serviceId);
+            throw;
+        }
         var transmitStamp = stamps.LastFrameTransmitTimestamp;
 
         // Zero means the channel reported no transmit instant. Falling back to now is the old
@@ -1234,15 +1247,22 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 // short to carry the echo is returned as it was: the service's length check
                 // reports it as malformed rather than letting it vanish as a stray. The same
                 // echo for the same service -- a polled DID -- cannot be told apart here; a
-                // late answer with it is taken for this request's, as before.
+                // late answer with it is taken for this request's unless the previous request
+                // quarantined the service (QuarantineLateResponses), in which case this request
+                // went out only once the window had passed.
                 if (UdsResponseEcho.Correlate(request, response) == UdsEchoMatch.Stray)
                     continue;
 
                 return response;
             }
         }
-        catch
+        catch (Exception ex)
         {
+            // Abandoned: its answer may still come (#340). Noted before the discard below, so
+            // a 0x78 for this service among what it reads moves the new window out.
+            if (ex is UdsTimeoutException or OperationCanceledException)
+                QuarantineLateAnswers(serviceId);
+
             // Best-effort: if a PDU is already sitting in the inbox when we abort (e.g. cancel
             // raced with arrival), drop it under the lock so it cannot poison the next caller.
             // As the pre-send discard: settled and read first, so a 0x78 for a suppressed send
@@ -1250,6 +1270,18 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             await DiscardStalePdusAsync().ConfigureAwait(false);
             throw;
         }
+    }
+
+    // With QuarantineLateResponses, a request abandoned after it may have reached the bus --
+    // timed out, or cancelled -- leaves its service a window of P2* from now: the next request
+    // for the service waits it out before it is sent, reading and dropping what arrives, so
+    // the late answer cannot be taken for that request's even where it echoes the same bytes,
+    // and its 0x78 cannot restart that request's P2* (#340). The machinery is the suppressed
+    // send's; a 0x78 inside the window moves it out by P2* as it does there.
+    private void QuarantineLateAnswers(UdsServiceId serviceId)
+    {
+        if (!_options.QuarantineLateResponses) return;
+        _suppressedWindows.Note((byte)serviceId, Now(), _options.P2StarClientMax, _time.Frequency);
     }
 
     private static bool IsAllZero(byte[] data, int offset, int count)

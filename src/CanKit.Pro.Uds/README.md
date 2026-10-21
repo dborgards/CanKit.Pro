@@ -86,7 +86,14 @@ await uds.DownloadAsync(
   (one that timed out or was cancelled) with another DID is a stray, not this request's answer
   and not a protocol error (#340). What the echo cannot tell apart is the same request
   repeated: when a polled DID's previous request timed out and its answer arrives after the
-  next request for that DID went out, that answer is taken as the next request's. A
+  next request for that DID went out, that answer is taken as the next request's, and the
+  previous request's late NRC 0x78 restarts P2\* for the next one. Setting
+  `UdsClientOptions.QuarantineLateResponses = true` (default `false`) closes that: a request
+  that times out or is cancelled quarantines its service for the P2\* budget in force, the
+  next request for the service is sent only once that window has passed, and what arrives
+  meanwhile — the late answer, its 0x78 — is discarded; a 0x78 inside the window moves its
+  end out by P2\*. Requests for other services are not held up. The price is up to P2\* of
+  delay for that next request; an answer later still than the window is taken as before. A
   conformant server never answers later than the P2Server_max / P2\*Server_max it declares,
   so keep `P2ClientMax` / `P2StarClientMax` at or above the session's values.
 * P2 and P2* end with the **first frame** of the response (ISO 14229-2), not its last: a
