@@ -689,6 +689,42 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         relayed.Should().BeSameAs(fault, "the adapter's exception is relayed as itself, not wrapped");
     }
 
+    // #349, a characterisation of the matching as it stands, not a contract: the maintainer's
+    // decision there is whether a late echo of a send that already timed out is absorbed for a
+    // bounded time (the J1939 node's ClaimEchoGrace model, #180) or left as a documented limit of
+    // content-based matching. Either way this is the scenario, made reproducible: the first send's
+    // frame was accepted and its echo is on its way, but arrives only after the send timed out and
+    // a byte-identical second send went out behind it. Today that late echo confirms the second
+    // send -- the two echoes cannot be told apart on the wire, and the first send's entry is gone.
+    // A decision for the tombstone turns this test into the red one it is implemented against.
+    [Fact]
+    public async Task A_Late_Echo_Of_A_Timed_Out_Send_Is_Matched_To_The_Next_Identical_Send()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        var frame = CanFrame.Classic(0x700, new byte[] { 3, 1, 4 });
+
+        // Not lost, late: the echo stays parked past the send's own timeout. The timeout is a
+        // delay the test waits out, not a quantity it measures (#92).
+        var first = await service.SendConfirmedAsync(frame, TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        first.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        sender.DeferredEchoes.Count.Should().Be(1, "the first send's echo is still on its way");
+
+        var second = service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+
+        // Oldest first: this is the first send's echo, arriving late.
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+
+        // Inverts with a tombstone: the second send would then still be pending here, waiting for
+        // the echo that is still parked.
+        var confirmation = await second.WaitAsync(ShortTimeout);
+        confirmation.Confirmed.Should().BeTrue("as it stands, the late echo is matched to the next identical send (#349)");
+        confirmation.IsApproximated.Should().BeFalse();
+        sender.DeferredEchoes.Count.Should().Be(1, "the second send's own echo has not been released");
+    }
+
     // Echo matching runs for every echo frame the adapter reports while any send is outstanding,
     // and it used to copy that frame's payload into the lookup key just to ask whether anything
     // was waiting for it. The key never leaves the lookup, so it can borrow the payload instead.
