@@ -159,7 +159,8 @@ public class IsoTpCanFdTests : IClassFixture<VirtualAdapterFixture>
         };
 
         var pdu = Enumerable.Range(1, pduLength).Select(i => (byte)i).ToArray();
-        var recvTask = receiver.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvTask = receiver.ReceiveAsync(receiveTimeout.Token);
         await sender.SendAsync(pdu).WaitAsync(ShortTimeout);
         (await recvTask).Should().Equal(pdu);
 

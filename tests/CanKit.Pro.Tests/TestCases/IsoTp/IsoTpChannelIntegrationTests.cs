@@ -2220,12 +2220,14 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
 
         // 30 bytes with an AE byte: FF carries 5, CFs 6 each -- five frames and one FC per way.
         byte[] a2b = Enumerable.Range(0, 30).Select(i => (byte)i).ToArray();
-        var recvOnBob = bobChannel.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        using var bobTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvOnBob = bobChannel.ReceiveAsync(bobTimeout.Token);
         await aliceChannel.SendAsync(a2b).WaitAsync(ShortTimeout);
         (await recvOnBob).Should().Equal(a2b);
 
         byte[] b2a = Enumerable.Range(100, 30).Select(i => (byte)i).ToArray();
-        var recvOnAlice = aliceChannel.ReceiveAsync(new CancellationTokenSource(ShortTimeout).Token);
+        using var aliceTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvOnAlice = aliceChannel.ReceiveAsync(aliceTimeout.Token);
         await bobChannel.SendAsync(b2a).WaitAsync(ShortTimeout);
         (await recvOnAlice).Should().Equal(b2a);
 
