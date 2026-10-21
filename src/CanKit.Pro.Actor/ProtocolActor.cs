@@ -161,6 +161,10 @@ namespace CanKit.Pro.Actor
 
         private int _disposedFlag;
 
+        // Set by the first Dispose caller whose join timed out, so the TimeoutException goes
+        // through BackgroundExceptionOccurred once rather than once per caller (see Dispose).
+        private int _shutdownTimeoutReported;
+
         // How many entries the timer machinery is carrying that have been cancelled but not yet
         // dropped. Maintained with Interlocked because TimerHandle.Dispose runs on arbitrary
         // caller threads; only ever read by the loop, and only as a heuristic (see
@@ -482,14 +486,17 @@ namespace CanKit.Pro.Actor
             // Sharing _disposeGate with Post/Schedule closes the race where a caller passes
             // ThrowIfDisposed, then loses to this flag flip, then still enqueues work that
             // FinalDrain either already ran past or will never look at again.
+            bool first;
             lock (_disposeGate)
             {
-                if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return; // idempotent
+                first = Interlocked.Exchange(ref _disposedFlag, 1) == 0;
             }
 
             // Wakes a blocked wait immediately; further Post/Schedule calls now throw
-            // ObjectDisposedException instead of silently queuing work nobody will run.
-            _stopCts.Cancel();
+            // ObjectDisposedException instead of silently queuing work nobody will run. Only the
+            // first caller cancels: the loop disposes _stopCts itself once it has stopped, and a
+            // later caller may well arrive after that.
+            if (first) _stopCts.Cancel();
 
             if (IsOnCurrentActor)
             {
@@ -503,18 +510,26 @@ namespace CanKit.Pro.Actor
                 return;
             }
 
+            // Every off-loop caller joins, not just the one that flipped the flag (#338). The
+            // second call is the common one -- a callback disposed the actor reentrantly and the
+            // owner's using/finally then disposes it again, or two owners race -- and returning at
+            // once there would hand the caller an actor whose loop is still inside a callback and
+            // whose FinalDrain has not run. Thread.Join on a finished thread and Task.Wait on a
+            // completed task return immediately, so a late caller pays nothing.
             var joined = _dedicatedThread is not null
                 ? _dedicatedThread.Join(_shutdownTimeout)
                 : WaitForLoopTask();
 
-            if (!joined)
+            if (!joined && Interlocked.Exchange(ref _shutdownTimeoutReported, 1) == 0)
             {
                 // Previously this timeout was silent, so a caller could not tell a clean shutdown
                 // from an abandoned loop -- the actor looked disposed while a work item was still
                 // running on a live background thread, mutating state the caller believed it now
                 // owned exclusively. There is exactly one defined channel for "something went wrong
                 // in the background" (FR-RAW-023); report it there rather than throwing, because
-                // Dispose must stay safe to call from a finally/using block.
+                // Dispose must stay safe to call from a finally/using block. Reported once, by
+                // whichever caller gives up first: the subscribers are the same for every caller,
+                // and a second report would describe the same stuck callback.
                 RaiseBackgroundException(new TimeoutException(
                     $"The {nameof(ProtocolActor)} loop did not finish within {_shutdownTimeout}. A work item or timer callback is still running; Dispose returned without joining it, and the loop will tear itself down whenever that callback eventually returns."));
             }
