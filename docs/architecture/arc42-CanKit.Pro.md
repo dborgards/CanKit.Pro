@@ -5,7 +5,9 @@
 **Ursprung:** verfasst am 2026-07-14 im Vorgänger-Repository
 [CanKit.Pro.legacy](https://github.com/dborgards/CanKit.Pro.legacy) (Basis: CanKit `master` @ `36866ff`)
 **Ziel-Frameworks der CanKit.Pro-Pakete:** `netstandard2.0`, `net10.0` (`src/Directory.Build.props`)
-**Nachgeführt:** 2026-09-29 ([#173](https://github.com/dborgards/CanKit.Pro/issues/173)) auf den Stand von `main`: alle Pakete der Ebenen L2–L4 existieren; der Ist/Ziel-Kontrast der Erstfassung ist aufgelöst
+**Nachgeführt:** 2026-09-29 ([#173](https://github.com/dborgards/CanKit.Pro/issues/173)) auf den Stand von `main`: alle Pakete der Ebenen L2–L4 existieren; der Ist/Ziel-Kontrast der Erstfassung ist aufgelöst.
+2026-10-21 auf den Stand von `main` (`36c97ca`): CANopen-Umfang (CiA 302-2, 305, 801, 319, klassisches PDO-Verhalten FR-CO-052..057), Testpfade auf `tests/CanKit.Pro.Tests`, Fork-Fixes an CanKit als nicht upstream gekennzeichnet (`docs/upstream-candidates.md`), `EdsDcfNet`-Abhängigkeit, SBOM im Release
+**Übersetzung:** `arc42-CanKit.Pro-en.md` (Englisch); dieses Dokument ist das Original
 
 > **Lesehinweis 1 — Systemgrenze.** Dieses Dokument beschreibt das *Gesamtsystem* aus CanKit
 > (Ebenen L0/L1) und CanKit.Pro (L2–L4). Nur **L2 und darüber** wird in diesem Repository
@@ -35,12 +37,16 @@
 > | L3 ISO-TP (ISO 15765-2), Kodierer und aktorgetriebener `IIsoTpChannel` (§5.4, §6.4, §6.7, ADR-4) | `CanKit.Pro.IsoTp` |
 > | L3 J1939-TP (BAM/CM) (§6.6) | `CanKit.Pro.J1939Tp` |
 > | L4 UDS-Client über ISO-TP (§6.5) | `CanKit.Pro.Uds` |
-> | L4 CANopen (CiA 301, CiA 304, CiA 305 LSS master, slave and commissioning) | `CanKit.Pro.CANopen` |
+> | L4 CANopen: CiA 301 (SDO/PDO/NMT/EMCY/SYNC/MPDO), CiA 302-2 Flying Master und Boot-up, CiA 304 Safety, CiA 305 LSS (Master, Slave, Inbetriebnahme), CiA 801 Bitratenerkennung, CiA 319 Konfigurationsinstanz und Geräteseite, CiA 306 EDS/DCF (§5.1, ADR-12, ADR-13) | `CanKit.Pro.CANopen` |
 > | L4 J1939-Applikation | `CanKit.Pro.J1939` |
 >
 > Der Frame-Ownership-/Lifetime-Vertrag (§8.1, ADR-9) ist die eine Ausnahme: er wurde im Fork
-> *innerhalb von CanKit* umgesetzt und ist damit dort geblieben — CanKit.Pro kann ihn nur
-> voraussetzen, nicht durchsetzen (siehe Abschnitt 11).
+> *innerhalb von CanKit* umgesetzt und ist damit dort geblieben — im Vorgänger-Repository, nicht
+> im CanKit 0.5.6, das dieses Repository konsumiert (`CanFrame.Duplicate` und das
+> `OwnMemory`-Verhalten fehlen dort; `docs/upstream-candidates.md` § 2–3 listet die Änderungen,
+> die upstream angeboten werden sollen). CanKit.Pro kann den Vertrag nur voraussetzen, nicht
+> durchsetzen (siehe Abschnitt 11). Dasselbe gilt für die übrigen mit ✅ markierten CanKit-Fixes
+> in Abschnitt 11: „behoben" heißt dort *im Fork behoben*.
 >
 > Requirement-IDs verweisen auf das SRS (`docs/requirements/SRS-CanKit.Pro.md`); Schema:
 > `FR-RAW-*`, `FR-TP-*`, `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*`, `NFR-*`, `CON-*`. Die
@@ -143,7 +149,7 @@ Zero-Copy) erhöhen den Aufwand für Q4 und für einen sicheren **Frame-Ownershi
 |----|---------------|-----------|
 | CON-TFM | Multi-Target `netstandard2.0; net10.0` (`src/Directory.Build.props`). | API muss auf dem kleinsten gemeinsamen Nenner (netstandard2.0) verfügbar sein; TFM-Weichen via `#if NET5_0_OR_GREATER` (in den Paketen bisher nur die `IsExternalInit`-Shims). Die `netstandard2.0`-Assets laufen in der Testmatrix auf `net48` (Windows-Leg von `ci.yml`). |
 | CON-PINV | Vendor-Zugriff via **P/Invoke** in `Native/*.cs`, je Adapter eine `*.Fake.cs`-Spiegelung. | Native-Schicht ist plattform- und bitness-abhängig; Fake ermöglicht hardwarelose Builds (`-c Fake` → `DefineConstants=FAKE`). |
-| CON-SDK | Externe Vendor-SDKs (z. B. `Peak.PCANBasic.NET`, Kvaser `canlib`, ZLG, Vector XL). | NuGet-Abhängigkeiten pro Adapter, also upstream. Kein CanKit.Pro-Paket referenziert ein Vendor-SDK; `CanKit.Pro.IsoTp` hängt an `CanKit.Abstractions`, den L2-Paketen `CanKit.Pro.Actor`, `.RawCan` und `.Reliability` sowie BCL-Polyfills, an keinem Vendor-SDK (Review §1.1/16 behoben, FR-TP-020). |
+| CON-SDK | Externe Vendor-SDKs (z. B. `Peak.PCANBasic.NET`, Kvaser `canlib`, ZLG, Vector XL). | NuGet-Abhängigkeiten pro Adapter, also upstream. Kein CanKit.Pro-Paket referenziert ein Vendor-SDK; `CanKit.Pro.IsoTp` hängt an `CanKit.Abstractions`, den L2-Paketen `CanKit.Pro.Actor`, `.RawCan` und `.Reliability` sowie BCL-Polyfills, an keinem Vendor-SDK (Review §1.1/16 behoben, FR-TP-020). Die einzige Drittabhängigkeit außerhalb von CanKit und BCL ist `EdsDcfNet` in `CanKit.Pro.CANopen` für den EDS/DCF-Pfad (FR-CO-025..028). |
 | CON-LANG | `LangVersion=14`, `Nullable=enable`, `EnableNETAnalyzers`; Warnungen sind unter `CI=true` Fehler (`Directory.Build.props`). Code-Stil prüft `dotnet format --verify-no-changes` als eigener Schritt. | Moderne C#-Sprachfeatures (record struct, collection expressions); netstandard2.0 braucht `IsExternalInit`-Shims. |
 | CON-UNSAFE | `AllowUnsafeBlocks` in Codec/Transport (`FrameCodec` nutzt `Unsafe.CopyBlockUnaligned`). | Performante Frame-Erzeugung, aber erhöhter Review-Bedarf (Bounds-Sicherheit). |
 | CON-DOC | `GenerateDocumentationFile=true`, zweisprachige (EN/ZH) XML-Doku. | Öffentliche API ist doppelt dokumentiert; Typos in der API sind Breaking Changes nach 1.0 (Review §3). |
@@ -160,6 +166,11 @@ Zero-Copy) erhöhen den Aufwand für Q4 und für einen sicheren **Frame-Ownershi
   Review §3 betraf den Vorgänger (Abschnitt 11).
 - Änderungen landen ausschließlich per Pull Request auf `main` (`CONTRIBUTING.md`); alle Projekte
   unter `src/` sind packbar, eine „experimental"-Markierung einzelner Pakete gibt es nicht mehr.
+- **Release manuell über `release.yml`** (semantic-release aus Conventional Commits); jeder Release
+  trägt je Paket eine CycloneDX-SBOM als Release-Asset; die zwei Attestierungen je Paket
+  (Build-Provenance und SBOM) legt der `attest`-Job im Attestation-Store von GitHub ab, nicht
+  unter den Release-Assets (`docs/supply-chain.md`, #314). `dotnet pack` vergleicht die öffentliche Oberfläche jedes Pakets
+  per Package Validation mit dem letzten Release auf nuget.org (`src/Directory.Build.props`, #257).
 
 ## 2.3 Konventionen
 
@@ -250,7 +261,7 @@ flowchart TB
 | Q3 Echtzeit | **Plattformabhängiges High-Res-Timing** | Ist: `SoftwarePeriodicTx` (Win Waitable-Timer / POSIX `clock_nanosleep`), `PreciseDelay`, hardware-`BCMPeriodicTx` (SocketCAN). Ziel: macOS-Fallback ergänzen. |
 | Q4 Testbarkeit | **Fake-Native + Virtual-Loopback** | Upstream: `*.Fake.cs` je Adapter (`-c Fake`), `Virtual`-In-Memory-Hub. Hier: xUnit-Suite `tests/CanKit.Pro.Tests`, Protokolltests laufen gegen den `Virtual`-Adapter (8.9). |
 | Q2 Portabilität | **API auf kleinstem TFM, P/Invoke gekapselt** | Ist: netstandard2.0-kompatible API, `#if`-Weichen. |
-| L2–L4 | **Aktor-Modell pro Protokollinstanz** | Jede Protokollinstanz von ISO-TP-Kanal, J1939-TP-Kanal, CANopen-Knoten und J1939-Knoten besitzt genau einen Bearbeitungs-„Aktor" (`CanKit.Pro.Actor`: Mailbox/Loop), keine geteilten mutablen States über Thread-Grenzen. Der UDS-Client folgt dem Modell nicht: er serialisiert seine Anfragen über einen `SemaphoreSlim` (eine Transaktion zugleich, ISO 14229-1 §7.3) und nutzt einen `ProtocolActor` höchstens als optionale Zeitquelle für P2/P2*. |
+| L2–L4 | **Aktor-Modell pro Protokollinstanz** | Jede Protokollinstanz von ISO-TP-Kanal, J1939-TP-Kanal, CANopen-Knoten und J1939-Knoten besitzt genau einen Bearbeitungs-„Aktor" (`CanKit.Pro.Actor`: Mailbox/Loop), keine geteilten mutablen States über Thread-Grenzen. Der UDS-Client folgt dem Modell nicht: er serialisiert seine Anfragen über einen `SemaphoreSlim` (eine Transaktion zugleich, ISO 14229-1 §7.3) und nutzt einen `ProtocolActor` höchstens als optionale Zeitquelle für P2/P2*. Der LSS-Master (`CanOpenLss.OpenMaster`) arbeitet ebenso: ein Kommando zugleich hinter einem `SemaphoreSlim`, ein `ProtocolActor` nur als Timer. |
 
 **Leitentscheidung:** L1 bleibt der stabile, herstellerneutrale Raw-CAN-Kern. Alle
 höheren Protokolle bekommen ihre gemeinsamen Querschnittsdienste **nicht** ad hoc,
@@ -335,7 +346,7 @@ flowchart TB
 | L1 Raw-CAN-Kern | vorhanden | Herstellerneutraler Frame-Zugriff, Discovery, Utilities, Diagnostics. | `ICanBus`, `CanBus.Open`, `CanRegistry` | `FR-RAW-*` |
 | L2 Raw-CAN-Dienste | vorhanden (`CanKit.Pro.RawCan`, `.Actor`, `.Addressing`, `.Reliability`) | Ein RX-Strom → N unabhängige gefilterte Consumer; Ownership-Vertrag (upstream); TX-Confirm; Aktor-Modell. | `ICanBusService` / `ISubscription` | `FR-RAW-DEMUX-*`, `FR-RAW-OWN-*`, `FR-RAW-TXC-*` |
 | L3 Transport | vorhanden (`CanKit.Pro.IsoTp`, `CanKit.Pro.J1939Tp`) | Segmentierung/Reassemblierung (ISO-TP), Sessions (J1939-TP). | `IIsoTpChannel`, `IJ1939TpChannel` | `FR-TP-*` |
-| L4 Anwendungsprotokolle | vorhanden (`CanKit.Pro.Uds`, `.CANopen`, `.J1939`) | Diagnose-/Applikationssemantik auf L3/L2; CANopen Safety (CiA 304) im CANopen-Paket, `SrdoEngine` (ADR-12). | `UdsClient`, `ICanOpenNode`, `J1939Node` | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*` |
+| L4 Anwendungsprotokolle | vorhanden (`CanKit.Pro.Uds`, `.CANopen`, `.J1939`) | Diagnose-/Applikationssemantik auf L3/L2. CANopen bündelt im einen Paket Gerät (CiA 301, FR-CO-001..028, 052..057), Master/Tool (Peer-SDO, fremde PDOs, Flying Master und Boot-up nach CiA 302-2, Discovery; FR-CO-029..034), Safety (CiA 304/319, `SrdoEngine`, ADR-12; FR-CO-035..046, 051, 058..059) und LSS (CiA 305/801, ADR-13; FR-CO-047..050). | `UdsClient`, `ICanOpenNode`, `CanOpenLss`, `J1939Node` | `FR-UDS-*`, `FR-CO-*`, `FR-J1939-*` |
 
 ## 5.2 Ebene 2 – Zoom L1 (Raw-CAN-Kern, vorhanden)
 
@@ -443,7 +454,7 @@ flowchart TB
 |-------------|-------|-------|----------------------------|---------|
 | `ICanBusService` | – | Ein Dienst-Objekt pro `ICanBus`; hält Subscriptions, TX-Confirm, Aktoren. | `Subscribe(filter) → ISubscription`, `SendConfirmedAsync(frame) → Task<TxConfirmation>` | `FR-RAW-SVC-*` |
 | Multi-Protokoll-Demux | (2) | Ein RX-Strom → N unabhängige gefilterte Consumer, **ohne** konkurrierendes `ReceiveAsync`. **Umgesetzt** im neuen Paket `CanKit.Pro.RawCan` (`ICanBusService`/`CanBusService` + `ISubscription`): je Subscription ein eigener bounded Drop-Oldest-Channel (FR-RAW-011), Fast-Path `CanIdFilter` (ID-Range/Maske) neben generischem `Func<CanFrameEvent,bool>` (FR-RAW-010/013), deterministisches Dispose (FR-RAW-012). Das gelieferte Element ist `CanFrameEvent` = Frame + `IsEcho` + Empfangszeitstempel; Echos werden nur an Subscriptions ausgeliefert, die sie mit `includeEcho: true` angefordert haben (FR-RAW-015, [#23](https://github.com/dborgards/CanKit.Pro/issues/23)). Baut ausschließlich auf `ICanBus.FrameObserved`, kein Adapter-Eingriff. | `ICanBusService.Subscribe(filter, includeEcho) → ISubscription { IAsyncEnumerable<CanFrameEvent> Frames; }` | `FR-RAW-010..013`, `FR-RAW-015` |
-| Frame-Ownership-Vertrag | (1) | Verbindliche Lease-Regeln (siehe 8.1); verhindert Use-after-free/Double-Dispose. **Kernmechanik umgesetzt** (`OwnMemory`-Fix, `CanFrame.Duplicate`, Virtual-Hub-Broadcast per Kopie); ausstehend (upstream): TX-Lease für übrige L0-Adapter; den ISO-TP-Scheduler des Prototyps, der sie ebenfalls brauchte, gibt es nicht mehr. | Vertragsdoku + `OwnMemory`-Fix (Review §1.5) | `FR-RAW-OWN-*` |
+| Frame-Ownership-Vertrag | (1) | Verbindliche Lease-Regeln (siehe 8.1); verhindert Use-after-free/Double-Dispose. **Kernmechanik nur im Fork umgesetzt** (`OwnMemory`-Fix, `CanFrame.Duplicate`, Virtual-Hub-Broadcast per Kopie — in CanKit.Pro.legacy, nicht im konsumierten CanKit 0.5.6, siehe Lesehinweis 3); ausstehend (upstream): Übernahme dieser Fixes und TX-Lease für übrige L0-Adapter; den ISO-TP-Scheduler des Prototyps, der sie ebenfalls brauchte, gibt es nicht mehr. | Vertragsdoku + `OwnMemory`-Fix (Review §1.5) | `FR-RAW-OWN-*` |
 | TX-Confirm | (4) | Einheitliche „gesendet"-Bestätigung, egal ob Hardware-Echo vorhanden. **Umgesetzt** in `CanKit.Pro.RawCan` (`ICanBusService.SendConfirmedAsync`): FIFO-Echo-Matching je (ID, Payload) für gleichzeitige inhaltsgleiche Sendevorgänge (FR-RAW-031), dokumentierte Treiber-Akzeptanz-Approximation ohne Echo (FR-RAW-032), beobachtbare Fehlschläge statt Hängen bei Timeout/BusOff/Ablehnung (FR-RAW-033), konfigurierbarer Timeout je Aufruf (FR-RAW-034). | `TxConfirmation { Confirmed; Timestamp; IsApproximated; FailureReason; }` | `FR-RAW-030..034` |
 | Adressierungs-Helfer | – | 11/29-bit, Extended/Mixed/NormalFixed (bislang nur als Einzelfall in `IsoTpEndpoint` vorhanden). **Umgesetzt** als eigenständiges, abhängigkeitsfreies Paket `CanKit.Pro.Addressing`: validierte 11-/29-Bit-ID-Prüfung (`CanIdRange`), allgemeine J1939-PGN/Priorität/PDU-Format/Quelladresse-Komposition/-Dekomposition (`J1939Id`/`J1939Fields`, FR-RAW-040) — verallgemeinert die zuvor auf eine feste Diagnose-PGN beschränkte 29-Bit-Konstruktion aus `IsoTpEndpoint.CreateNormalFixed`. Zusätzlich `CanIdFilter.Overlaps` sowie `ICanBusService.FindOverlappingFilterSubscriptions()` in `CanKit.Pro.RawCan` zur Erkennung überlappender Subscription-Filter (FR-RAW-041, Should); jeder Treffer wird als benannter `FilterOverlap` (beide Subscriptions plus geteilter ID-Bereich) gemeldet. | ID-Bau/-Zerlegung, PGN/Prio-Helfer | `FR-RAW-ADDR-*` |
 | Aktor-/Threading-Modell | (3) | Genau ein Bearbeitungs-Thread/Mailbox pro Protokollinstanz; kein geteilter mutabler State. **Umgesetzt** als eigenständiges, abhängigkeitsfreies Paket `CanKit.Pro.Actor` (siehe ADR-6): ereignisgetriebener Loop (kein Busy-Loop, FR-RAW-022), je Instanz wählbarer Ausführungskontext (`ActorExecutionMode`: `DedicatedThread`/`ThreadPool`/`SynchronizationContext`, FR-RAW-024), `BackgroundExceptionOccurred` als einziger Kanal für Hintergrundfehler (FR-RAW-023). Genutzt von `CanKit.Pro.IsoTp` (`IsoTpChannel`), `CanKit.Pro.J1939Tp`, `CanKit.Pro.J1939` und `CanKit.Pro.CANopen`; `CanKit.Pro.Uds` verwendet ihn nur als optionale Zeitquelle für P2/P2* und serialisiert Anfragen selbst. | `IProtocolActor { Post(msg); PostAsync(msg); Schedule(delay, cb); }` | `FR-RAW-ACTOR-*` |
@@ -827,7 +838,8 @@ flowchart TB
 **TFM-/Plattform-abhängige Pfade:**
 
 Die CanKit.Pro-Pakete sind reiner Managed-Code ohne P/Invoke und laufen dort, wo CanKit läuft;
-die plattformabhängigen Zeilen betreffen L0/L1 und liegen damit upstream. Die
+die plattformabhängigen Zeilen betreffen L0/L1 und liegen damit upstream. `CanKit.Pro.CANopen`
+bringt als einziges Paket eine weitere Managed-Abhängigkeit mit (`EdsDcfNet`, CON-SDK). Die
 `netstandard2.0`-Assets werden in der Testmatrix unter .NET Framework (`net48`) ausgeführt,
 die `net10.0`-Assets unter .NET 10.
 
@@ -849,7 +861,7 @@ und `IDisposable`. Der Wert wird kopiert, über Events geteilt, durch die `Async
 gereicht und im Virtual-Hub an N Empfänger gebroadcastet. Ohne verbindlichen Vertrag
 entstehen **Use-after-free** und **Double-Dispose** (Review §1.5, §2.1).
 
-**Ist-Zustand (behoben, FR-RAW-001/002/004):**
+**Ist-Zustand im Fork (behoben in CanKit.Pro.legacy, FR-RAW-001/002/004; nicht in CanKit 0.5.6, siehe `docs/upstream-candidates.md` § 2–3):**
 - `CanFrame.Dispose()` respektiert das `OwnMemory`-Flag und gibt den Owner nur frei, wenn
   die Frame-Instanz laut Ownership-Vertrag Eigentümerin ist (vormals Review §1.5,
   `CanFrame.cs:370`; behoben).
@@ -859,13 +871,16 @@ entstehen **Use-after-free** und **Double-Dispose** (Review §1.5, §2.1).
 - `VirtualBusHub.Broadcast` reicht nicht mehr den geteilten Sender-Frame weiter, sondern
   ruft für jeden Empfänger (und den Echo-Pfad) `frame.Duplicate(...)` auf, sodass ein Consumer,
   der seine Kopie sofort disposed, Sender oder andere Consumer nicht mehr invalidieren kann
-  (vormals Review §2.1, VirtualBusHub-Use-after-free; behoben, siehe
-  `tests/CanKit.Tests/TestCases/VirtualBusOwnershipTests.cs`).
+  (vormals Review §2.1, VirtualBusHub-Use-after-free; behoben, Test
+  `VirtualBusOwnershipTests` im Vorgänger-Repository — er prüft CanKit-Interna, die das
+  veröffentlichte Paket nicht freigibt).
 - `VirtualBusHub._hubs` entfernt leere Hubs jetzt beim Verlassen des letzten Mitglieds
   (`VirtualBusHub.Detach`/`Join`, atomar unter einem gemeinsamen Registry-Lock), statt
   unbegrenzt zu wachsen (vormals Review §2.4; behoben).
 
-**Noch offen:** Event-Beobachter (`FrameReceived`, deprecated) erhalten weiterhin den
+**Noch offen:** Keiner dieser Fixes ist im konsumierten CanKit 0.5.6 enthalten; bis sie upstream
+landen, verlässt sich `CanKit.Pro.RawCan` darauf, dass `FrameObserved` eine `CanFrameView` liefert,
+und konstruiert selbst keine Frames mit Owner. Event-Beobachter (`FrameReceived`, deprecated) erhalten weiterhin den
 disposable `CanFrame` statt nur einer `CanFrameView`, was Fehlgebrauch erlaubt (Migration
 auf `FrameObserved` läuft, aber `FrameReceived` bleibt aus Kompatibilitätsgründen bestehen).
 Der TX-Lease-Grundsatz (3) ist für den Virtual-Adapter umgesetzt; für die übrigen L0-Adapter
@@ -1033,8 +1048,18 @@ zu einem Loopback-Netz für Protokolltests. xUnit-**Matrix-Tests** (`tests/CanKi
 prüfen Adapter einheitlich (upstream). In diesem Repository liegt die xUnit-Suite
 `tests/CanKit.Pro.Tests`; die Protokolltests laufen gegen den `Virtual`-Adapter. Die ISO-TP-Lücke
 aus Review §4 ist geschlossen: `tests/CanKit.Pro.Tests/TestCases/IsoTp` deckt Codec, Kanal und
-Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt sie zusätzlich auf
-`net48` aus, wo die `netstandard2.0`-Assets tatsächlich laufen.
+Timeouts ab; daneben `TestCases/CANopen` (mit `Lss`, `Safety`), `J1939`, `Uds` und
+eigenschaftsbasierte Tests unter `Properties`. Da der veröffentlichte `Virtual`-Adapter sein Echo
+nicht mit `IsEcho` markiert, laufen Echo-abhängige Tests in drei „Echo-Welten"
+(`Infrastructure/EchoWorlds.cs`: markiert, unmarkiert, markiert im Normal-Modus). Zeitabhängige
+Tests werden auf die virtuelle Uhr des Aktors umgestellt statt gegen die Wanduhr zu messen (#92, #171). Die Suite läuft
+auf `net10.0`; der Windows-Leg von `ci.yml` führt sie zusätzlich auf `net48` aus, wo die
+`netstandard2.0`-Assets tatsächlich laufen. `eng/verify-requirements-traceability.py` prüft, ob
+jede `Must`-Anforderung der SRS von mindestens einem Test referenziert wird; es lässt die in
+`WAIVERS` genannten Anforderungen mit nicht-testbarer Verifikation (Dokumentations-/Architektur-
+review, CI-Matrix) und die in `KNOWN_GAPS` geführten bekannten Lücken durch und schlägt nur bei
+einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „keine neue Lücke", nicht
+„alles belegt"; die offenen Posten stehen im Skript selbst.
 
 ---
 
@@ -1090,7 +1115,7 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   (FR-RAW-010/013); `Dispose` meldet Subscriptions deterministisch ab und schließt ihren Channel
   (FR-RAW-012), das Verwerfen des Dienstes hängt sich vom `FrameObserved`-Event ab. Baut rein auf der
   bestehenden `ICanBus`-Oberfläche — kein Adapter-Eingriff. Abgesichert per Virtual-Loopback
-  (`tests/CanKit.Tests/TestCases/RawCanSubscriptionTests.cs`). Offen: Laufzeit-Rekonfiguration der
+  (`tests/CanKit.Pro.Tests/TestCases/RawCanSubscriptionTests.cs`). Offen: Laufzeit-Rekonfiguration der
   Filterkriterien (FR-RAW-014, Could) ist bewusst nicht Teil dieser Umsetzung.
 
 ### ADR-6 (umgesetzt): Aktor-Modell pro Protokollinstanz
@@ -1120,7 +1145,7 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   auf unbestimmte Zeit hängen zu lassen. Den ISO-TP-Prototyp (funktional defekt, Review
   §1.1, u. a. 100 %-CPU-Busy-Loop und unsynchronisierte `List`-Zustände) gibt es nicht mehr; sein
   Nachfolger `IsoTpChannel` und die J1939-, J1939-TP- und CANopen-Pakete laufen auf `ProtocolActor`. Abgesichert per
-  Unit-/Nebenläufigkeitstest (`tests/CanKit.Tests/TestCases/ProtocolActorTests.cs`), u. a.
+  Unit-/Nebenläufigkeitstest (`tests/CanKit.Pro.Tests/TestCases/ProtocolActorTests.cs`), u. a.
   paralleler `PostAsync`-Zugriff aus echten OS-Threads ohne Datenverlust.
 
 ### ADR-7 (umgesetzt): TX-Confirm-Abstraktion
@@ -1142,9 +1167,10 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   getrennt davon über Task-Cancellation. `BusState.BusOff` löst über `ICanBus.FaultOccurred` ein
   proaktives Fast-Fail aller offenen Bestätigungen aus, statt auf den vollen Timeout zu warten.
   `CanKit.Adapter.Virtual` deklarierte `CanFeature.Echo` bislang nicht statisch (im Gegensatz zu
-  allen echten Adaptern) und wurde dafür ergänzt — sonst wäre Echo-Matching mangels
-  hardwareunabhängiger CI gar nicht testbar gewesen. Abgesichert per Virtual-Loopback
-  (`tests/CanKit.Tests/TestCases/TxConfirmTests.cs`).
+  allen echten Adaptern) und wurde dafür im Fork ergänzt — sonst wäre Echo-Matching mangels
+  hardwareunabhängiger CI gar nicht testbar gewesen. Diese Ergänzung ist nicht in CanKit 0.5.6
+  (`docs/upstream-candidates.md` § 3); die Tests hier stellen die Echo-Welten deshalb selbst her
+  (§8.9). Abgesichert per Virtual-Loopback (`tests/CanKit.Pro.Tests/TestCases/TxConfirmTests.cs`).
   **Einschränkung (gemessen, #249):** Echo-Matching setzt voraus, dass der Adapter das eigene
   Frame mit `IsEcho` zurückmeldet. PCAN liefert es im Echo-Modus ungeflaggt, Kvaser (CanKit 0.5.6)
   auf einem ruhigen Bus gar nicht; dort läuft jede Bestätigung in den Timeout. Mit diesen Adaptern
@@ -1165,10 +1191,11 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
 - **Konsequenzen:** + sichere Grundlage für L2–L4 (Q1/Q5). − erfordert Anpassung von Pipe,
   QueuedCanBus, Virtual-Hub (und damals den ISO-TP-Scheduler).
 - **Status:** `Dispose()`/`OwnMemory` und Virtual-Hub (`CanFrame.Duplicate`, Broadcast-Kopie,
-  `_hubs`-Leak-Fix) sind umgesetzt und per Unit-/Virtual-Loopback-Test abgesichert
-  (`tests/CanKit.Tests/TestCases/CanFrameTests.cs`,
-  `tests/CanKit.Tests/TestCases/VirtualBusOwnershipTests.cs`). Offen: TX-Lease-Kopie in den
-  übrigen L0-Adaptern; der ISO-TP-Scheduler, der sie ebenfalls brauchte, existiert nicht mehr.
+  `_hubs`-Leak-Fix) sind **im Fork** umgesetzt und dort per Unit-/Virtual-Loopback-Test
+  abgesichert (`CanFrameTests`, `VirtualBusOwnershipTests` im Vorgänger-Repository). Im
+  konsumierten CanKit 0.5.6 fehlen sie; `docs/upstream-candidates.md` § 2 führt sie als
+  Upstream-Kandidaten. Offen: Übernahme upstream; TX-Lease-Kopie in den übrigen L0-Adaptern; der
+  ISO-TP-Scheduler, der sie ebenfalls brauchte, existiert nicht mehr.
 
 ### ADR-10 (umgesetzt): Adressierungs-Helfer als eigenständiges Paket
 - **Kontext:** 11-/29-Bit-ID- und J1939-PGN-Logik existierte nur als ein einziger, fest auf eine
@@ -1193,8 +1220,8 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   und der geteilte ID-Bereich, bei Mask-Filtern als einschließende Hülle einer gestreuten Menge.
   Alle Kombinationen laufen über dieselbe bitweise Suche (O(Bitbreite), kein Aufzählen einzelner
   ID-Werte), die den kleinsten bzw. größten gemeinsamen ID direkt mitliefert, statt nur dessen
-  Existenz. Abgesichert per Unit-Test (`tests/CanKit.Tests/TestCases/AddressingTests.cs`,
-  `tests/CanKit.Tests/TestCases/CanIdFilterOverlapTests.cs`, inkl. Abgleich gegen eine
+  Existenz. Abgesichert per Unit-Test (`tests/CanKit.Pro.Tests/TestCases/AddressingTests.cs`,
+  `tests/CanKit.Pro.Tests/TestCases/CanIdFilterOverlapTests.cs`, inkl. Abgleich gegen eine
   Brute-Force-Absuche des gesamten 11-Bit-ID-Raums).
 
 ### ADR-11 (umgesetzt): Fehler-/Timeout-Infrastruktur als eigenständiges Paket
@@ -1222,8 +1249,8 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   `Schedule`-Vorbehalt des Aktors.
 - **Status:** Umgesetzt: `IDeadlineScheduler`/`DeadlineScheduler`/`Deadline` (FR-RAW-050) sowie
   `BusStateMonitor`/`BusStateChangedEventArgs`/`BusStateExtensions` (FR-RAW-051), abgesichert per
-  Unit-/Virtual-Loopback-Test (`tests/CanKit.Tests/TestCases/DeadlineTests.cs`,
-  `tests/CanKit.Tests/TestCases/BusStateMonitorTests.cs`). Die Primitive ist **reusable L2-
+  Unit-/Virtual-Loopback-Test (`tests/CanKit.Pro.Tests/TestCases/DeadlineTests.cs`,
+  `tests/CanKit.Pro.Tests/TestCases/BusStateMonitorTests.cs`). Die Primitive ist **reusable L2-
   Infrastruktur** und wird von `IsoTpChannel` (N_Bs, N_Cr), `CanKit.Pro.J1939`, `CanKit.Pro.J1939Tp`
   und `CanKit.Pro.CANopen` genutzt; der ISO-TP-Scheduler des Prototyps, der `Deadline`s pflegte
   ohne sie auszuwerten, existiert nicht mehr. FR-RAW-052 (reservierte/ungültige
@@ -1251,7 +1278,36 @@ Timeouts ab. Die Suite läuft auf `net10.0`; der Windows-Leg von `ci.yml` führt
   Abgleich gegen EN 50325-5 steht aus (#289). Entscheidungsakte:
   `docs/reviews/2026-10-09-canopen-safety-scope.md`.
 - **Status:** Umgesetzt als FR-CO-035..046; die Konfigurationsinstanz nach CiA 319 v2.0.0
-  (Identitätsprüfung, Speichern, SRVT-Vorgabe) als FR-CO-051 (17.10.2026).
+  (Identitätsprüfung, Speichern, SRVT-Vorgabe) als FR-CO-051 (#310, 19.10.2026); die Geräteseite
+  nach CiA 319 §5.3/§5.4 (Neuberechnung beim A5h-Write, Download-Indikation, periodische Prüfung
+  per `SrdoConfigurationCheckInterval`, Start-up-Vergleich) als FR-CO-058..059 (#329, 20.10.2026).
+  Nicht gebaut: Clause 7/8 (Safety Application Layer der Profile), diverse Redundanz und sicherer
+  Zustand (README § „Not built, and why"); Abgleich gegen EN 50325-5 steht aus (#289).
+
+### ADR-13 (umgesetzt): Master-/Tool-Rolle, Flying Master und LSS im CANopen-Paket
+- **Kontext:** Nach der Geräterolle (FR-CO-013..028) kamen Fähigkeiten hinzu, die ein Werkzeug
+  oder ein NMT-Master braucht: SDO-Zugriff auf Peers gegen deren EDS/DCF, Beobachten fremder PDOs,
+  Flying Master und Boot-up-Manager nach CiA 302-2 Version 4.1.0, Knotenerkennung
+  (`docs/reviews/2026-09-26-canopen-master-tool-scope.md`, #131), später LSS nach CiA 305 v3.0.0
+  und die Bitratenerkennung nach CiA 801. Jede davon hätte ein eigenes Paket sein können.
+- **Entscheidung:** alles im Paket `CanKit.Pro.CANopen`, als partielle Klassen von `CanOpenNode`
+  (`CanOpenNode.FlyingMaster.cs`, `.BootUp.cs`, `.PeerSdo.cs`, `.ForeignPdo.cs`) bzw. als
+  eigenständige Typen auf demselben `ICanBusService` (`CanOpenDiscovery`, `CanOpenLss.OpenMaster`
+  → `ILssMaster`, `LssCommissioning`, `LssBitRateDetection`). Der LSS-Slave sitzt im Knoten
+  (`CanOpenNodeOptions.Lss`, `LSS_Supported` aus der EDS/DCF) und hält NMT, Heartbeat und
+  LSS-Antworten während der Switch-Delays in einer Warteschlange zurück (#331). Der LSS-Master
+  folgt dem UDS-Muster (ein Kommando zugleich hinter `SemaphoreSlim`, Aktor nur als Timer), nicht
+  dem Aktor-Modell des Knotens.
+- **Konsequenzen:** + ein Objektverzeichnis, ein Aktor und eine Zeitquelle für Gerät, Master und
+  Safety; Node-ID-Wechsel per LSS zieht die vordefinierten COB-IDs des Knotens mit; keine
+  öffentliche Erweiterungs-SPI, die eingefroren werden müsste (ADR-12). − das Paket ist das größte
+  der Solution und seine Beschreibung in der `.csproj` zählt inzwischen alle Profile auf;
+  − CiA 302 ist nur mitgliederzugänglich, die Umsetzung folgt den öffentlichen Beschreibungen der
+  Ausgabe 4.1.0 (README § „Flying master").
+- **Status:** Umgesetzt als FR-CO-029..034 (Master/Tool), FR-CO-047..050 (LSS-Master, -Slave,
+  Inbetriebnahme, CiA 801; #304, #305, #306, #309, #331). Nicht gebaut: Bitratenerkennung als LSS-Kommando (Index 9
+  wird vom Slave abgelehnt), Umschalten der Bitrate des offenen Kanals ohne Adapter-Callback
+  (README § „Not built, and why").
 
 ---
 
@@ -1298,7 +1354,10 @@ flowchart LR
 # 11. Risiken und technische Schulden
 
 Direkt aus dem Deep-Code-Review (`docs/reviews/2026-07-14-deep-code-review.md`) abgeleitet.
-Priorisierung: **K** = kritisch, **W** = wichtig, **G** = gering.
+Priorisierung: **K** = kritisch, **W** = wichtig, **G** = gering. Die Zeilen über CanKit-Code
+(L0/L1) beschreiben den Fork; ✅ heißt *dort* behoben, nicht im konsumierten CanKit 0.5.6
+(Lesehinweis 3). Befunde zu den CanKit.Pro-Paketen selbst stehen im Deep Review vom 30.09.2026
+(`docs/reviews/2026-09-30-deep-review.md`) und als Issues, nicht in dieser Tabelle.
 
 | Prio | Risiko / Schuld | Auswirkung | Gegenmaßnahme | Review § |
 |------|------------------|-----------|---------------|----------|
@@ -1320,12 +1379,15 @@ Priorisierung: **K** = kritisch, **W** = wichtig, **G** = gering.
 | G | ✅ *Behoben (Default-Branch ist `main`).* **CI-Trigger tot** (`branches:[main]`, Default `master`); kein ISO-TP-Workflow. | Push-Trigger feuerte nicht; Transport ungetestet. | Alle Workflows triggern auf `main`, dem Default-Branch dieses Repositories; die ISO-TP-Tests laufen im Testschritt von `ci.yml` mit der übrigen Suite. | §3, §4 |
 
 **Gesamtbewertung:** L0/L1 sind produktionsnah; die punktuellen kritischen Bugs
-(Stopwatch, BCM, QueuedCanBus, Frame-Ownership, Virtual-Hub) sind behoben (siehe ✅-Markierungen
-oben). Der ISO-TP-Prototyp des Forks ist durch den Neubau `CanKit.Pro.IsoTp` ersetzt (siehe die
+(Stopwatch, BCM, QueuedCanBus, Frame-Ownership, Virtual-Hub) sind im Fork behoben (siehe
+✅-Markierungen oben). Ob ein Fix im konsumierten CanKit 0.5.6 angekommen ist, sagt
+`docs/upstream-candidates.md`; die Ownership- und Virtual-Hub-Fixes sind es nicht, und das
+Echo-Verhalten von PCAN und Kvaser ist dort als gemessene Abweichung geführt (ADR-7, #249). Der ISO-TP-Prototyp des Forks ist durch den Neubau `CanKit.Pro.IsoTp` ersetzt (siehe die
 ✅-Zeilen oben). Von den vier strukturellen L2-Lücken ist der Frame-Ownership-Vertrag
-(FR-RAW-001..004) für L1-Kern und Virtual-Adapter upstream umgesetzt, FR-RAW-005 (TX-Lease der übrigen L0-Adapter, Should) ist noch offen (siehe §8.1); Demux,
-Threading/Aktor und TX-Confirm sind als `CanKit.Pro.RawCan` und `CanKit.Pro.Actor` umgesetzt und
-tragen die L3/L4-Pakete. Offen ist, was in dieser Tabelle ohne ✅ steht, sowie die Vorbehalte
+(FR-RAW-001..004) nur im Fork für L1-Kern und Virtual-Adapter umgesetzt — im konsumierten CanKit
+0.5.6 fehlt er, bis die Upstream-Kandidaten angenommen sind —, FR-RAW-005 (TX-Lease der übrigen
+L0-Adapter, Should) ist auch dort offen (siehe §8.1); Demux, Threading/Aktor und TX-Confirm sind
+als `CanKit.Pro.RawCan` und `CanKit.Pro.Actor` umgesetzt und tragen die L3/L4-Pakete. Offen ist, was in dieser Tabelle ohne ✅ steht, sowie die Vorbehalte
 des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
 
 ---
@@ -1369,6 +1431,14 @@ des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
 | **SDO / PDO** | Service / Process Data Object (CANopen). |
 | **NMT / EMCY** | Network Management / Emergency Object (CANopen). |
 | **SRDO / GFC** | Safety-Relevant Data Object / Global Failsafe Command (CANopen Safety, CiA 304). |
+| **SCT / SRVT** | Safeguard Cycle Time / Safety-Related Object Validation Time (SRDO-Zeitüberwachungen, CiA 304). |
+| **Konfigurationsinstanz / SRD** | Rollen nach CiA 319: das Werkzeug, das die Safety-Parameter eines Geräts schreibt und verifiziert / das Safety-Related Device, das sie prüft. |
+| **MPDO (SAM/DAM)** | Multiplexed PDO, source- bzw. destination-address mode (CiA 301, Mapping-Zähler FEh/FFh). |
+| **SYNC** | Synchronisationsobjekt (CiA 301, 1005h/1006h/1019h); taktet synchrone PDOs. |
+| **Flying Master** | Wahl des aktiven NMT-Masters unter mehreren masterfähigen Knoten (CiA 302-2, 1F90h). |
+| **LSS** | Layer Setting Services (CiA 305): Node-ID und Bitrate eines Slaves über den Bus setzen; Fastscan findet unkonfigurierte Slaves. |
+| **EDS / DCF** | Electronic Data Sheet / Device Configuration File (CiA 306): Gerätebeschreibung, aus der das Objektverzeichnis geladen wird (`EdsDcfNet`). |
+| **SBOM** | Software Bill of Materials (hier CycloneDX 1.6, je Paket als Release-Asset). |
 | **SPI (hier)** | Service Provider Interface; interne Erweiterungspunkte (`CanKit.Abstractions.SPI.*`), nicht der Hardware-SPI-Bus. |
 | **Fake-Native** | `*.Fake.cs`-Spiegel der P/Invoke-Schicht für hardwarelose Builds (`-c Fake`). |
 | **Virtual-Hub** | In-Memory-Loopback-Adapter (`VirtualBusHub`) für Tests. |
@@ -1381,7 +1451,8 @@ des SRS (HIL-Läufe, `KNOWN_GAPS` der Traceability-Prüfung).
 ---
 
 *Ende des Dokuments. Aussagen über ISO-TP-Interna (§5.4, §6.4, §6.7) wurden am 2026-09-29
-gegen `src/CanKit.Pro.IsoTp` verifiziert. Abschnitte, die Befunde der Erstfassung wiedergeben
+gegen `src/CanKit.Pro.IsoTp` verifiziert und am 2026-10-21 erneut gegen `IIsoTpChannel` und
+`TxStage` geprüft (unverändert). Abschnitte, die Befunde der Erstfassung wiedergeben
 (Review-Verweise, Kontextabsätze der ADRs, Abschnitt 11), beschreiben den Fork-Prototyp und sind
 als historisch bzw. mit ✅ gekennzeichnet; sie referenzieren die SRS-Requirement-IDs sowie das
 Review-Dokument.*

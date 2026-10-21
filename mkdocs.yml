@@ -173,7 +173,9 @@ nav:
   - API: api/
   - Architecture:
       - arc42 (German): architecture/arc42-CanKit.Pro.md
+      - arc42 (English): architecture/arc42-CanKit.Pro-en.md
       - Requirements (German): requirements/SRS-CanKit.Pro.md
+      - Requirements (English): requirements/SRS-CanKit.Pro-en.md
   - Development:
       - Contributing: contributing.md
       - Release process: release-process.md
