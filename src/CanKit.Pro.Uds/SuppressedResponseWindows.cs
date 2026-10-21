@@ -19,6 +19,7 @@ namespace CanKit.Pro.Uds;
 internal sealed class SuppressedResponseWindows
 {
     private readonly Dictionary<byte, long> _until = new();
+    private readonly Dictionary<byte, TimeSpan> _pendingExtension = new();
     private readonly object _gate = new();
 
     /// <summary>Notes that a request for <paramref name="sid"/> went out at
@@ -33,6 +34,30 @@ internal sealed class SuppressedResponseWindows
     /// </summary>
     public void Note(byte sid, long sentTimestamp, TimeSpan window, long ticksPerSecond)
         => Extend(sid, sentTimestamp + Ticks(window, ticksPerSecond));
+
+    /// <summary>
+    /// As <see cref="Note(byte, long, TimeSpan, long)"/>, noting with the window how far an NRC
+    /// 0x78 heard inside it moves it out: the P2* in force when the request went out. The
+    /// physical client's P2* changes with the session (#340), and a window opened under a longer
+    /// one must not be moved out by a shorter one negotiated since -- the late answer still has
+    /// the P2* its own session gave it (Codex on #382). A window noted twice keeps the longer.
+    /// </summary>
+    public void Note(byte sid, long sentTimestamp, TimeSpan window, long ticksPerSecond, TimeSpan pendingExtension)
+    {
+        lock (_gate)
+        {
+            Note(sid, sentTimestamp, window, ticksPerSecond);
+            if (!_pendingExtension.TryGetValue(sid, out var kept) || kept < pendingExtension)
+                _pendingExtension[sid] = pendingExtension;
+        }
+    }
+
+    /// <summary>How far an NRC 0x78 heard inside the window for <paramref name="sid"/> moves it
+    /// out, if that was noted with it.</summary>
+    public bool TryGetPendingExtension(byte sid, out TimeSpan extension)
+    {
+        lock (_gate) return _pendingExtension.TryGetValue(sid, out extension);
+    }
 
     internal static long Ticks(TimeSpan window, long ticksPerSecond)
         => TickMath.ToTicks(window, ticksPerSecond);
@@ -73,7 +98,25 @@ internal sealed class SuppressedResponseWindows
         lock (_gate)
         {
             if (had) _until[sid] = until;
-            else _until.Remove(sid);
+            else
+            {
+                _until.Remove(sid);
+                _pendingExtension.Remove(sid);
+            }
+        }
+    }
+
+    /// <summary>
+    /// As <see cref="Restore(byte, bool, long)"/>, putting back what
+    /// <see cref="TryGetPendingExtension"/> reported before the note as well.
+    /// </summary>
+    public void Restore(byte sid, bool had, long until, bool hadExtension, TimeSpan extension)
+    {
+        lock (_gate)
+        {
+            Restore(sid, had, until);
+            if (hadExtension) _pendingExtension[sid] = extension;
+            else _pendingExtension.Remove(sid);
         }
     }
 
@@ -85,7 +128,11 @@ internal sealed class SuppressedResponseWindows
     /// <summary>Closes the window for <paramref name="sid"/>.</summary>
     public void Forget(byte sid)
     {
-        lock (_gate) _until.Remove(sid);
+        lock (_gate)
+        {
+            _until.Remove(sid);
+            _pendingExtension.Remove(sid);
+        }
     }
 
     /// <summary>How long from now until <paramref name="until"/>, or zero if it has passed.</summary>

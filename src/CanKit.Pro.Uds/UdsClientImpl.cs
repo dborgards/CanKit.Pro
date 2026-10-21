@@ -558,7 +558,8 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             // confirmation, the frame is on the bus and may still be answered (Codex on #150).
             // Moved out to the transmit stamp afterwards.
             bool hadWindow = _suppressedWindows.TryGetDeadline(request[0], out var previousUntil);
-            _suppressedWindows.Note(request[0], Now(), P2Budget, _time.Frequency);
+            bool hadExtension = _suppressedWindows.TryGetPendingExtension(request[0], out var previousExtension);
+            NoteWindow(request[0], Now(), P2Budget);
             IsoTpTransmitStamps stamps;
             try
             {
@@ -567,7 +568,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
             catch (Exception ex) when (RefusedBeforeTransmission(ex))
             {
                 // Nothing reached the bus: the window noted for it is put back (Codex on #150).
-                _suppressedWindows.Restore(request[0], hadWindow, previousUntil);
+                _suppressedWindows.Restore(request[0], hadWindow, previousUntil, hadExtension, previousExtension);
                 throw;
             }
             catch
@@ -575,11 +576,11 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
                 // A send that leaves by exception -- cancelled, or a transport fault -- may
                 // have put the frame on the bus after the provisional window ran out; its P2
                 // from the transmission is at most P2 from now (Codex on #150).
-                _suppressedWindows.Note(request[0], Now(), P2Budget, _time.Frequency);
+                NoteWindow(request[0], Now(), P2Budget);
                 throw;
             }
             var sent = stamps.LastFrameTransmitTimestamp > 0 ? stamps.LastFrameTransmitTimestamp : Now();
-            _suppressedWindows.Note(request[0], sent, P2Budget, _time.Frequency);
+            NoteWindow(request[0], sent, P2Budget);
         }
         finally
         {
@@ -678,7 +679,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         var data = pdu.Pdu;
         if (data.Length < 3 || data[0] != NegativeResponseSid || data[2] != NrcResponsePending)
             return false;
-        var extendedUntil = pdu.FirstFrameArrivalTimestamp + Ticks(P2StarBudget);
+        var extendedUntil = pdu.FirstFrameArrivalTimestamp + Ticks(PendingExtensionOf(data[1]));
         if (data[1] != sid)
         {
             // Another service's: only a window still open when the 0x78 arrived (Codex on #150).
@@ -691,6 +692,17 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         until = extendedUntil;
         return true;
     }
+
+    // A window for sid, from `from` for `window`, with the P2* in force now as how far a 0x78
+    // inside it moves it out: a session change before that 0x78 arrives must not shorten what
+    // the request that opened the window was promised (Codex on #382).
+    private void NoteWindow(byte sid, long from, TimeSpan window)
+        => _suppressedWindows.Note(sid, from, window, _time.Frequency, P2StarBudget);
+
+    // How far a 0x78 for sid moves its window out: the P2* noted with the window, or the one in
+    // force when there is none.
+    private TimeSpan PendingExtensionOf(byte sid)
+        => _suppressedWindows.TryGetPendingExtension(sid, out var extension) ? extension : P2StarBudget;
 
     // The services whose second byte is a sub-function parameter, and so carry the
     // suppressPosRspMsgIndication bit (ISO 14229-1 table 2, "sub-function" column). The table
@@ -1336,7 +1348,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
     private void QuarantineLateAnswers(UdsServiceId serviceId)
     {
         if (!_options.QuarantineLateResponses) return;
-        _suppressedWindows.Note((byte)serviceId, Now(), P2StarBudget, _time.Frequency);
+        NoteWindow((byte)serviceId, Now(), P2StarBudget);
     }
 
     private static bool IsAllZero(byte[] data, int offset, int count)
@@ -1410,7 +1422,7 @@ internal sealed class UdsClientImpl : IUdsClient, IAsyncDisposable
         // Only a window still open when the 0x78 arrived: one that had run out is not revived
         // for a full P2* by a late frame (Codex on #150).
         _suppressedWindows.ExtendIfOpenAt(data[1], pdu.FirstFrameArrivalTimestamp,
-            pdu.FirstFrameArrivalTimestamp + Ticks(P2StarBudget));
+            pdu.FirstFrameArrivalTimestamp + Ticks(PendingExtensionOf(data[1])));
     }
 
     /// <summary>

@@ -499,6 +499,65 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         await secondAct.Should().ThrowAsync<UdsTimeoutException>();
     }
 
+    // Codex on #382 — a window keeps the P2* of the session it was opened in. A request
+    // abandoned in the programming session (P2* 10 s) quarantines its service; a session change
+    // to one with a shorter P2* follows; the abandoned request's 0x78, arriving late in the
+    // window, moves it out by the programming session's P2* -- what the server promised that
+    // request -- and not by the new, shorter one, which would let the next request out before
+    // the abandoned request's final answer.
+    [Fact]
+    public async Task A_Window_Keeps_The_P2Star_Of_The_Session_It_Was_Opened_In()
+    {
+        var steps = new EcuSteps();
+        var pendingAfter = TimeSpan.FromMilliseconds(9000); // after the abandoned request timed out
+        var finalAfter = TimeSpan.FromMilliseconds(8000);   // after the 0x78
+        int calls = 0;
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x10, req => req[1] == (byte)UdsSessionType.Programming
+                    ? new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray()
+                    : new byte[] { req[1], 0x00, 0x32, 0x00, 0x64 }); // 50 ms, 1 s: below the configured
+                e.On(0x22, req =>
+                {
+                    if (Interlocked.Increment(ref calls) == 1)
+                        throw new EcuResponsePendingThenNegative(1, 0x22, delayBefore: pendingAfter, delayAfter: finalAfter);
+                    return new byte[] { 0xF1, 0x90, 0xBB };
+                });
+            },
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = TimeSpan.FromMilliseconds(1500),
+                QuarantineLateResponses = true,
+            });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(ProgrammingP2);
+        await pair.Clock.AdvanceAsync(ProgrammingP2);
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<UdsTimeoutException>(); // the quarantine: P2* 10 s
+
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token)); // P2* 1.5 s now
+
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(ProgrammingP2Star);
+        await pair.Clock.AdvanceAsync(pendingAfter);
+        await pair.DeliverAsync(() => steps.Release(pendingAfter), Negative(0x22, 0x78));
+        // Moved out by the programming session's P2* from the 0x78 -- not by the 1.5 s in force.
+        await pair.WaitUntilWaitingAsync(ProgrammingP2Star);
+
+        await pair.Clock.AdvanceAsync(finalAfter);
+        await pair.DeliverAsync(() => steps.Release(finalAfter), Negative(0x22, 0x22));
+
+        await pair.Clock.AdvanceAsync(ProgrammingP2Star - finalAfter); // the window closes; B goes out
+        var data = await Within(second);
+        data.Should().Equal(new byte[] { 0xBB }, "the abandoned request's final answer arrived inside its window");
+    }
+
     [Theory]
     [InlineData(new byte[] { 0x00, 0x32, 0x01, 0xF4 }, 50, 5_000)]
     [InlineData(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, 65_535, 655_350)]
