@@ -279,22 +279,24 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         //
         // The wait is also linked to the channel's lifetime (#339): a Dispose while this caller
         // is queued behind another send releases it at once, as ObjectDisposedException. The
-        // caller's own cancellation keeps its OperationCanceledException.
-        var linkedGateWait = cancellationToken.CanBeCanceled
+        // caller's own cancellation keeps its OperationCanceledException, carrying the caller's
+        // token rather than the linked one -- as the wait did before it was linked, and as
+        // CancelInFlightSend reports a cancellation after the gate.
+        using (var linkedGateWait = cancellationToken.CanBeCanceled
             ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _lifetimeCts.Token)
-            : null;
-        try
+            : null)
         {
-            await _sendGate.WaitAsync(linkedGateWait?.Token ?? _lifetimeCts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            ThrowIfDisposed();
-            throw;
-        }
-        finally
-        {
-            linkedGateWait?.Dispose();
+            try
+            {
+                await _sendGate.WaitAsync(linkedGateWait?.Token ?? _lifetimeCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Only two things cancel this wait: the caller's token, or the channel's
+                // lifetime, which Dispose cancels after it has marked the channel disposed.
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new ObjectDisposedException(nameof(IsoTpChannel));
+            }
         }
 
         try
@@ -622,7 +624,7 @@ internal sealed class IsoTpChannel : IIsoTpChannel
         // matters when the actor cannot run -- a Dispose called from one of its own callbacks,
         // or an injected actor that is busy -- and the in-flight send keeps the gate until the
         // cleanup posted below fails it.
-        try { _lifetimeCts.Cancel(); } catch { /* a waiter's continuation threw; nothing to do */ }
+        try { _lifetimeCts.Cancel(); } catch (AggregateException) { /* a registered callback threw; nothing else to do */ }
 
         // Order matters: stop pulling frames off the subscription so nothing new is queued to the
         // actor while it winds down, then complete the PDU inbox so pending ReceiveAsync callers
