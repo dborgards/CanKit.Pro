@@ -708,8 +708,13 @@ internal sealed partial class CanOpenNode
             HandleBlockUploadServerInit(data, cs);
             return true;
         }
-        // Block upload start (0xA3), sub-block ack (0xA2), end response (0xA1).
-        if (cs == SdoBlockFrames.CcsBlockUploadStart && _sdoBlockServer is { InDownload: false } up)
+        // Block upload start (0xA3), sub-block ack (0xA2), end response (0xA1). Each is taken in
+        // its own phase only: a start repeated once the sub-block is out used to re-run the
+        // sender and reset the phase, so after the end frame the end response no longer matched
+        // and the session only ended in its timeout (#341). Outside its phase it falls through
+        // to the classic server, which answers the unexpected command specifier with an abort.
+        if (cs == SdoBlockFrames.CcsBlockUploadStart
+            && _sdoBlockServer is { InDownload: false, Phase: SdoBlockServerPhase.AwaitStart } up)
         {
             HandleBlockUploadServerStart(up);
             return true;
@@ -1090,6 +1095,17 @@ internal sealed partial class CanOpenNode
         if (session.ResumeSeqno == 1)
             session.SubBlockStartOffset = session.Offset;
         var seqno = session.ResumeSeqno;
+        if (session.Buffer.Length == 0)
+        {
+            // An empty object still needs its one segment: the block encoding carries zero data
+            // bytes as a last segment (c = 1) whose seven bytes are all unused, declared by
+            // n = 7 in the end frame, as the classic path's last segment does. Without it the
+            // client waits for seqno 1 and both sides end in their timeouts (#341).
+            frames.Add((cobId, SdoBlockFrames.BuildSegment(seqno, isLastSegment: true, ReadOnlySpan<byte>.Empty)));
+            session.SubBlockLastSeqno = seqno;
+            seqno++;
+            session.LastSegmentUnusedBytes = 7;
+        }
         while (seqno <= session.NegotiatedBlockSize)
         {
             int remaining = session.Buffer.Length - session.Offset;
@@ -1111,7 +1127,16 @@ internal sealed partial class CanOpenNode
         }
         session.ResumeSeqno = seqno;
         session.Phase = SdoBlockServerPhase.AwaitSubBlockAck;
-        _ = SendOrderedControlFrames(frames.ToArray());
+        // The batch is asked before every frame whether this session is still the open one
+        // (#341, the server-side mirror of the download client's check at the C9 fix above).
+        // Every way the session ends -- the client's abort, the idle timeout, a supersede by a
+        // new initiate, NMT Stop or reset, disposal -- takes it out of _sdoBlockServer, so that
+        // one slot is the signal and no teardown path has to remember a flag. Read on the
+        // sending task, which is why the field is volatile. The segments still to go would
+        // otherwise reach a client that has no session for them any more: a client that aborts
+        // and starts its next transfer at once sees them interleaved with that transfer's frames.
+        _ = SendOrderedControlFrames(onSendCompleted: null,
+            shouldStop: () => !ReferenceEquals(_sdoBlockServer, session), frames.ToArray());
     }
 
     private void SendBlockUploadEnd(SdoBlockServerSession session)
