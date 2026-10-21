@@ -28,7 +28,7 @@ public sealed class IsoTpThreadPoolHopTests
         // A dedicated thread is not a pool thread, so resuming inline on it is told apart from
         // the hop by IsThreadPoolThread alone; the installed context records any attempt to
         // resume through it, which Task.Yield would make.
-        RunOnDedicatedThread(() =>
+        await RunOnDedicatedThreadAsync(() =>
         {
             SynchronizationContext.SetSynchronizationContext(context);
             hopped = ResumedOnPoolThreadAsync();
@@ -51,7 +51,7 @@ public sealed class IsoTpThreadPoolHopTests
         var ran = new TaskCompletionSource<(bool PoolThread, string? Flowed)>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
-        RunOnDedicatedThread(() =>
+        await RunOnDedicatedThreadAsync(() =>
         {
             flowed.Value = "caller";
             IsoTpChannel.ThreadPoolHop.Instance.OnCompleted(
@@ -63,18 +63,19 @@ public sealed class IsoTpThreadPoolHopTests
         value.Should().Be("caller", "OnCompleted, unlike UnsafeOnCompleted, flows the ExecutionContext");
     }
 
-    private static void RunOnDedicatedThread(Action action)
+    // LongRunning gives the action a thread of its own rather than a pool thread, and the task
+    // carries anything it throws. The precondition is checked rather than assumed: on a pool
+    // thread, a hop that resumed inline would pass the IsThreadPoolThread assertions unseen.
+    private static async Task RunOnDedicatedThreadAsync(Action action)
     {
-        Exception? failure = null;
-        var thread = new Thread(() =>
+        var onPoolThread = await Task.Factory.StartNew(() =>
         {
-            try { action(); }
-            catch (Exception ex) { failure = ex; }
-        })
-        { IsBackground = true };
-        thread.Start();
-        thread.Join(ShortTimeout).Should().BeTrue("the dedicated thread only starts the work");
-        failure.Should().BeNull();
+            var poolThread = Thread.CurrentThread.IsThreadPoolThread;
+            action();
+            return poolThread;
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).WaitAsync(ShortTimeout);
+
+        onPoolThread.Should().BeFalse("the action must start on a thread that is not a pool thread");
     }
 
     private sealed class CountingSynchronizationContext : SynchronizationContext
