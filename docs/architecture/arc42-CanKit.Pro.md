@@ -1164,8 +1164,12 @@ einer neuen, nicht verzeichneten Lücke fehl. Ein grüner Lauf heißt also „ke
   im Review als `QueuedDeadline.Enqueue`-Absturz bei identischen Frames benannt wurde. Fehlschläge
   (Timeout, BusOff, Ablehnung durch den Treiber) lösen die zurückgegebene Task beobachtbar auf
   (`TxConfirmation.FailureReason`), nie unbegrenztes Hängen; explizite Aufrufer-Cancellation läuft
-  getrennt davon über Task-Cancellation. `BusState.BusOff` löst über `ICanBus.FaultOccurred` ein
-  proaktives Fast-Fail aller offenen Bestätigungen aus, statt auf den vollen Timeout zu warten.
+  getrennt davon über Task-Cancellation. Ein proaktives Fast-Fail aller offenen Bestätigungen als
+  `BusOff`, statt auf den vollen Timeout zu warten, gibt es nur, wenn der Adapter
+  `ICanBus.FaultOccurred` auslöst, während `ICanBus.BusState` `BusOff` liest — das tut kein
+  Adapter von CanKit 0.5.6; dort endet ein während eines Bus-Off offener Sendevorgang als
+  `Timeout` (#348; was die Adapter stattdessen melden, steht in
+  `src/CanKit.Pro.RawCan/README.md`, § *TX-Confirm*).
   `CanKit.Adapter.Virtual` deklarierte `CanFeature.Echo` bislang nicht statisch (im Gegensatz zu
   allen echten Adaptern) und wurde dafür im Fork ergänzt — sonst wäre Echo-Matching mangels
   hardwareunabhängiger CI gar nicht testbar gewesen. Diese Ergänzung ist nicht in CanKit 0.5.6
