@@ -810,7 +810,13 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         FinishDispose();
     }
 
-    private static readonly TimeSpan DisposeJoinTimeout = TimeSpan.FromSeconds(2);
+    /// <summary>
+    /// How long Dispose waits for the reader and for the event pump. Settable only as a test
+    /// seam (#362): with a join longer than the test's own hang guard, a Dispose that waits for
+    /// the thread it is called on never returns instead of returning two seconds late, so the
+    /// test can tell the two apart without measuring time.
+    /// </summary>
+    internal TimeSpan DisposeJoinTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary>A subscriber that kept the pump past the join timeout does not get the events still
     /// queued behind it: nothing is delivered past Dispose.</summary>
@@ -822,7 +828,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     /// <summary>Waits for <paramref name="task"/> for at most <see cref="DisposeJoinTimeout"/>
     /// without holding a thread. Neither task joined here faults (each reports its own failures
     /// through <see cref="BackgroundExceptionOccurred"/>), so there is nothing to observe.</summary>
-    private static async Task JoinAsync(Task task)
+    private async Task JoinAsync(Task task)
     {
         using var cts = new CancellationTokenSource();
         await Task.WhenAny(task, Task.Delay(DisposeJoinTimeout, cts.Token)).ConfigureAwait(false);
