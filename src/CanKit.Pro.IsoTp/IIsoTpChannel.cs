@@ -114,8 +114,10 @@ public interface IIsoTpChannel : IDisposable
     /// was lost, is still returned afterwards. Throws the recorded reassembly-abort exception
     /// when the queued item is a fault, exactly as
     /// <see cref="ReceiveWithArrivalAsync"/> would; neither end of the inbox is reported here.
-    /// A <see cref="DiscardPendingPdus(long)"/> running concurrently is waited out, so a PDU it
-    /// retains is never reported as absent.
+    /// A <see cref="DiscardPendingPdus(long)"/> running concurrently does not make a PDU it
+    /// retains look absent: an empty read that overlapped one is made again. The read itself is
+    /// not serialised with the discard, though -- one made while the discard drains the inbox
+    /// can still take a PDU the discard would have dropped (#383).
     /// </summary>
     /// <remarks>
     /// The companion to <see cref="ReceiveWithArrivalAsync"/> for a caller whose deadline has
