@@ -82,6 +82,11 @@ namespace CanKit.Pro.RawCan
             // shown up in.
             internal Task Completion => _pumpTask;
 
+            // Test hook (#362): how long Dispose joins the pump. A self-join from inside onNext
+            // can only end by this running out, so a test that must tell "skipped" from "waited
+            // and gave up" without timing it sets it to infinite and watches for the hang.
+            internal TimeSpan JoinTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
             public CallbackSubscription(
                 ISubscription subscription,
                 ICanBusService service,
@@ -161,7 +166,7 @@ namespace CanKit.Pro.RawCan
                 // cancelled from here, so waiting longer would only move the hang into the caller's
                 // Dispose. What the timeout leaves behind is now a task that reports its own
                 // failures (see the pump's catch) instead of one nothing will ever observe.
-                try { _pumpTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* best-effort */ }
+                try { _pumpTask.Wait(JoinTimeout); } catch { /* best-effort */ }
             }
         }
     }
