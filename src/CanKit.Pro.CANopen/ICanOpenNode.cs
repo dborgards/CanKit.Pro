@@ -63,8 +63,10 @@ public interface ICanOpenNode : IDisposable
     /// code. Created with the communication-profile objects CiA 301 requires of a device that
     /// supports SDO, PDO, SYNC, EMCY, heartbeat and guarding (<c>1000h</c>, <c>1001h</c>,
     /// <c>1005h</c>, <c>1006h</c>, <c>100Ch</c>, <c>100Dh</c>, <c>1010h</c>, <c>1011h</c>,
-    /// <c>1014h</c>, <c>1016h</c>, <c>1017h</c>, <c>1018h</c>, <c>1200h</c>, <c>1400h</c>–<c>1403h</c>,
-    /// <c>1600h</c>–<c>1603h</c>, <c>1800h</c>–<c>1803h</c>, <c>1A00h</c>–<c>1A03h</c>), each at its
+    /// <c>1014h</c>, <c>1016h</c>, <c>1017h</c>, <c>1018h</c>, <c>1200h</c>, and per PDO up to
+    /// <see cref="CanOpenNodeOptions.PdoCount"/> the records <c>1400h</c>/<c>1600h</c>/<c>1800h</c>/
+    /// <c>1A00h</c> + n − 1 — <c>1400h</c>–<c>1403h</c>, <c>1600h</c>–<c>1603h</c>,
+    /// <c>1800h</c>–<c>1803h</c>, <c>1A00h</c>–<c>1A03h</c> for the default four), each at its
     /// CiA 301 default. <c>1000h</c> and <c>1018h</c> carry placeholder values (device type 0,
     /// vendor-id 0 = "no vendor-id assigned") that the application replaces with its own; the
     /// remaining objects are managed by the node and take values, not re-declarations.
@@ -401,8 +403,9 @@ public interface ICanOpenNode : IDisposable
     /// </summary>
     /// <param name="pdoIndex">TPDO number 1..CanOpenNodeOptions.PdoCount (or the description's higher count).</param>
     /// <param name="mapping">The mapped objects; copied into the mapping record. Every target
-    /// must exist in the OD, be PDO-mappable and readable, and have the mapped bit length (dummy
-    /// entries <c>0001h</c>–<c>0007h</c> excepted).</param>
+    /// must exist in the OD, be PDO-mappable and readable, and have the mapped bit length. A dummy
+    /// entry <c>0001h</c>–<c>0007h</c> (sub-index 0) touches no object but must have its data
+    /// type's bit length too (<see cref="PdoMappingEntry.DummyBitLength"/>).</param>
     /// <param name="transmission">Trigger mode; see <see cref="TpdoTransmission"/>. Cyclic
     /// "every n-th SYNC" is configured by writing the raw byte to <c>1800h:02</c> instead.</param>
     /// <param name="cobId">The <c>1800h:01</c> word: a CAN-ID plus the CiA 301 control
@@ -431,7 +434,8 @@ public interface ICanOpenNode : IDisposable
     /// frames matching the COB-ID unpack into the local OD and raise <see cref="RpdoReceived"/> —
     /// immediately, or with the next SYNC for <see cref="RpdoTransmission.Synchronous"/>.
     /// <paramref name="cobId"/> is the <c>1400h:01</c> word (bit 31 set = configured but disabled;
-    /// bit 29 selects an extended CAN frame); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
+    /// bit 29 selects an extended CAN frame; bit 30, the RTR bit of a TPDO, has no meaning for an
+    /// RPDO and is accepted and ignored); the CAN-ID must not be one CiA 301 §7.3.5 restricts.
     /// The writes are one transaction on the actor loop, as for <see cref="ConfigureTpdo"/>.
     /// </summary>
     /// <exception cref="ArgumentException">A value was rejected; see <see cref="ConfigureTpdo"/>.</exception>
@@ -439,9 +443,13 @@ public interface ICanOpenNode : IDisposable
         RpdoTransmission transmission = RpdoTransmission.EventDriven);
 
     /// <summary>Requests a TPDO transmission from the application (CiA 301 "internal event").
-    /// Event-driven TPDOs transmit subject to their inhibit time; a synchronous-acyclic TPDO
-    /// transmits after the next SYNC; the other modes transmit immediately. The node still
-    /// respects the current NMT state (only fires in <see cref="NmtState.Operational"/>).</summary>
+    /// Event-driven TPDOs (<c>FEh</c>/<c>FFh</c>) transmit subject to their inhibit time; a
+    /// synchronous-acyclic TPDO (<c>00h</c>) transmits after the next SYNC. The other types do
+    /// not react to an event, so the call sends nothing for them: a cyclic TPDO
+    /// (<c>01h</c>–<c>F0h</c>) is transmitted by the SYNC, and an RTR-only TPDO
+    /// (<c>FCh</c>/<c>FDh</c>) by an RTR. The node still respects the current NMT state (only
+    /// fires in <see cref="NmtState.Operational"/>); a call that sends nothing completes
+    /// normally, as for a PDO that is not valid.</summary>
     Task TriggerTpdoAsync(int pdoIndex, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -452,7 +460,10 @@ public interface ICanOpenNode : IDisposable
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Which PDO the COB-ID belongs to is read live from <c>1400h:01</c> / <c>1800h:01</c>. A
+    /// Which PDO the COB-ID belongs to is read live from <c>1400h:01</c> / <c>1800h:01</c> when a
+    /// peer description bound for <paramref name="peerNodeId"/> declares the record; without a
+    /// binding the peer-SDO gate refuses every PDO record before a frame is sent, and the whole
+    /// observation is decoded from <paramref name="peerDescription"/>. A
     /// value that comes back is used ahead of <paramref name="peerDescription"/>, including a PDO
     /// the device marks invalid (bit 31 set) or a CAN-ID the file does not name. The same entry
     /// in the file (<c>$NODEID</c> resolved to <paramref name="peerNodeId"/>) is used only when

@@ -522,6 +522,34 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         ex.Message.Should().Contain("not declared");
     }
 
+    /// <summary>
+    /// #358 (test gap): a PDO communication record whose sub-index 00h disagrees with the
+    /// sub-indices the file lists. <c>quirky.eds</c> declares <c>[1801]</c> with sub-indices 0–2;
+    /// here its sub-index 00h claims 1 (fewer) or 5 (more). The node's <c>1801h:00</c> is the
+    /// highest sub-index it actually implements from the file, 02h, whatever the file wrote there.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    public void A_Comm_Record_Sub_Index_00h_Is_The_Highest_Sub_Index_The_File_Lists(int claimed)
+    {
+        string text = File.ReadAllText(Fixture("quirky.eds"));
+        int section = text.IndexOf("[1801sub0]", StringComparison.Ordinal);
+        int value = text.IndexOf("DefaultValue=2", section, StringComparison.Ordinal);
+        section.Should().BeGreaterThan(0);
+        value.Should().BeLessThan(text.IndexOf("[1801sub1]", StringComparison.Ordinal), "the value belongs to [1801sub0]");
+        string edited = text.Substring(0, value) + $"DefaultValue={claimed}" + text.Substring(value + "DefaultValue=2".Length);
+
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var device = CanOpen.OpenNode(busB, Device, CanOpenDeviceDescription.ParseEds(edited));
+        var od = device.ObjectDictionary;
+
+        od.ReadUnsigned(0x1801, 0x00).Should().Be(2u);
+        od.TryGet(0x1801, 0x02, out _).Should().BeTrue("the file lists sub-index 02h");
+        od.TryGet(0x1801, 0x03, out _).Should().BeFalse("nothing the file does not list is created, whatever sub-index 00h claims");
+    }
+
     // =========================================================================================
     // FR-CO-025 — a DCF is a commissioned device: its NodeID is the node's, its ParameterValue
     // overrides the DefaultValue of the EDS it was made from.

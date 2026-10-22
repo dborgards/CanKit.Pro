@@ -24,6 +24,13 @@
     <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
       <_Parameter1>CanKit.Pro.Tests</_Parameter1>
     </AssemblyAttribute>
+    <!-- A J1939 node tells the channel it owns whether it still holds the channel's source
+         address, read on the channel's loop where a session starts (#347). A seam between the
+         two layers rather than a feature, so the layer that needs it is named here instead of
+         the constructor being made public, as CanKit.Pro.Actor does for ITimeSource. -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>CanKit.Pro.J1939</_Parameter1>
+    </AssemblyAttribute>
   </ItemGroup>
 
 </Project>

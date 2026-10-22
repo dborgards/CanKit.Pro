@@ -46,32 +46,49 @@ public static class SrdoCrc
         return crc;
     }
 
-    /// <summary>§8.4.2.2 "The order for data which are checked by the CRC": a) direction (1),
-    /// b) refresh time / SCT (2), c) SRVT (1), d) COB-ID 1 (4), e) COB-ID 2 (4), f) mapping
-    /// sub-index 0 (1), then per mapping entry g) its sub-index (1) and h) its value (4). The
-    /// record form holds each object twice, plain at the odd and inverted at the even sub-index,
-    /// with the same mapping value.</summary>
+    /// <summary>The 13FFh byte sequence of a configuration being written — the record form of
+    /// <paramref name="parameter"/> and <paramref name="mapping"/>: each mapped object twice,
+    /// plain at the odd and inverted at the even sub-index, with the same mapping value — fed to
+    /// the serializer below.</summary>
     internal static byte[] CanonicalBytes(in SrdoCommunicationParameter parameter, SrdoMapping mapping)
     {
         if ((byte)parameter.Direction > (byte)SrdoDirection.Receive)
             throw new ArgumentOutOfRangeException(nameof(parameter), parameter.Direction, "The direction is 0..2 (CiA DSP 304 §8.4.2.2, sub-index 1).");
         ushort cycle = (ushort)Milliseconds(parameter.RefreshOrSafeguardCycleTime, ushort.MaxValue, "refresh time or SCT (sub-index 2, UNSIGNED16)", nameof(parameter));
         byte srvt = (byte)Milliseconds(parameter.ValidationTime, byte.MaxValue, "SRVT (sub-index 3, UNSIGNED8)", nameof(parameter));
-        var bytes = new List<byte>(13 + 10 * mapping.Entries.Count);
-        bytes.Add((byte)parameter.Direction);
-        bytes.Add((byte)(cycle >> 8));
-        bytes.Add((byte)cycle);
-        bytes.Add(srvt);
-        AddU32(bytes, parameter.CobId1);
-        AddU32(bytes, parameter.CobId2);
-        bytes.Add((byte)(2 * mapping.Entries.Count));
+        var slots = new List<(byte Subindex, uint Value)>(2 * mapping.Entries.Count);
         byte sub = 1;
         foreach (var entry in mapping.Entries)
         {
             uint value = ((uint)entry.Index << 16) | ((uint)entry.Subindex << 8) | entry.BitLength;
-            bytes.Add(sub++);
-            AddU32(bytes, value);
-            bytes.Add(sub++);
+            slots.Add((sub++, value));
+            slots.Add((sub++, value));
+        }
+        return CanonicalBytes((byte)parameter.Direction, cycle, srvt, parameter.CobId1, parameter.CobId2, (byte)slots.Count, slots);
+    }
+
+    /// <summary>§8.4.2.2 "The order for data which are checked by the CRC": a) direction (1),
+    /// b) refresh time / SCT (2), c) SRVT (1), d) COB-ID 1 (4), e) COB-ID 2 (4), f) mapping
+    /// sub-index 0 (1), then per mapping slot g) its sub-index (1) and h) its value (4) — every
+    /// field as given, multi-byte fields MSB-first. The one serializer of the 13FFh layout: the
+    /// tool side (<see cref="Compute"/>, over a configuration being written) and the device side
+    /// (<see cref="SrdoRecords.RecordChecksum"/>, over a record as the dictionary holds it) both
+    /// feed it, so the byte order #289 may change is decided here once and cannot drift between
+    /// the two.</summary>
+    internal static byte[] CanonicalBytes(byte direction, ushort cycleMs, byte validationMs, uint cobId1, uint cobId2,
+        byte mappingCount, IReadOnlyList<(byte Subindex, uint Value)> slots)
+    {
+        var bytes = new List<byte>(13 + 5 * slots.Count);
+        bytes.Add(direction);
+        bytes.Add((byte)(cycleMs >> 8));
+        bytes.Add((byte)cycleMs);
+        bytes.Add(validationMs);
+        AddU32(bytes, cobId1);
+        AddU32(bytes, cobId2);
+        bytes.Add(mappingCount);
+        foreach (var (subindex, value) in slots)
+        {
+            bytes.Add(subindex);
             AddU32(bytes, value);
         }
         return bytes.ToArray();

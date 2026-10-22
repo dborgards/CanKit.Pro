@@ -603,6 +603,55 @@ public class UdsExpiredDeadlineTests
             "the 0x78 heard before the second request's handoff moved the suppressed send's window out by P2*");
     }
 
+    /// <summary>
+    /// #340 (b) — with <see cref="UdsClientOptions.QuarantineLateResponses"/>, a request cancelled
+    /// between the driver's acceptance and the confirmation may be on the bus and be answered, as
+    /// a suppressed send may (O): it quarantines its service for P2* from the cancellation,
+    /// and the next request for the service is sent only once that has passed. 0x31 rather than
+    /// 0x22, so the stub's one canned answer (62 F1 90 AA) is a stray to both requests and the
+    /// second one ends in a timeout rather than returning it.
+    /// </summary>
+    [Fact]
+    public async Task S_With_The_Quarantine_A_Request_Cancelled_Before_Confirmation_Holds_The_Next_One()
+    {
+        using var clock = NewClock();
+        var actor = clock.NewActor();
+        using var channel = new StubChannel(
+            deliverAfter: TimeSpan.FromSeconds(5),
+            stampArrivalAtDelivery: true)
+        {
+            TransmissionTime = TimeSpan.FromSeconds(5), // held until the cancellation, so nothing races it
+            CancellableSend = true,
+            HonorCancellation = true,
+            Clock = actor,
+        };
+        var p2Star = TimeSpan.FromMilliseconds(300);
+        using var client = UdsClient.Create(channel, actor, new UdsClientOptions
+        {
+            P2ClientMax = Budget,
+            P2StarClientMax = p2Star,
+            QuarantineLateResponses = true,
+        });
+        var cancelAt = TimeSpan.FromMilliseconds(30);
+
+        using var early = new CancellationTokenSource();
+        var cancelled = client.SendRawAsync(new byte[] { 0x31, 0x01, 0x02, 0x01 }, early.Token);
+        await WaitUntilSentAsync(channel, 1);
+        await clock.AdvanceAsync(cancelAt);
+        early.Cancel(); // at 30 ms, the send still held
+        Func<Task> cancel = () => cancelled;
+        await cancel.Should().ThrowAsync<OperationCanceledException>();
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var next = client.SendRawAsync(new byte[] { 0x31, 0x01, 0x02, 0x01 }, cts.Token);
+        Func<Task> run = () => RunAsync(clock, next);
+        await run.Should().ThrowAsync<UdsTimeoutException>();
+
+        // Without the quarantine the second send would start at 30 ms, right after the cancellation.
+        Gap(channel, actor, 0, 1).Should().BeGreaterThanOrEqualTo(cancelAt + p2Star,
+            "the second send waited out the quarantine the cancelled send opened");
+    }
+
     private sealed class StubChannel : IIsoTpChannel
     {
         private static readonly byte[] Response = { 0x62, 0xF1, 0x90, 0xAA };
