@@ -559,6 +559,64 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
         data.Should().Equal(new byte[] { 0xBB }, "the abandoned request's final answer arrived inside its window");
     }
 
+    // Codex on #382 — but only while that window is open. A suppressed TesterPresent in the
+    // programming session (P2* 10 s) whose window runs out with no request for 0x3E after it
+    // leaves nothing behind: a session change to one with a shorter P2* follows, and the next
+    // suppressed TesterPresent's 0x78 moves its window out by the P2* in force now (1.5 s) --
+    // not by the programming session's, which would hold the next 0x3E back for 10 s.
+    [Fact]
+    public async Task A_Window_That_Ran_Out_Passes_No_P2Star_To_The_Next()
+    {
+        var steps = new EcuSteps();
+        var pendingAt = TimeSpan.FromMilliseconds(50);
+        var negativeAt = TimeSpan.FromMilliseconds(400); // after the 0x78
+        var p2Star = TimeSpan.FromMilliseconds(1500);
+        int suppressed = 0;
+        using var pair = new ClockPair(
+            e =>
+            {
+                e.Delay = steps.WaitAsync;
+                e.On(0x10, req => req[1] == (byte)UdsSessionType.Programming
+                    ? new byte[] { req[1] }.Concat(ProgrammingTiming).ToArray()
+                    : new byte[] { req[1], 0x00, 0x32, 0x00, 0x64 }); // 50 ms, 1 s: below the configured
+                e.On(0x3E, req =>
+                {
+                    if ((req[1] & 0x80) != 0 && Interlocked.Increment(ref suppressed) == 2)
+                        throw new EcuResponsePendingThenNegative(pendingCount: 1, nrc: 0x12,
+                            delayBefore: pendingAt, delayAfter: negativeAt);
+                    return new byte[] { 0x00 }; // the first suppressed send: no answer at all
+                });
+            },
+            options: new UdsClientOptions
+            {
+                P2ClientMax = TimeSpan.FromMilliseconds(300),
+                P2StarClientMax = p2Star,
+            });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Programming, cts.Token));
+        await Within(pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token)); // its window: P2 500 ms
+        await pair.Clock.AdvanceAsync(ProgrammingP2 + TimeSpan.FromMilliseconds(1)); // run out, unconsumed
+
+        await Within(pair.Client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token)); // P2* 1.5 s now
+        await Within(pair.Client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token)); // its window: P2 300 ms
+
+        var next = pair.Client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token);
+        await pair.WaitUntilWaitingAsync(TimeSpan.FromMilliseconds(300));
+        await pair.Clock.AdvanceAsync(pendingAt);
+        await pair.DeliverAsync(() => steps.Release(pendingAt), Negative(0x3E, 0x78));
+        // Moved out by the P2* in force from the 0x78's arrival -- not by the programming
+        // session's, noted with a window that had closed before this send went out.
+        await pair.WaitUntilWaitingAsync(p2Star);
+
+        await pair.Clock.AdvanceAsync(negativeAt);
+        await pair.DeliverAsync(() => steps.Release(negativeAt), Negative(0x3E, 0x12));
+        await pair.Clock.AdvanceAsync(p2Star - negativeAt); // the window closes; the next goes out
+        Func<Task> act = () => Within(next);
+        await act.Should().NotThrowAsync("the negative answer belongs to the suppressed send");
+        pair.Ecu.RequestsHandled.Should().Be(5);
+    }
+
     [Theory]
     [InlineData(new byte[] { 0x00, 0x32, 0x01, 0xF4 }, 50, 5_000)]
     [InlineData(new byte[] { 0xFF, 0xFF, 0xFF, 0xFF }, 65_535, 655_350)]

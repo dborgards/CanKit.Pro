@@ -40,14 +40,20 @@ internal sealed class SuppressedResponseWindows
     /// 0x78 heard inside it moves it out: the P2* in force when the request went out. The
     /// physical client's P2* changes with the session (#340), and a window opened under a longer
     /// one must not be moved out by a shorter one negotiated since -- the late answer still has
-    /// the P2* its own session gave it (Codex on #382). A window noted twice keeps the longer.
+    /// the P2* its own session gave it (Codex on #382). A window noted again while it is still
+    /// open keeps the longer; one that had already closed when the new request went out passes
+    /// nothing on, so the new window has its own -- a window left to run out unconsumed, a
+    /// suppressed send with no request for its service after it, must not lend a later session
+    /// its P2* (Codex on #382).
     /// </summary>
     public void Note(byte sid, long sentTimestamp, TimeSpan window, long ticksPerSecond, TimeSpan pendingExtension)
     {
         lock (_gate)
         {
+            // Open as ExtendIfOpenAt counts it: up to and including its deadline.
+            bool stillOpen = _until.TryGetValue(sid, out var previousUntil) && sentTimestamp <= previousUntil;
             Note(sid, sentTimestamp, window, ticksPerSecond);
-            if (!_pendingExtension.TryGetValue(sid, out var kept) || kept < pendingExtension)
+            if (!stillOpen || !_pendingExtension.TryGetValue(sid, out var kept) || kept < pendingExtension)
                 _pendingExtension[sid] = pendingExtension;
         }
     }
