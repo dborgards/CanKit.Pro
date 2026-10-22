@@ -73,6 +73,7 @@ internal sealed partial class CanOpenNode
             if (mismatches.Count > 0) return new PeerSafetyResult(false, mismatches);
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(configuration, peerCount, nameof(configuration));
+            EnsureFixedTransfersFitDescription(peerNodeId, binding, CountedConfigurationTransfers(peerCount));
             var writes = SafetyWrites(configuration, peerCount, binding, nameof(configuration)).ToList();
             // §9.2 "write all safety-relevant parameter incl. checksums"; CiA 319 §5.3 step 1: the
             // SRDO configuration data, then the checksums to 13FFh.
@@ -166,6 +167,7 @@ internal sealed partial class CanOpenNode
             EnsureValidationTimesFitDescription(expected, binding, paramName);
             int peerCount = await ReadPeerSrdoCountAsync(peerNodeId, binding, cancellationToken).ConfigureAwait(false);
             EnsureConfigurationFitsPeer(expected, peerCount, paramName);
+            EnsureFixedTransfersFitDescription(peerNodeId, binding, CountedVerificationTransfers(peerCount));
             // 1300h is not part of step D's list (§8.3.1 D). A deleted SRDO's checksum is not
             // checked by the device (§9.5, last rule: the checksums of the SRDOs that exist), so a
             // stale one is no mismatch; that SRDO's sub1 = 0 still is compared.
@@ -223,6 +225,24 @@ internal sealed partial class CanOpenNode
         yield return (SrdoRecords.Checksum, 0x00);
         foreach (var n in expected.Srdos.Keys.OrderBy(n => n)) yield return (SrdoRecords.Checksum, (byte)n);
         yield return (SrdoRecords.ConfigurationValid, 0x00);
+    }
+
+    /// <summary>The transfers a configuration makes for every SRDO up to the peer's count, named
+    /// or not, whatever the peer answers — the deletion (sub-index 01h of each communication
+    /// record, the delete-first pass) and each checksum 13FFh:n (0 for an SRDO not named) — known
+    /// once 13FFh:00 is read and run through the gate then, before the first write: a refusal
+    /// there would otherwise come after the peer's SRDOs were deleted and its 13FEh cleared.</summary>
+    private static IEnumerable<(ushort Index, byte Subindex)> CountedConfigurationTransfers(int peerSrdoCount)
+    {
+        for (int n = 1; n <= peerSrdoCount; n++) yield return (SrdoRecords.CommIndex(n), 0x01);
+        for (int n = 1; n <= peerSrdoCount; n++) yield return (SrdoRecords.Checksum, (byte)n);
+    }
+
+    /// <summary>The transfers a verification makes for every SRDO up to the peer's count: sub-index
+    /// 01h of each communication record (an SRDO not expected is compared as deleted).</summary>
+    private static IEnumerable<(ushort Index, byte Subindex)> CountedVerificationTransfers(int peerSrdoCount)
+    {
+        for (int n = 1; n <= peerSrdoCount; n++) yield return (SrdoRecords.CommIndex(n), 0x01);
     }
 
     /// <summary>The gate every transfer passes, run over <paramref name="transfers"/> before the
@@ -320,6 +340,17 @@ internal sealed partial class CanOpenNode
         if (count[0] > SrdoRecords.MaxSrdoCount)
             throw new InvalidOperationException(
                 $"The peer reports {count[0]} SRDOs in 13FFh:00; CiA DSP 304 §8.4.2.2 allows at most {SrdoRecords.MaxSrdoCount}.");
+        // The §9.2 list touches every SRDO up to the count, named or not — a configuration deletes
+        // each (130(n)h:01 = 0) and zeroes its checksum (13FFh:n), a verification reads each sub1 —
+        // and the gate implies records only up to the file's highest (FR-CO-029). A peer that
+        // reports more than the file implies is refused here, before the first write: at the first
+        // record above the file the gate would refuse mid-transaction, after the delete-first pass
+        // had already deleted the peer's SRDOs and cleared its 13FEh.
+        if (count[0] > binding.DescribedSrdoCount)
+            throw new InvalidOperationException(
+                $"The peer reports {count[0]} SRDOs in 13FFh:00, but its bound description declares SRDO records only up to {binding.DescribedSrdoCount}, " +
+                $"and the peer-SDO gate lets through no record above them (FR-CO-029): SRDOs {binding.DescribedSrdoCount + 1}..{count[0]} could be neither deleted nor verified, " +
+                "so the bound file does not describe this peer. Nothing was written, and nothing further was sent.");
         return count[0];
     }
 
