@@ -6,6 +6,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 
 namespace CanKit.Pro.Tests.Infrastructure;
 
@@ -191,7 +192,12 @@ public sealed class ControllableBus : ICanBus
         => FrameObserved?.Invoke(this, new CanReceiveDataView(
             new CanReceiveData(frame) { ReceiveTimestamp = receiveTimestamp, IsEcho = isEcho }));
 
-    /// <summary>Raises <see cref="FaultOccurred"/>, the signal a bus-off surfaces through.</summary>
+    /// <summary>
+    /// Raises <see cref="FaultOccurred"/>. Under the default <c>CanExceptionPolicy</c> a CanKit
+    /// 0.5.6 adapter does so only when its receive loop dies, and under no policy for a bus-off
+    /// (#348); paired with <see cref="BusState"/> it drives the service's bus-off sweep, which
+    /// only this double reaches.
+    /// </summary>
     public void RaiseFault(Exception error) => FaultOccurred?.Invoke(this, error);
 
     /// <summary>
@@ -206,7 +212,29 @@ public sealed class ControllableBus : ICanBus
 
     public IBusRTOptionsConfigurator Options => _options;
 
-    public BusState BusState { get; set; }
+    private BusState _busState;
+
+    /// <summary>
+    /// When set, what reading <see cref="BusState"/> after <see cref="Dispose"/> throws. The PCAN,
+    /// Kvaser, SocketCAN and ZLG getters in CanKit 0.5.6 call <c>ThrowIfDisposed()</c> before the
+    /// driver status call, which throws <see cref="CanBusDisposedException"/>; a bus following
+    /// .NET's own convention throws <see cref="ObjectDisposedException"/> instead. Unset by
+    /// default so a test that tears the double down in any order keeps reading a plain property;
+    /// set for a test about what the service does when the read fails inside a fault callback
+    /// (#369).
+    /// </summary>
+    public Func<Exception>? BusStateFailureOnceDisposed { get; set; }
+
+    public BusState BusState
+    {
+        get
+        {
+            if (BusStateFailureOnceDisposed is { } failure && Volatile.Read(ref _disposed) != 0)
+                throw failure();
+            return _busState;
+        }
+        set => _busState = value;
+    }
 
     public BusNativeHandle NativeHandle => BusNativeHandle.Zero;
 

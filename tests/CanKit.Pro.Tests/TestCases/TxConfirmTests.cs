@@ -7,6 +7,7 @@ using AwesomeAssertions;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
@@ -624,9 +625,10 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         var pendingTask = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }),
             TimeSpan.FromSeconds(30));
 
-        // What a real adapter does when the controller drops off the bus: the state goes BusOff and
-        // a Fault-severity exception is reported through the bus's fault channel. The service's
-        // OnFaultOccurred must then fail every outstanding confirmation.
+        // The one combination that produces BusOff: the state reads BusOff and a fault is reported
+        // through the bus's fault channel. The service's OnFaultOccurred must then fail every
+        // outstanding confirmation. No CanKit 0.5.6 adapter raises a fault for a bus-off (#348);
+        // the double does, which is why this path is testable at all.
         sender.BusState = BusState.BusOff;
         sender.RaiseFault(new InvalidOperationException("simulated bus-off"));
 
@@ -639,6 +641,192 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff);
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(5),
             "the BusOff path must resolve the confirmation immediately, not via the 30 s timeout");
+    }
+
+    // The other half of the guard the test above exercises only one side of: a fault reported
+    // while the controller is *not* off the bus is not a bus-off, and must not fail the outstanding
+    // confirmation as one. The test above sets BusState = BusOff *and* raises the fault, so the
+    // BusState check in OnFaultOccurred could be deleted without it going red (mutation R-M1 in
+    // docs/reviews/2026-10-21-deep-review/rawcan-addressing.md, #348). Here the state stays
+    // ErrActive, the fault is raised, and the send's own echo -- parked until after the fault --
+    // must still confirm it: with the guard gone the sweep would have resolved it as BusOff first.
+    [Fact]
+    public async Task A_Fault_While_The_Bus_Is_Not_Off_Leaves_The_Send_Pending()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x123, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        sender.BusState.Should().Be(BusState.ErrActive, "the double reports a healthy controller until a test moves it");
+        sender.RaiseFault(new InvalidOperationException("poll loop died, controller still on the bus"));
+
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        var result = await send.WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeTrue("a fault that is not a bus-off leaves the send to its own echo");
+        result.IsApproximated.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.None);
+    }
+
+    // #348 (R-9): the only fault a CanKit 0.5.6 adapter raises is its receive loop dying, after
+    // which nothing will ever arrive -- and until this change the service swallowed it unless the
+    // bus was also off. It now goes through the service's one fault channel, as the adapter's own
+    // exception, so a consumer that only reads subscriptions can learn, on the service it
+    // subscribed on, that the bus is dead.
+    // FaultOccurred is raised synchronously by the double, so the relay has run when RaiseFault
+    // returns; nothing here waits on a clock.
+    [Fact]
+    public void A_Bus_Fault_Is_Relayed_Through_BackgroundExceptionOccurred()
+    {
+        using var sender = OpenEcho();
+        using var service = new CanBusService(sender);
+
+        Exception? relayed = null;
+        service.BackgroundExceptionOccurred += (_, ex) => relayed = ex;
+
+        var fault = new InvalidOperationException("poll loop died");
+        sender.RaiseFault(fault);
+
+        relayed.Should().BeSameAs(fault, "the adapter's exception is relayed as itself, not wrapped");
+    }
+
+    // Codex on #369: the relay runs before the bus-off sweep, and a listener may answer "the bus
+    // is dead" by disposing the bus -- after which the PCAN, Kvaser, SocketCAN and ZLG BusState
+    // getters throw CanBusDisposedException (ThrowIfDisposed). The state the sweep decides
+    // on is therefore read *before* any listener runs. Read afterwards, the getter throws out of
+    // OnFaultOccurred, the sweep never runs, and the outstanding send times out instead of
+    // resolving as BusOff. The double throws the same way on request; the fault is raised
+    // synchronously, so nothing here waits on a clock.
+    [Fact]
+    public async Task A_Listener_That_Disposes_The_Bus_On_The_Relayed_Fault_Does_Not_Defeat_The_BusOff_Sweep()
+    {
+        using var sender = OpenDeferredEcho();
+        sender.BusStateFailureOnceDisposed = () => new CanBusDisposedException();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x125, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        service.BackgroundExceptionOccurred += (_, _) => sender.Dispose();
+        sender.BusState = BusState.BusOff;
+        sender.RaiseFault(new InvalidOperationException("poll loop died, controller off the bus"));
+
+        var result = await send.WaitAsync(ShortTimeout);
+
+        result.Confirmed.Should().BeFalse();
+        result.FailureReason.Should().Be(TxConfirmFailureReason.BusOff,
+            "the sweep decides on the state read before the listener disposed the bus");
+    }
+
+    // The other side of the read above: OnFaultOccurred runs on the poll thread that just died, and
+    // the BusState getter there may itself throw -- CanBusDisposedException from the adapters'
+    // ThrowIfDisposed once the bus is disposed, ObjectDisposedException from a bus that follows
+    // .NET's own convention. A read that fails that way counts as "not off": the sweep is skipped
+    // even though the state was set to BusOff before the bus went away, and the relay still
+    // happens. An unguarded read throws out of OnFaultOccurred before any listener runs. The send's
+    // own echo, parked until after the fault, then confirms it -- had the sweep run, it would have
+    // resolved the send as BusOff first. The fault is raised synchronously by the double, so the
+    // relay has run when RaiseFault returns; nothing here waits on a clock.
+    [Theory]
+    [InlineData(typeof(CanBusDisposedException))]
+    [InlineData(typeof(ObjectDisposedException))]
+    public async Task A_BusState_Read_That_Fails_Skips_The_Sweep_But_Not_The_Relay(Type failure)
+    {
+        using var sender = OpenDeferredEcho();
+        sender.BusStateFailureOnceDisposed = () => failure == typeof(ObjectDisposedException)
+            ? new ObjectDisposedException(nameof(ControllableBus))
+            : new CanBusDisposedException();
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x126, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        Exception? relayed = null;
+        service.BackgroundExceptionOccurred += (_, ex) => relayed = ex;
+
+        sender.BusState = BusState.BusOff;
+        sender.Dispose();
+        var fault = new InvalidOperationException("poll loop died");
+        sender.Invoking(s => s.RaiseFault(fault)).Should().NotThrow();
+
+        relayed.Should().BeSameAs(fault, "a BusState read that fails must not swallow the relay");
+
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        var result = await send.WaitAsync(ShortTimeout);
+        result.FailureReason.Should().Be(TxConfirmFailureReason.None,
+            "a state that could not be read is not a bus-off, so the send is not resolved as one");
+        result.Confirmed.Should().BeTrue("the send is left to its own echo");
+    }
+
+    // A getter that throws something other than a failed state read (a third-party bus's own
+    // bug, say) is not swallowed -- it still escapes into the adapter's raiseFault -- but the
+    // fault is relayed before it does, so "relayed either way" (README § TX-Confirm) holds for it
+    // too (Codex on #369). No sweep runs: the exception leaves OnFaultOccurred first, and the
+    // send is left to its own echo. Synchronous throughout, nothing waits on a clock.
+    [Fact]
+    public async Task A_BusState_Read_That_Throws_Anything_Else_Still_Relays_The_Fault()
+    {
+        using var sender = OpenDeferredEcho();
+        var unexpected = new InvalidOperationException("third-party getter bug");
+        sender.BusStateFailureOnceDisposed = () => unexpected;
+        using var service = new CanBusService(sender);
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x127, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+
+        Exception? relayed = null;
+        service.BackgroundExceptionOccurred += (_, ex) => relayed = ex;
+
+        sender.BusState = BusState.BusOff;
+        sender.Dispose();
+        var fault = new InvalidOperationException("poll loop died");
+        sender.Invoking(s => s.RaiseFault(fault)).Should().Throw<InvalidOperationException>()
+            .Which.Should().BeSameAs(unexpected, "an exception that is not a failed state read is not swallowed");
+
+        relayed.Should().BeSameAs(fault, "the fault is relayed before the getter's exception escapes");
+
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+        var result = await send.WaitAsync(ShortTimeout);
+        result.FailureReason.Should().Be(TxConfirmFailureReason.None, "no sweep ran");
+        result.Confirmed.Should().BeTrue("the send is left to its own echo");
+    }
+
+    // #349, a characterisation of the matching as it stands, not a contract: the maintainer's
+    // decision there is whether a late echo of a send that already timed out is absorbed for a
+    // bounded time (the J1939 node's ClaimEchoGrace model, #180) or left as a documented limit of
+    // content-based matching. Either way this is the scenario, made reproducible: the first send's
+    // frame was accepted and its echo is on its way, but arrives only after the send timed out and
+    // a byte-identical second send went out behind it. Today that late echo confirms the second
+    // send -- the two echoes cannot be told apart on the wire, and the first send's entry is gone.
+    // A decision for the tombstone turns this test into the red one it is implemented against.
+    [Fact]
+    public async Task A_Late_Echo_Of_A_Timed_Out_Send_Is_Matched_To_The_Next_Identical_Send()
+    {
+        using var sender = OpenDeferredEcho();
+        using var service = new CanBusService(sender);
+
+        var frame = CanFrame.Classic(0x700, new byte[] { 3, 1, 4 });
+
+        // Not lost, late: the echo stays parked past the send's own timeout. The timeout is a
+        // delay the test waits out, not a quantity it measures (#92).
+        var first = await service.SendConfirmedAsync(frame, TimeSpan.FromMilliseconds(50)).WaitAsync(ShortTimeout);
+        first.FailureReason.Should().Be(TxConfirmFailureReason.Timeout);
+        sender.DeferredEchoes.Count.Should().Be(1, "the first send's echo is still on its way");
+
+        var second = service.SendConfirmedAsync(frame, TimeSpan.FromSeconds(30));
+        await sender.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
+
+        // Oldest first: this is the first send's echo, arriving late.
+        sender.DeferredEchoes.ReleaseNext().Should().BeTrue();
+
+        // Inverts with a tombstone: the second send would then still be pending here, waiting for
+        // the echo that is still parked.
+        var confirmation = await second.WaitAsync(ShortTimeout);
+        confirmation.Confirmed.Should().BeTrue("as it stands, the late echo is matched to the next identical send (#349)");
+        confirmation.IsApproximated.Should().BeFalse();
+        sender.DeferredEchoes.Count.Should().Be(1, "the second send's own echo has not been released");
     }
 
     // Echo matching runs for every echo frame the adapter reports while any send is outstanding,
