@@ -1163,12 +1163,14 @@ new gap", not "everything proven"; the open items are listed in the script itsel
   (FR-RAW-031) — exactly the error class the review named as the `QueuedDeadline.Enqueue` crash on
   identical frames. Failures (timeout, BusOff, rejection by the driver) resolve the returned task
   observably (`TxConfirmation.FailureReason`), never hang indefinitely; explicit caller
-  cancellation runs separately via task cancellation. `BusState.BusOff` triggers, via
-  `ICanBus.FaultOccurred`, a proactive fast-fail of all open confirmations instead of waiting for
-  the full timeout. `CanKit.Adapter.Virtual` did not previously declare `CanFeature.Echo`
-  statically (unlike all real adapters) and was extended for that in the fork — otherwise echo
-  matching would not have been testable at all for want of hardware-independent CI. That addition
-  is not in CanKit 0.5.6 (`docs/upstream-candidates.md` § 3); the tests here therefore create the
+  cancellation runs separately via task cancellation. A proactive fast-fail of all open
+  confirmations as `BusOff`, instead of waiting for the full timeout, happens only when the adapter
+  raises `ICanBus.FaultOccurred` while `ICanBus.BusState` reads `BusOff` — which no CanKit 0.5.6
+  adapter does; there a send outstanding during a bus-off ends as `Timeout` (#348; what the
+  adapters report instead is stated in `src/CanKit.Pro.RawCan/README.md`, § *TX-Confirm*).
+  `CanKit.Adapter.Virtual` did not previously declare `CanFeature.Echo` statically (unlike all
+  real adapters) and was extended for that in the fork — otherwise echo matching would not have
+  been testable at all for want of hardware-independent CI. That addition is not in CanKit 0.5.6 (`docs/upstream-candidates.md` § 3); the tests here therefore create the
   echo worlds themselves (§8.9). Secured via virtual loopback
   (`tests/CanKit.Pro.Tests/TestCases/TxConfirmTests.cs`).
   **Limitation (measured, #249):** Echo matching requires the adapter to report the own frame with

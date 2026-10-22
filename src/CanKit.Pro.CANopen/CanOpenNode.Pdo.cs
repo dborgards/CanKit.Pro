@@ -116,7 +116,9 @@ internal sealed partial class CanOpenNode
     /// The CiA 301 §7.5.2.38 re-mapping procedure as OD writes: destroy the PDO (bit 31), disable
     /// the mapping (sub0 = 0), write the entries, enable the mapping (sub0 = N), set the
     /// communication parameters, create the PDO. Each write is validated like an SDO download;
-    /// a rejection surfaces as <see cref="ArgumentException"/> and leaves the PDO destroyed.
+    /// a rejection surfaces as <see cref="ArgumentException"/> and leaves the PDO destroyed —
+    /// except the checks ahead of step 1 (records present, optional sub-indices the value needs),
+    /// which refuse with the same exception and leave the PDO as it was.
     /// Runs on the actor loop (<see cref="RunOnActorAndWait"/>) and holds the dictionary's write
     /// gate throughout (<see cref="ObjectDictionary.Transaction"/>), so the sequence is one
     /// transaction: the SDO server writes on the same loop, a second configuration queues behind
@@ -130,6 +132,24 @@ internal sealed partial class CanOpenNode
         {
             _od.Transaction(() =>
             {
+                // Decided before step 1, so a refusal leaves the PDO as it was. A PDO the
+                // description does not declare has no records at all (§7.3.3, the loader removes
+                // them), and CiA 301 Table 71 makes the inhibit time (03h) and the event timer
+                // (05h) optional sub-indices of a TPDO communication record: the loader keeps
+                // only the ones the file declares, so they are written only where they exist, and
+                // a value that needs an absent one is refused rather than lost.
+                RequirePdoRecordEntry(comm, 0x01);
+                RequirePdoRecordEntry(comm, 0x02);
+                RequirePdoRecordEntry(map, 0x00);
+                bool hasInhibit = _od.TryGet(comm, 0x03, out _);
+                bool hasEventTimer = _od.TryGet(comm, 0x05, out _);
+                if (isTpdo && inhibit != 0 && !hasInhibit)
+                    throw new ArgumentException(
+                        $"the communication record 0x{comm:X4} has no inhibit time (sub-index 03h), so a non-zero inhibit time cannot be set.", "inhibitTime");
+                if (isTpdo && eventTimerMs != 0 && !hasEventTimer)
+                    throw new ArgumentException(
+                        $"the communication record 0x{comm:X4} has no event timer (sub-index 05h), so an event timer cannot be set.", "eventTimerInterval");
+
                 uint current = _od.ReadUnsigned(comm, 0x01);
                 _od.WriteUnsigned(comm, 0x01, ((current & CanOpenCobId.InvalidBit) != 0 ? cobIdWord : current) | CanOpenCobId.InvalidBit);
                 _od.WriteUnsigned(map, 0x00, 0);
@@ -141,8 +161,8 @@ internal sealed partial class CanOpenNode
                 _od.WriteUnsigned(comm, 0x02, transmissionType);
                 if (isTpdo)
                 {
-                    _od.WriteUnsigned(comm, 0x03, inhibit);
-                    _od.WriteUnsigned(comm, 0x05, eventTimerMs);
+                    if (hasInhibit) _od.WriteUnsigned(comm, 0x03, inhibit);
+                    if (hasEventTimer) _od.WriteUnsigned(comm, 0x05, eventTimerMs);
                 }
                 _od.WriteUnsigned(comm, 0x01, cobIdWord);
             });
@@ -152,6 +172,18 @@ internal sealed partial class CanOpenNode
             throw new ArgumentException(
                 $"{(isTpdo ? "TPDO" : "RPDO")}{pdoIndex} configuration rejected: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// A sub-index <see cref="WritePdoRecords"/> cannot do without. Its absence is the
+    /// documented <see cref="ArgumentException"/> (the PDO is not declared on this node), not the
+    /// <see cref="KeyNotFoundException"/> the dictionary would raise mid-sequence.
+    /// </summary>
+    private void RequirePdoRecordEntry(ushort index, byte subindex)
+    {
+        if (_od.TryGet(index, subindex, out _)) return;
+        throw new ArgumentException(
+            $"the PDO is not declared on this node: 0x{index:X4}:{subindex:X2} does not exist.", "pdoIndex");
     }
 
     private static uint EncodeMappingEntry(PdoMappingEntry e)
