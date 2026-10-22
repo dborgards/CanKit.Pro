@@ -2804,37 +2804,31 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         };
 
         int held = 1;
-        var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+        // Disposed in the middle as the retirement under test; the using covers a failure before that.
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
             new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor,
             sourceAddressHeld: () => Volatile.Read(ref held) != 0);
-        try
-        {
-            var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
-            var queued = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
-            int queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
-            queuedCount.Should().Be(1, "the second BAM waits behind the first, which is on the wire");
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        var queued = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        int queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+        queuedCount.Should().Be(1, "the second BAM waits behind the first, which is on the wire");
 
-            Volatile.Write(ref held, 0);
+        Volatile.Write(ref held, 0);
 
-            Func<Task> late = () => sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3)).WithTimeout(ShortTimeout);
-            await late.Should().ThrowAsync<ObjectDisposedException>(
-                "a send reaching the loop after the address was given up starts no session");
+        Func<Task> late = () => sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3)).WithTimeout(ShortTimeout);
+        await late.Should().ThrowAsync<ObjectDisposedException>(
+            "a send reaching the loop after the address was given up starts no session");
 
-            await DrainAsync(clock, actor, first);
-            queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
-            queuedCount.Should().Be(1, "the end of the first session does not start the queued one");
-            queued.IsCompleted.Should().BeFalse();
-            lock (announced) announced.Should().Equal(0xFEC0u);
+        await DrainAsync(clock, actor, first);
+        queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+        queuedCount.Should().Be(1, "the end of the first session does not start the queued one");
+        queued.IsCompleted.Should().BeFalse();
+        lock (announced) announced.Should().Equal(0xFEC0u);
 
-            sender.Dispose();
-            Func<Task> retired = () => queued.WithTimeout(ShortTimeout);
-            await retired.Should().ThrowAsync<ObjectDisposedException>("the retirement fails what is still queued");
-            lock (announced) announced.Should().Equal(0xFEC0u);
-        }
-        finally
-        {
-            sender.Dispose();
-        }
+        sender.Dispose();
+        Func<Task> retired = () => queued.WithTimeout(ShortTimeout);
+        await retired.Should().ThrowAsync<ObjectDisposedException>("the retirement fails what is still queued");
+        lock (announced) announced.Should().Equal(0xFEC0u);
     }
 
     [Fact]
