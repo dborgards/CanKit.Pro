@@ -74,6 +74,30 @@ public class SrdoRecordsTests
         SrdoRecords.IsConfigurationValid(od, 1).Should().BeFalse("one bit of the checksum is wrong");
     }
 
+    /// <summary>S-6 of the 2026-10-21 review (#360): the tool side checksums a configuration
+    /// being written (<see cref="SrdoCrc.Compute"/>, the inverted slots synthesised from the
+    /// plain ones), the device side the record as the dictionary holds it
+    /// (<see cref="SrdoRecords.RecordChecksum"/>, every slot raw). Both feed the one serializer
+    /// of <see cref="SrdoCrc"/>, and over a legitimate record they agree — pinned here with two
+    /// mapped objects, where the field order, the slot doubling and the count byte all enter,
+    /// and against the serializer called with the raw fields. A raw slot changed behind the
+    /// dictionary's back is seen by the device side alone (Codex on #329).</summary>
+    [Fact]
+    public void RecordChecksum_Of_A_Legitimate_Record_Is_The_Checksum_Of_Its_Configuration()
+    {
+        var od = RecordFor(1, 1, 30, 20, 0x109, 0x10A, 0x20000010, 0x20000010, 0x20010008, 0x20010008);
+        SrdoRecords.TryReadCommunication(od, 1, out var p).Should().BeTrue();
+        var mapping = SrdoMapping.FromEntries(SrdoRecords.ReadMapping(od, 1));
+        mapping.Entries.Should().HaveCount(2);
+        ushort crc = SrdoRecords.RecordChecksum(od, 1);
+        crc.Should().Be(SrdoCrc.Compute(p, mapping));
+        crc.Should().Be(SrdoCrc.Crc16Xmodem(SrdoCrc.CanonicalBytes(1, 30, 20, 0x109, 0x10A, 4,
+            new[] { ((byte)1, 0x20000010u), ((byte)2, 0x20000010u), ((byte)3, 0x20010008u), ((byte)4, 0x20010008u) })));
+        od.WriteUnsigned(SrdoRecords.MapIndex(1), 2, 0x20010008);
+        SrdoRecords.RecordChecksum(od, 1).Should().NotBe(crc, "the inverted slot no longer repeats its plain one");
+        SrdoCrc.Compute(p, mapping).Should().Be(crc, "the tool side synthesises the inverted slots and cannot see it");
+    }
+
     [Fact]
     public void A_Record_Without_A_Direction_Entry_Is_Absent()
     {
