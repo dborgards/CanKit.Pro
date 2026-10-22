@@ -3739,7 +3739,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // the next BAM and CM TP.DT, the T3 and the T4 expiry -- act only while the session they were
     // bound to is still the one registered under its key. No public path reaches that check with
     // a session that has ended, because a cancel releases the spacing timer and the deadline
-    // before a successor can start, so the tests hold one back through CaptureTxContinuation and
+    // before a successor can start, so the tests hold one back through CaptureTxContinuations and
     // run it while a successor of the same key is in flight. The successor must not notice:
     // nothing is sent for the old session, the successor's timer is as it was, and it runs to
     // completion with its own frames only.
@@ -3770,9 +3770,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the announce
         bus.DeferredEchoes.ReleaseNext();
         await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout); // DT 1 is next
-        var stale = await actor.PostAsync<Action?>(() => sender.CaptureTxContinuation(
-            J1939Pgn.GlobalAddress, pgn, J1939TpChannel.TxContinuation.NextBamDt));
-        stale.Should().NotBeNull();
+        var stale = (await actor.PostAsync(() => sender.CaptureTxContinuations(J1939Pgn.GlobalAddress, pgn))).NextBamDt;
 
         cts.Cancel();
         Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
@@ -3780,7 +3778,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var second = sender.SendBamAsync(pgn, payload);
         await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the successor's announce, unconfirmed
 
-        await actor.PostAsync(stale!);
+        await actor.PostAsync(stale);
         (await actor.NextTimerDelayAsync()).Should().BeNull(
             "the successor arms its spacing only once its own announce is confirmed");
 
@@ -3793,12 +3791,11 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     }
 
     [Theory]
-    [InlineData(nameof(J1939TpChannel.TxContinuation.NextCmDt))]
-    [InlineData(nameof(J1939TpChannel.TxContinuation.T3Expired))]
-    [InlineData(nameof(J1939TpChannel.TxContinuation.T4Expired))]
-    public async Task A_Stale_Cm_Continuation_Leaves_The_Successor_Session_Of_Its_Key_Alone(string continuationName)
+    [InlineData("NextCmDt")]
+    [InlineData("T3Expired")]
+    [InlineData("T4Expired")]
+    public async Task A_Stale_Cm_Continuation_Leaves_The_Successor_Session_Of_Its_Key_Alone(string continuation)
     {
-        var continuation = (J1939TpChannel.TxContinuation)Enum.Parse(typeof(J1939TpChannel.TxContinuation), continuationName);
         const byte subjectSa = 0x10, peerSa = 0x20;
         const uint pgn = 0xFEC9u;
         var stalePayload = RandomPayload(21, seed: 369); // three packets each
@@ -3827,14 +3824,19 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
         bus.DeferredEchoes.ReleaseNext();
         var staleDts = new List<byte[]>();
-        if (continuation == J1939TpChannel.TxContinuation.NextCmDt)
+        if (continuation == "NextCmDt")
         {
             bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
             await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
             staleDts.Add(DtFrames(stalePayload, 1)[0]);
         }
-        var stale = await actor.PostAsync<Action?>(() => sender.CaptureTxContinuation(peerSa, pgn, continuation));
-        stale.Should().NotBeNull();
+        var captured = await actor.PostAsync(() => sender.CaptureTxContinuations(peerSa, pgn));
+        Action stale = continuation switch
+        {
+            "NextCmDt" => captured.NextCmDt,
+            "T3Expired" => captured.T3Expired,
+            _ => captured.T4Expired,
+        };
 
         int parked = 1 + staleDts.Count; // the RTS and the old session's DT, if it sent one
         cancel.Cancel();
@@ -3846,7 +3848,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await bus.DeferredEchoes.WaitForEnqueuedAsync(parked + 2, ShortTimeout); // the successor's RTS
         await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout); // its T3, for the CTS
 
-        await actor.PostAsync(stale!);
+        await actor.PostAsync(stale);
         (await actor.NextTimerDelayAsync()).Should().Be(options.T3,
             "the successor's T3 is still the timer running, neither replaced nor joined by another");
 

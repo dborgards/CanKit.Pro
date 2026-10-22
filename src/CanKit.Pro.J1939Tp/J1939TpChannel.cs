@@ -973,14 +973,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     private bool IsCurrentSession(TxSession session)
         => _txSessions.TryGetValue(session.Key, out var current) && ReferenceEquals(current, session);
 
-    /// <summary>The TX continuations a test can hold past their session; see <see cref="CaptureTxContinuation"/>.</summary>
-    internal enum TxContinuation { NextBamDt, NextCmDt, T3Expired, T4Expired }
-
     /// <summary>
-    /// Binds <paramref name="continuation"/> to the session registered under
-    /// (<paramref name="destinationAddress"/>, <paramref name="pgn"/>) the way its timer or
-    /// confirmation does, and returns it to run later; null when no session is registered.
-    /// Actor-loop state: call it and run what it returns there.
+    /// Binds the four TX continuations to the session registered under
+    /// (<paramref name="destinationAddress"/>, <paramref name="pgn"/>) the way its timers and
+    /// confirmations do, and returns them to run later. Actor-loop state: call it and run what it
+    /// returns there. Throws <see cref="KeyNotFoundException"/> when no session is registered.
     /// </summary>
     /// <remarks>
     /// A test seam, not a feature. No public path runs these four after their session ended --
@@ -988,17 +985,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// <see cref="IsCurrentSession"/> guards, the second line of defence against a stale step
     /// acting on a successor under the same key, are only reachable by holding one back.
     /// </remarks>
-    internal Action? CaptureTxContinuation(byte destinationAddress, uint pgn, TxContinuation continuation)
+    internal (Action NextBamDt, Action NextCmDt, Action T3Expired, Action T4Expired) CaptureTxContinuations(
+        byte destinationAddress, uint pgn)
     {
-        if (!_txSessions.TryGetValue(new TxSessionKey(destinationAddress, pgn), out var session)) return null;
-        return continuation switch
-        {
-            TxContinuation.NextBamDt => () => TrySendNextBamDt(session),
-            TxContinuation.NextCmDt => () => TrySendNextCmDt(session),
-            TxContinuation.T3Expired => () => OnTxT3Expired(session),
-            TxContinuation.T4Expired => () => OnTxT4Expired(session),
-            _ => throw new ArgumentOutOfRangeException(nameof(continuation), continuation, null),
-        };
+        var session = _txSessions[new TxSessionKey(destinationAddress, pgn)];
+        return (() => TrySendNextBamDt(session), () => TrySendNextCmDt(session),
+            () => OnTxT3Expired(session), () => OnTxT4Expired(session));
     }
 
     private void OnBamAnnounceConfirmed(TxSession session)
