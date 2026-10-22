@@ -166,7 +166,11 @@ namespace CanKit.Pro.RawCan
                 // cancelled from here, so waiting longer would only move the hang into the caller's
                 // Dispose. What the timeout leaves behind is now a task that reports its own
                 // failures (see the pump's catch) instead of one nothing will ever observe.
-                try { _pumpTask.Wait(JoinTimeout); } catch { /* best-effort */ }
+                //
+                // Waited on the task's handle rather than Task.Wait, which throws for a faulted
+                // task and needed a catch-all around it: the join only asks whether the pump has
+                // ended, never how, and the pump reports its own failures.
+                ((IAsyncResult)_pumpTask).AsyncWaitHandle.WaitOne(JoinTimeout);
             }
         }
     }
