@@ -650,41 +650,49 @@ public class UdsFunctionalClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Codex on #150: P2* runs from the 0x78's arrival, not from the end of the collection.
-    // With the 0x78 at the start of a 1500 ms window and P2* = 1600 ms, the next call may go
-    // out at 1600 ms after the request, not at 3100. The two readings are the collection's
-    // length apart, so the collection is long: an upper bound is what a loaded host breaks,
-    // and macOS CI on #150 was 300 ms late against a 300 ms difference.
+    // #362: this ran two real collections and asserted the pair finished under 2400 ms, 750 ms
+    // from either reading -- a margin a loaded host spent. On the virtual clock the two readings
+    // are instants, not durations: the 0x78 arrives at t0, the collection ends at t0 + 100 ms,
+    // and the window the next call waits out must end at t0 + P2* = 1600 ms, not at 1700 ms.
+    // Nothing waits on the host's timing; a window anchored elsewhere is never the timer that
+    // StepThroughSlicesUntil is waiting for, and it times out there.
     [Fact]
     public async Task A_Pending_Answer_Extends_The_Window_From_Its_Arrival_Not_From_The_Collections_End()
     {
-        var session = NewSession();
-        using var busTester = OpenClassic(session, 0);
-        using var busEcus = OpenClassic(session, 1);
+        using var clock = new WindowClock();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        // P2 longer than the collection, so once the collection is armed it is the earliest timer.
+        var p2 = TimeSpan.FromMilliseconds(300);
+        var collection = TimeSpan.FromMilliseconds(100);
+        var p2Star = TimeSpan.FromMilliseconds(1600);
+        using var functional = OpenOnClock(bus, clock, responseWindow: p2, responsePendingWindow: p2Star);
 
         var pending = SingleFrameFrom(Ecu1, new byte[] { 0x7F, 0x22, 0x78 });
         var positive = SingleFrameFrom(Ecu1, new byte[] { 0x62, 0xF1, 0x91, 0x02 });
-        busEcus.FrameObserved += (_, e) =>
-        {
-            if (e.CanFrame.ID != unchecked((int)FunctionalTxId)) return;
-            if (e.CanFrame.Data.Span[3] == 0x90) busEcus.Transmit(pending); else busEcus.Transmit(positive);
-        };
 
-        using var functional = UdsFunctionalClient.Create(
-            IsoTpFactory.OpenFunctional(busTester, FunctionalTxId, Ecu1, 0x7EF, FastOptions()),
-            ownsClient: true, responseWindow: TimeSpan.FromMilliseconds(100), responsePendingWindow: TimeSpan.FromMilliseconds(1600));
+        // Only a hang bound: every step below waits on an event or a timer, not on a duration.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var t0 = clock.Clock.Elapsed;
+        var first = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, collection, cts.Token);
+        // Handed to the driver at t0, its confirmation held; the listener has armed P2 from t0.
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout);
+        await WaitForProvisionalWindow(clock, p2);
+        bus.RaiseObserved(pending, isEcho: false); // the 0x78, at t0
+        bus.DeferredEchoes.ReleaseNext(); // the collection is armed from the confirmation, still t0
+        await CollectFor(clock, first, collection); // the collection ends at t0 + 100 ms
 
-        using var cts = new CancellationTokenSource(ShortTimeout);
-        var sw = Stopwatch.StartNew();
-        await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, TimeSpan.FromMilliseconds(1500), cts.Token);
-        var responses = await functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, TimeSpan.FromMilliseconds(50), cts.Token);
-        sw.Stop();
+        var second = functional.SendRawAsync(new byte[] { 0x22, 0xF1, 0x91 }, ShortCollection, cts.Token);
+        // The listener's P2 slice, armed at t0, ends; it re-arms for what is left of the window.
+        await clock.Clock.AdvanceToAsync(t0 + p2);
+        await StepThroughSlicesUntil(clock, ArmedUntil(clock, t0 + p2Star));
+        bus.DeferredEchoes.Enqueued.Should().Be(1, "the next call is still waiting out P2* from the 0x78");
 
-        responses.Should().ContainSingle();
-        // From the 0x78 (at ~0 ms) plus 1600 ms the second call goes out and collects for
-        // 50 ms: ~1650 ms in all. From the collection's end (1500 ms) plus 1600 ms it could not
-        // finish before 3150 ms. The bound sits between the two, 750 ms from either.
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(2400),
-            "P2* is counted from the 0x78's arrival");
+        await clock.Clock.AdvanceToAsync(t0 + p2Star);
+        await StepThroughSlicesUntil(clock, _ => bus.DeferredEchoes.Enqueued >= 2);
+        bus.RaiseObserved(positive, isEcho: false);
+        bus.DeferredEchoes.ReleaseNext();
+        (await RunCall(clock, second)).Should().ContainSingle(
+            "P2* is counted from the 0x78's arrival, so the call went out at t0 + 1600 ms");
     }
 
     // Codex on #150: a collection window longer than P2 may hold a 0x78 from after the

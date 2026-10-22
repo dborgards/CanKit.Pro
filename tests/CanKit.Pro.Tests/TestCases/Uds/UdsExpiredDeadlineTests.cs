@@ -278,28 +278,39 @@ public class UdsExpiredDeadlineTests
     /// the transmit stamp by 20 ms and the transfer completes after the budget; the client must
     /// neither wait for it nor accept it.
     /// </summary>
+    /// <remarks>
+    /// On the virtual clock (#362). The wall-clock version asserted the timeout came in under
+    /// 400 ms -- the 80 ms deadline, the 50 ms recheck and the thread pool against a 270 ms
+    /// margin a loaded host could spend. Here the clock is moved past the budget and then held
+    /// short of the 400 ms the stale transfer needs to complete: a client that waited for it
+    /// would wait for ever, so the timeout arriving at all is the proof, with no bound to meet.
+    /// </remarks>
     [Fact]
     public async Task I_A_Reception_That_Began_Before_The_Request_Went_Out_Is_Not_Waited_For()
     {
+        using var clock = NewClock();
+        var actor = clock.NewActor();
         using var channel = new StubChannel(
             deliverAfter: TimeSpan.FromMilliseconds(400),
             stampArrivalAtDelivery: true)
         {
             HonorCancellation = true,
             FirstFrameOffsetFromTransmit = TimeSpan.FromMilliseconds(-20),
+            Clock = actor,
         };
-        using var client = NewClient(channel);
+        using var client = NewClient(channel, actor);
 
-        var sw = Stopwatch.StartNew();
-        Func<Task> act = () => client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        var request = client.ReadDataByIdentifierAsync(0xF190, CancellationToken.None);
+        // P2 is armed from the transmit stamp, and the clock has not moved since: exactly the
+        // budget away. Past it, but nowhere near the stale transfer's completion.
+        await clock.WaitUntilTimerArmedAsync(actor, Budget, TimeSpan.FromSeconds(10));
+        await clock.AdvanceAsync(Budget + TimeSpan.FromMilliseconds(20));
+
+        // The bound only catches the hang a waiting client turns into; nothing here is timed.
+        Func<Task> act = () => request.WaitAsync(TimeSpan.FromSeconds(30));
         await act.Should().ThrowAsync<UdsTimeoutException>(
-            "a response that began before the request was sent is an earlier request's");
-        sw.Stop();
-
-        // Timed out at the budget, not once the stale transfer completed: the 400 ms delivery
-        // is a lower bound on what waiting for it would cost, against an 80 ms budget.
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(400),
-            "the stale reception must not extend the budget");
+            "a response that began before the request was sent is an earlier request's, and "
+            + "the stale reception must not extend the budget");
     }
 
     /// <summary>
