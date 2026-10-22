@@ -1,0 +1,110 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using CanKit.Pro.RawCan;
+
+namespace CanKit.Pro.CanOpenConformance;
+
+/// <summary>One frame as the tap saw it, with the moment it arrived measured on one clock.</summary>
+internal readonly record struct TappedFrame(uint CanId, byte[] Data, bool IsRemote, double AtMs);
+
+/// <summary>
+/// Records what the bus carried for a window, filtered to the COB-IDs a check cares about.
+/// Measuring a period needs arrival times from one clock rather than the driver's timestamps,
+/// which differ per adapter in resolution and epoch; what this measures is therefore the interval
+/// as the host saw it, and every finding that reports a period says so.
+/// </summary>
+internal sealed class BusTap : IDisposable
+{
+    private readonly List<TappedFrame> _frames = new();
+    private readonly Stopwatch _clock = Stopwatch.StartNew();
+    private readonly IDisposable _subscription;
+
+    public BusTap(ICanBusService service, Func<uint, bool> wanted)
+    {
+        _subscription = service.Subscribe(
+            onNext: e =>
+            {
+                var frame = e.Frame;
+                // CanFrameView.ID is signed; a CAN id never is, and the COB-ID arithmetic in
+                // CanOpenCobId is unsigned throughout.
+                var canId = unchecked((uint)frame.ID);
+                if (!wanted(canId)) return;
+                lock (_frames) _frames.Add(new TappedFrame(canId, frame.Data.ToArray(), frame.IsRemoteFrame, _clock.Elapsed.TotalMilliseconds));
+            },
+            // Echoes of this tool's own transmits are not bus traffic from the device, and on an
+            // adapter that flags them they would otherwise be counted as the device's answers.
+            predicate: e => !e.IsEcho,
+            bufferCapacity: 4096);
+    }
+
+    /// <summary>Every frame seen so far, oldest first.</summary>
+    public IReadOnlyList<TappedFrame> Frames
+    {
+        get { lock (_frames) return _frames.ToArray(); }
+    }
+
+    public IReadOnlyList<TappedFrame> WithId(uint canId) => Frames.Where(f => f.CanId == canId).ToArray();
+
+    /// <summary>Waits out a window; nothing is polled, the subscription fills in the background.</summary>
+    public Task ListenAsync(int milliseconds, CancellationToken cancellationToken = default)
+        => Task.Delay(milliseconds, cancellationToken);
+
+    /// <summary>
+    /// Waits until <paramref name="predicate"/> holds for the frames collected, or the deadline
+    /// passes. Returns whether it held — a check reports the timeout itself, because "the device
+    /// said nothing" is a result and not an error of the tool.
+    /// </summary>
+    public async Task<bool> WaitForAsync(Func<IReadOnlyList<TappedFrame>, bool> predicate, int timeoutMs, CancellationToken cancellationToken = default)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed.TotalMilliseconds < timeoutMs)
+        {
+            if (predicate(Frames)) return true;
+            await Task.Delay(10, cancellationToken).ConfigureAwait(false);
+        }
+
+        return predicate(Frames);
+    }
+
+    public void Dispose() => _subscription.Dispose();
+
+    /// <summary>
+    /// The intervals between consecutive arrivals, and the robust statistics a report can stand
+    /// behind on a loaded host: the median and the inter-quartile range. Deliberately not the mean
+    /// and standard deviation — one descheduled thread moves both, and CLAUDE.md records what
+    /// that costs.
+    /// </summary>
+    public static IntervalSummary? Summarise(IReadOnlyList<TappedFrame> frames)
+    {
+        if (frames.Count < 3) return null;
+        var gaps = new double[frames.Count - 1];
+        for (var i = 1; i < frames.Count; i++) gaps[i - 1] = frames[i].AtMs - frames[i - 1].AtMs;
+        Array.Sort(gaps);
+        return new IntervalSummary(frames.Count, Quantile(gaps, 0.5), Quantile(gaps, 0.25), Quantile(gaps, 0.75), gaps[0], gaps[^1]);
+    }
+
+    private static double Quantile(double[] sorted, double q)
+    {
+        if (sorted.Length == 1) return sorted[0];
+        var position = q * (sorted.Length - 1);
+        var low = (int)Math.Floor(position);
+        var high = (int)Math.Ceiling(position);
+        return low == high ? sorted[low] : sorted[low] + (position - low) * (sorted[high] - sorted[low]);
+    }
+}
+
+/// <summary>Robust summary of the gaps between consecutive frames of one COB-ID, in milliseconds.</summary>
+internal readonly record struct IntervalSummary(int Count, double MedianMs, double Q1Ms, double Q3Ms, double MinMs, double MaxMs)
+{
+    public double IqrMs => Q3Ms - Q1Ms;
+
+    public override string ToString() =>
+        string.Format(CultureInfo.InvariantCulture,
+            "{0} frames, median {1:F1} ms, IQR {2:F1} ms, range {3:F1}..{4:F1} ms",
+            Count, MedianMs, IqrMs, MinMs, MaxMs);
+}
