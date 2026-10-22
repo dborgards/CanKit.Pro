@@ -58,12 +58,26 @@ public interface IUdsClient : IDisposable
     /// <see cref="UdsSessionType"/>. Returns the raw parameter bytes echoed back by the ECU
     /// (session parameter record, typically 4 bytes carrying P2/P2* server timing).
     /// </summary>
+    /// <remarks>
+    /// The record's P2Server_max (bytes 0..1, 1 ms units) and P2*Server_max (bytes 2..3, 10 ms
+    /// units) set the client's budgets for every later request: P2 becomes the longer of
+    /// <see cref="UdsClientOptions.P2ClientMax"/> and P2Server_max +
+    /// <see cref="UdsClientOptions.SessionTimingMargin"/>, P2* the longer of
+    /// <see cref="UdsClientOptions.P2StarClientMax"/> and P2*Server_max +
+    /// <see cref="UdsClientOptions.SessionTimingMargin"/>. A configured budget is never
+    /// shortened. Each successful response starts again from the configured budgets, so a
+    /// record shorter than 4 bytes leaves them as configured; a successful
+    /// <see cref="EcuResetAsync"/> returns to them as well (#340). <see cref="Options"/> keeps
+    /// reporting the configured values.
+    /// </remarks>
     Task<byte[]> DiagnosticSessionControlAsync(UdsSessionType session,
         CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends DiagnosticSessionControl (0x10) with a raw sub-function byte. Convenience for
     /// vendor-specific session numbers that are not covered by <see cref="UdsSessionType"/>.
+    /// The returned session parameter record sets the client's P2/P2* budgets as described on
+    /// <see cref="DiagnosticSessionControlAsync(UdsSessionType, CancellationToken)"/>.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">
     /// <paramref name="sessionType"/> is 0x00 (ISOSAEReserved) or has bit 7 set: that bit is
@@ -76,7 +90,9 @@ public interface IUdsClient : IDisposable
     /// <summary>
     /// Sends ECUReset (0x11, SRS FR-UDS-005) and returns the raw powerDownTime parameter (0..1
     /// bytes) echoed back by the ECU. On success, <see cref="CurrentSession"/> is reset to
-    /// <see cref="UdsSessionType.Default"/> to match the ECU returning to the default session.
+    /// <see cref="UdsSessionType.Default"/> to match the ECU returning to the default session,
+    /// and the P2/P2* budgets to the configured <see cref="UdsClientOptions.P2ClientMax"/> /
+    /// <see cref="UdsClientOptions.P2StarClientMax"/>.
     /// Callers should typically wait for the ECU to reboot before issuing further requests.
     /// </summary>
     Task<byte[]> EcuResetAsync(UdsEcuResetType resetType,

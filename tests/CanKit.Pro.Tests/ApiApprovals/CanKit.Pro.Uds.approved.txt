@@ -36,6 +36,7 @@ namespace CanKit.Pro.Uds
         public static readonly System.TimeSpan DefaultP2;
         public static readonly System.TimeSpan DefaultP2Star;
         public static readonly System.TimeSpan DefaultTesterPresentPeriod;
+        public static readonly System.TimeSpan SessionTimingMargin;
         public UdsClientOptions() { }
         public System.TimeSpan BusyRepeatRequestDelay { get; init; }
         public bool KeepAliveSuppressPositiveResponse { get; init; }
@@ -43,6 +44,7 @@ namespace CanKit.Pro.Uds
         public int MaxResponsePendingCount { get; init; }
         public System.TimeSpan P2ClientMax { get; init; }
         public System.TimeSpan P2StarClientMax { get; init; }
+        public bool QuarantineLateResponses { get; init; }
         public System.TimeSpan TesterPresentPeriod { get; init; }
         public CanKit.Pro.Uds.UdsClientOptions With(System.TimeSpan? p2ClientMax = default, System.TimeSpan? p2StarClientMax = default, int? maxResponsePendingCount = default, System.TimeSpan? testerPresentPeriod = default, bool? keepAliveSuppressPositiveResponse = default, int? maxBusyRepeatRequests = default, System.TimeSpan? busyRepeatRequestDelay = default) { }
     }
