@@ -2780,6 +2780,63 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await Task.WhenAll(sends).WaitAsync(ShortTimeout);
     }
 
+    // #347 (Codex on #368): a J1939 node loses its address on its own loop and retires the
+    // channel only after that, so the channel is told whether the node still holds the address
+    // and reads it where a session starts. Once it is no longer held, neither a send that reaches
+    // the loop then nor one queued behind the session in flight may start a session: the first
+    // is refused, the second stays queued until the retirement fails it. The session already on
+    // the wire is the node's to end, by that retirement, not the channel's.
+    [Fact]
+    public async Task A_Channel_Whose_Owner_No_Longer_Holds_The_Address_Starts_No_Session()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var announced = new List<uint>();
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (fields.SourceAddress != 0x10 || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        int held = 1;
+        var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor,
+            sourceAddressHeld: () => Volatile.Read(ref held) != 0);
+        try
+        {
+            var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+            var queued = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+            int queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+            queuedCount.Should().Be(1, "the second BAM waits behind the first, which is on the wire");
+
+            Volatile.Write(ref held, 0);
+
+            Func<Task> late = () => sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3)).WithTimeout(ShortTimeout);
+            await late.Should().ThrowAsync<ObjectDisposedException>(
+                "a send reaching the loop after the address was given up starts no session");
+
+            await DrainAsync(clock, actor, first);
+            queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+            queuedCount.Should().Be(1, "the end of the first session does not start the queued one");
+            queued.IsCompleted.Should().BeFalse();
+            lock (announced) announced.Should().Equal(0xFEC0u);
+
+            sender.Dispose();
+            Func<Task> retired = () => queued.WithTimeout(ShortTimeout);
+            await retired.Should().ThrowAsync<ObjectDisposedException>("the retirement fails what is still queued");
+            lock (announced) announced.Should().Equal(0xFEC0u);
+        }
+        finally
+        {
+            sender.Dispose();
+        }
+    }
+
     [Fact]
     public async Task A_Send_Beyond_The_Queue_Limit_Is_Rejected_At_Once_And_Sends_Within_It_Still_Queue()
     {

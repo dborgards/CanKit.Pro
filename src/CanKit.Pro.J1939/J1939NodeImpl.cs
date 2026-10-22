@@ -171,7 +171,9 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// lands there (#195). Null, the only value production passes, opens the real channel on
     /// <paramref name="service"/>. Every TP session the node sends runs on that channel: a send
     /// that finds it bound to another address than the one it captured is refused, not given a
-    /// channel of its own (#347).
+    /// channel of its own, and the real channel refuses on its own loop a session that would
+    /// start after the address was lost (#347). A substitute opened through the seam is not
+    /// told; a test of that refusal opens the real one.
     /// </remarks>
     internal J1939NodeImpl(ICanBusService service, J1939NodeOptions options, bool ownsService,
         ProtocolActor? actor = null, Func<byte, IJ1939TpChannel>? openTransport = null)
@@ -1203,6 +1205,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
     /// </summary>
     internal Action? AfterSendGate;
 
+    /// <summary>
+    /// A seam for tests, null in production: runs on the actor once a rebind has decided to
+    /// replace the channel and before it disposes the current one. After a loss that is the
+    /// interval in which the address is already cleared and the channel still carries it, so a
+    /// test holds the actor here while a send reaches the channel (#347).
+    /// </summary>
+    internal Action? BeforeTransportRebind;
+
     private async Task SendCoreAsync(J1939Message message, CancellationToken cancellationToken)
     {
         if (message.Priority > 7)
@@ -1252,6 +1262,11 @@ internal sealed class J1939NodeImpl : IJ1939Node
                 // J1939Message.Priority documents the same. Callers who need a specific TP
                 // priority must configure J1939NodeOptions.TransportOptions.Priority when
                 // opening the node.
+                // Matching the address is necessary, not sufficient. A loss clears the address
+                // before it retires the channel, so a send arriving in that interval still finds
+                // the channel on the lost address. The channel decides on its own loop, where the
+                // session starts, by reading the address again (OpenTransport): a loss processed
+                // by then refuses it, so no first TP frame is put on the wire after the loss.
                 var tpChannel = _transport;
                 if (tpChannel.SourceAddress != sa)
                 {
@@ -1449,10 +1464,14 @@ internal sealed class J1939NodeImpl : IJ1939Node
         catch (Exception ex) { RaiseBackgroundException(ex); }
     }
 
+    // The channel is told whether the node still holds its address, and asks where a session
+    // starts, on its own loop (#347): every loss writes the address before RebindTransportOnLoop
+    // retires the channel, so a session that started read the address before the loss, and one
+    // that reads it after is refused. The placeholder 0xFE is never held, and no send reaches it.
     private IJ1939TpChannel OpenTransport(byte sourceAddress)
         => _openTransport?.Invoke(sourceAddress)
-           ?? J1939Tp.J1939Tp.Open(_service, sourceAddress: sourceAddress,
-               options: _options.TransportOptions, leaveOpen: true);
+           ?? new J1939TpChannel(_service, sourceAddress, _options.TransportOptions, ownsService: false,
+               sourceAddressHeld: () => !HasReclaimCrossed(sourceAddress));
 
     private Task StartTransportReader(IJ1939TpChannel transport)
         => Task.Run(() => RunTransportReaderAsync(transport));
@@ -1541,6 +1560,7 @@ internal sealed class J1939NodeImpl : IJ1939Node
         if (Volatile.Read(ref _disposed) != 0) return false;
         var current = _transport;
         if (current is not null && current.SourceAddress == sourceAddress) return true;
+        BeforeTransportRebind?.Invoke();
 
         // Tear down the previous transport BEFORE opening the new one so no window exists
         // where two subscribed channels can both surface the same broadcast TP.BAM

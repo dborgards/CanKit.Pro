@@ -3642,6 +3642,107 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // ---------------------------------------------------------------------------------------
+    // #347, the interval inside the loss itself (Codex on #368). Every loss path clears the
+    // address before RebindTransportOnLoop retires the channel, so between the two the channel
+    // still carries the lost address and is not yet disposed. A send that passed the gate before
+    // the loss and reaches the channel in that interval finds SourceAddress equal to the address
+    // it captured, so the sender-side comparison lets it through; only the channel, reading the
+    // node's address again on its own loop where the session starts, can refuse it.
+    //
+    // Forced, not sampled: the sender is held past its gate (AfterSendGate), the actor is held
+    // in the loss between clearing the address and disposing the channel (BeforeTransportRebind),
+    // and only then is the sender let go. The send has to fail while the actor is still held --
+    // the refusal must not depend on the retirement it precedes -- and nothing of a TP session
+    // from the lost address may reach the wire.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task Send_MultiFrame_ReachingTheChannelInsideTheLoss_SendsNoSessionUnderTheLostAddress()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // the peer that unseats the owner
+        using var busC = Open(session, 2); // spectator: watches for TP traffic from the lost SA
+        using var serviceA = new CanBusService(busA);
+
+        // Owner's NAME is numerically higher -> lower priority -> unseated by the peer's claim
+        // for the same SA (SAE J1939-81 §4.4.3.2).
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var owner = new J1939NodeImpl(serviceA, new J1939NodeOptions(Name(0x000200))
+        {
+            ClaimAnnounceTimeout = announce,
+        }, ownsService: false);
+        using var peer = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010))
+        {
+            ClaimAnnounceTimeout = announce,
+        });
+
+        const byte contendedSa = 0x50;
+        await owner.ClaimAddressAsync(contendedSa).WithTimeout(ShortTimeout);
+        owner.ClaimState.Should().Be(J1939ClaimState.Claimed);
+
+        using var tpFromLostSaSeen = new SemaphoreSlim(0);
+        busC.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != contendedSa) return;
+            if (J1939Pgn.IsTransportCm(fields.Pgn) || J1939Pgn.IsTransportDt(fields.Pgn))
+                tpFromLostSaSeen.Release();
+        };
+
+        var atGate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseSender = new ManualResetEventSlim();
+        owner.AfterSendGate = () =>
+        {
+            atGate.TrySetResult(true);
+            releaseSender.Wait(ShortTimeout);
+        };
+        // Installed after the claim, so the first rebind it sees is the loss's. Held once.
+        var inLoss = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var releaseActor = new ManualResetEventSlim();
+        owner.BeforeTransportRebind = () =>
+        {
+            if (!inLoss.TrySetResult(true)) return;
+            releaseActor.Wait(ShortTimeout);
+        };
+
+        try
+        {
+            // 60 bytes is a BAM of nine TP.DT frames. SendAsync runs synchronously up to the
+            // hold, so it is started off this thread.
+            var payload = new byte[60];
+            for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
+            var sendTask = Task.Run(() => owner.SendAsync(new J1939Message(0xFED2u, payload, destinationAddress: 0xFF)));
+            await atGate.Task.AsTaskWithTimeout(ShortTimeout);
+
+            // The peer's claim reaches the owner's actor, which clears the address and stops in
+            // the rebind with the channel still on the lost address.
+            var peerClaim = peer.ClaimAddressAsync(contendedSa);
+            await inLoss.Task.AsTaskWithTimeout(ShortTimeout);
+            owner.Address.Should().BeNull("the loss clears the address before it retires the channel");
+
+            releaseSender.Set();
+            Func<Task> awaitSend = () => sendTask.WithTimeout(ShortTimeout);
+            await awaitSend.Should().ThrowAsync<J1939NoAddressException>(
+                "the channel refuses a session whose address the node lost before it started");
+
+            releaseActor.Set();
+            await peerClaim.WithTimeout(ShortTimeout);
+            peer.Address.Should().Be(contendedSa);
+
+            // A session the channel had started would be on its way across the hub by now; the
+            // negative gets WireWindow for it.
+            (await tpFromLostSaSeen.WaitAsync(WireWindow)).Should().BeFalse(
+                "no TP.CM or TP.DT may go out under an address the node has lost");
+        }
+        finally
+        {
+            releaseSender.Set();
+            releaseActor.Set();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
     // FR-J1939-007: periodic single-frame PGN send. Every periodic PGN flows through the
     // node's SendAsync / actor loop (L2 scheduling) — the previous dual `IPeriodicTx` path
     // was collapsed to a single implementation (PR #33) so error handling and claim-gate
