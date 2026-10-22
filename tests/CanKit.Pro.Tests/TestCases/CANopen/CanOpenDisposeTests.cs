@@ -1,5 +1,4 @@
 using System;
-using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using AwesomeAssertions;
@@ -25,9 +24,12 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
 {
     private static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(5);
 
-    // Dispose's join timeout is two seconds. A call that waited for itself takes all of it; one
-    // that did not takes milliseconds. This bound sits between the two with room on both sides.
-    private static readonly TimeSpan NoStall = TimeSpan.FromSeconds(1.5);
+    // Dispose's join timeout is two seconds, so a call that waited for itself used to be told
+    // from one that did not by its duration: under 1.5 s or not. A host stalled for 1.5 s failed
+    // that (#362). The test now sets the join far past its own hang guard instead, so a call that
+    // waits for itself does not return at all, and the guard only bounds a call that does.
+    private static readonly TimeSpan SelfWait = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan HangGuard = TimeSpan.FromSeconds(30);
 
     private static string NewSession() => $"canopen-dispose-{Guid.NewGuid():N}";
 
@@ -53,31 +55,35 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
     // event pump (an ordinary event), the actor (ApplicationReset is raised on it) and the reader
     // task (it reports a failed subscription). The subscriber blocks on the call, as a handler that
     // is not async has to, so a call that waits for the thread it is on takes its whole join
-    // timeout (two seconds; the actor's is five). This bound sits between that and milliseconds.
+    // timeout -- SelfWait here, i.e. it never returns within the hang guard. The actor's own join
+    // of itself is ProtocolActor's (five seconds, not shortened here) and is pinned without a
+    // clock by ProtocolActorTests.Dispose_Called_Reentrantly_From_A_Posted_Callback_Does_Not_Deadlock.
     [Theory]
     [MemberData(nameof(Contexts))]
     public async Task A_Node_Can_Be_Disposed_From_Its_Own_Subscriber_Without_Waiting_For_Itself(string call, string context)
     {
         using var resources = new DisposeBag();
-        var elapsed = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var returned = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var transferEnded = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         ICanOpenNode? node = null;
         Task? openTransfer = null;
         void DisposeNode()
         {
-            var watch = Stopwatch.StartNew();
             if (call == "Dispose") node!.Dispose();
             else node!.DisposeAsync().AsTask().Wait();
             // What a caller may rely on when the call returns: its open transfers have ended. From
             // the actor this needs the cleanup to run in place, a post waits for this very handler.
             transferEnded.TrySetResult(openTransfer?.IsCompleted ?? true);
-            elapsed.TrySetResult(watch.Elapsed);
+            returned.TrySetResult(true);
         }
 
         if (context == "a reader failure report")
         {
             var starved = new StarvedReaderBusService { FramesFault = new InvalidOperationException("the demux broke") };
-            node = resources.Add(new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource()));
+            node = resources.Add(new CanOpenNode(starved, 0x01, new CanOpenNodeOptions(), ownsService: false, new ManualTimeSource())
+            {
+                DisposeJoinTimeout = SelfWait,
+            });
             node.BackgroundExceptionOccurred += (_, _) => DisposeNode();
             starved.WakeReader();
         }
@@ -86,7 +92,10 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
             var session = NewSession();
             var busA = resources.Add(Open(session, 1));
             var rawBus = resources.Add(Open(session, 2));
-            node = resources.Add(CanOpen.OpenNode(busA, nodeId: 0x01));
+            node = resources.Add(new CanOpenNode(new CanBusService(busA), 0x01, new CanOpenNodeOptions(), ownsService: true)
+            {
+                DisposeJoinTimeout = SelfWait,
+            });
             if (context == "ApplicationReset")
             {
                 PeerSdoLaboratory.Bind(node, 0x02);
@@ -102,7 +111,8 @@ public class CanOpenDisposeTests : IClassFixture<VirtualAdapterFixture>
             }
         }
 
-        (await elapsed.Task.WithTimeoutAsync(ShortTimeout)).Should().BeLessThan(NoStall);
+        await FluentActions.Awaiting(() => returned.Task.WithTimeoutAsync(HangGuard))
+            .Should().NotThrowAsync("a call that does not wait for its own thread returns");
         (await transferEnded.Task.WithTimeoutAsync(ShortTimeout)).Should().BeTrue("the open transfer ended before the call returned");
     }
 
