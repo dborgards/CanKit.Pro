@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel;
 
 namespace CanKit.Pro.J1939Tp;
 
@@ -9,7 +10,7 @@ namespace CanKit.Pro.J1939Tp;
 /// </summary>
 /// <remarks>
 /// The J1939-21 §5.10.2.4 recommended values are hard-coded defaults; production callers can
-/// override any subset via <see cref="With"/>. Every timer defaults to its standard value:
+/// override any subset via <see cref="With(TimeSpan?, TimeSpan?, TimeSpan?, TimeSpan?, TimeSpan?, byte?, byte?, int?, int?, int?, bool?)"/>. Every timer defaults to its standard value:
 /// <list type="bullet">
 ///   <item><description><see cref="T1"/> = 750 ms — TP.DT gap timeout at the receiver.</description></item>
 ///   <item><description><see cref="T2"/> = 1250 ms — CTS→first TP.DT timeout at the receiver.</description></item>
@@ -116,12 +117,33 @@ public sealed class J1939TpOptions
     /// </summary>
     public bool SendConnectionAbortRole { get; init; }
 
+    /// <summary>Returns a copy of these options with the provided overrides. The 1.3.0
+    /// signature, kept so that callers compiled against it still bind; source callers resolve
+    /// to the overload with every parameter optional. <see cref="SendConnectionAbortRole"/> is kept.</summary>
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public J1939TpOptions With(
+        TimeSpan? t1,
+        TimeSpan? t2,
+        TimeSpan? t3,
+        TimeSpan? t4,
+        TimeSpan? bamPacketSpacing,
+        byte? priority,
+        byte? maxPacketsPerCts,
+        int? receiveBufferCapacity,
+        int? maxRetransmitRequests,
+        int? maxQueuedSendsPerDestination)
+        => With(t1, t2, t3, t4, bamPacketSpacing, priority, maxPacketsPerCts, receiveBufferCapacity,
+            maxRetransmitRequests, maxQueuedSendsPerDestination, sendConnectionAbortRole: null);
+
     /// <summary>
-    /// Convenience clone that returns a new instance with the provided overrides. Useful for
-    /// tests that want to tweak one field of a shared default template.
+    /// Convenience clone that returns a new instance with the provided overrides; a
+    /// <see langword="null"/> argument keeps this instance's value. Useful for deriving a
+    /// per-channel configuration from a shared template, <see cref="SendConnectionAbortRole"/>
+    /// included.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// Thrown when <paramref name="maxPacketsPerCts"/> is 0.
+    /// Thrown when <paramref name="maxPacketsPerCts"/> is 0, or <paramref name="maxRetransmitRequests"/>
+    /// or <paramref name="maxQueuedSendsPerDestination"/> is negative.
     /// </exception>
     public J1939TpOptions With(
         TimeSpan? t1 = null,
@@ -133,7 +155,8 @@ public sealed class J1939TpOptions
         byte? maxPacketsPerCts = null,
         int? receiveBufferCapacity = null,
         int? maxRetransmitRequests = null,
-        int? maxQueuedSendsPerDestination = null)
+        int? maxQueuedSendsPerDestination = null,
+        bool? sendConnectionAbortRole = null)
     {
         if (maxPacketsPerCts is 0)
             throw new ArgumentOutOfRangeException(nameof(maxPacketsPerCts), maxPacketsPerCts,
@@ -158,7 +181,7 @@ public sealed class J1939TpOptions
             ReceiveBufferCapacity = receiveBufferCapacity ?? ReceiveBufferCapacity,
             MaxRetransmitRequests = maxRetransmitRequests ?? MaxRetransmitRequests,
             MaxQueuedSendsPerDestination = maxQueuedSendsPerDestination ?? MaxQueuedSendsPerDestination,
-            SendConnectionAbortRole = SendConnectionAbortRole,
+            SendConnectionAbortRole = sendConnectionAbortRole ?? SendConnectionAbortRole,
         };
     }
 

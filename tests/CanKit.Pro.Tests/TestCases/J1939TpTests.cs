@@ -723,6 +723,36 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
             .Which.ParamName.Should().Be("maxPacketsPerCts");
     }
 
+    // #350 / Codex on #367: With overrides SendConnectionAbortRole like every other option -- a
+    // value replaces the template's, null keeps it -- and leaves the rest of the template alone.
+    [Theory]
+    [InlineData(false, null, false)]
+    [InlineData(true, null, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    public void Options_With_Overrides_SendConnectionAbortRole_Or_Keeps_It(bool template, bool? overrideValue, bool expected)
+    {
+        var source = new J1939TpOptions { SendConnectionAbortRole = template, T3 = TimeSpan.FromSeconds(2) };
+
+        var copy = source.With(sendConnectionAbortRole: overrideValue);
+
+        copy.SendConnectionAbortRole.Should().Be(expected);
+        copy.T3.Should().Be(TimeSpan.FromSeconds(2), "an override of the role leaves the other options as they were");
+    }
+
+    // The 1.3.0 signature stays for callers compiled against it; ten positional arguments bind to
+    // it rather than to the overload with the role, and it keeps the template's role.
+    [Fact]
+    public void Options_With_In_Its_1_3_0_Signature_Keeps_SendConnectionAbortRole()
+    {
+        var source = new J1939TpOptions { SendConnectionAbortRole = true };
+
+        var copy = source.With(null, null, TimeSpan.FromSeconds(2), null, null, null, null, null, null, null);
+
+        copy.SendConnectionAbortRole.Should().BeTrue();
+        copy.T3.Should().Be(TimeSpan.FromSeconds(2));
+    }
+
     // Bugbot 3596025934 / 3596396508: T2 (CTS → first DT) must abort on the wire, raise
     // BackgroundExceptionOccurred, and fault a blocked ReceiveAsync (IsoTp AbortRx pattern).
     [Fact]
