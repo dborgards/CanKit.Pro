@@ -120,7 +120,9 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
     // per peer" slot as the classical SDO client / server; the two are mutually exclusive by
     // construction (BeginSdoBlockDownload / BeginSdoBlockUpload each check both dictionaries).
     private readonly Dictionary<byte, SdoBlockClientSession> _sdoBlockClients = new();
-    private SdoBlockServerSession? _sdoBlockServer;
+    // Volatile: the upload server's sending batch reads it off the actor, before each segment,
+    // to learn that its session has ended (SendNextBlockUploadSubBlock, #341).
+    private volatile SdoBlockServerSession? _sdoBlockServer;
 
     // Node-guarding consumers (FR-CO-009): keyed by producer node-id, each with its own
     // guardTime deadline (RTR poll) and life-time deadline (timeout).

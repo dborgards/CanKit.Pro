@@ -209,7 +209,7 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0601 0002h` | Download to a read-only object: the PDO records without `WritableCommunicationParameters`, `1200h`, `1000h`, `1001h`, `1018h`, `1F81h:00`, `1F82h:00`, `1F90h:00` |
 | `0602 0000h` | Mapping entry whose target object does not exist; `sub0` enabling a mapping with an empty slot |
 | `0604 0041h` | Target not PDO-mappable, not accessible in the PDO's direction, or of another width than mapped; dummy entry with the wrong width |
-| `0604 0042h` | Mapping longer than 8 bytes |
+| `0604 0042h` | Mapping longer than 8 bytes — for a PDO, checked when `sub0` enables it, over the entries it names |
 | `0604 0043h` | Second `1016h` entry for a node-id already monitored |
 | `0607 0010h` | Mapping bit length 0 or above 64 |
 | `0607 0012h` / `0607 0013h` | Download of the wrong width for the object — `sub0` of a mapping record is UNSIGNED8 |
@@ -385,7 +385,10 @@ disposed counts as failed.
 written to this node's object dictionary, and a frame that is not one of this node's own RPDOs
 is still not applied when it arrives.
 
-The COB-ID is read live from `1400h:01` / `1800h:01`. A word that comes back is used ahead of the
+The COB-ID is read live from `1400h:01` / `1800h:01` when a peer description bound for that node
+(`BindPeerDeviceDescription`) declares the record. Without a binding the peer-SDO gate refuses
+every PDO record before a frame is sent, and the whole observation — COB-ID and mapping — is
+decoded from the file passed to the call. A word that comes back is used ahead of the
 peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID the file does
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
 by the peer-SDO gate, or does not return a word.
@@ -506,8 +509,9 @@ change while the PDO is valid. RPDO sub-index 6 remains absent as the specificat
 
 **Synchronous window.** `1007h:00` is the window length in microseconds; 0 disables it.
 With a window enabled, synchronous RPDOs outside it are discarded, including before the
-first SYNC. Data accepted inside the window is applied at the next SYNC. Synchronous
-TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
+first SYNC. That discard is a policy this implementation chose (FR-CO-053: "chosen optional
+discard policy"), not a reception rule quoted from CiA 301 §7.5.2.7. Data accepted inside
+the window is applied at the next SYNC. Synchronous TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
 outlived its window or was superseded by another SYNC is discarded. This is software
 scheduling; it cannot withdraw a frame already handed to the CAN driver.
 
@@ -543,10 +547,10 @@ changes. The transmission type byte in `1800h:02` decides how a TPDO fires:
 | `TpdoTransmission` | `1800h:02` | Behaviour |
 | --- | --- | --- |
 | `SynchronousAcyclic` | `00h` | A change of state of a mapped object or `TriggerTpdoAsync` latches one transmission for the next SYNC |
-| `Synchronous` | `01h` | Transmitted at every SYNC |
-| *(write the byte)* | `02h`–`F0h` | Transmitted at every n-th SYNC. `CanOpenTransmissionType.SynchronousEveryNthSync(n)` gives the byte; write it to `1800h:02` through the object dictionary |
-| `RtrOnlySynchronous` | `FCh` | Sampled at every SYNC into a buffer; the buffered sample answers an RTR — nothing answers before the first SYNC |
-| `RtrOnlyEventDriven` | `FDh` | Sampled and transmitted when an RTR arrives |
+| `Synchronous` | `01h` | Transmitted at every SYNC; `TriggerTpdoAsync` sends nothing |
+| *(write the byte)* | `02h`–`F0h` | Transmitted at every n-th SYNC; `TriggerTpdoAsync` sends nothing. `CanOpenTransmissionType.SynchronousEveryNthSync(n)` gives the byte; write it to `1800h:02` through the object dictionary |
+| `RtrOnlySynchronous` | `FCh` | Sampled at every SYNC into a buffer; the buffered sample answers an RTR — nothing answers before the first SYNC; `TriggerTpdoAsync` sends nothing |
+| `RtrOnlyEventDriven` | `FDh` | Sampled and transmitted when an RTR arrives; `TriggerTpdoAsync` sends nothing |
 | `EventDriven`, `EventTimer` | `FEh` | Transmitted on change of state and on `TriggerTpdoAsync`, rate-limited by the inhibit time; `EventTimer` additionally sets `1800h:05` |
 | *(write the byte)* | `FFh` | As `FEh` |
 
@@ -566,7 +570,9 @@ unless bit 30 of `1800h:01` ("no RTR allowed") is set — by the event-driven ty
 RTR-only types (see the table). A synchronous TPDO (`00h`–`F0h`) is transmitted after the SYNC
 and by nothing else, so its RTR is not answered: §7.2.2.3 defines the remote request for
 event-driven PDOs. The record's power-on default carries bit 30; `ConfigureTpdo` without an
-explicit `cobId` clears it.
+explicit `cobId` clears it. On an RPDO (`1400h:01`) bit 30 has no meaning — a consumer answers
+no RTR — so it is accepted, kept in the record and ignored: the RPDO
+matches its CAN-ID whether the bit is set or not.
 
 **PDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID, and a frame on it
 actuates each of them; two valid TPDO records may as well, and an RTR on it reads each of them.
@@ -585,7 +591,7 @@ EMCY `8210h` (if `1014h` is valid); a longer one is read up to the mapped length
 `Add*` methods — default `true` for application objects, `false` for the communication
 profile, except entries CiA 301 marks optionally mappable), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
 must fit 64 bits; entries occupy the payload in sub-index order. A **dummy entry** — index
-`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
+`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bits
 without touching the dictionary, which pads an RPDO to a peer's layout. `ConfigureTpdo` and
 `ConfigureRpdo` copy the `PdoMapping` into the record; mutating the instance afterwards changes
 nothing. A rejection throws `ArgumentException` naming the abort code and leaves the PDO
@@ -595,7 +601,10 @@ invalid.
 `WritableCommunicationParameters`: destroy the PDO (bit 31 of `1800h:01` to 1) → disable the
 mapping (`1A00h:00` = 0) → write the entries (`1A00h:01`…) → enable the mapping (`1A00h:00` = N)
 → set transmission type, inhibit time, event timer → create the PDO (bit 31 to 0). The engine
-picks the record up at the last step.
+picks the record up at the last step. Each entry is checked on its own when it is written; the
+length of the whole mapping is checked when it is enabled (`0604 0042h` on `1A00h:00` = N), over
+the entries N names. While the mapping is disabled the slots keep what they held, and the entries
+may be written in any order, so a slot not yet overwritten does not count against a new one.
 
 ## Error control
 
@@ -878,7 +887,10 @@ takes a path around `Add*`; it is the guard behind that rule.
 `GetSrdoState(n)` of a producer is valid while the node is Operational with a
 valid configuration. The state is a snapshot of the actor's view: right after `OpenNode` the
 records are taken on the actor's first turn, so a read before any call that round-trips the actor
-(`State`, say) has returned may still show direction `None`.
+(`State`, say) has returned may still show direction `None`. Its `LastValidAt` is wall-clock UTC
+(`DateTime.UtcNow`), not the node's time source: cycles, SCT and SRVT run on the time source, so
+under a `ManualTimeSource` they move with the virtual clock while `LastValidAt` moves with the
+real one.
 
 ### Consumer
 
@@ -888,7 +900,11 @@ Then (§8.1.1, §8.1.3.1, §9.5):
 * the plain frame starts the SRVT; a second plain frame replaces the first and restarts it;
 * the inverted frame must follow within the SRVT (`ValidationTimeExpired` otherwise), must have
   a plain frame before it (`OutOfOrder`), and must be its bitwise inverse with the same length
-  (`Mismatch`);
+  (`Mismatch`) — except that an inverted frame arriving while the SRDO is still `NotReceived` as
+  armed, before any pair (a short one, not processed, included), expiry or mismatch of this
+  Operational period, is no pair of this consumer's and no violation: a producer already running
+  when the consumer entered Operational between its plain and its inverted frame. It is consumed
+  without a transition, the SCT runs on, and the next pair makes the SRDO valid;
 * both frames are classic CAN frames (§8.1): a CAN FD frame, or a payload over 8 bytes, on either
   id is no SRDO frame and is rejected as a wrong inverse is — `Mismatch`, a pending plain frame
   dropped, nothing written, no `SrdoReceived`, the SCT not restarted, no EMCY;
@@ -962,7 +978,9 @@ peer-SDO gate over every transfer it will make whatever the peer answers — `10
 file that does not declare one of them is refused with nothing sent (`PeerSdoAccessException`),
 not mid-transaction with the peer part-way through its configuration; an SRDO named above the
 file's highest SRDO record, which the gate could never let through, is refused likewise
-(`ArgumentException`). Its first frames verify the peer's identity (§5.2): `1018h:01`
+(`ArgumentException`). The transfers that depend on the peer's count — those for the SRDOs it has
+that the configuration does not name — pass the gate once the count is read, still before the
+first write (below). Its first frames verify the peer's identity (§5.2): `1018h:01`
 (vendor-ID), `:02` (product code) and `:03` (revision number) are uploaded and compared with the
 bound EDS/DCF's own `1018h:01`–`03` — "the entries in the EDS", as declared: the ParameterValue,
 the DefaultValue where none. All three are read; a peer that is not the device the file describes
@@ -987,7 +1005,13 @@ above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` 
 byte — it is UNSIGNED8, so none, two or four bytes are refused rather than read by their low byte —
 or a count above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
 further frame and for a verification alike: SRDOs claimed beyond 64 could never be configured or
-verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
+verified, so the count is not taken as 64. So is a count above the bound file's highest SRDO record
+(`InvalidOperationException` naming both): the gate implies no record above it, so the SRDOs the
+peer has beyond the file could be neither deleted nor verified, and the refusal would otherwise
+come at the first of them — after the delete-first pass had deleted the peer's SRDOs and cleared
+its `13FEh`. With the count known, the transfers the §9.2 list makes for every SRDO up to it, named
+or not — sub-index `01h` of each record, `13FFh:n` of each — pass the gate before the first write,
+as the fixed transfers did before the first frame. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
 direction, because the checksum covers it) are refused before the first frame. So is a mapping
 the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
 refusal at the mapping would leave it without its configuration: each mapped object must be
@@ -1063,7 +1087,8 @@ bound file declares without a writable sub-index `03h` is expected at the checks
 a peer that aborts the upload of a sub-index `03h` the file does not declare with `0609 0011h` does
 not implement it — no difference (CiA 319 §6.2, as for a configuration); every other abort
 propagates. `13FFh:00`, the checksums of the SRDOs expected and `13FEh` pass the gate before the
-first frame. The identity of CiA 319 §5.2 is not read: it
+first frame; a count above the file's highest SRDO record is refused as for a configuration, and
+sub-index `01h` of every record up to the count passes the gate once it is read. The identity of CiA 319 §5.2 is not read: it
 belongs to the configuration, and the boot-up binds a DCF for a node-id.
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
@@ -1657,7 +1682,8 @@ Each item names what a caller does about it.
   entries, so a file that does not declare them with a value, contradicts them in `[DeviceInfo]`
   or declares them all 0 is refused before the first frame, and a peer that is another device ends
   the call with those entries as mismatches; every transfer the call makes whatever the peer
-  answers passes the gate before the first frame; `PeerSafetyConfiguration.Storage` (settable)
+  answers passes the gate before the first frame, and those that depend on the peer's SRDO count
+  pass it once the count is read, before the first write; `PeerSafetyConfiguration.Storage` (settable)
   asks for the step-5 store through `1010h`, reported in `PeerSafetyResult.Stored`, with a peer's
   abort in `PeerSafetyResult.StorageAbort`; and a tx SRDO whose record the file declares without
   a writable sub-index `03h` must say 20 ms, which is written as optional where the file says

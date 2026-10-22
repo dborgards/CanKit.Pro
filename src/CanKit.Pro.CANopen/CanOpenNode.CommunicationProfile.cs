@@ -25,7 +25,10 @@ namespace CanKit.Pro.CANopen;
 /// <c>1005h</c>/<c>1006h</c> (SYNC), <c>100Ch</c>/<c>100Dh</c> (life guarding), <c>1010h</c>/
 /// <c>1011h</c> (store / restore, in-memory), <c>1014h</c> (EMCY COB-ID), <c>1016h</c>/<c>1017h</c>
 /// (heartbeat), <c>1200h</c> (the default SDO server, constant), and the PDO communication and
-/// mapping records <c>1400h</c>–<c>1403h</c>, <c>1600h</c>–<c>1603h</c>, <c>1800h</c>–<c>1803h</c>,
+/// mapping records, one of each per PDO up to <see cref="CanOpenNodeOptions.PdoCount"/> (or the
+/// higher count of the description the node was opened from): <c>1400h</c>–<c>15FFh</c>, <c>1600h</c>–<c>17FFh</c>,
+/// <c>1800h</c>–<c>19FFh</c>, <c>1A00h</c>–<c>1BFFh</c>, of which the default count of four
+/// creates <c>1400h</c>–<c>1403h</c>, <c>1600h</c>–<c>1603h</c>, <c>1800h</c>–<c>1803h</c>,
 /// <c>1A00h</c>–<c>1A03h</c>. <c>1000h</c> and <c>1018h</c> are created as placeholders the
 /// application replaces; they drive no behaviour.
 /// </para>

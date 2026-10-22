@@ -103,7 +103,7 @@ public partial class CanOpenPdoEngineTests
     }
 
     [Fact]
-    public async Task Mapping_Count_Revalidates_Total_Bits_And_Optional_Preceding_Slots()
+    public async Task Mapping_Count_Revalidates_Total_Bits_And_A_Slot_Needs_No_Predecessor()
     {
         using var service = new StarvedReaderBusService();
         using var node = new CanOpenNode(service, Device, new CanOpenNodeOptions(), false);

@@ -275,17 +275,53 @@ internal sealed partial class CanOpenNode
     /// <summary>The expectation of a safety slave: what its bound DCF says, when that file
     /// declares at least one SRDO (spec decision 4). An EDS has no parameter values and never
     /// makes a safety slave. Built from the description on every call, not kept: a description
-    /// can be edited in place, and the peer-SDO gate reads it live too. On the actor this decides
+    /// can be edited in place, and the peer-SDO gate reads it live too — which is also why the
+    /// answer is not memoised per bound instance: an edit in place would leave a memo stale, and
+    /// a stale "safety slave" would queue a verification that finds nothing to verify, which
+    /// looks here again (<see cref="OnSlaveVerified"/>), without end. What is spared instead is
+    /// the load itself, for every description that cannot declare an SRDO
+    /// (<see cref="MayDeclareAnSrdo"/>). On the actor this decides
     /// whether a verification is queued; the verification itself takes its expectation again,
     /// from the description bound when it owns the peer's channel
     /// (<see cref="VerifyPeerSafetyCoreAsync"/>).</summary>
-    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId) => SafetyExpectationOf(CaptureBoundPeerDescription(nodeId), nodeId);
+    private PeerSafetyConfiguration? SafetyExpectationOf(byte nodeId)
+        => BoundPeerDescription(nodeId) is { } description && MayDeclareAnSrdo(description, nodeId)
+            ? SafetyExpectationOf(DescribedObjects.Capture(description), nodeId)
+            : null;
 
     private static PeerSafetyConfiguration? SafetyExpectationOf(DescribedObjects? description, byte nodeId)
     {
         if (description is null || !description.IsConfigurationFile) return null;
         var expected = PeerSafetyConfiguration.FromSafetyObjects(LoadDescribedSafetyObjects(description, nodeId));
         return expected.DeclaresAnySrdo ? expected : null;
+    }
+
+    /// <summary>Whether <paramref name="description"/> can make a safety slave at all: the
+    /// necessary condition for <see cref="SafetyExpectationOf(DescribedObjects?, byte)"/> to
+    /// yield an expectation, read off the description without capturing or loading it. The loader
+    /// creates an SRDO from one thing only — a communication record 1301h–1340h whose sub-index
+    /// 01h the file gives a value that reads as a direction other than 0 and fits UNSIGNED8
+    /// (<see cref="ApplySrdoCommunicationRecord"/> queues the deferred create from exactly that
+    /// entry) — and an EDS never makes a safety slave. So a description without such a record
+    /// declares no SRDO, and the step-D probe, which runs on the actor for an assigned slave on
+    /// each announcement until it is started or verifying and over every assigned slave at the
+    /// start moment, answers for it without building a dictionary from the file (#360, S-5). A
+    /// description with one is loaded as before: whether the device creates the SRDO — a COB-ID
+    /// pair, a mapping record, a mapping that applies — is the loader's decision, taken with the
+    /// loader's own code (FR-CO-043), not a second rule set here.</summary>
+    internal static bool MayDeclareAnSrdo(CanOpenDeviceDescription description, byte nodeId)
+    {
+        if (!description.IsConfigurationFile) return false;
+        var objects = description.Objects.Objects;
+        for (int n = 1; n <= SrdoRecords.MaxSrdoCount; n++)
+        {
+            if (!objects.TryGetValue(SrdoRecords.CommIndex(n), out var record)) continue;
+            foreach (var entry in EntriesOf(record))
+            {
+                if (entry.Subindex == 0x01 && ParseUnsigned(nodeId, entry, out _) is > 0 and <= byte.MaxValue) return true;
+            }
+        }
+        return false;
     }
 
     /// <summary>What a slave's step D ended with. <see cref="NothingToVerify"/>: no safety DCF was

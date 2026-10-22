@@ -13,13 +13,16 @@ using EdsDcfNet.Utilities;
 namespace CanKit.Pro.CANopen;
 
 /// <summary>
-/// Decodes a PDO of another node (the mapping records <c>1600h</c>–<c>1603h</c> and
-/// <c>1A00h</c>–<c>1A03h</c>) into a caller-supplied sink. The local object dictionary is not
+/// Decodes a PDO of another node (the mapping records <c>1600h</c>–<c>17FFh</c> and
+/// <c>1A00h</c>–<c>1BFFh</c>) into a caller-supplied sink. The local object dictionary is not
 /// written.
 /// </summary>
 /// <remarks>
 /// The COB-ID is read live from <c>1400h:01</c> / <c>1800h:01</c>. The mapping is read live from
-/// <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c>. A live value is used ahead of the file.
+/// <c>1600h</c>–<c>17FFh</c> / <c>1A00h</c>–<c>1BFFh</c>. A live value is used ahead of the file.
+/// Live reads pass the peer-SDO gate, so they happen only for records a peer description bound
+/// for that node declares; without a binding every PDO record is refused before a frame is
+/// sent, and the whole observation is decoded from the file.
 /// The file is used when that upload aborts, times out, is refused by the peer-SDO gate, or does
 /// not come back as a usable value. The live reads of one observation are one snapshot of the
 /// peer: the observer takes the peer's SDO channel without waiting and holds it to the end, so a

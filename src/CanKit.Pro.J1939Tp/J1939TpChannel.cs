@@ -339,7 +339,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 // Peer already has (or is about to have) an open CM session with us — tell it to
                 // tear down. Reason 2 ("resources needed for another task") is the closest
                 // standard code for an application-initiated local cancel.
-                SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn),
+                SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, key.Pgn, SentRole(J1939TpAbortRole.Originator)),
                     destinationAddress: key.DestinationAddress);
             }
             // Complete with the caller's token (do not go through TxSession.Cancel, which would
@@ -632,7 +632,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     var cmKey = new RxSessionKey(sa, J1939TpKind.Cm);
                     if (_rxSessions.ContainsKey(cmKey))
                     {
-                        SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.SessionAlreadyOpen, dataPgn),
+                        SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.SessionAlreadyOpen, dataPgn, SentRole(J1939TpAbortRole.Responder)),
                             destinationAddress: sa);
                         return;
                     }
@@ -648,7 +648,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                         // is ignored, and the originator's T3 closes its side.
                         if (totalBytes > J1939TpFrames.MaxTpPayloadLength)
                         {
-                            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.MessageSizeExceeded, dataPgn),
+                            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.MessageSizeExceeded, dataPgn, SentRole(J1939TpAbortRole.Responder)),
                                 destinationAddress: sa);
                         }
                         return;
@@ -685,25 +685,43 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
             case J1939TpFrames.ControlAbort:
                 {
-                    // Aborts are per-CM-session; only cancel the session if the peer aborted the
-                    // PGN we're actually reassembling. A stray abort for a different PGN (e.g.
+                    // Aborts are per-CM-session; only cancel a session if the peer aborted the
+                    // PGN it is actually about. A stray abort for a different PGN (e.g. a
                     // late-arriving frame from a previous, already-torn-down session) must not
                     // kill the current transfer.
+                    //
+                    // The same frame can address either direction: the peer as originator
+                    // aborts the session we are reassembling, the peer as responder the one we
+                    // are sending (while we wait for CTS / send DTs / wait for EOM -- without
+                    // this SendCmAsync would hang until T3/T4). With a CM transfer of the same
+                    // PGN running both ways at once the PGN alone matches both, and the
+                    // Connection Abort Role in byte 3 says which one the peer means. The role
+                    // is read as a tie-breaker only: where the PGN matches one direction, that
+                    // direction ends whatever the role says, so a peer that sends none (first
+                    // edition, 0xFF) or sets it wrong gets the behaviour of before #350; where
+                    // it matches both and no role is sent, both end, as before (#350).
                     var cmKey = new RxSessionKey(sa, J1939TpKind.Cm);
-                    if (_rxSessions.TryGetValue(cmKey, out var existing) && existing.Pgn == dataPgn)
+                    bool rxMatches = _rxSessions.TryGetValue(cmKey, out var existing) && existing.Pgn == dataPgn;
+                    bool txMatches = _txSessions.TryGetValue(new TxSessionKey(sa, dataPgn), out var tx) && tx.IsCm;
+                    if (rxMatches && txMatches)
                     {
-                        existing.Cancel();
+                        switch (J1939TpFrames.ReadAbortRole(payload))
+                        {
+                            case J1939TpAbortRole.Originator: txMatches = false; break;
+                            case J1939TpAbortRole.Responder: rxMatches = false; break;
+                        }
+                    }
+
+                    if (rxMatches)
+                    {
+                        existing!.Cancel();
                         _rxSessions.Remove(cmKey);
                         AbortRx(new J1939TpAbortException(
                             (J1939TpAbortReason)payload[1], dataPgn,
                             $"Peer 0x{sa:X2} aborted TP.CM RX session for PGN 0x{dataPgn:X}."));
                     }
-
-                    // Same frame can also terminate our *outbound* TP.CM: peer as responder
-                    // aborts while we wait for CTS / send DTs / wait for EOM. HandleRxTxSideResponse
-                    // already implements that path, but CTS/EOM routing alone never delivered
-                    // ControlAbort there — SendCmAsync would hang until T2/T3/T4.
-                    HandleRxTxSideResponse(sa, dataPgn, payload);
+                    if (txMatches)
+                        FailTxOnPeerAbort(tx!, sa, payload);
                     break;
                 }
 
@@ -745,7 +763,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                 : J1939TpAbortReason.BadSequenceNumber;
             if (match.Kind == J1939TpKind.Cm)
             {
-                SendTpCm(J1939TpFrames.BuildAbort(snReason, pgn),
+                SendTpCm(J1939TpFrames.BuildAbort(snReason, pgn, SentRole(J1939TpAbortRole.Responder)),
                     destinationAddress: sa);
             }
             match.Cancel();
@@ -819,7 +837,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.Cancel();
         if (session.Kind == J1939TpKind.Cm)
         {
-            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, session.Pgn),
+            SendTpCm(J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, session.Pgn, SentRole(J1939TpAbortRole.Responder)),
                 destinationAddress: session.PeerAddress);
         }
         // Fault blocked ReceiveAsync as well as BackgroundExceptionOccurred.
@@ -963,7 +981,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // Now wait for CTS with T3 (initial), per §5.10.2.4. Armed immediately: a fast peer
             // may already have CTS'd before the RTS SendConfirmedAsync continuation runs.
             session.State = TxStage.WaitCts;
-            session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
+            session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(session));
         }
         else
         {
@@ -975,16 +993,39 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
     }
 
-    // A BAM chain is driven by timers and send confirmations that outlive a cancel: the caller can
-    // cancel and send the same PGN again within the packet spacing, and the same key then names a
-    // different session. Every step therefore carries the session it belongs to and acts only
-    // while that very instance is the registered one -- the key alone cannot tell them apart.
-    private bool IsCurrentBamSession(TxSession session)
+    // A TX chain is driven by timers and send confirmations that outlive a cancel: the caller can
+    // cancel and send the same PGN again within the packet spacing, or while a TP.DT is still
+    // unconfirmed, and the same key then names a different session. Every step therefore carries
+    // the session it belongs to and acts only while that very instance is the registered one --
+    // the key alone cannot tell them apart. The BAM path got this in #258; the CM path, where the
+    // cancelled session's late DT n confirmation passed the sequence-number check of the new
+    // session's own DT n and sent DT n+1 behind an unconfirmed packet, in #350.
+    private bool IsCurrentSession(TxSession session)
         => _txSessions.TryGetValue(session.Key, out var current) && ReferenceEquals(current, session);
+
+    /// <summary>
+    /// Binds the four TX continuations to the session registered under
+    /// (<paramref name="destinationAddress"/>, <paramref name="pgn"/>) the way its timers and
+    /// confirmations do, and returns them to run later. Actor-loop state: call it and run what it
+    /// returns there. Throws <see cref="KeyNotFoundException"/> when no session is registered.
+    /// </summary>
+    /// <remarks>
+    /// A test seam, not a feature. No public path runs these four after their session ended --
+    /// a cancel or abort releases the spacing timer and the deadline first -- so their
+    /// <see cref="IsCurrentSession"/> guards, the second line of defence against a stale step
+    /// acting on a successor under the same key, are only reachable by holding one back.
+    /// </remarks>
+    internal (Action NextBamDt, Action NextCmDt, Action T3Expired, Action T4Expired) CaptureTxContinuations(
+        byte destinationAddress, uint pgn)
+    {
+        var session = _txSessions[new TxSessionKey(destinationAddress, pgn)];
+        return (() => TrySendNextBamDt(session), () => TrySendNextCmDt(session),
+            () => OnTxT3Expired(session), () => OnTxT4Expired(session));
+    }
 
     private void OnBamAnnounceConfirmed(TxSession session)
     {
-        if (!IsCurrentBamSession(session)) return;
+        if (!IsCurrentSession(session)) return;
         // BAM sender: the packet spacing between BAM and first DT, then between subsequent DTs.
         session.State = TxStage.SendingDt;
         session.NextSn = 1;
@@ -1025,7 +1066,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
                     return;
                 }
                 session.Deadline?.Dispose();
-                session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(key));
+                session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(session));
                 return;
             }
 
@@ -1098,7 +1139,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             session.LastDtQueued = false; // a retransmit re-queues the last packet
             session.Deadline?.Dispose();
             session.Deadline = null;
-            TrySendNextCmDt(key);
+            TrySendNextCmDt(session);
         }
         else if (control == J1939TpFrames.ControlEomAck)
         {
@@ -1131,20 +1172,26 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             session.Tcs.TrySetResult(null);
             EndTx(key);
         }
-        else if (control == J1939TpFrames.ControlAbort)
-        {
-            var reason = (J1939TpAbortReason)payload[1];
-            session.Deadline?.Dispose();
-            session.Deadline = null;
-            session.Tcs.TrySetException(new J1939TpAbortException(reason, session.Key.Pgn,
-                $"Peer 0x{sa:X2} aborted TP.CM session for PGN 0x{session.Key.Pgn:X}: {reason}."));
-            EndTx(key);
-        }
+    }
+
+    /// <summary>
+    /// The peer, as responder, aborted <paramref name="session"/>: the send faults with the
+    /// peer's reason. Routed from <see cref="HandleRxTpCm"/>, which decides which direction a
+    /// Connection Abort addresses (#350).
+    /// </summary>
+    private void FailTxOnPeerAbort(TxSession session, byte sa, byte[] payload)
+    {
+        var reason = (J1939TpAbortReason)payload[1];
+        session.Deadline?.Dispose();
+        session.Deadline = null;
+        session.Tcs.TrySetException(new J1939TpAbortException(reason, session.Key.Pgn,
+            $"Peer 0x{sa:X2} aborted TP.CM session for PGN 0x{session.Key.Pgn:X}: {reason}."));
+        EndTx(session.Key);
     }
 
     private void TrySendNextBamDt(TxSession session)
     {
-        if (!IsCurrentBamSession(session)) return;
+        if (!IsCurrentSession(session)) return;
         int offset = (session.NextSn - 1) * J1939TpFrames.DtDataBytes;
         byte sn = session.NextSn;
         var dt = J1939TpFrames.BuildDt(sn, session.Pdu, offset);
@@ -1154,7 +1201,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     private void OnBamDtConfirmed(TxSession session, byte confirmedSn)
     {
-        if (!IsCurrentBamSession(session)) return;
+        if (!IsCurrentSession(session)) return;
         if (session.NextSn != confirmedSn) return; // stale confirmation
 
         // Compute the next SN as an int first: for a maximum-length PDU (TotalPackets=255) the
@@ -1174,21 +1221,24 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.SpacingTimer = _actor.Schedule(_options.BamPacketSpacing, () => TrySendNextBamDt(session));
     }
 
-    private void TrySendNextCmDt(TxSessionKey key)
+    private void TrySendNextCmDt(TxSession session)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || !session.IsCm) return;
+        if (!IsCurrentSession(session)) return;
         int offset = (session.NextSn - 1) * J1939TpFrames.DtDataBytes;
         byte sn = session.NextSn;
         var dt = J1939TpFrames.BuildDt(sn, session.Pdu, offset);
         if (sn == session.TotalPackets)
             session.LastDtQueued = true;
-        SendControlFrame(J1939Pgn.TpDt, dt, destinationAddress: key.DestinationAddress,
-            session, onConfirmed: () => OnCmDtConfirmed(key, sn));
+        SendControlFrame(J1939Pgn.TpDt, dt, destinationAddress: session.Key.DestinationAddress,
+            session, onConfirmed: () => OnCmDtConfirmed(session, sn));
     }
 
-    private void OnCmDtConfirmed(TxSessionKey key, byte confirmedSn)
+    private void OnCmDtConfirmed(TxSession session, byte confirmedSn)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || !session.IsCm) return;
+        // The instance check tells a cancelled session's late confirmation from the current
+        // session's own (#350); the sequence-number check stays for a confirmation of this very
+        // session that a retransmit request has overtaken.
+        if (!IsCurrentSession(session)) return;
         if (session.NextSn != confirmedSn) return; // stale confirmation
 
         // Same overflow discipline as OnBamDtConfirmed: an int keeps the "we finished" test
@@ -1204,7 +1254,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // the outstanding DT confirmed, rather than after the block (Codex on #152).
         if (session.HasPendingCts && session.PendingCtsIsRetransmit)
         {
-            ApplyPendingCts(key, session);
+            ApplyPendingCts(session);
             return;
         }
 
@@ -1214,7 +1264,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // retransmit request, applied below like any block's (#58).
             session.State = TxStage.WaitEom;
             session.Deadline?.Dispose();
-            session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
+            session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(session));
             return;
         }
 
@@ -1226,7 +1276,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             // T2 is the receiver's (#31).
             if (session.HasPendingCts)
             {
-                ApplyPendingCts(key, session);
+                ApplyPendingCts(session);
                 return;
             }
 
@@ -1235,11 +1285,11 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             if (session.HoldPending)
             {
                 session.HoldPending = false;
-                session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(key));
+                session.Deadline = _deadlines.Arm(_options.T4, () => OnTxT4Expired(session));
             }
             else
             {
-                session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(key));
+                session.Deadline = _deadlines.Arm(_options.T3, () => OnTxT3Expired(session));
             }
             return;
         }
@@ -1247,10 +1297,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         // Send the next DT in the same block; chained via confirmation so DTs cannot race each
         // other in the underlying Task.Run pool (which would otherwise let SN N+1 hit the wire
         // before SN N when the transport is very fast, as happens on virtual/loopback buses).
-        TrySendNextCmDt(key);
+        TrySendNextCmDt(session);
     }
 
-    private void ApplyPendingCts(TxSessionKey key, TxSession session)
+    private void ApplyPendingCts(TxSession session)
     {
         session.HasPendingCts = false;
         session.PendingCtsIsRetransmit = false;
@@ -1260,12 +1310,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.LastDtQueued = false;
         session.Deadline?.Dispose();
         session.Deadline = null;
-        TrySendNextCmDt(key);
+        TrySendNextCmDt(session);
     }
 
-    private void OnTxT3Expired(TxSessionKey key)
+    private void OnTxT3Expired(TxSession session)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || !session.IsCm) return;
+        if (!IsCurrentSession(session)) return;
         if (session.State != TxStage.WaitCts && session.State != TxStage.WaitEom) return;
         var msg = session.State == TxStage.WaitEom
             ? "T3 expired waiting for EndOfMsgAck from peer."
@@ -1273,9 +1323,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         AbortTx(session, J1939TpAbortReason.Timeout, msg);
     }
 
-    private void OnTxT4Expired(TxSessionKey key)
+    private void OnTxT4Expired(TxSession session)
     {
-        if (!_txSessions.TryGetValue(key, out var session) || !session.IsCm) return;
+        if (!IsCurrentSession(session)) return;
         if (session.State != TxStage.WaitCts) return;
         AbortTx(session, J1939TpAbortReason.Timeout,
             "T4 expired: peer held session open (CTS with numPackets=0) too long.");
@@ -1286,7 +1336,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         session.Deadline?.Dispose();
         session.Deadline = null;
         // Notify peer.
-        SendTpCm(J1939TpFrames.BuildAbort(reason, session.Key.Pgn),
+        SendTpCm(J1939TpFrames.BuildAbort(reason, session.Key.Pgn, SentRole(J1939TpAbortRole.Originator)),
             destinationAddress: session.Key.DestinationAddress);
         session.Tcs.TrySetException(new J1939TpAbortException(reason, session.Key.Pgn, message));
         EndTx(session.Key);
@@ -1295,6 +1345,12 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     // =========================================================================================
     // Wire helpers
     // =========================================================================================
+
+    // The Connection Abort Role goes on the wire only when the options ask for it; otherwise
+    // byte 3 of the abort stays the first edition's reserved 0xFF (#350).
+    private J1939TpAbortRole SentRole(J1939TpAbortRole role)
+        => _options.SendConnectionAbortRole ? role : J1939TpAbortRole.NotAvailable;
+
     private void SendTpCm(byte[] payload, byte destinationAddress, TxSession? session = null,
         Action? onConfirmed = null)
         => SendControlFrame(J1939Pgn.TpCm, payload, destinationAddress, session, onConfirmed);
