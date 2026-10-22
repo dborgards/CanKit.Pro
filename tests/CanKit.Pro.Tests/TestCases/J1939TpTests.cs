@@ -377,8 +377,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     // J1939-21 §5.10.3 requires exactly one CM connection per (SA, DA) pair, so the fix is to
     // refuse the second RTS with SessionAlreadyOpen and keep the first session's DT stream
     // running to completion. This test replays that scenario end-to-end via raw frame injection.
-    [Fact]
-    public async Task SecondRtsFromSamePeer_DifferentPgn_IsAbortedAndDtRoutesToActiveSession()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SecondRtsFromSamePeer_DifferentPgn_IsAbortedAndDtRoutesToActiveSession(bool sendRole)
     {
         var session = NewSession();
         using var receiverBus = Open(session, 0);
@@ -396,7 +398,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         // injects a second RTS and asserts the Abort *before* sending DTs; a short T2 could
         // expire on a slow Windows/net48 runner and emit Abort(Timeout) for the active PGN, which
         // is correct protocol behavior but unrelated to the intruder-RTS rejection under test.
-        var opts = new J1939TpOptions().With(t2: TimeSpan.FromSeconds(5));
+        var opts = new J1939TpOptions { SendConnectionAbortRole = sendRole }.With(t2: TimeSpan.FromSeconds(5));
         using var receiver = J1939TpFactory.Open(receiverBus, sourceAddress: receiverSa, options: opts);
 
         // Observe every TP.CM frame the receiver emits so we can inspect CTS / EOM / Abort.
@@ -461,6 +463,9 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
                  && J1939TpFrames.ReadDataPgn(d) == intruderPgn,
             ShortTimeout);
         abort[1].Should().Be(1, "J1939-21 table 7: already in a session (#33)");
+        // Byte 3: the responder's role, 01 in bits 2..1, when asked for; the first edition's
+        // reserved 0xFF otherwise (#350).
+        abort.Should().Equal(new byte[] { 0xFF, 1, sendRole ? (byte)0xFD : (byte)0xFF, 0xFF, 0xFF, 0x76, 0xF8, 0x00 });
 
         // Receiver must not have started tearing down / re-CTSing the active session.
         lock (observed)
@@ -646,8 +651,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Bugbot 3596025922: canceling an in-flight TP.CM after RTS must send Connection Abort.
-    [Fact]
-    public async Task SendCm_CancelInFlight_SendsConnectionAbort()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SendCm_CancelInFlight_SendsConnectionAbort(bool sendRole)
     {
         var session = NewSession();
         using var senderBus = Open(session, 0);
@@ -657,7 +664,8 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         const byte peerSa = 0x72;
         const uint pgn = 0xFE71u;
 
-        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa);
+        using var sender = J1939TpFactory.Open(senderBus, sourceAddress: senderSa,
+            options: new J1939TpOptions { SendConnectionAbortRole = sendRole });
 
         var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -688,7 +696,10 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<OperationCanceledException>();
 
         var abort = await abortSeen.Task.AsTaskWithTimeout(ShortTimeout);
-        abort[1].Should().Be((byte)J1939TpAbortReason.NoResourcesAvailable);
+        // Byte 3: the originator's role, 00 in bits 2..1, when asked for; the first edition's
+        // reserved 0xFF otherwise (#350).
+        abort.Should().Equal(new byte[] { 0xFF, (byte)J1939TpAbortReason.NoResourcesAvailable,
+            sendRole ? (byte)0xFC : (byte)0xFF, 0xFF, 0xFF, 0x71, 0xFE, 0x00 });
     }
 
     // Bugbot 3596025929: MaxPacketsPerCts=0 must fail fast, not crash later in BuildCts.
@@ -710,6 +721,36 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         Action act = () => new J1939TpOptions().With(maxPacketsPerCts: 0);
         act.Should().Throw<ArgumentOutOfRangeException>()
             .Which.ParamName.Should().Be("maxPacketsPerCts");
+    }
+
+    // #350 / Codex on #367: With overrides SendConnectionAbortRole like every other option -- a
+    // value replaces the template's, null keeps it -- and leaves the rest of the template alone.
+    [Theory]
+    [InlineData(false, null, false)]
+    [InlineData(true, null, true)]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, false)]
+    public void Options_With_Overrides_SendConnectionAbortRole_Or_Keeps_It(bool template, bool? overrideValue, bool expected)
+    {
+        var source = new J1939TpOptions { SendConnectionAbortRole = template, T3 = TimeSpan.FromSeconds(2) };
+
+        var copy = source.With(sendConnectionAbortRole: overrideValue);
+
+        copy.SendConnectionAbortRole.Should().Be(expected);
+        copy.T3.Should().Be(TimeSpan.FromSeconds(2), "an override of the role leaves the other options as they were");
+    }
+
+    // The 1.3.0 signature stays for callers compiled against it; ten positional arguments bind to
+    // it rather than to the overload with the role, and it keeps the template's role.
+    [Fact]
+    public void Options_With_In_Its_1_3_0_Signature_Keeps_SendConnectionAbortRole()
+    {
+        var source = new J1939TpOptions { SendConnectionAbortRole = true };
+
+        var copy = source.With(null, null, TimeSpan.FromSeconds(2), null, null, null, null, null, null, null);
+
+        copy.SendConnectionAbortRole.Should().BeTrue();
+        copy.T3.Should().Be(TimeSpan.FromSeconds(2));
     }
 
     // Bugbot 3596025934 / 3596396508: T2 (CTS → first DT) must abort on the wire, raise
@@ -945,9 +986,18 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
     // Bugbot 3596617262: peer Connection Abort during outbound TP.CM must fail SendCmAsync
     // immediately — not leave the send task open until T2/T3/T4 expires.
-    [Fact]
-    public async Task Cm_Sender_PeerAbort_FailsSendImmediately()
+    //
+    // #350: whatever Connection Abort Role the frame carries. With one session to the PGN the
+    // role is not consulted -- a first-edition peer sends none, and a peer that sets it wrong
+    // still ends the only session the PGN can mean. The role decides only between two
+    // (A_Peer_Abort_Ends_The_Direction_Its_Role_Names).
+    [Theory]
+    [InlineData((byte)J1939TpAbortRole.NotAvailable)]
+    [InlineData((byte)J1939TpAbortRole.Responder)]
+    [InlineData((byte)J1939TpAbortRole.Originator)]
+    public async Task Cm_Sender_PeerAbort_FailsSendImmediately(byte roleValue)
     {
+        var role = (J1939TpAbortRole)roleValue;
         var session = NewSession();
         using var senderBus = Open(session, 0);
         using var peerBus = Open(session, 1);
@@ -976,7 +1026,7 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var sendTask = sender.SendCmAsync(pgn, destinationAddress: peerSa, payload);
         await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
 
-        var abort = J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn);
+        var abort = J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, role);
         var cmId = J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, senderSa);
         peerBus.Transmit(CanFrame.Classic((int)cmId, abort, isExtendedFrame: true));
 
@@ -1982,9 +2032,48 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
     [InlineData(J1939TpAbortReason.MessageSizeExceeded, 9)]
     public void Abort_Reason_Goes_On_The_Wire_As_Table_7_Assigns_It(J1939TpAbortReason reason, byte code)
     {
-        var frame = J1939TpFrames.BuildAbort(reason, dataPgn: 0xFECAu);
+        var frame = J1939TpFrames.BuildAbort(reason, dataPgn: 0xFECAu, J1939TpAbortRole.NotAvailable);
         frame[0].Should().Be(J1939TpFrames.ControlAbort);
         frame[1].Should().Be(code);
+    }
+
+    // #350: the Connection Abort Role (J1939-21, second edition) is the two low bits of byte 3;
+    // the rest of the byte stays 0xFF, so a first-edition reader still sees its reserved byte
+    // as near as the field allows, and 0xFF from a first-edition peer reads as no role.
+    [Theory]
+    [InlineData((byte)J1939TpAbortRole.Originator, 0xFC)]
+    [InlineData((byte)J1939TpAbortRole.Responder, 0xFD)]
+    [InlineData((byte)J1939TpAbortRole.NotAvailable, 0xFF)]
+    public void Abort_Role_Goes_On_The_Wire_In_The_Low_Bits_Of_Byte_3(byte roleValue, byte byte3)
+    {
+        var role = (J1939TpAbortRole)roleValue;
+        var frame = J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, dataPgn: 0xFECAu, role);
+        frame[2].Should().Be(byte3);
+        frame[3].Should().Be(0xFF);
+        frame[4].Should().Be(0xFF);
+        J1939TpFrames.ReadAbortRole(frame).Should().Be(role);
+    }
+
+    [Theory]
+    [InlineData(0xFF, (byte)J1939TpAbortRole.NotAvailable)] // first edition: reserved, filled with 0xFF
+    [InlineData(0xFC, (byte)J1939TpAbortRole.Originator)]
+    [InlineData(0xFD, (byte)J1939TpAbortRole.Responder)]
+    [InlineData(0xFE, (byte)J1939TpAbortRole.NotAvailable)] // the value the field does not assign
+    [InlineData(0x00, (byte)J1939TpAbortRole.Originator)] // a peer that clears the reserved bits
+    [InlineData(0x01, (byte)J1939TpAbortRole.Responder)]
+    public void Abort_Role_Is_Read_From_The_Low_Bits_Of_Byte_3_Alone(byte byte3, byte roleValue)
+    {
+        var role = (J1939TpAbortRole)roleValue;
+        var frame = J1939TpFrames.BuildAbort(J1939TpAbortReason.Timeout, dataPgn: 0xFECAu, J1939TpAbortRole.NotAvailable);
+        frame[2] = byte3;
+        J1939TpFrames.ReadAbortRole(frame).Should().Be(role);
+    }
+
+    [Fact]
+    public void Abort_Role_Is_Not_Read_From_A_Short_Payload()
+    {
+        var act = () => J1939TpFrames.ReadAbortRole(new byte[7]);
+        act.Should().Throw<ArgumentException>().WithParameterName("tpCmPayload");
     }
 
     // A CTS asking for a packet already sent is a retransmit request; with
@@ -2369,6 +2458,43 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         await none.Should().ThrowAsync<OperationCanceledException>("no CTS answers an RTS that permits none");
 
         // Served, because no session lingers for the malformed one.
+        peer.SendCm(peerSa, J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn));
+        var ctsFrame = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlCts, ShortTimeout);
+        ctsFrame[1].Should().BeGreaterThan(0);
+    }
+
+    // #33: an RTS announcing more than the 1785 bytes a TP message can carry is the one way the
+    // totals go wrong that table 7 has a code for (9, message size exceeded). The abort names
+    // the RTS's PGN and, with SendConnectionAbortRole, goes out in the responder's role (#350); no
+    // session is opened, so the next well-formed RTS from the same peer is served.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_Rts_Beyond_The_Maximum_Message_Size_Is_Refused_With_Reason_9(bool sendRole)
+    {
+        var session = NewSession();
+        using var subjectBus = Open(session, 0);
+        using var peerBus = Open(session, 1);
+        const byte subjectSa = 0x22, peerSa = 0x11;
+        const uint pgn = 0xFBCDu;
+        using var receiver = J1939TpFactory.Open(subjectBus, sourceAddress: subjectSa,
+            options: new J1939TpOptions { SendConnectionAbortRole = sendRole });
+        using var peer = new RawPeer(peerBus, subjectSa);
+
+        // BuildRts refuses the size, as a sender should; the peer's frame is written by hand.
+        const int totalBytes = J1939TpFrames.MaxTpPayloadLength + 1;
+        var rts = J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn);
+        rts[1] = (byte)(totalBytes & 0xFF);
+        rts[2] = (byte)(totalBytes >> 8);
+        rts[3] = 255;
+        peer.SendCm(peerSa, rts);
+
+        var abort = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlAbort, ShortTimeout);
+        abort.Should().Equal(new byte[] { 0xFF, (byte)J1939TpAbortReason.MessageSizeExceeded,
+            sendRole ? (byte)0xFD : (byte)0xFF, 0xFF, 0xFF, 0xCD, 0xFB, 0x00 },
+            "J1939-21 table 7, code 9 (#33), for the RTS's PGN, as the responder when the role is sent (#350)");
+
+        // Served, because no session lingers for the refused one.
         peer.SendCm(peerSa, J1939TpFrames.BuildRts(totalBytes: 14, totalPackets: 2, maxPacketsPerCts: 0xFF, dataPgn: pgn));
         var ctsFrame = await peer.WaitForCmAsync(d => d[0] == J1939TpFrames.ControlCts, ShortTimeout);
         ctsFrame[1].Should().BeGreaterThan(0);
@@ -2778,6 +2904,57 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
                 await Task.Yield();
         }
         await Task.WhenAll(sends).WaitAsync(ShortTimeout);
+    }
+
+    // #347 (Codex on #368): a J1939 node loses its address on its own loop and retires the
+    // channel only after that, so the channel is told whether the node still holds the address
+    // and reads it where a session starts. Once it is no longer held, neither a send that reaches
+    // the loop then nor one queued behind the session in flight may start a session: the first
+    // is refused, the second stays queued until the retirement fails it. The session already on
+    // the wire is the node's to end, by that retirement, not the channel's.
+    [Fact]
+    public async Task A_Channel_Whose_Owner_No_Longer_Holds_The_Address_Starts_No_Session()
+    {
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+
+        var announced = new List<uint>();
+        bus.OnTransmitting = frame =>
+        {
+            if (!frame.IsExtendedFrame) return;
+            var fields = J1939Id.Decompose((uint)frame.ID);
+            if (fields.SourceAddress != 0x10 || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            lock (announced) announced.Add(J1939TpFrames.ReadDataPgn(frame.Data.Span));
+        };
+
+        int held = 1;
+        // Disposed in the middle as the retirement under test; the using covers a failure before that.
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor,
+            sourceAddressHeld: () => Volatile.Read(ref held) != 0);
+        var first = sender.SendBamAsync(0xFEC0u, RandomPayload(9, seed: 1));
+        var queued = sender.SendBamAsync(0xFEC1u, RandomPayload(9, seed: 2));
+        int queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+        queuedCount.Should().Be(1, "the second BAM waits behind the first, which is on the wire");
+
+        Volatile.Write(ref held, 0);
+
+        Func<Task> late = () => sender.SendBamAsync(0xFEC2u, RandomPayload(9, seed: 3)).WithTimeout(ShortTimeout);
+        await late.Should().ThrowAsync<ObjectDisposedException>(
+            "a send reaching the loop after the address was given up starts no session");
+
+        await DrainAsync(clock, actor, first);
+        queuedCount = await actor.PostAsync(() => sender.QueuedSendCount).WaitAsync(ShortTimeout);
+        queuedCount.Should().Be(1, "the end of the first session does not start the queued one");
+        queued.IsCompleted.Should().BeFalse();
+        lock (announced) announced.Should().Equal(0xFEC0u);
+
+        sender.Dispose();
+        Func<Task> retired = () => queued.WithTimeout(ShortTimeout);
+        await retired.Should().ThrowAsync<ObjectDisposedException>("the retirement fails what is still queued");
+        lock (announced) announced.Should().Equal(0xFEC0u);
     }
 
     [Fact]
@@ -3574,6 +3751,484 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
 
         (await actor.NextTimerDelayAsync()).Should().BeNull("no chain was started for the cancelled BAM");
         Volatile.Read(ref dtCount).Should().Be(0);
+    }
+
+    // #350 (T-1): the same gap on the CM path. A cancelled CM send's TP.DT 1 confirmation
+    // arrives after the same (destination, PGN) was sent again and the peer's CTS for the new
+    // session has put its own DT 1 on the wire. Keyed by (destination, PGN), the late
+    // confirmation found the new session, passed its sequence-number check -- both are DT 1 --
+    // and moved its cursor, frontier and block, so DT 2 went to the pool behind an unconfirmed
+    // DT 1: the reordering the chain-on-confirmation discipline exists to prevent.
+    //
+    // When the confirmation is ignored nothing happens, so there is no event to wait for; the
+    // test probes the state instead. With packet 1 outstanding, a CTS for packet 2 is a sequence
+    // error (code 7, as A_Cts_For_An_Unsent_Packet_Of_The_Block_Is_A_Sequence_Error_Not_A_Retransmit
+    // pins); had the stale confirmation moved the frontier to 1 and the cursor to 2, the same
+    // CTS would be a retransmit request, served without a fault.
+    [Fact]
+    public async Task A_Late_Dt_Confirmation_Of_A_Cancelled_Cm_Send_Does_Not_Advance_The_Next_Send_Of_The_Same_Key()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 350); // three packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            if (J1939Id.Decompose((uint)f.ID).Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        using var cancel = new CancellationTokenSource();
+        var first = sender.SendCmAsync(pgn, peerSa, payload, cancel.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        cancel.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the Connection Abort
+
+        // The same key again, admitted at once: the cancelled session is gone and nothing else
+        // runs to this destination. The peer clears the whole message, and the new session's own
+        // DT 1 goes out -- with the old session's DT 1 still unconfirmed behind it in the queue.
+        var second = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout); // the new RTS
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(5, ShortTimeout); // the new session's DT 1
+
+        bus.DeferredEchoes.ReleaseNext(); // the cancelled session's DT 1 confirmation ...
+        await actor.PostAsync(() => 0);   // ... has run on the actor
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 2, dataPgn: pgn)), isEcho: false);
+        Func<Task> probed = async () => await second.WithTimeout(ShortTimeout);
+        var ex = await probed.Should().ThrowAsync<J1939TpAbortException>(
+            "packet 2 of the new session is unsent, so a CTS for it is a sequence error -- the late confirmation did not move its cursor");
+        ex.Which.Reason.Should().Be(J1939TpAbortReason.BadSequenceNumber);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 1 }, "each session sent its own DT 1 and nothing else");
+    }
+
+    // #350, second line of defence: the four TX continuations a timer or a confirmation runs --
+    // the next BAM and CM TP.DT, the T3 and the T4 expiry -- act only while the session they were
+    // bound to is still the one registered under its key. No public path reaches that check with
+    // a session that has ended, because a cancel releases the spacing timer and the deadline
+    // before a successor can start, so the tests hold one back through CaptureTxContinuations and
+    // run it while a successor of the same key is in flight. The successor must not notice:
+    // nothing is sent for the old session, the successor's timer is as it was, and it runs to
+    // completion with its own frames only.
+    private static byte[][] DtFrames(byte[] payload, int packets)
+        => Enumerable.Range(1, packets)
+            .Select(sn => J1939TpFrames.BuildDt((byte)sn, payload, (sn - 1) * J1939TpFrames.DtDataBytes))
+            .ToArray();
+
+    [Fact]
+    public async Task A_Stale_Bam_Dt_Continuation_Leaves_The_Successor_Bam_Of_Its_Key_Alone()
+    {
+        const uint pgn = 0xFEC9u;
+        var stalePayload = RandomPayload(21, seed: 367); // three packets each
+        var payload = RandomPayload(21, seed: 368);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dts = new List<byte[]>();
+        bus.OnTransmitting = frame =>
+        {
+            if (J1939Id.Decompose((uint)frame.ID).Pgn == J1939Pgn.TpDt) lock (dts) dts.Add(frame.Data.ToArray());
+        };
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+
+        using var cts = new CancellationTokenSource();
+        var first = sender.SendBamAsync(pgn, stalePayload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the announce
+        bus.DeferredEchoes.ReleaseNext();
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout); // DT 1 is next
+        var stale = (await actor.PostAsync(() => sender.CaptureTxContinuations(J1939Pgn.GlobalAddress, pgn))).NextBamDt;
+
+        cts.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        var second = sender.SendBamAsync(pgn, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the successor's announce, unconfirmed
+
+        await actor.PostAsync(stale);
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "the successor arms its spacing only once its own announce is confirmed");
+
+        bus.DeferredEchoes.ReleaseAll();
+        bus.EchoMode = EchoDelivery.Synchronous;
+        await DrainAsync(clock, actor, second);
+        lock (dts)
+            dts.Should().BeEquivalentTo(DtFrames(payload, 3), o => o.WithStrictOrdering(),
+                "the successor's three TP.DT and none of the cancelled BAM's");
+    }
+
+    [Theory]
+    [InlineData("NextCmDt")]
+    [InlineData("T3Expired")]
+    [InlineData("T4Expired")]
+    public async Task A_Stale_Cm_Continuation_Leaves_The_Successor_Session_Of_Its_Key_Alone(string continuation)
+    {
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var stalePayload = RandomPayload(21, seed: 369); // three packets each
+        var payload = RandomPayload(21, seed: 370);
+        var options = new J1939TpOptions().With(t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dts = new List<byte[]>();
+        var aborts = 0;
+        bus.OnTransmitting = frame =>
+        {
+            uint framePgn = J1939Id.Decompose((uint)frame.ID).Pgn;
+            if (framePgn == J1939Pgn.TpDt) lock (dts) dts.Add(frame.Data.ToArray());
+            else if (framePgn == J1939Pgn.TpCm && frame.Data.Span[0] == J1939TpFrames.ControlAbort) Interlocked.Increment(ref aborts);
+        };
+        using var service = new CanBusService(bus);
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options, ownsService: false, actor);
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        // The old session, in the state its continuation runs in: waiting for a CTS for an expiry,
+        // with DT 1 on the wire for the next TP.DT -- where the stale step would send DT 1 again.
+        using var cancel = new CancellationTokenSource();
+        var first = sender.SendCmAsync(pgn, peerSa, stalePayload, cancel.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        var staleDts = new List<byte[]>();
+        if (continuation == "NextCmDt")
+        {
+            bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+            staleDts.Add(DtFrames(stalePayload, 1)[0]);
+        }
+        var captured = await actor.PostAsync(() => sender.CaptureTxContinuations(peerSa, pgn));
+        Action stale = continuation switch
+        {
+            "NextCmDt" => captured.NextCmDt,
+            "T3Expired" => captured.T3Expired,
+            _ => captured.T4Expired,
+        };
+
+        int parked = 1 + staleDts.Count; // the RTS and the old session's DT, if it sent one
+        cancel.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(parked + 1, ShortTimeout); // the cancel's Connection Abort
+
+        var second = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(parked + 2, ShortTimeout); // the successor's RTS
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout); // its T3, for the CTS
+
+        await actor.PostAsync(stale);
+        (await actor.NextTimerDelayAsync()).Should().Be(options.T3,
+            "the successor's T3 is still the timer running, neither replaced nor joined by another");
+
+        bus.DeferredEchoes.ReleaseAll();
+        bus.EchoMode = EchoDelivery.Synchronous;
+        int beforeBlock = bus.TransmitCount;
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await WaitForTransmitCount(bus, beforeBlock + 3);
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+        await second.WithTimeout(ShortTimeout);
+
+        lock (dts)
+            dts.Should().BeEquivalentTo(staleDts.Concat(DtFrames(payload, 3)), o => o.WithStrictOrdering(),
+                "the successor's three TP.DT, after whatever the old session had sent before its cancel");
+        Volatile.Read(ref aborts).Should().Be(1, "the cancel's Connection Abort is the only one");
+    }
+
+    // #350 (T3): with a CM transfer of the same PGN running in both directions with one peer, a
+    // Connection Abort from that peer matches both the session it sends us and the one we send
+    // it. The Connection Abort Role in byte 3 (J1939-21, second edition) says which one: as
+    // originator the peer aborts what it was sending, as responder what we were sending. A
+    // first-edition peer sends 0xFF, no role, and both end -- the behaviour before #350.
+    [Theory]
+    [InlineData((byte)J1939TpAbortRole.Originator)]
+    [InlineData((byte)J1939TpAbortRole.Responder)]
+    [InlineData((byte)J1939TpAbortRole.NotAvailable)]
+    public async Task A_Peer_Abort_Ends_The_Direction_Its_Role_Names(byte roleValue)
+    {
+        var role = (J1939TpAbortRole)roleValue;
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var outgoing = RandomPayload(21, seed: 351); // three packets each way
+        var incoming = RandomPayload(21, seed: 352);
+        using var actor = new ProtocolActor();
+        using var subject = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+
+        var rtsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var eomAckSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dtSns = new List<byte>();
+        var threeDtsSeen = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            var data = f.Data.ToArray();
+            if (fields.Pgn == J1939Pgn.TpDt)
+            {
+                int count;
+                lock (dtSns) { dtSns.Add(data[0]); count = dtSns.Count; }
+                if (count == 3) threeDtsSeen.TrySetResult(count);
+                return;
+            }
+            if (!J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            if (data[0] == J1939TpFrames.ControlRts) rtsSeen.TrySetResult(data);
+            if (data[0] == J1939TpFrames.ControlCts) ctsSeen.TrySetResult(data);
+            if (data[0] == J1939TpFrames.ControlEomAck) eomAckSeen.TrySetResult(data);
+        };
+        static CanFrame Peer(uint tpPgn, byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, tpPgn, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        // Our send to the peer: RTS out, waiting for its CTS. Its send to us: RTS in, our CTS
+        // out. Both sessions exist, under the same peer and PGN.
+        var send = subject.SendCmAsync(pgn, peerSa, outgoing);
+        await rtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        bus.RaiseObserved(Peer(J1939Pgn.TpCm, peerSa, subjectSa,
+            J1939TpFrames.BuildRts(totalBytes: 21, totalPackets: 3, maxPacketsPerCts: 0xFF, dataPgn: pgn)), isEcho: false);
+        await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        bus.RaiseObserved(Peer(J1939Pgn.TpCm, peerSa, subjectSa,
+            J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, role)), isEcho: false);
+
+        bool rxEnds = role != J1939TpAbortRole.Responder;
+        bool txEnds = role != J1939TpAbortRole.Originator;
+
+        if (txEnds)
+        {
+            Func<Task> failed = async () => await send.WithTimeout(ShortTimeout);
+            (await failed.Should().ThrowAsync<J1939TpAbortException>("the peer, as responder, aborted our send"))
+                .Which.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+        }
+        if (rxEnds)
+        {
+            Func<Task> faulted = async () => await subject.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+            (await faulted.Should().ThrowAsync<J1939TpAbortException>("the peer, as originator, aborted what it was sending us"))
+                .Which.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+        }
+
+        if (!rxEnds)
+        {
+            // The peer's transfer to us goes on: its three packets reassemble, and ReceiveAsync
+            // hands the datagram over -- it would throw first had the abort faulted the inbox.
+            for (byte sn = 1; sn <= 3; sn++)
+            {
+                bus.RaiseObserved(Peer(J1939Pgn.TpDt, peerSa, subjectSa,
+                    J1939TpFrames.BuildDt(sn, incoming, (sn - 1) * J1939TpFrames.DtDataBytes)), isEcho: false);
+            }
+            var datagram = await subject.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+            datagram.Pgn.Should().Be(pgn);
+            datagram.SourceAddress.Should().Be(peerSa);
+            datagram.Payload.Should().Equal(incoming);
+            await eomAckSeen.Task.AsTaskWithTimeout(ShortTimeout);
+        }
+        if (!txEnds)
+        {
+            // Our transfer to the peer goes on: its CTS drives our three packets out, and its
+            // EndOfMsgAck completes the send.
+            bus.RaiseObserved(Peer(J1939Pgn.TpCm, peerSa, subjectSa,
+                J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+            await threeDtsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+            lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 2, 3 });
+            bus.RaiseObserved(Peer(J1939Pgn.TpCm, peerSa, subjectSa,
+                J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+            await send.WithTimeout(ShortTimeout);
+        }
+    }
+
+    // #350: the common case of a Connection Abort -- the peer, as originator, gives up on what it
+    // was sending us while nothing of ours goes the other way. With no TX session under the
+    // peer and PGN the RX match alone decides, the role is not consulted, and the reassembly
+    // ends with the peer's reason.
+    [Fact]
+    public async Task A_Peer_Abort_Of_Its_Transfer_To_Us_Ends_The_Reassembly_With_Its_Reason()
+    {
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        // A frozen clock: T2 runs from our CTS, and its expiry would end the reassembly too --
+        // with Timeout, so the abort below carries a reason T2 cannot produce, and T2 never fires.
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var subject = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+        var background = new List<Exception>();
+        subject.BackgroundExceptionOccurred += (_, ex) => { lock (background) background.Add(ex); };
+
+        var ctsSeen = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        bus.OnTransmitting = f =>
+        {
+            var fields = J1939Id.Decompose((uint)f.ID);
+            var data = f.Data.ToArray();
+            if (J1939Pgn.IsTransportCm(fields.Pgn) && data[0] == J1939TpFrames.ControlCts)
+                ctsSeen.TrySetResult(data);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildRts(totalBytes: 21, totalPackets: 3, maxPacketsPerCts: 0xFF, dataPgn: pgn)), isEcho: false);
+        await ctsSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, J1939TpAbortRole.NotAvailable)), isEcho: false);
+
+        Func<Task> faulted = async () => await subject.ReceiveAsync().AsTaskWithTimeout(ShortTimeout);
+        var ex = (await faulted.Should().ThrowAsync<J1939TpAbortException>()).Which;
+        ex.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+        ex.Pgn.Should().Be(pgn);
+        lock (background) background.Should().ContainSingle().Which.Should().BeSameAs(ex);
+    }
+
+    // #350: a peer abort while a TP.DT of ours is still unconfirmed. In that state the session
+    // runs no deadline -- the confirmation is what it waits for -- and the abort must fail the
+    // send at once rather than leave it to the confirmation. The confirmation then arrives for a
+    // session that is gone, and the same key is free for the next send, which runs to completion.
+    [Fact]
+    public async Task A_Peer_Abort_While_A_Dt_Is_Unconfirmed_Fails_The_Send_At_Once()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new CanBusService(bus);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 353); // three packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            if (J1939Id.Decompose((uint)f.ID).Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var first = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa,
+            J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, J1939TpAbortRole.Responder)), isEcho: false);
+        Func<Task> failed = async () => await first.WithTimeout(ShortTimeout);
+        (await failed.Should().ThrowAsync<J1939TpAbortException>("the peer, as responder, aborted the send mid-block"))
+            .Which.Reason.Should().Be(J1939TpAbortReason.NoResourcesAvailable);
+
+        bus.DeferredEchoes.ReleaseNext(); // DT 1's confirmation, for a session that is gone
+
+        // The key is free: the next send is admitted (a session still registered would refuse it
+        // as "already in flight") and runs through on its own confirmations.
+        var second = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // the new RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        for (int sent = 0; sent < 3; sent++)
+        {
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(4 + sent, ShortTimeout);
+            bus.DeferredEchoes.ReleaseNext();
+        }
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+        await second.WithTimeout(ShortTimeout);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 1, 2, 3 }, "the aborted session's DT 1, then the new session's own three");
+    }
+
+    // #152: a CTS for the next block that arrives while the current block's last TP.DT is still
+    // unconfirmed -- a fast peer on a Virtual loopback does this -- is stashed and applied the
+    // moment that confirmation runs, and the next block goes out from there. DeferredEchoes
+    // fixes the order: the CTS has reached the actor before the confirmation is released.
+    [Fact]
+    public async Task A_Cts_For_The_Next_Block_Arriving_Before_The_Last_Confirmation_Of_This_One_Is_Applied_With_It()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var payload = RandomPayload(21, seed: 152); // three packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, new J1939TpOptions(),
+            ownsService: false, actor);
+
+        var dtSns = new List<byte>();
+        bus.OnTransmitting = f =>
+        {
+            if (J1939Id.Decompose((uint)f.ID).Pgn == J1939Pgn.TpDt) lock (dtSns) dtSns.Add(f.Data.Span[0]);
+        };
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        var send = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 1, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, the block's only packet, unconfirmed
+
+        // The next block's CTS, in hand before DT 1 is confirmed.
+        var nextBlock = J1939TpFrames.BuildCts(numPackets: 2, nextPacketSn: 2, dataPgn: pgn);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(nextBlock));
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, nextBlock), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1 }, "DT 2 waits for DT 1's confirmation, CTS or no CTS");
+
+        bus.DeferredEchoes.ReleaseNext(); // DT 1 confirmed: the stashed CTS takes effect
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout); // DT 2
+        bus.DeferredEchoes.ReleaseNext();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(4, ShortTimeout); // DT 3
+        bus.DeferredEchoes.ReleaseNext();
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+        await send.WithTimeout(ShortTimeout);
+        lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 2, 3 });
+    }
+
+    // #350: a Connection Abort ends a TP.CM session only. A BAM is registered under the global
+    // address, so the one abort whose (source, PGN) can name it comes from source 0xFF -- not
+    // an address a node may send from, but nothing filters it before the abort is routed. The
+    // BAM has no abort channel (§5.10.3) and must run to completion regardless.
+    [Fact]
+    public async Task A_Connection_Abort_From_The_Global_Address_Does_Not_End_A_Bam()
+    {
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        using var service = new FrameConsumptionCountingBusService(new CanBusService(bus));
+        const byte subjectSa = 0x10;
+        const uint pgn = 0xFECBu;
+        var payload = RandomPayload(14, seed: 3501); // two packets
+        using var actor = new ProtocolActor();
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa,
+            new J1939TpOptions().With(bamPacketSpacing: TimeSpan.Zero), ownsService: false, actor);
+
+        var send = sender.SendBamAsync(pgn, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the BAM announce, unconfirmed
+
+        var abort = J1939TpFrames.BuildAbort(J1939TpAbortReason.NoResourcesAvailable, pgn, J1939TpAbortRole.Responder);
+        var handedOver = service.WaitUntilConsumedAsync(e => e.Frame.Data.ToArray().SequenceEqual(abort));
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, J1939Pgn.GlobalAddress, subjectSa),
+            abort, isExtendedFrame: true), isEcho: false);
+        await handedOver.WaitAsync(ShortTimeout);
+        await actor.PostAsync(() => 0);
+        send.IsCompleted.Should().BeFalse("an abort ends a TP.CM session, and this is a BAM");
+
+        for (int confirmed = 0; confirmed < 3; confirmed++) // the announce, then DT 1 and DT 2
+        {
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(confirmed + 1, ShortTimeout);
+            bus.DeferredEchoes.ReleaseNext();
+        }
+        await send.WithTimeout(ShortTimeout);
     }
 
     [Theory]

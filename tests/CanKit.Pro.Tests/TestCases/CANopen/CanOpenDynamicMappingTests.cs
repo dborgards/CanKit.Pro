@@ -264,11 +264,16 @@ public class CanOpenDynamicMappingTests : IClassFixture<VirtualAdapterFixture>
         await master.SdoDownloadAsync(0x11, 0x1A00, 0x02, MappingEntryBytes(0x2000, 0x01, 32))
             .WithTimeoutAsync(ShortTimeout);
 
-        // 4 + 4 + 2 = 10 bytes > the 8-byte classic CAN limit.
+        await master.SdoDownloadAsync(0x11, 0x1A00, 0x03, MappingEntryBytes(0x2001, 0x00, 16))
+            .WithTimeoutAsync(ShortTimeout);
+
+        // 4 + 4 + 2 = 10 bytes > the 8-byte classic CAN limit. Each entry is valid on its own; the
+        // length is judged when step 4 enables the mapping (#358, P-4).
         var ex = await Assert.ThrowsAsync<SdoAbortException>(() =>
-            master.SdoDownloadAsync(0x11, 0x1A00, 0x03, MappingEntryBytes(0x2001, 0x00, 16))
+            master.SdoDownloadAsync(0x11, 0x1A00, 0x00, new byte[] { 0x03 })
                 .WithTimeoutAsync(ShortTimeout));
         ex.AbortCode.Should().Be((uint)SdoAbortCode.PdoMappingLengthExceeded);
+        slave.ObjectDictionary.ReadUnsigned(0x1A00, 0x00).Should().Be(0u, "the refused count is not stored");
     }
 
     // -----------------------------------------------------------------------------------------

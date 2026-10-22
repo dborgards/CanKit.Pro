@@ -12,11 +12,13 @@ namespace CanKit.Pro.CANopen.Pdo;
 /// <remarks>
 /// Bit lengths are the same units the CiA 301 §7.5.2.38 mapping record uses (a 32-bit mapping
 /// entry is <c>index &lt;&lt; 16 | subindex &lt;&lt; 8 | bit-length</c>). The node stores every
-/// mapping in its <c>1600h</c>–<c>1603h</c> / <c>1A00h</c>–<c>1A03h</c> records, whether it was
-/// configured through <c>ConfigureTpdo</c>/<c>ConfigureRpdo</c> or written over SDO.
+/// mapping in its mapping records — <c>1600h + n − 1</c> / <c>1A00h + n − 1</c> for PDO n, up to
+/// <c>17FFh</c> / <c>1BFFh</c> — whether it was configured through
+/// <c>ConfigureTpdo</c>/<c>ConfigureRpdo</c> or written over SDO.
 /// An entry whose index is one of the static data types <c>0001h</c>–<c>0007h</c> (with
-/// sub-index 0) is a <em>dummy mapping</em> (CiA 301 §7.5.2.36): it occupies its bytes in the
-/// PDO without touching the object dictionary, which pads an RPDO to a peer's layout.
+/// sub-index 0) is a <em>dummy mapping</em> (CiA 301 §7.5.2.36): it occupies the bits of its
+/// data type (<see cref="DummyBitLength"/>) in the PDO without touching the object dictionary,
+/// which pads an RPDO to a peer's layout.
 /// </remarks>
 public readonly struct PdoMappingEntry : IEquatable<PdoMappingEntry>
 {
@@ -47,7 +49,7 @@ public readonly struct PdoMappingEntry : IEquatable<PdoMappingEntry>
     public int ByteLength => (BitLength + 7) / 8;
 
     /// <summary>Whether this is a dummy mapping (CiA 301 §7.5.2.36): index <c>0001h</c>–<c>0007h</c>,
-    /// sub-index 0. The bytes are padding — zeros in a TPDO, ignored in an RPDO.</summary>
+    /// sub-index 0. Its bits are padding — zeros in a TPDO, ignored in an RPDO.</summary>
     public bool IsDummy => Subindex == 0 && Index is >= 0x0001 and <= 0x0007;
 
     /// <summary>The bit length CiA 301 assigns to the dummy data type <paramref name="index"/>

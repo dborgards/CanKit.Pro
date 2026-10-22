@@ -4,6 +4,28 @@ using CanKit.Pro.Addressing;
 namespace CanKit.Pro.J1939Tp;
 
 /// <summary>
+/// The role the sender of a TP.CM Connection Abort has in the session it aborts -- the
+/// Connection Abort Role field in byte 3 of the frame (J1939-21, second edition). With it a
+/// peer that runs a CM transfer of the same PGN in both directions with us can tell which of
+/// the two one abort ends; without it (<see cref="NotAvailable"/>, what a first-edition peer
+/// sends as 0xFF) the PGN is all there is to go on (#350).
+/// </summary>
+internal enum J1939TpAbortRole : byte
+{
+    /// <summary>The abort comes from the node that sent the RTS.</summary>
+    Originator = 0,
+
+    /// <summary>The abort comes from the node the RTS was sent to.</summary>
+    Responder = 1,
+
+    /// <summary>
+    /// No role on the wire: the first edition's reserved 0xFF, or one of the two values the
+    /// field does not assign.
+    /// </summary>
+    NotAvailable = 3,
+}
+
+/// <summary>
 /// SAE J1939-21 §5.10 Transport Protocol wire-format codec: builds and parses the two protocol
 /// PGNs used by every session -- TP.CM (0xEC00) and TP.DT (0xEB00) -- into their plain 8-byte
 /// payload representations. Pure functions; no allocation of any state, no timing knowledge.
@@ -128,18 +150,47 @@ internal static class J1939TpFrames
         return payload;
     }
 
-    /// <summary>Builds an 8-byte TP.CM Connection Abort with reason <paramref name="reason"/>.</summary>
-    public static byte[] BuildAbort(J1939TpAbortReason reason, uint dataPgn)
+    /// <summary>
+    /// Mask of the Connection Abort Role field: bits 1..2 of byte 3 of a TP.CM Connection Abort
+    /// (J1939-21, second edition). The first edition had the byte reserved, filled with 0xFF,
+    /// which reads as <see cref="J1939TpAbortRole.NotAvailable"/> here.
+    /// </summary>
+    public const byte AbortRoleMask = 0x03;
+
+    /// <summary>
+    /// Builds an 8-byte TP.CM Connection Abort with reason <paramref name="reason"/>, sent in
+    /// <paramref name="role"/> -- the role this node has in the session it aborts. Byte 3 carries
+    /// the role in its two low bits, the rest of it and bytes 4..5 stay 0xFF;
+    /// <see cref="J1939TpAbortRole.NotAvailable"/> leaves byte 3 at 0xFF as well, which is what
+    /// the channel sends unless <see cref="J1939TpOptions.SendConnectionAbortRole"/> is set (#350).
+    /// </summary>
+    public static byte[] BuildAbort(J1939TpAbortReason reason, uint dataPgn, J1939TpAbortRole role)
     {
         ValidateDataPgn(dataPgn);
         var payload = new byte[8];
         payload[0] = ControlAbort;
         payload[1] = (byte)reason;
-        payload[2] = 0xFF;
+        payload[2] = (byte)(~AbortRoleMask | ((byte)role & AbortRoleMask));
         payload[3] = 0xFF;
         payload[4] = 0xFF;
         WriteDataPgn(payload, dataPgn);
         return payload;
+    }
+
+    /// <summary>
+    /// Reads the Connection Abort Role from byte 3 of a TP.CM Connection Abort. 0 is the
+    /// originator, 1 the responder; the two values the field does not assign, and so the first
+    /// edition's 0xFF, are <see cref="J1939TpAbortRole.NotAvailable"/> (#350).
+    /// </summary>
+    public static J1939TpAbortRole ReadAbortRole(ReadOnlySpan<byte> tpCmPayload)
+    {
+        if (tpCmPayload.Length < 8) throw new ArgumentException("TP.CM payload must be 8 bytes.", nameof(tpCmPayload));
+        return (tpCmPayload[2] & AbortRoleMask) switch
+        {
+            (byte)J1939TpAbortRole.Originator => J1939TpAbortRole.Originator,
+            (byte)J1939TpAbortRole.Responder => J1939TpAbortRole.Responder,
+            _ => J1939TpAbortRole.NotAvailable,
+        };
     }
 
     /// <summary>

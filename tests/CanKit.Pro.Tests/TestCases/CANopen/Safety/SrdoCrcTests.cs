@@ -37,6 +37,19 @@ public class SrdoCrcTests
             0x02, 0x20, 0x00, 0x01, 0x10);// g2/h2) sub-index 2, same object, inverted slot
     }
 
+    /// <summary>The configuration form is the serializer fed with the record form: direction,
+    /// the times as whole milliseconds, the ids, the count of slots and each object twice (#360,
+    /// S-6). The serializer writes the fields as given — this is where #289's byte order lives.</summary>
+    [Fact]
+    public void The_Configuration_Form_Feeds_The_One_Serializer()
+    {
+        var mapping = new SrdoMapping().Add(0x2000, 0x01, 16).Add(0x2001, 0x00, 8);
+        SrdoCrc.CanonicalBytes(Parameter, mapping).Should().Equal(SrdoCrc.CanonicalBytes(1, 25, 20, 0x101, 0x102, 4,
+            new[] { ((byte)1, 0x20000110u), ((byte)2, 0x20000110u), ((byte)3, 0x20010008u), ((byte)4, 0x20010008u) }));
+        SrdoCrc.CanonicalBytes(2, 0x1234, 0xAB, 0x12345678, 0x9ABCDEF0, 0x03, new[] { ((byte)7, 0xCAFEBABEu) }).Should().Equal(
+            0x02, 0x12, 0x34, 0xAB, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x03, 0x07, 0xCA, 0xFE, 0xBA, 0xBE);
+    }
+
     [Fact]
     public void Compute_Is_The_Primitive_Over_The_Canonical_Sequence()
     {

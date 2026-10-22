@@ -314,6 +314,84 @@ public partial class CanOpenPdoEngineTests
         wire.Payloads(emcy).Select(p => p[0]).Should().BeEquivalentTo(new byte[] { 0x10, 0x30, 0x10, 0x30 });
     }
 
+    // #358 (P-5): the DAM target passed the target check, and then the write itself is refused —
+    // here by a write validator, in practice by a re-declaration in between. That is a target
+    // that is not available (8230h), not an exception out of the frame handler; nothing is
+    // actuated, and the next frame the target takes lands as usual.
+    [Fact]
+    public async Task Mpdo_Target_That_Refuses_The_Write_Raises_8230h_Instead_Of_Throwing()
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Device);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x2000, 0, 0);
+        node.Pdo().ConfigureMultiplexedRpdo(1, MpdoAddressMode.Destination, Rpdo1);
+        var background = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => background.Enqueue(ex);
+        var received = new System.Collections.Concurrent.ConcurrentQueue<byte[]>();
+        var landed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId != Rpdo1) return;
+            received.Enqueue(e.Payload);
+            if (e.Payload[4] == 43) landed.TrySetResult(true);
+        };
+        await StartAsync(wire, node);
+
+        var inner = od.WriteValidator!;
+        bool refuse = true;
+        od.WriteValidator = (index, subindex, value) => refuse && index == 0x2000
+            ? OdWriteDecision.Reject(CanKit.Pro.CANopen.Sdo.SdoAbortCode.General)
+            : inner(index, subindex, value);
+        uint emcy = CanOpenCobId.Emcy(Device);
+        wire.Transmit(Rpdo1, new byte[] { 0x80, 0x00, 0x20, 0x00, 42, 0, 0, 0 });
+        await wire.WaitForCountAsync(emcy, 1);
+        wire.Payloads(emcy)[0].Take(2).Should().Equal(0x30, 0x82);
+        od.ReadUnsigned(0x2000, 0).Should().Be(0u, "the refused write did not land");
+
+        refuse = false;
+        wire.Transmit(Rpdo1, new byte[] { 0x80, 0x00, 0x20, 0x00, 43, 0, 0, 0 });
+        await landed.Task.WithTimeoutAsync(ShortTimeout);
+        od.ReadUnsigned(0x2000, 0).Should().Be(43u);
+        background.Should().BeEmpty("a refused MPDO target is reported as 8230h, not thrown");
+        received.Should().ContainSingle("only the frame that landed is reported as received");
+    }
+
+    // #358 (P-3) — an application trigger is an event (CiA 301 Table 72). A cyclic TPDO
+    // (01h-F0h) is sent by the SYNC and an RTR-only one (FCh/FDh) by an RTR, so a trigger sends
+    // neither. The witness is an event-driven TPDO2 triggered afterwards on the same actor and
+    // sent through the same bus: once its frame is on the wire, a frame the first trigger had
+    // sent would be there before it.
+    [Theory]
+    [InlineData(0x01)]
+    [InlineData(0x05)]
+    [InlineData(0xF0)]
+    [InlineData(0xFC)]
+    [InlineData(0xFD)]
+    public async Task Trigger_Sends_Nothing_For_A_Cyclic_Or_Rtr_Only_Tpdo(int type)
+    {
+        var session = NewSession();
+        using var bus = Open(session, 0);
+        using var wire = new Wire(session, 2);
+        using var node = CanOpen.OpenNode(bus, Device);
+        var od = node.ObjectDictionary;
+        od.AddU8(0x2000, 0, 0x5A);
+        node.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0, 8), TpdoTransmission.Synchronous);
+        node.ConfigureTpdo(2, new PdoMapping().Add(0x2000, 0, 8));
+        uint cobId = od.ReadUnsigned(0x1800, 1);
+        od.WriteUnsigned(0x1800, 1, cobId | CanOpenCobId.InvalidBit);
+        od.WriteUnsigned(0x1800, 2, (uint)type);
+        od.WriteUnsigned(0x1800, 1, cobId);
+        await StartAsync(wire, node);
+
+        await node.TriggerTpdoAsync(1);
+        await node.TriggerTpdoAsync(2);
+        await wire.WaitForCountAsync(Tpdo2, 1);
+        wire.Count(Tpdo1).Should().Be(0, "transmission type {0:X2}h does not react to an application trigger", type);
+    }
+
     [Fact]
     public async Task Sync_Length_Emergency_Is_Latched_Until_A_Valid_Sync()
     {

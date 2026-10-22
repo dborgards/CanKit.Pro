@@ -318,5 +318,8 @@ internal sealed partial class SrdoEngine : IDisposable
         public IDeadline? SctDeadline { get; set; }
         public IDeadline? SrvtDeadline { get; set; }
         public bool ShortFrameReported { get; set; }
+        /// <summary>A plain frame followed by an inverted one since the consumer was armed,
+        /// whatever became of the pair (#360, S-7).</summary>
+        public bool PairSeen { get; set; }
     }
 }

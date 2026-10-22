@@ -731,6 +731,78 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
         od.ReadUnsigned(0x1800, 0x03).Should().Be(10u);
     }
 
+    // #358 (test gap) — 1400h:03 is retained on an RPDO as an implementation-specific inhibit
+    // parameter (README § PDO engine): it follows the TPDO rule for sub-index 03h — no change while
+    // the PDO exists — and does not suppress reception. Two frames sent back to back under an
+    // inhibit of 6.5535 s are both actuated within the 5 s wait, which a suppressing node could
+    // only meet by letting the second one through.
+    [Fact]
+    public async Task Rpdo_Inhibit_Sub_Index_Follows_The_Valid_Pdo_Rule_And_Does_Not_Suppress_Reception()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2100, 0x00, 0);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, 8));
+
+        (await DownloadShouldAbortAsync(master, 0x1400, 0x03, new byte[] { 0xFF, 0xFF }))
+            .AbortCode.Should().Be((uint)SdoAbortCode.ValueRangeExceeded, "the RPDO exists");
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1 | CanOpenCobId.InvalidBit));
+        await DownloadAsync(master, 0x1400, 0x03, new byte[] { 0xFF, 0xFF });
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1));
+        (await UploadAsync(master, 0x1400, 0x03)).Should().Equal(new byte[] { 0xFF, 0xFF });
+
+        var received = new System.Collections.Concurrent.ConcurrentQueue<byte>();
+        var second = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId != Rpdo1) return;
+            received.Enqueue(e.Payload[0]);
+            if (e.Payload[0] == 0x02) second.TrySetResult(true);
+        };
+        await StartAsync(wire, device);
+        wire.Transmit(Rpdo1, new byte[] { 0x01 });
+        wire.Transmit(Rpdo1, new byte[] { 0x02 });
+        await second.Task.WithTimeoutAsync(ShortTimeout);
+        received.Should().Equal(0x01, 0x02);
+        od.ReadUnsigned(0x2100, 0x00).Should().Be(0x02u);
+    }
+
+    // #358 (test gap) — bit 30 of an RPDO COB-ID (the RTR bit of Table 66) is accepted over SDO
+    // and ignored for reception: the RPDO still matches its 11-bit CAN-ID. The maintainer's
+    // decision on #358 is to document that rather than refuse it (README § RTR, ConfigureRpdo).
+    [Fact]
+    public async Task Rpdo_Cob_Id_With_Bit_30_Set_Over_Sdo_Is_Accepted_And_Still_Receives()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        var od = device.ObjectDictionary;
+        od.AddU8(0x2100, 0x00, 0);
+        device.ConfigureRpdo(1, new PdoMapping().Add(0x2100, 0x00, 8));
+
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1 | CanOpenCobId.InvalidBit));
+        await DownloadAsync(master, 0x1400, 0x01, U32Bytes(Rpdo1 | CanOpenCobId.NoRtrBit));
+        (await UploadAsync(master, 0x1400, 0x01)).Should().Equal(U32Bytes(Rpdo1 | CanOpenCobId.NoRtrBit));
+
+        var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        device.RpdoReceived += (_, e) =>
+        {
+            if (e.CobId == Rpdo1) received.TrySetResult(e.Payload);
+        };
+        await StartAsync(wire, device);
+        wire.Transmit(Rpdo1, new byte[] { 0x5A });
+        (await received.Task.WithTimeoutAsync(ShortTimeout)).Should().Equal(0x5A);
+        od.ReadUnsigned(0x2100, 0x00).Should().Be(0x5Au);
+    }
+
     // =========================================================================================
     // FR-CO-017 — RPDO transmission type (CiA 301 §7.5.2.35 Table 68).
     // =========================================================================================
@@ -1105,6 +1177,39 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
             "sub-index 01h is the first object, 02h the second, and the dummy in 03h is a zero byte");
     }
 
+    // FR-CO-020 (#358, P-4) — while the mapping is disabled the slots keep a previous mapping, and
+    // the write order is free. A master remapping {01h = 64 bits} to {01h = 8, 02h = 8} that
+    // writes slot 02h first must not be refused for the stale 64 bits still in slot 01h: the
+    // length of the mapping is judged when step 4 enables it, over the entries it names.
+    [Fact]
+    public async Task Mapping_Slot_Write_Does_Not_Count_A_Stale_Preceding_Slot()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var wire = new Wire(session, 2);
+        using var master = CanOpen.OpenNode(busA, Master);
+        using var device = CanOpen.OpenNode(busB, Device, MasterConfigurable);
+        var od = device.ObjectDictionary;
+        od.AddRaw(0x2000, 0x00, OdDataType.Unsigned64, new byte[8]);
+        od.AddU8(0x2001, 0x00, 0x11);
+        od.AddU8(0x2002, 0x00, 0x22);
+        device.ConfigureTpdo(1, new PdoMapping().Add(0x2000, 0x00, 64));
+
+        await DownloadAsync(master, 0x1800, 0x01, U32Bytes(Tpdo1 | CanOpenCobId.InvalidBit));
+        await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x00 });
+        (await UploadAsync(master, 0x1A00, 0x01)).Should().Equal(MappingEntryBytes(0x2000, 0x00, 64), "slot 01h still holds the previous 64-bit entry");
+        await DownloadAsync(master, 0x1A00, 0x02, MappingEntryBytes(0x2002, 0x00, 8));
+        await DownloadAsync(master, 0x1A00, 0x01, MappingEntryBytes(0x2001, 0x00, 8));
+        await DownloadAsync(master, 0x1A00, 0x00, new byte[] { 0x02 });
+        await DownloadAsync(master, 0x1800, 0x01, U32Bytes(Tpdo1));
+
+        await StartAsync(wire, device);
+        await device.TriggerTpdoAsync(1);
+        await wire.WaitForCountAsync(Tpdo1, 1);
+        wire.Payloads(Tpdo1)[0].Should().Equal(0x11, 0x22);
+    }
+
     // FR-CO-020 — sub-index 00h: step 4 "the mapping is not valid or not possible" (0602 0000h /
     // 0604 0042h) for a count that names an empty slot or more entries than fit; the reserved and
     // MPDO values of Table 73 are not supported (0609 0030h).
@@ -1248,9 +1353,12 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
 
     // FR-CO-024 (C13) — a producer that keeps sending short frames raises EMCY 8210h once, not once
     // per frame: the EMCY traffic would otherwise be a multiple of the fault it reports. A frame
-    // that fits ends the run, so the next short one is reported again. The count is read when the
-    // third EMCY arrives, after which every EMCY the second short frame could have raised is
-    // already in the list: the bus delivers them in order.
+    // that fits ends the run, so the next short one is reported again. The count is read only once
+    // a witness EMCY has arrived: the witness is sent after a fitting frame behind the last short
+    // one was actuated, so the actor had handled every short frame by then, and every EMCY goes
+    // out through one chain in the order the actor decided — whatever the short frames raised is
+    // in the list before the witness (#358 addendum: reading at the second arrival let the
+    // fourth frame's EMCY still be in flight, and the test stayed green without the latch).
     [Fact]
     public async Task Rpdo_Shorter_Than_Its_Mapping_Raises_Emcy_Once_Per_Run_Of_Short_Frames()
     {
@@ -1274,22 +1382,29 @@ public partial class CanOpenPdoEngineTests : IClassFixture<VirtualAdapterFixture
             arrived.Add(emcys.Count);
         };
         var received = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fittedAgain = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
         device.RpdoReceived += (_, e) =>
         {
-            if (e.CobId == Rpdo1) received.TrySetResult(e.Payload);
+            if (e.CobId != Rpdo1) return;
+            if (e.Payload[0] == 0x08) fittedAgain.TrySetResult(e.Payload);
+            else received.TrySetResult(e.Payload);
         };
         await StartAsync(wire, device);
 
+        const ushort Witness = 0xFF00;
         wire.Transmit(Rpdo1, new byte[] { 0x01 });
         arrived.Take(timeout.Token);
         wire.Transmit(Rpdo1, new byte[] { 0x02 });
         wire.Transmit(Rpdo1, new byte[] { 0x03, 0x04, 0x05, 0x06 });
         await received.Task.WithTimeoutAsync(ShortTimeout);
         wire.Transmit(Rpdo1, new byte[] { 0x07 });
-        arrived.Take(timeout.Token);
+        wire.Transmit(Rpdo1, new byte[] { 0x08, 0x09, 0x0A, 0x0B });
+        await fittedAgain.Task.WithTimeoutAsync(ShortTimeout);
+        await device.SendEmcyAsync(Witness, 0);
+        while (!emcys.Any(m => m.ErrorCode == Witness)) arrived.Take(timeout.Token);
 
-        emcys.Should().HaveCount(2, "the second short frame continues the run the first one reported");
-        emcys.Should().OnlyContain(m => m.ErrorCode == 0x8210);
+        emcys.Where(m => m.ErrorCode != Witness).Should().HaveCount(2, "the second short frame continues the run the first one reported");
+        emcys.Where(m => m.ErrorCode != Witness).Should().OnlyContain(m => m.ErrorCode == 0x8210);
     }
 
     // FR-CO-024 (C13) — with the EMCY switched off (1014h bit 31) a short frame raises nothing, and
