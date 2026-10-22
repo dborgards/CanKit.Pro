@@ -85,7 +85,7 @@ internal sealed partial class CanOpenNode : ILssSlave
     // application hook the newest one is waiting on. Bookkeeping for the test seam below only;
     // nothing in the node reads them (#362).
     private int _lssSwitchResumesPending;
-    private Task? _lssHookInProgress;
+    private Task _lssHookInProgress = Task.CompletedTask;
 
     /// <summary>
     /// Test seam: the actor the switch delays, the response windows and every other timer of this
@@ -153,7 +153,7 @@ internal sealed partial class CanOpenNode : ILssSlave
                 if (_lssTxInFlight != 0 || _lssFlushing) return false;
             }
             if (Volatile.Read(ref _lssSwitchResumesPending) == 0) return true;
-            return Volatile.Read(ref _lssHookInProgress) is { IsCompleted: false };
+            return !Volatile.Read(ref _lssHookInProgress).IsCompleted;
         }
     }
 

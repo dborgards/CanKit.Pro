@@ -2298,7 +2298,10 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         {
             await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
             await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
-            slave.IsLssSettledForTests.Should().BeTrue("the hook is the application's to finish");
+            // The hook has been entered; the node records its task as soon as the hook returns it.
+            // From then on it is the application's to finish, and the slave counts as settled.
+            await WaitUntilAsync(() => slave.IsLssSettledForTests);
+            slave.LssBitRateSwitchCompletion.IsCompleted.Should().BeFalse();
 
             blocked = slave.PostToActorAsync(() => release.Wait(LssTestTiming.SchedulingBudget));
             hook.TrySetResult(true);
