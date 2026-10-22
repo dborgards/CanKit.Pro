@@ -887,7 +887,10 @@ takes a path around `Add*`; it is the guard behind that rule.
 `GetSrdoState(n)` of a producer is valid while the node is Operational with a
 valid configuration. The state is a snapshot of the actor's view: right after `OpenNode` the
 records are taken on the actor's first turn, so a read before any call that round-trips the actor
-(`State`, say) has returned may still show direction `None`.
+(`State`, say) has returned may still show direction `None`. Its `LastValidAt` is wall-clock UTC
+(`DateTime.UtcNow`), not the node's time source: cycles, SCT and SRVT run on the time source, so
+under a `ManualTimeSource` they move with the virtual clock while `LastValidAt` moves with the
+real one.
 
 ### Consumer
 
@@ -897,7 +900,11 @@ Then (§8.1.1, §8.1.3.1, §9.5):
 * the plain frame starts the SRVT; a second plain frame replaces the first and restarts it;
 * the inverted frame must follow within the SRVT (`ValidationTimeExpired` otherwise), must have
   a plain frame before it (`OutOfOrder`), and must be its bitwise inverse with the same length
-  (`Mismatch`);
+  (`Mismatch`) — except that an inverted frame arriving while the SRDO is still `NotReceived` as
+  armed, before any pair (a short one, not processed, included), expiry or mismatch of this
+  Operational period, is no pair of this consumer's and no violation: a producer already running
+  when the consumer entered Operational between its plain and its inverted frame. It is consumed
+  without a transition, the SCT runs on, and the next pair makes the SRDO valid;
 * both frames are classic CAN frames (§8.1): a CAN FD frame, or a payload over 8 bytes, on either
   id is no SRDO frame and is rejected as a wrong inverse is — `Mismatch`, a pending plain frame
   dropped, nothing written, no `SrdoReceived`, the SCT not restarted, no EMCY;
@@ -971,7 +978,9 @@ peer-SDO gate over every transfer it will make whatever the peer answers — `10
 file that does not declare one of them is refused with nothing sent (`PeerSdoAccessException`),
 not mid-transaction with the peer part-way through its configuration; an SRDO named above the
 file's highest SRDO record, which the gate could never let through, is refused likewise
-(`ArgumentException`). Its first frames verify the peer's identity (§5.2): `1018h:01`
+(`ArgumentException`). The transfers that depend on the peer's count — those for the SRDOs it has
+that the configuration does not name — pass the gate once the count is read, still before the
+first write (below). Its first frames verify the peer's identity (§5.2): `1018h:01`
 (vendor-ID), `:02` (product code) and `:03` (revision number) are uploaded and compared with the
 bound EDS/DCF's own `1018h:01`–`03` — "the entries in the EDS", as declared: the ParameterValue,
 the DefaultValue where none. All three are read; a peer that is not the device the file describes
@@ -996,7 +1005,13 @@ above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` 
 byte — it is UNSIGNED8, so none, two or four bytes are refused rather than read by their low byte —
 or a count above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
 further frame and for a verification alike: SRDOs claimed beyond 64 could never be configured or
-verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
+verified, so the count is not taken as 64. So is a count above the bound file's highest SRDO record
+(`InvalidOperationException` naming both): the gate implies no record above it, so the SRDOs the
+peer has beyond the file could be neither deleted nor verified, and the refusal would otherwise
+come at the first of them — after the delete-first pass had deleted the peer's SRDOs and cleared
+its `13FEh`. With the count known, the transfers the §9.2 list makes for every SRDO up to it, named
+or not — sub-index `01h` of each record, `13FFh:n` of each — pass the gate before the first write,
+as the fixed transfers did before the first frame. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
 direction, because the checksum covers it) are refused before the first frame. So is a mapping
 the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
 refusal at the mapping would leave it without its configuration: each mapped object must be
@@ -1072,7 +1087,8 @@ bound file declares without a writable sub-index `03h` is expected at the checks
 a peer that aborts the upload of a sub-index `03h` the file does not declare with `0609 0011h` does
 not implement it — no difference (CiA 319 §6.2, as for a configuration); every other abort
 propagates. `13FFh:00`, the checksums of the SRDOs expected and `13FEh` pass the gate before the
-first frame. The identity of CiA 319 §5.2 is not read: it
+first frame; a count above the file's highest SRDO record is refused as for a configuration, and
+sub-index `01h` of every record up to the count passes the gate once it is read. The identity of CiA 319 §5.2 is not read: it
 belongs to the configuration, and the boot-up binds a DCF for a node-id.
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
@@ -1666,7 +1682,8 @@ Each item names what a caller does about it.
   entries, so a file that does not declare them with a value, contradicts them in `[DeviceInfo]`
   or declares them all 0 is refused before the first frame, and a peer that is another device ends
   the call with those entries as mismatches; every transfer the call makes whatever the peer
-  answers passes the gate before the first frame; `PeerSafetyConfiguration.Storage` (settable)
+  answers passes the gate before the first frame, and those that depend on the peer's SRDO count
+  pass it once the count is read, before the first write; `PeerSafetyConfiguration.Storage` (settable)
   asks for the step-5 store through `1010h`, reported in `PeerSafetyResult.Stored`, with a peer's
   abort in `PeerSafetyResult.StorageAbort`; and a tx SRDO whose record the file declares without
   a writable sub-index `03h` must say 20 ms, which is written as optional where the file says

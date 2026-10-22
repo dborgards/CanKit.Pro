@@ -358,8 +358,11 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
         "inverted slot missing" => WithoutSubIndex(SafetyDcfText(), 0x1381, 2),
         "mapping count unreadable" => Patch(SafetyDcfText(), "[1381sub0]", "ParameterValue=4", "ParameterValue=four"),
         "COB-ID 1 unreadable" => Patch(SafetyDcfText(), "[1301sub5]", "ParameterValue=0x109", "ParameterValue=not-a-number"),
-        // SRDO 2 created on 10Bh/10Ch: the pre-defined pair of SRDO 1 at node-id 6.
         "SRDO 2 not declared, SRDO 3 is" => GappedSafetyDcfText(),
+        // SRDO 1 and 2 swapped: SRDO 1 deleted, the file's one configured SRDO is record 2.
+        "only SRDO 2 has a direction" => SafetyDcfText().Replace("[1302", "[13XX").Replace("[1301", "[1302").Replace("[13XX", "[1301")
+            .Replace("[1382", "[13XX").Replace("[1381", "[1382").Replace("[13XX", "[1381"),
+        // SRDO 2 created on 10Bh/10Ch: the pre-defined pair of SRDO 1 at node-id 6.
         "SRDO 2 on the ids SRDO 1 defaults to" => Patch(Patch(Patch(WithoutSubIndex(WithoutSubIndex(SafetyDcfText(), 0x1301, 5), 0x1301, 6),
             "[1302sub1]", "DefaultValue=0", "DefaultValue=1"), "[1302sub5]", "DefaultValue=0", "DefaultValue=0x10B"), "[1302sub6]", "DefaultValue=0", "DefaultValue=0x10C"),
         _ => throw new ArgumentOutOfRangeException(nameof(name), name, null),
@@ -420,6 +423,53 @@ public class CanOpenSafetyDeviceDescriptionTests : IClassFixture<VirtualAdapterF
                 "the checksum step D expects is the one of the records the device holds");
         }
         expected.Srdos.Keys.Should().OnlyContain(n => n <= device.Safety().SrdoCount);
+    }
+
+    /// <summary>Step D's probe on the actor (#360, S-5) asks a cheap question of the live
+    /// description before loading it into a dictionary of its own: can this file declare an SRDO
+    /// at all? The answer must be a necessary condition for the loader's — never false for a file
+    /// the loader creates an SRDO from (a safety slave would be started unverified) — and no
+    /// second rule set: a file with a direction set that the loader still leaves deleted is "may",
+    /// loaded, and decided by the loader. Every variant of the agreement theory above, at the
+    /// node-ids it uses, one whose only configured SRDO is not SRDO 1 (the filter scans every
+    /// record, not the first), plus the cases the filter answers itself: no SRDO record at all, a
+    /// direction of 0, one the file leaves empty, one that does not read as a number, one that
+    /// does not fit UNSIGNED8, and an EDS.</summary>
+    [Theory]
+    [InlineData("as shipped", 5, true, true)]
+    [InlineData("as shipped", 6, true, true)]
+    [InlineData("no COB-ID 1", 70, true, false)]               // no pre-defined pair above node-id 64: the loader refuses the SRDO
+    [InlineData("no mapping record", 5, true, false)]          // the filter says "may"; the loader leaves the SRDO deleted
+    [InlineData("no refresh time", 5, true, true)]
+    [InlineData("no COB-ID 2", 70, true, false)]
+    [InlineData("COB-ID 1 unreadable", 5, true, true)]
+    [InlineData("SRDO 2 on the ids SRDO 1 defaults to", 6, true, true)]
+    [InlineData("SRDO 2 not declared, SRDO 3 is", 5, true, true)]
+    [InlineData("only SRDO 2 has a direction", 6, true, true)]
+    [InlineData("inverted slot differs", 5, true, false)]
+    [InlineData("mapping count unreadable", 5, true, false)]
+    [InlineData("no SRDO record", 5, false, false)]
+    [InlineData("direction 0", 5, false, false)]
+    [InlineData("direction empty", 5, false, false)]
+    [InlineData("direction unreadable", 5, false, false)]
+    [InlineData("direction above UNSIGNED8", 5, false, false)]
+    [InlineData("an EDS", 5, false, false)]
+    public void The_Step_D_Pre_Filter_Is_A_Necessary_Condition_For_The_Loaders_Expectation(string variant, byte nodeId, bool may, bool declares)
+    {
+        var description = variant switch
+        {
+            "no SRDO record" => CanOpenDeviceDescription.Load(Fixture("device.dcf")),
+            "direction 0" => CanOpenDeviceDescription.ParseDcf(Patch(SafetyDcfText(), "[1301sub1]", "ParameterValue=1", "ParameterValue=0")),
+            "direction empty" => CanOpenDeviceDescription.ParseDcf(Patch(Patch(SafetyDcfText(), "[1301sub1]", "DefaultValue=0", "DefaultValue="), "[1301sub1]", "ParameterValue=1", "ParameterValue=")),
+            "direction unreadable" => CanOpenDeviceDescription.ParseDcf(Patch(SafetyDcfText(), "[1301sub1]", "ParameterValue=1", "ParameterValue=one")),
+            "direction above UNSIGNED8" => CanOpenDeviceDescription.ParseDcf(Patch(SafetyDcfText(), "[1301sub1]", "ParameterValue=1", "ParameterValue=257")),
+            "an EDS" => CanOpenDeviceDescription.ParseEds(Patch(SafetyDcfText(), "[1301sub1]", "DefaultValue=0", "DefaultValue=1")),
+            _ => CanOpenDeviceDescription.ParseDcf(Variant(variant)),
+        };
+        CanOpenNode.MayDeclareAnSrdo(description, nodeId).Should().Be(may);
+        bool expectation = description.IsConfigurationFile && PeerSafetyConfiguration.FromDeviceDescription(description, nodeId).DeclaresAnySrdo;
+        expectation.Should().Be(declares);
+        if (declares) may.Should().BeTrue("a file the loader creates an SRDO from must pass the filter, or step D would skip the slave");
     }
 
     /// <summary>The configuration keeps the mapping it was given: a later change to the
