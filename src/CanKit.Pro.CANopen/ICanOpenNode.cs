@@ -414,7 +414,11 @@ public interface ICanOpenNode : IDisposable
     /// TPDO (<c>1800h:03</c>, in multiples of 100 µs, at most 6.5535 s). Has no effect on the
     /// synchronous and RTR-only modes, per CiA 301 §7.5.2.37.</param>
     /// <exception cref="ArgumentException">A value was rejected; the message names the CiA 301
-    /// abort code the same write would have produced over SDO. The PDO is left disabled.</exception>
+    /// abort code the same write would have produced over SDO. The PDO is left disabled. Also
+    /// thrown, before anything is written, when the PDO is not declared on this node (a bound
+    /// description omits its records), or when the bound description declares no inhibit time
+    /// (<c>1800h:03</c>) or no event timer (<c>1800h:05</c>) — both optional per CiA 301 Table 71 —
+    /// and a non-zero value is requested for the absent one.</exception>
     void ConfigureTpdo(int pdoIndex, PdoMapping mapping,
         TpdoTransmission transmission = TpdoTransmission.EventDriven,
         uint? cobId = null,
