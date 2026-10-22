@@ -95,6 +95,12 @@ public sealed class IsoTpChannelOptions
     /// for the consumer. When full, the oldest PDU is dropped so the RX loop never stalls.
     /// Defaults to 64.
     /// </summary>
+    /// <remarks>
+    /// The drop is silent: no <see cref="IIsoTpChannel.BackgroundExceptionOccurred"/> is raised
+    /// and nothing counts it, and a reassembly-abort fault queued for a receiver is dropped the
+    /// same way. A channel nobody reads from therefore loses PDUs without a trace once this many
+    /// have accumulated; a consumer that cannot keep up sizes the buffer or drains it.
+    /// </remarks>
     public int ReceiveBufferCapacity { get; init; } = 64;
 
     /// <summary>

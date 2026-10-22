@@ -111,6 +111,71 @@ public class IsoTpCanFdTests : IClassFixture<VirtualAdapterFixture>
         got.Should().Equal(pdu);
     }
 
+    // Test gap of the 2026-10-21 review (#353, Q7 residual; mutation isotp-M3): FD without
+    // padding at channel level. The codec's rounding of an unpadded payload up to the next valid
+    // FD length (#273) and the receiver's rule for a last CF shorter than the FF's CAN_DL were
+    // pinned by codec unit tests only; every channel round trip ran with UsePadding = true.
+    // 9 bytes: an escape SF of 11 bytes on the wire, rounded to 12. 100 bytes: FF(62) + a last
+    // CF of 38 bytes + PCI, rounded to 48. 130 bytes: FF(62) + CF(63) + a last CF of 5 bytes +
+    // PCI = 6, exact, below the FF's 64. The sniffer checks every frame's length is a valid FD
+    // length and that nothing was padded to 64 but the FF, which a padded channel would do.
+    [Theory]
+    [InlineData(9, 12)]
+    [InlineData(100, 48)]
+    [InlineData(130, 6)]
+    public async Task Fd_Without_Padding_Round_Trips_On_Valid_Frame_Lengths(int pduLength, int lastFrameLength)
+    {
+        var session = NewSession();
+        using var busA = OpenCanFd(session, 0);
+        using var busB = OpenCanFd(session, 1);
+        using var snifferBus = OpenCanFd(session, 2);
+
+        var unpadded = new IsoTpChannelOptions
+        {
+            UseCanFd = true,
+            UsePadding = false,
+            LocalBlockSize = 0,
+            LocalStMin = TimeSpan.Zero,
+            NAs = TimeSpan.FromMilliseconds(500),
+            NBs = TimeSpan.FromMilliseconds(500),
+            NCr = TimeSpan.FromMilliseconds(500),
+            WftMax = 10,
+        };
+        using var sender = IsoTpFactory.Open(busA, IsoTpEndpoint.Normal(0x7E0, 0x7E8), unpadded);
+        using var receiver = IsoTpFactory.Open(busB, IsoTpEndpoint.Normal(0x7E8, 0x7E0), unpadded);
+
+        var lengths = new List<int>();
+        // One SF, or the FF (62 bytes) plus a CF per 63 bytes of the rest, the last one partial.
+        var expectedFrames = pduLength <= 62 ? 1 : 1 + (pduLength - 62 + 62) / 63;
+        var sniffedAll = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        snifferBus.FrameObserved += (_, e) =>
+        {
+            if (e.CanFrame.ID != 0x7E0) return;
+            lock (lengths)
+            {
+                lengths.Add(e.CanFrame.Data.Length);
+                if (lengths.Count >= expectedFrames) sniffedAll.TrySetResult(true);
+            }
+        };
+
+        var pdu = Enumerable.Range(1, pduLength).Select(i => (byte)i).ToArray();
+        using var receiveTimeout = new CancellationTokenSource(ShortTimeout);
+        var recvTask = receiver.ReceiveAsync(receiveTimeout.Token);
+        await sender.SendAsync(pdu).WaitAsync(ShortTimeout);
+        (await recvTask).Should().Equal(pdu);
+
+        await sniffedAll.Task.WaitAsync(ShortTimeout);
+        int[] validFd = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64 };
+        lock (lengths)
+        {
+            lengths.Should().HaveCount(expectedFrames);
+            lengths.Should().OnlyContain(l => validFd.Contains(l), "every FD frame must have a valid length");
+            lengths[lengths.Count - 1].Should().Be(lastFrameLength, "the last frame is rounded up, not padded to 64");
+            if (expectedFrames > 1)
+                lengths[0].Should().Be(64, "a First Frame always fills the frame");
+        }
+    }
+
     [Fact]
     public async Task Channel_With_UseCanFd_Emits_Only_CanFd_Frames_For_Sf_Ff_Cf_And_Fc()
     {

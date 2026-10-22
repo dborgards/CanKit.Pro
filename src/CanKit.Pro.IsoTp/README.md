@@ -54,7 +54,13 @@ CAN-FD long-payload cases still get the least coverage of the two halves.
   `IsoTpWaitFrameLimitExceededException`, or `IsoTpSendRejectedException` on the corresponding
   ISO 15765-2 error cases.
 - `ReceiveAsync` / `ReceiveAllAsync` — two surfaces onto the same bounded, drop-oldest PDU inbox
-  (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64), in arrival order.
+  (bounded to `IsoTpChannelOptions.ReceiveBufferCapacity`, default 64), in arrival order. The
+  drop is silent — no `BackgroundExceptionOccurred`, no counter — and takes a queued
+  reassembly-abort fault as readily as a PDU, so a channel nobody reads from loses PDUs without a
+  trace once the inbox is full. What is queued before the channel is disposed, or before its bus
+  service is lost, is still delivered; an empty inbox then ends a receive with
+  `InvalidOperationException` (disposed) or with `ObjectDisposedException` / the subscription's
+  own failure (service lost), the latter also raised once through `BackgroundExceptionOccurred`.
   `DatagramReceived` is not one of them: each completed PDU is raised on its own thread-pool work
   item, so handlers may run concurrently and out of order; nothing is raised for a frame handled after
   `Dispose` has begun, but a handler already queued may still run.

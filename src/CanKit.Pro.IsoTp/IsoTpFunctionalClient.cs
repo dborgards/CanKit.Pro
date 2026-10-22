@@ -38,9 +38,10 @@ namespace CanKit.Pro.IsoTp;
 /// </para>
 /// <para>
 /// <strong>Threading:</strong> <see cref="SendAndCollectAsync"/>, <see cref="SendAsync"/>, and
-/// <see cref="CollectResponsesAsync"/> are safe to call from any thread. They are not mutually
-/// concurrent — only one call at a time is meaningful because each creates a fresh subscription
-/// window; callers that need to serialise multiple rounds should await each call in turn.
+/// <see cref="CollectResponsesAsync"/> are safe to call from any thread, and concurrently: each
+/// call makes its own subscription and shares no state with another. Concurrent collections are
+/// merely redundant -- every one of them sees the same responses -- so callers that run several
+/// rounds against the same ECUs await each call in turn.
 /// <see cref="Dispose"/> is thread-safe and idempotent.
 /// </para>
 /// </remarks>
@@ -130,6 +131,10 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// </returns>
     /// <exception cref="InvalidOperationException">
     /// <paramref name="pdu"/> exceeds the Single-Frame capacity for the configured frame kind.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="window"/> is negative or exceeds what a timer can measure (about 49 days);
+    /// nothing is transmitted.
     /// </exception>
     /// <exception cref="IsoTpException">
     /// The TX-confirm failed (bus-off, driver rejection, or N_As timeout).
@@ -234,11 +239,23 @@ public sealed class IsoTpFunctionalClient : IDisposable
     /// <param name="window">Duration to collect responses.</param>
     /// <param name="cancellationToken">Cancels the collection window early.</param>
     /// <returns>All Single-Frame responses received within the window, in arrival order.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="window"/> is negative or exceeds what a timer can measure (about 49 days);
+    /// nothing is subscribed.
+    /// </exception>
+    /// <exception cref="ObjectDisposedException">The client was disposed.</exception>
     public async Task<IReadOnlyList<IsoTpFunctionalResponse>> CollectResponsesAsync(
         TimeSpan window,
         CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        // The same bounds as SendAndCollectAsync, checked before the subscription (#353, I-5):
+        // the collector's timer would otherwise refuse the window with the BCL's parameter name,
+        // and a window of exactly -1 ms would be taken for "no timer" and collect for ever.
+        if (window < TimeSpan.Zero || window > MaxWindow)
+            throw new ArgumentOutOfRangeException(nameof(window), window,
+                "The collection window must be between zero and what a timer can measure (about 49 days).");
+
         using var sub = _service.Subscribe(_responseFilter, includeEcho: true);
         return await CollectFromSubscriptionAsync(sub, window, cancellationToken).ConfigureAwait(false);
     }
