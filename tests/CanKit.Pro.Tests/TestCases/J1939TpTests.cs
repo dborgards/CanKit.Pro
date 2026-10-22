@@ -4295,12 +4295,23 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         var actor = clock.NewActor();
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
-        using var sender = BamSenderOn(actor, service);
+        // No budget: Dispose's two seconds for the cleanup were a margin a loaded host could eat
+        // between the actor's release and the cleanup (#362), after which Dispose correctly gave
+        // up and returned with the sends in flight -- a red the property under test never saw.
+        // The budget expiring has its own test
+        // (Disposing_On_A_Borrowed_Actor_Stuck_Past_The_Budget_Defers_The_Service).
+        using var sender = new J1939TpChannel(service, sourceAddress: 0x10,
+            new J1939TpOptions().With(bamPacketSpacing: InFlightSpacing), ownsService: false, actor)
+        {
+            CleanupBudget = Timeout.InfiniteTimeSpan,
+        };
         var sends = await SendBamsInFlight(clock, actor, sender);
 
-        // The caller's other work holds the actor for 100 ms, and releases it on its own: the
-        // assertion does not depend on how long that takes, only on Dispose's 2 s budget for
-        // the cleanup outlasting it. A Dispose that only posted the cleanup returns inside it.
+        // The caller's other work holds the actor for 100 ms, and releases it on its own. A
+        // Dispose that waits returns only after the cleanup, however long the host takes to get
+        // there; one that only posted the cleanup returns inside the 100 ms. The window is
+        // therefore only how long such a Dispose has to return in, and a host slow enough to
+        // overrun it lets that Dispose pass -- it cannot fail one that waits.
         var occupied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         actor.Post(() =>
         {
