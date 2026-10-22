@@ -91,7 +91,10 @@ public interface ICanOpenSafety
     /// entries are all 0, describes no device and is refused before the first frame. Every transfer
     /// the call makes whatever the peer answers — the identity, 13FFh:00, 1300h, the checksums of
     /// the SRDOs named, 13FEh, the 1010h sub-index asked for — passes the peer-SDO gate before the
-    /// first frame.
+    /// first frame; the transfers that depend on the peer's count — sub-index 01h of every record
+    /// up to it and every 13FFh:n, for the SRDOs the configuration does not name too — pass it
+    /// once 13FFh:00 is read, before the first write, and a count above the bound description's
+    /// highest SRDO record is refused there, since the gate could let no record above it through.
     /// Then (§5.3 step 1) it downloads 1300h, every record (deleted first,
     /// created last) and the checksums 13FFh:n, (step 2) reads everything back and compares byte for
     /// byte, and only then (step 3) writes 13FEh = A5h and reads it back — step 4 is the peer's own
@@ -130,15 +133,19 @@ public interface ICanOpenSafety
     /// the bound description does not declare one of the transfers the call makes whatever the
     /// peer answers — 1018h:01–03, 13FFh:00, 1300h, 13FFh:n of an SRDO named, 13FEh, the 1010h
     /// sub-index <see cref="PeerSafetyConfiguration.Storage"/> names — refused before the first
-    /// frame by the gate that would refuse the transfer.</exception>
+    /// frame by the gate that would refuse the transfer; or, once the count is read, sub-index 01h
+    /// of a record up to it or 13FFh:n of an SRDO the configuration does not name — refused
+    /// before the first write, likewise.</exception>
     /// <exception cref="InvalidOperationException">The bound description declares a 1018h entry
     /// without a value this implementation reads (a plain number; a <c>$NODEID</c> formula is no
     /// identity), contradicts itself (a <c>[DeviceInfo]</c> number
     /// set and unlike its 1018h entry) or has 1018h:01–03 all 0, so it carries no identity to
     /// verify the peer against (CiA 319 §5.2) — refused before the first frame; or the peer's
     /// 13FFh:00 is not exactly one byte (it is UNSIGNED8; none, two or four bytes are refused, a
-    /// longer one is not cut to its low byte), or the count is above 64 (§8.4.2.2) — refused
-    /// before any further frame.</exception>
+    /// longer one is not cut to its low byte), or the count is above 64 (§8.4.2.2) or above the
+    /// bound description's highest SRDO record (the gate implies no record above it, so the
+    /// SRDOs the peer has beyond the file could not be deleted) — refused before any further
+    /// frame, nothing written.</exception>
     /// <exception cref="ArgumentException">The configuration names an SRDO above the peer's count,
     /// or maps an object the peer's bound EDS/DCF does not declare, does not flag mappable, declares
     /// with another width or with a type without a fixed width (a string, a domain: an SRDO maps
@@ -169,9 +176,12 @@ public interface ICanOpenSafety
     /// change to <paramref name="expected"/>, after that takes effect for the next call.</summary>
     /// <exception cref="InvalidOperationException">The peer's 13FFh:00 is not exactly one byte
     /// (it is UNSIGNED8; none, two or four bytes are refused, a longer one is not cut to its low
-    /// byte), or the count is above 64 (§8.4.2.2) — refused before any further frame.</exception>
+    /// byte), or the count is above 64 (§8.4.2.2) or above the bound description's highest SRDO
+    /// record (the gate implies no record above it, so the SRDOs the peer has beyond the file
+    /// could not be verified) — refused before any further frame.</exception>
     /// <exception cref="PeerSdoAccessException">The bound description does not declare 13FFh:00,
-    /// 13FFh:n of an SRDO expected, or 13FEh — refused before the first frame.</exception>
+    /// 13FFh:n of an SRDO expected, or 13FEh — refused before the first frame; or, once the count
+    /// is read, sub-index 01h of a record up to it — refused before any further frame.</exception>
     /// <exception cref="ArgumentException">The expectation names an SRDO above the peer's count,
     /// or gives a tx SRDO whose record the description declares without a writable sub-index 3 an
     /// SRVT other than 20 ms (CiA 319 §6.2); the parameter named is <paramref name="expected"/>.</exception>

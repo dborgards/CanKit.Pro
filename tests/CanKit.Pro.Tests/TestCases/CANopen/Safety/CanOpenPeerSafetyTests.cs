@@ -832,6 +832,39 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         fake.Written.Should().NotContainKey((0x13FE, 0), "A5h is written only after a clean readback");
     }
 
+    /// <summary>CiA 319 §5.3 step 4 as the tool sees it: the SRD checks the checksums itself when
+    /// A5h is written, and one that found a mismatch has set 13FEh back to 0 — the only way a
+    /// checksum the SRD computes differently (#289) reaches the configuration entity. The readback
+    /// of 13FEh that is not A5h ends the call with that one mismatch, not acknowledged and not
+    /// stored: the step-5 store is not sent. Mutation safety-M2 of the 2026-10-21 review (the
+    /// readback comparison removed) is what this test catches (#344).</summary>
+    [Fact]
+    public async Task A_Readback_Of_13FEh_That_Is_Not_A5h_Is_A_Mismatch_And_Nothing_Is_Stored()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0x13FE, 0x00)); // answers the readback with A6h
+        master.BindPeerDeviceDescription(Device, PeerFileWith1010(withSub2: false));
+        var configuration = new PeerSafetyConfiguration { GlobalFailsafeCommandEnabled = true, Storage = PeerSafetyStorage.AllParameters }
+            .Add(1, new SrdoCommunicationParameter(SrdoDirection.Transmit, TimeSpan.FromMilliseconds(30), TimeSpan.FromMilliseconds(20), 0x109, 0x10A),
+                new SrdoMapping().Add(0x2000, 0x00, 16).Add(0x2001, 0x00, 8));
+        var result = await master.Safety().ConfigurePeerSafetyAsync(Device, configuration).WithTimeoutAsync(ShortTimeout);
+        result.Succeeded.Should().BeFalse();
+        result.Stored.Should().BeFalse();
+        result.StorageAbort.Should().BeNull("the store was never sent");
+        var mismatch = result.Mismatches.Should().ContainSingle().Which;
+        (mismatch.Index, mismatch.Subindex).Should().Be(((ushort)0x13FE, (byte)0x00));
+        mismatch.Expected.Should().Equal(0xA5);
+        mismatch.Actual.Should().Equal(0xA6);
+        lock (fake.Written)
+        {
+            fake.Written[(0x13FE, 0)].Should().Equal(new byte[] { 0xA5 }, "step 3 was taken: the acknowledgement was written and read back");
+            fake.Written.Should().NotContainKey((0x1010, 1), "no store after a readback that is not A5h");
+        }
+        lock (fake.Requests) fake.Requests.Last().Should().Be(((ushort)0x13FE, (byte)0x00), "the readback of 13FEh is the last transfer");
+    }
+
     [Theory]
     [InlineData(SrdoDirection.Transmit, 70000, 20)]
     [InlineData(SrdoDirection.Transmit, 0, 20)]
@@ -1063,6 +1096,78 @@ public class CanOpenPeerSafetyTests : IClassFixture<VirtualAdapterFixture>
         ex.ParamName.Should().Be(verify ? "expected" : "configuration");
         lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify), "nothing after the count");
         lock (fake.Written) fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
+    }
+
+    /// <summary>The peer may report more SRDOs in 13FFh:00 than the bound file implies — a device
+    /// whose file declares fewer records than it implements. The §9.2 list deletes every SRDO up to
+    /// the count and a verification reads each, and the gate lets no record above the file's
+    /// highest through (FR-CO-029): refused once the count is read, before the first write, not at
+    /// the first record above the file — after the delete-first pass had deleted the peer's SRDOs
+    /// and cleared its 13FEh (#343).</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Count_Above_The_Files_Records_Is_Refused_Before_Anything_Is_Deleted(bool verify)
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0), srdoCount: 3);
+        master.BindPeerDeviceDescription(Device, PeerFile()); // declares records 1301h and 1302h: SRDO 3 is beyond it
+        List<(ushort, byte)> seeded;
+        lock (fake.Written) seeded = fake.Written.Keys.ToList();
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => verify
+            ? master.Safety().VerifyPeerSafetyConfigurationAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)
+            : master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout));
+        ex.Message.Should().Contain("3 SRDOs").And.Contain("13FFh:00").And.Contain("up to 2").And.Contain("Nothing was written");
+        lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify), "nothing after the count");
+        lock (fake.Written)
+        {
+            fake.Written.Should().NotContainKey((0x1301, 0x01), "the delete-first pass did not start");
+            fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
+        }
+    }
+
+    /// <summary>The fixture with 13FFh declaring sub-indices 0 and 1 only: a file that lists the
+    /// checksum of SRDO 1 but not of SRDO 2, whose records it still declares.</summary>
+    private static CanOpenDeviceDescription PeerFileWithoutChecksumOfSrdo2()
+    {
+        var text = FixtureText();
+        int start = text.IndexOf("[13FFsub2]", StringComparison.Ordinal);
+        int end = text.IndexOf("[ManufacturerObjects]", StringComparison.Ordinal);
+        start.Should().BeGreaterThan(-1);
+        end.Should().BeGreaterThan(start);
+        text = (text[..start] + text[end..]).Replace("Safety configuration signature\nSubNumber=3", "Safety configuration signature\nSubNumber=2");
+        var file = CanOpenDeviceDescription.ParseDcf(text);
+        file.Contains(0x13FF, 0x02).Should().BeFalse();
+        file.Contains(0x13FF, 0x01).Should().BeTrue();
+        file.Contains(0x1302, 0x01).Should().BeTrue();
+        return file;
+    }
+
+    /// <summary>A configuration zeroes the checksum 13FFh:n of every SRDO up to the count it does
+    /// not name, after the delete-first pass. The gate does not imply 13FFh:n (only the records),
+    /// so a file that leaves one of them out is refused once the count is read — by the gate, as
+    /// a fixed transfer is before the first frame — not at that write, with the peer's SRDOs
+    /// deleted (#343).</summary>
+    [Fact]
+    public async Task A_Checksum_Of_An_Unnamed_Srdo_The_File_Does_Not_Declare_Is_Refused_Before_Anything_Is_Deleted()
+    {
+        var session = VirtualAdapterFixture.NewSession("co-peer-safety");
+        using var busA = Open(session, 1);
+        using var master = OpenMasterOnVirtualClock(busA);
+        using var fake = new FakeExpeditedServer(session, 2, Device, lieAt: (0, 0)); // two SRDOs, as the file's records
+        master.BindPeerDeviceDescription(Device, PeerFileWithoutChecksumOfSrdo2());
+        List<(ushort, byte)> seeded;
+        lock (fake.Written) seeded = fake.Written.Keys.ToList();
+        var ex = await Assert.ThrowsAsync<PeerSdoAccessException>(() => master.Safety().ConfigurePeerSafetyAsync(Device, Configuration()).WithTimeoutAsync(ShortTimeout)); // names SRDO 1 only
+        (ex.Index, ex.Subindex, ex.PeerDescriptionLoaded).Should().Be(((ushort)0x13FF, (byte)0x02, true));
+        lock (fake.Requests) fake.Requests.Should().Equal(ReadsUpToTheCount(verify: false), "nothing after the count");
+        lock (fake.Written)
+        {
+            fake.Written.Should().NotContainKey((0x1301, 0x01), "the delete-first pass did not start");
+            fake.Written.Keys.Should().BeEquivalentTo(seeded, "nothing was written");
+        }
     }
 
     /// <summary>13FFh:00 is the number of SRDOs, at most 64 (§8.4.2.2). A peer reporting more is

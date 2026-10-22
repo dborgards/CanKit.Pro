@@ -962,7 +962,9 @@ peer-SDO gate over every transfer it will make whatever the peer answers — `10
 file that does not declare one of them is refused with nothing sent (`PeerSdoAccessException`),
 not mid-transaction with the peer part-way through its configuration; an SRDO named above the
 file's highest SRDO record, which the gate could never let through, is refused likewise
-(`ArgumentException`). Its first frames verify the peer's identity (§5.2): `1018h:01`
+(`ArgumentException`). The transfers that depend on the peer's count — those for the SRDOs it has
+that the configuration does not name — pass the gate once the count is read, still before the
+first write (below). Its first frames verify the peer's identity (§5.2): `1018h:01`
 (vendor-ID), `:02` (product code) and `:03` (revision number) are uploaded and compared with the
 bound EDS/DCF's own `1018h:01`–`03` — "the entries in the EDS", as declared: the ParameterValue,
 the DefaultValue where none. All three are read; a peer that is not the device the file describes
@@ -987,7 +989,13 @@ above it (`ArgumentException`) before writing anything; a peer whose `13FFh:00` 
 byte — it is UNSIGNED8, so none, two or four bytes are refused rather than read by their low byte —
 or a count above 64 — the most `13FFh:00` can be (§8.4.2.2) — is an `InvalidOperationException`, before any
 further frame and for a verification alike: SRDOs claimed beyond 64 could never be configured or
-verified, so the count is not taken as 64. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
+verified, so the count is not taken as 64. So is a count above the bound file's highest SRDO record
+(`InvalidOperationException` naming both): the gate implies no record above it, so the SRDOs the
+peer has beyond the file could be neither deleted nor verified, and the refusal would otherwise
+come at the first of them — after the delete-first pass had deleted the peer's SRDOs and cleared
+its `13FEh`. With the count known, the transfers the §9.2 list makes for every SRDO up to it, named
+or not — sub-index `01h` of each record, `13FFh:n` of each — pass the gate before the first write,
+as the fixed transfers did before the first frame. Times outside 1..65535 ms (cycle) and 1..255 ms (SRVT, for every
 direction, because the checksum covers it) are refused before the first frame. So is a mapping
 the peer's bound EDS/DCF rules out, because §9.2 deletes every SRDO of the peer first and a
 refusal at the mapping would leave it without its configuration: each mapped object must be
@@ -1063,7 +1071,8 @@ bound file declares without a writable sub-index `03h` is expected at the checks
 a peer that aborts the upload of a sub-index `03h` the file does not declare with `0609 0011h` does
 not implement it — no difference (CiA 319 §6.2, as for a configuration); every other abort
 propagates. `13FFh:00`, the checksums of the SRDOs expected and `13FEh` pass the gate before the
-first frame. The identity of CiA 319 §5.2 is not read: it
+first frame; a count above the file's highest SRDO record is refused as for a configuration, and
+sub-index `01h` of every record up to the count passes the gate once it is read. The identity of CiA 319 §5.2 is not read: it
 belongs to the configuration, and the boot-up binds a DCF for a node-id.
 
 The active flying master runs step D itself. An assigned slave whose bound **DCF** declares at
