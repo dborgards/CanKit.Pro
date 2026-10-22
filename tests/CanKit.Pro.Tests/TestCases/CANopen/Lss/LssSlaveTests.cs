@@ -2271,6 +2271,51 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #362: the seam ClockedLssBench moves its clock on. A switch still inside the application's
+    // hook is the test's wait, not the bench's; a switch that has finished is in flight until its
+    // completion has reached the actor, because only that ends a silence whose delay is over.
+    [Fact]
+    public async Task The_Settled_Seam_Waits_For_A_Finished_Switch_To_Reach_The_Actor()
+    {
+        var hook = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var service = new LssTestService { Send = _ => Task.FromResult(new TxConfirmation { Confirmed = true }) };
+        using var slave = new CanOpenNode(service, 5, new CanOpenNodeOptions
+        {
+            Lss = new LssSlaveOptions
+            {
+                BitRateSwitch = (_, _) =>
+                {
+                    entered.TrySetResult(true);
+                    return hook.Task;
+                },
+            },
+        }, ownsService: false, new ManualTimeSource());
+        await WaitUntilAsync(() => slave.IsLssSettledForTests);
+        using var release = new ManualResetEventSlim();
+        Task blocked = Task.CompletedTask;
+        try
+        {
+            await slave.PostToActorAsync(() => slave.BeginLssSilence(0, TimeSpan.Zero));
+            await entered.Task.WaitAsync(LssTestTiming.SchedulingBudget);
+            slave.IsLssSettledForTests.Should().BeTrue("the hook is the application's to finish");
+
+            blocked = slave.PostToActorAsync(() => release.Wait(LssTestTiming.SchedulingBudget));
+            hook.TrySetResult(true);
+            await slave.LssBitRateSwitchCompletion.WaitAsync(LssTestTiming.SchedulingBudget);
+            slave.IsLssSettledForTests.Should().BeFalse("the finished switch has not reached the held actor yet");
+            slave.IsLssSilentForTests.Should().BeTrue();
+        }
+        finally
+        {
+            release.Set();
+            hook.TrySetResult(true);
+            await blocked.WaitAsync(LssTestTiming.SchedulingBudget);
+        }
+        await WaitUntilAsync(() => slave.IsLssSettledForTests);
+        slave.IsLssSilentForTests.Should().BeFalse("the completion ended the silence on the actor");
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
