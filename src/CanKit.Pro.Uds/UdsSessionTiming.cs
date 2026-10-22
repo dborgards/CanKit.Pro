@@ -39,7 +39,7 @@ internal readonly struct UdsSessionTiming
         }
         int p2 = (record[0] << 8) | record[1];
         int p2Star = (record[2] << 8) | record[3];
-        timing = new UdsSessionTiming(TimeSpan.FromMilliseconds(p2), TimeSpan.FromMilliseconds(p2Star * 10));
+        timing = new UdsSessionTiming(TimeSpan.FromMilliseconds(p2), TimeSpan.FromMilliseconds(p2Star * 10.0));
         return true;
     }
 
