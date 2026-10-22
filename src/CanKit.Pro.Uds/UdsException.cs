@@ -8,7 +8,7 @@ namespace CanKit.Pro.Uds;
 /// Base type for every error surfaced by <see cref="IUdsClient"/>. Subclasses distinguish the
 /// three families the MVP cares about: a well-formed negative response from the ECU
 /// (<see cref="UdsNegativeResponseException"/>), an ECU that failed to respond within its P2/P2*
-/// budget (<see cref="UdsTimeoutException"/>), and a malformed / mismatched response
+/// budget (<see cref="UdsTimeoutException"/>), and a malformed response
 /// (<see cref="UdsProtocolException"/>). Transport-layer failures are re-thrown as-is: the
 /// protocol errors are typed as <see cref="IsoTp.IsoTpException"/> subclasses, but the channel
 /// also throws <see cref="ObjectDisposedException"/> (disposed during a send, or its bus service
@@ -106,10 +106,12 @@ public sealed class UdsTimeoutException : UdsException
 }
 
 /// <summary>
-/// Raised when the ECU response is malformed or does not correlate with the outgoing request
-/// (wrong SID echo, positive-response length shorter than the sub-function/DID that was asked
-/// for, etc). Distinct from a proper NRC — this class flags protocol violations, not
-/// business-layer rejections.
+/// Raised when the ECU response is malformed (a positive response shorter than the
+/// sub-function/DID that was asked for, a multi-DID record that does not parse, etc). Distinct
+/// from a proper NRC — this class flags protocol violations, not business-layer rejections.
+/// A response that does not correlate with the outgoing request — another service's SID, or
+/// this service's with another sub-function, DID, routine identifier or block sequence
+/// counter — is not raised as one: it is a stray, discarded while the wait goes on (#340).
 /// </summary>
 public sealed class UdsProtocolException : UdsException
 {

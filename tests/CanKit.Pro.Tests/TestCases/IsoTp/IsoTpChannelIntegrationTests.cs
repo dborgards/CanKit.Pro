@@ -2336,6 +2336,66 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         inFlight.ObjectName.Should().Be(nameof(IsoTpChannel));
     }
 
+    // Review on #364 (#339): Dispose releases the sends queued on the gate by cancelling the
+    // channel's lifetime from its own thread. On .NET Framework, SemaphoreSlim completes a
+    // cancelled waiter inline from that Cancel(), so without a hop the released send -- and every
+    // continuation its caller queued after it -- ran synchronously inside Dispose; called from an
+    // actor callback, on the actor loop. SendAsync now hops to the thread pool before it fails.
+    //
+    // Not a timing test: the continuation below is synchronous, so it runs on whichever thread
+    // completes the send, and it records whether that is the disposing thread while Dispose is
+    // still running on it. .NET 10's SemaphoreSlim already forces the waiter asynchronous, so the
+    // net10.0 leg passes either way; the net48 leg is the one that pins the hop.
+    [Fact]
+    public async Task A_Send_Released_By_Dispose_Does_Not_Complete_On_The_Disposing_Thread()
+    {
+        var session = NewSession();
+        using var bus = OpenClassic(session, 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var channel = new IsoTpChannel(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(),
+            ownsService: false, actor);
+        using var release = new ManualResetEventSlim();
+        var busy = actor.PostAsync(() => release.Wait(TimeSpan.FromSeconds(30)));
+
+        var send1 = channel.SendAsync(new byte[] { 0x01 });
+        var send2 = channel.SendAsync(new byte[] { 0x02 });
+        send2.IsCompleted.Should().BeFalse();
+
+        var disposingThread = -1;
+        var disposing = 0;
+        var completedInsideDispose = -1;
+        var observed = send2.ContinueWith(
+            _ => Volatile.Write(ref completedInsideDispose,
+                Volatile.Read(ref disposing) == 1
+                && Environment.CurrentManagedThreadId == Volatile.Read(ref disposingThread) ? 1 : 0),
+            CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+        var disposal = Task.Run(() =>
+        {
+            Volatile.Write(ref disposingThread, Environment.CurrentManagedThreadId);
+            Volatile.Write(ref disposing, 1);
+            try { channel.Dispose(); }
+            finally { Volatile.Write(ref disposing, 0); }
+        });
+        try
+        {
+            var queued = await Assert.ThrowsAsync<ObjectDisposedException>(() => send2.WaitAsync(ShortTimeout));
+            queued.ObjectName.Should().Be(nameof(IsoTpChannel));
+            await observed.WaitAsync(ShortTimeout);
+            completedInsideDispose.Should().Be(0,
+                "a send released by Dispose must not continue on the disposing thread inside Dispose");
+        }
+        finally
+        {
+            release.Set();
+            await busy;
+            await disposal.WaitAsync(ShortTimeout);
+        }
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send1.WaitAsync(ShortTimeout));
+    }
+
     // Review on #339: the gate wait is linked to the channel's lifetime now, and the linked
     // token is not the caller's. A send queued on the gate that its caller cancels must still
     // end with the caller's OperationCanceledException -- carrying the caller's token, as it did

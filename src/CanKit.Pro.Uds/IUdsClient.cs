@@ -107,8 +107,10 @@ public interface IUdsClient : IDisposable
     /// <exception cref="ArgumentException">A requested DID has no length entry, or a length is
     /// negative.</exception>
     /// <exception cref="UdsProtocolException">The ECU response is malformed, truncated, carries no
-    /// data record at all, repeats a DID, or contains DIDs that were not requested. A DID that is
-    /// merely not answered is not an error: it is absent from the result.</exception>
+    /// data record at all, repeats a DID, or contains a DID that was not requested behind its
+    /// first. A positive response whose <em>first</em> DID was not requested is not this
+    /// request's answer but a stray -- the receive loop discards it and the wait goes on (#340).
+    /// A DID that is merely not answered is not an error: it is absent from the result.</exception>
     Task<IReadOnlyDictionary<ushort, byte[]>> ReadDataByIdentifierAsync(
         IReadOnlyList<ushort> dataIdentifiers,
         IReadOnlyDictionary<ushort, int> dataRecordLengths,
