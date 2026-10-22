@@ -3735,6 +3735,135 @@ public class J1939TpTests : IClassFixture<VirtualAdapterFixture>
         lock (dtSns) dtSns.Should().Equal(new byte[] { 1, 1 }, "each session sent its own DT 1 and nothing else");
     }
 
+    // #350, second line of defence: the four TX continuations a timer or a confirmation runs --
+    // the next BAM and CM TP.DT, the T3 and the T4 expiry -- act only while the session they were
+    // bound to is still the one registered under its key. No public path reaches that check with
+    // a session that has ended, because a cancel releases the spacing timer and the deadline
+    // before a successor can start, so the tests hold one back through CaptureTxContinuation and
+    // run it while a successor of the same key is in flight. The successor must not notice:
+    // nothing is sent for the old session, the successor's timer is as it was, and it runs to
+    // completion with its own frames only.
+    private static byte[][] DtFrames(byte[] payload, int packets)
+        => Enumerable.Range(1, packets)
+            .Select(sn => J1939TpFrames.BuildDt((byte)sn, payload, (sn - 1) * J1939TpFrames.DtDataBytes))
+            .ToArray();
+
+    [Fact]
+    public async Task A_Stale_Bam_Dt_Continuation_Leaves_The_Successor_Bam_Of_Its_Key_Alone()
+    {
+        const uint pgn = 0xFEC9u;
+        var stalePayload = RandomPayload(21, seed: 367); // three packets each
+        var payload = RandomPayload(21, seed: 368);
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dts = new List<byte[]>();
+        bus.OnTransmitting = frame =>
+        {
+            if (J1939Id.Decompose((uint)frame.ID).Pgn == J1939Pgn.TpDt) lock (dts) dts.Add(frame.Data.ToArray());
+        };
+        using var service = new CanBusService(bus);
+        using var sender = BamSenderOn(actor, service);
+
+        using var cts = new CancellationTokenSource();
+        var first = sender.SendBamAsync(pgn, stalePayload, cts.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the announce
+        bus.DeferredEchoes.ReleaseNext();
+        await clock.WaitUntilTimerArmedAsync(actor, InFlightSpacing, ShortTimeout); // DT 1 is next
+        var stale = await actor.PostAsync<Action?>(() => sender.CaptureTxContinuation(
+            J1939Pgn.GlobalAddress, pgn, J1939TpChannel.TxContinuation.NextBamDt));
+        stale.Should().NotBeNull();
+
+        cts.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        var second = sender.SendBamAsync(pgn, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // the successor's announce, unconfirmed
+
+        await actor.PostAsync(stale!);
+        (await actor.NextTimerDelayAsync()).Should().BeNull(
+            "the successor arms its spacing only once its own announce is confirmed");
+
+        bus.DeferredEchoes.ReleaseAll();
+        bus.EchoMode = EchoDelivery.Synchronous;
+        await DrainAsync(clock, actor, second);
+        lock (dts)
+            dts.Should().BeEquivalentTo(DtFrames(payload, 3), o => o.WithStrictOrdering(),
+                "the successor's three TP.DT and none of the cancelled BAM's");
+    }
+
+    [Theory]
+    [InlineData(nameof(J1939TpChannel.TxContinuation.NextCmDt))]
+    [InlineData(nameof(J1939TpChannel.TxContinuation.T3Expired))]
+    [InlineData(nameof(J1939TpChannel.TxContinuation.T4Expired))]
+    public async Task A_Stale_Cm_Continuation_Leaves_The_Successor_Session_Of_Its_Key_Alone(string continuationName)
+    {
+        var continuation = (J1939TpChannel.TxContinuation)Enum.Parse(typeof(J1939TpChannel.TxContinuation), continuationName);
+        const byte subjectSa = 0x10, peerSa = 0x20;
+        const uint pgn = 0xFEC9u;
+        var stalePayload = RandomPayload(21, seed: 369); // three packets each
+        var payload = RandomPayload(21, seed: 370);
+        var options = new J1939TpOptions().With(t3: TimeSpan.FromSeconds(2), t4: TimeSpan.FromMilliseconds(1050));
+        using var clock = new VirtualClock();
+        var actor = clock.NewActor();
+        using var bus = ControllableBus.DeferredEchoCapable(NewSession());
+        var dts = new List<byte[]>();
+        var aborts = 0;
+        bus.OnTransmitting = frame =>
+        {
+            uint framePgn = J1939Id.Decompose((uint)frame.ID).Pgn;
+            if (framePgn == J1939Pgn.TpDt) lock (dts) dts.Add(frame.Data.ToArray());
+            else if (framePgn == J1939Pgn.TpCm && frame.Data.Span[0] == J1939TpFrames.ControlAbort) Interlocked.Increment(ref aborts);
+        };
+        using var service = new CanBusService(bus);
+        using var sender = new J1939TpChannel(service, sourceAddress: subjectSa, options, ownsService: false, actor);
+        static CanFrame PeerCm(byte peerSa, byte subjectSa, byte[] data)
+            => CanFrame.Classic((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa, subjectSa), data, isExtendedFrame: true);
+
+        // The old session, in the state its continuation runs in: waiting for a CTS for an expiry,
+        // with DT 1 on the wire for the next TP.DT -- where the stale step would send DT 1 again.
+        using var cancel = new CancellationTokenSource();
+        var first = sender.SendCmAsync(pgn, peerSa, stalePayload, cancel.Token);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the RTS
+        bus.DeferredEchoes.ReleaseNext();
+        var staleDts = new List<byte[]>();
+        if (continuation == J1939TpChannel.TxContinuation.NextCmDt)
+        {
+            bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+            await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout); // DT 1, its confirmation held
+            staleDts.Add(DtFrames(stalePayload, 1)[0]);
+        }
+        var stale = await actor.PostAsync<Action?>(() => sender.CaptureTxContinuation(peerSa, pgn, continuation));
+        stale.Should().NotBeNull();
+
+        int parked = 1 + staleDts.Count; // the RTS and the old session's DT, if it sent one
+        cancel.Cancel();
+        Func<Task> cancelled = async () => await first.WithTimeout(ShortTimeout);
+        await cancelled.Should().ThrowAsync<OperationCanceledException>();
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(parked + 1, ShortTimeout); // the cancel's Connection Abort
+
+        var second = sender.SendCmAsync(pgn, peerSa, payload);
+        await bus.DeferredEchoes.WaitForEnqueuedAsync(parked + 2, ShortTimeout); // the successor's RTS
+        await clock.WaitUntilTimerArmedAsync(actor, options.T3, ShortTimeout); // its T3, for the CTS
+
+        await actor.PostAsync(stale!);
+        (await actor.NextTimerDelayAsync()).Should().Be(options.T3,
+            "the successor's T3 is still the timer running, neither replaced nor joined by another");
+
+        bus.DeferredEchoes.ReleaseAll();
+        bus.EchoMode = EchoDelivery.Synchronous;
+        int beforeBlock = bus.TransmitCount;
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildCts(numPackets: 3, nextPacketSn: 1, dataPgn: pgn)), isEcho: false);
+        await WaitForTransmitCount(bus, beforeBlock + 3);
+        bus.RaiseObserved(PeerCm(peerSa, subjectSa, J1939TpFrames.BuildEomAck(totalBytes: 21, totalPackets: 3, dataPgn: pgn)), isEcho: false);
+        await second.WithTimeout(ShortTimeout);
+
+        lock (dts)
+            dts.Should().BeEquivalentTo(staleDts.Concat(DtFrames(payload, 3)), o => o.WithStrictOrdering(),
+                "the successor's three TP.DT, after whatever the old session had sent before its cancel");
+        Volatile.Read(ref aborts).Should().Be(1, "the cancel's Connection Abort is the only one");
+    }
+
     // #350 (T3): with a CM transfer of the same PGN running in both directions with one peer, a
     // Connection Abort from that peer matches both the session it sends us and the one we send
     // it. The Connection Abort Role in byte 3 (J1939-21, second edition) says which one: as
