@@ -145,6 +145,43 @@ public class SrdoEngineConsumerTests : IDisposable
         _host.Log.IndexOf("state:1:valid").Should().BeLessThan(_host.Log.IndexOf("received:1"), "the state change precedes the payload event");
     }
 
+    /// <summary>FR-CO-038, the consumer half (§8.3.1 step D: "in case of mismatch ... the safety
+    /// controller shall enter (stay) in safe state"): a consumer whose checksum does not match
+    /// its record reports ConfigurationInvalid on entering Operational, and a correct pair on
+    /// its COB-IDs is swallowed — consumed as the SRDO's frames, nothing actuated, no
+    /// SrdoReceived, no state change, no SCT running — where a valid consumer would take it
+    /// (<see cref="Starts_Invalid_And_Becomes_Valid_With_A_Complete_Pair"/>). Mutation safety-M1
+    /// of the 2026-10-21 review (the ConfigurationValid gate of TryHandleFrame removed) is what
+    /// this test catches (#344).</summary>
+    [Fact]
+    public void A_Consumer_With_An_Invalid_Configuration_Reports_ConfigurationInvalid_And_Takes_No_Pair()
+    {
+        Populate(_od, NodeId, 2);
+        Configure(_od, 1, SrdoDirection.Receive, 50, 20, 0x123, 0x124);
+        _od.WriteUnsigned(SrdoRecords.Checksum, 1, 0xFFFF); // tampered: 13FEh stays A5h, the checksum does not match
+        SrdoRecords.IsConfigurationValid(_od, 1).Should().BeFalse();
+        _engine = new SrdoEngine(_actor, _clock, _deadlines, _od, NodeId, 2, _host);
+        OnActor(() => { _engine.Rebuild(1); _engine.Rebuild(2); _engine.EnterOperational(); });
+        Settle();
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+        _host.States.Should().Contain((1, false, SrdoInvalidReason.ConfigurationInvalid));
+        int states = _host.States.Count;
+
+        Frame(0x123, Plain).Should().BeTrue("the frame is on the SRDO's COB-ID: consumed, not passed on");
+        Frame(0x124, Inverse).Should().BeTrue();
+        _engine.GetState(1).IsValid.Should().BeFalse("a correct pair does not validate an SRDO whose configuration is invalid");
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid);
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "nothing was actuated");
+        _od.ReadUnsigned(0x2001, 0).Should().Be(0x5Au, "nothing was actuated");
+        _host.Received.Should().BeEmpty("no SrdoReceived");
+        _host.States.Should().HaveCount(states, "no state change");
+
+        Advance(TimeSpan.FromMilliseconds(60));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.ConfigurationInvalid, "no SCT runs for a consumer that was never armed");
+        _host.States.Should().HaveCount(states);
+    }
+
     [Fact]
     public void Leaving_Operational_Cancels_Sct_And_Srvt()
     {
@@ -170,17 +207,85 @@ public class SrdoEngineConsumerTests : IDisposable
         _host.States.Should().NotContain(s => s.Reason == SrdoInvalidReason.ValidationTimeExpired, "the old SRVT was cancelled by the rebuild");
         _host.Log.Count.Should().Be(events);
         Frame(0x124, Inverse);
-        _engine.GetState(1).IsValid.Should().BeFalse();
-        _host.States.Last().Reason.Should().Be(SrdoInvalidReason.OutOfOrder, "the pending first frame did not survive the rebuild");
+        _engine.GetState(1).IsValid.Should().BeFalse("the pending first frame did not survive the rebuild: the inverted frame completes no pair");
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "nothing was written");
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived, "as re-armed by the rebuild; before its first pair a lone inverted frame is no OutOfOrder");
+        _host.Log.Count.Should().Be(events, "no event for the lone inverted frame");
     }
 
+    /// <summary>§9.5 "received in chronological order" is a rule about a pair. A lone inverted
+    /// frame after a pair was taken has a plain frame missing before it: OutOfOrder, one
+    /// transition, nothing written. (Before the first pair it is no pair of this consumer's:
+    /// <see cref="A_Lone_Inverted_Frame_Before_The_First_Pair_Is_No_Pair_And_No_Transition"/>.)</summary>
     [Fact]
     public void Second_Frame_Without_First_Is_OutOfOrder()
     {
         StartConsumer();
+        Frame(0x123, Plain); Frame(0x124, Inverse);   // valid: a pair was taken
+        Frame(0x124, Inverse).Should().BeTrue();
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.OutOfOrder);
+        _host.States.Should().Contain((1, false, SrdoInvalidReason.OutOfOrder));
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x5678u, "nothing of the lone frame was written");
+    }
+
+    /// <summary>S-7 of the 2026-10-21 review (#360): a consumer that enters Operational between a
+    /// producer's plain and inverted frame — a network started with one NMT Start to node 0, the
+    /// producer already running — sees the inverted frame first. It belongs to no pair of this
+    /// consumer's, and §9.5's chronological-order rule is about a pair: while the SRDO is still
+    /// NotReceived as armed the frame is consumed without a transition — no OutOfOrder event,
+    /// nothing written, the SCT running on from the arming, not restarted — and the next pair
+    /// makes the SRDO valid with the one transition the start-up has anyway.</summary>
+    [Fact]
+    public void A_Lone_Inverted_Frame_Before_The_First_Pair_Is_No_Pair_And_No_Transition()
+    {
+        StartConsumer();
+        int events = _host.Log.Count;
+        Frame(0x124, Inverse).Should().BeTrue("the frame is on the SRDO's COB-ID 2: consumed, not passed on");
+        _engine.GetState(1).IsValid.Should().BeFalse();
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived, "no pair, no violation");
+        _host.Log.Count.Should().Be(events, "no transition, no event");
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "nothing was written");
+
+        Advance(TimeSpan.FromMilliseconds(49));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived);
+        Advance(TimeSpan.FromMilliseconds(1));
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.SafeguardCycleExpired, "the SCT runs on from the arming: the lone frame did not restart it");
+        _host.States.Should().NotContain(s => s.Reason == SrdoInvalidReason.OutOfOrder);
+
+        OnActor(() => { _engine.LeaveOperational(); _engine.EnterOperational(); }); // armed again: NotReceived
         Frame(0x124, Inverse);
+        Frame(0x123, Plain); Frame(0x124, Inverse);
+        _engine.GetState(1).IsValid.Should().BeTrue("the next pair validates");
+        _od.ReadUnsigned(0x2000, 0).Should().Be(0x5678u);
+        _host.States.Should().NotContain(s => s.Reason == SrdoInvalidReason.OutOfOrder);
+        _host.States.Where(s => s.Srdo == 1).Select(s => s.Reason).Should().Equal(
+            SrdoInvalidReason.NotOperational, SrdoInvalidReason.NotReceived, SrdoInvalidReason.SafeguardCycleExpired, // the two lone frames: no entry
+            SrdoInvalidReason.NotOperational, SrdoInvalidReason.NotReceived, null);
+    }
+
+    /// <summary>Codex on #380: a pair shorter than the mapping is not processed (§8.1.3.1) and
+    /// leaves the SRDO NotReceived, but it is a pair — the producer's order has been seen, so the
+    /// start-up exemption of <see cref="A_Lone_Inverted_Frame_Before_The_First_Pair_Is_No_Pair_And_No_Transition"/>
+    /// is over: a lone inverted frame after it is OutOfOrder, as after any other pair. Arming
+    /// again starts a new period, in which a lone inverted frame is again no pair.</summary>
+    [Fact]
+    public void A_Lone_Inverted_Frame_After_A_Short_Pair_Is_OutOfOrder()
+    {
+        StartConsumer();
+        Frame(0x123, 0x78, 0x56); Frame(0x124, 0x87, 0xA9);   // short: EMCY 8210h, not processed
+        _host.Emcys.Should().Equal((ushort)0x8210);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived, "a short pair is not processed");
+        Frame(0x124, Inverse).Should().BeTrue();
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.OutOfOrder, "a pair has been seen: this frame's plain frame is missing");
         _host.States.Should().Contain((1, false, SrdoInvalidReason.OutOfOrder));
         _od.ReadUnsigned(0x2000, 0).Should().Be(0x1234u, "nothing was written");
+
+        OnActor(() => { _engine.LeaveOperational(); _engine.EnterOperational(); }); // armed again: NotReceived
+        int events = _host.Log.Count;
+        Frame(0x124, Inverse);
+        _engine.GetState(1).Reason.Should().Be(SrdoInvalidReason.NotReceived, "arming again forgets the pair seen before it");
+        _host.Log.Count.Should().Be(events, "no transition, no event");
     }
 
     [Fact]
