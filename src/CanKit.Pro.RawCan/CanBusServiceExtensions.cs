@@ -167,10 +167,14 @@ namespace CanKit.Pro.RawCan
                 // Dispose. What the timeout leaves behind is now a task that reports its own
                 // failures (see the pump's catch) instead of one nothing will ever observe.
                 //
-                // Waited on the task's handle rather than Task.Wait, which throws for a faulted
-                // task and needed a catch-all around it: the join only asks whether the pump has
-                // ended, never how, and the pump reports its own failures.
-                ((IAsyncResult)_pumpTask).AsyncWaitHandle.WaitOne(JoinTimeout);
+                // Task.Wait rather than the task's AsyncWaitHandle: the handle is an OS event that
+                // the task keeps until it is disposed or finalized, one per disposed subscription,
+                // while Task.Wait's own wait primitive is released when the wait returns. The pump
+                // ends normally (its body reports every failure itself), so the only exception the
+                // join can see is the AggregateException of a faulted task -- and the join only asks
+                // whether the pump has ended, never how.
+                try { _pumpTask.Wait(JoinTimeout); }
+                catch (AggregateException) { }
             }
         }
     }
