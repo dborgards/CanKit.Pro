@@ -225,14 +225,49 @@ internal sealed class ClockedLssBench : IDisposable
         public TimeSpan? Until { get; }
         public TimeSpan Started { get; }
         public bool SettledAtUntil { get; set; }
+
+        // Conditions are evaluated on the thread pool, never on the pump: a condition may block
+        // (LssState() posts to the node's actor and waits), and a blocked pump could not report
+        // the stall (Codex on #387). Only the pump reads and writes these.
+        public Task<bool>? Probe { get; set; }
+        public bool Seen { get; set; }
+        public Exception? Failed { get; set; }
+
         public TaskCompletionSource<bool> Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private bool IsSatisfied(Request request)
+    /// <summary>Takes the result of a finished probe, and starts the next one when none is running.</summary>
+    private static void Observe(Request request)
     {
-        if (request.Until is { } until)
-            return Now >= until && request.SettledAtUntil;
-        return request.Condition!();
+        if (request.Until is not null || request.Seen || request.Failed is not null) return;
+        if (request.Probe is not { } probe)
+        {
+            request.Probe = Task.Run(request.Condition!);
+            return;
+        }
+        if (!probe.IsCompleted) return;
+        request.Probe = null;
+        if (probe.Status == TaskStatus.RanToCompletion) request.Seen = probe.Result;
+        else request.Failed = probe.Exception?.GetBaseException() ?? new TaskCanceledException(probe);
+    }
+
+    /// <summary>
+    /// Evaluates every waiting condition afresh -- started after everything the caller has seen,
+    /// so a false answer is about the bench as it is now -- and waits for the answers.
+    /// </summary>
+    private async Task EvaluateAsync()
+    {
+        Request[] waiting;
+        lock (_requestGate) waiting = _requests.Where(request => request.Until is null).ToArray();
+        foreach (var request in waiting)
+        {
+            // A probe started earlier answers about an earlier bench; let it finish, then ask again.
+            while (request.Probe is { IsCompleted: false }) await IdleAsync().ConfigureAwait(false);
+            Observe(request);
+            Observe(request);
+            while (request.Probe is { IsCompleted: false }) await IdleAsync().ConfigureAwait(false);
+            Observe(request);
+        }
     }
 
     /// <summary>Completes every satisfied request. False, with the pump retired, when none is left.</summary>
@@ -243,15 +278,12 @@ internal sealed class ClockedLssBench : IDisposable
             for (int i = _requests.Count - 1; i >= 0; i--)
             {
                 var request = _requests[i];
-                bool done;
-                try { done = IsSatisfied(request); }
-                catch (Exception ex)
+                if (request.Failed is { } failure)
                 {
                     _requests.RemoveAt(i);
-                    request.Done.TrySetException(ex);
-                    continue;
+                    request.Done.TrySetException(failure);
                 }
-                if (done)
+                else if (request.Until is { } until ? Now >= until && request.SettledAtUntil : request.Seen)
                 {
                     _requests.RemoveAt(i);
                     request.Done.TrySetResult(true);
@@ -270,48 +302,44 @@ internal sealed class ClockedLssBench : IDisposable
         }
     }
 
+    /// <summary>Whether a waiter's condition has been seen to hold (or to throw). Never blocks.</summary>
     private bool AnyConditionSatisfied()
     {
-        lock (_requestGate)
-        {
-            foreach (var request in _requests)
-            {
-                try
-                {
-                    if (request.Until is null && request.Condition!()) return true;
-                }
-                catch
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
+        Request[] waiting;
+        lock (_requestGate) waiting = _requests.Where(request => request.Until is null).ToArray();
+        foreach (var request in waiting) Observe(request);
+        return waiting.Any(request => request.Seen || request.Failed is not null);
     }
 
     private async Task PumpAsync()
     {
         try
         {
-            while (ReleaseSatisfied())
+            while (true)
             {
+                await EvaluateAsync().ConfigureAwait(false);
+                if (!ReleaseSatisfied()) return;
                 var settled = await SettleCoreAsync().ConfigureAwait(false);
                 if (settled is not { } version) continue;
 
                 lock (_requestGate)
                 {
-                    foreach (var request in _requests)
-                        if (request.Until is { } at && Now >= at) request.SettledAtUntil = true;
+                    foreach (var request in _requests.Where(request => request.Until is { } at && Now >= at))
+                        request.SettledAtUntil = true;
                 }
+                // Once more after settling: a condition the settled bench meets must not see the
+                // clock move first.
+                await EvaluateAsync().ConfigureAwait(false);
                 if (!ReleaseSatisfied()) return;
 
                 var due = await NextDueAsync().ConfigureAwait(false);
                 if (due is not { } next) continue;
-                TimeSpan? cap = null;
+                TimeSpan? cap;
                 lock (_requestGate)
                 {
-                    foreach (var request in _requests)
-                        if (request.Until is { } at && (cap is null || at - Now < cap)) cap = at - Now;
+                    cap = _requests.Where(request => request.Until is not null)
+                        .Select(request => (TimeSpan?)(request.Until!.Value - Now))
+                        .Min();
                 }
                 if (cap is { } limit && (next.Delay is null || limit < next.Delay)) next = (limit, next.MasterArmed);
                 if (next.Delay is not { } step || (Volatile.Read(ref _masterOps) > 0 && !next.MasterArmed))
@@ -332,8 +360,9 @@ internal sealed class ClockedLssBench : IDisposable
                 await PokeAsync().ConfigureAwait(false);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            // The stall detector, a disposed bench or a broken actor: every waiter gets the reason.
             lock (_requestGate)
             {
                 foreach (var request in _requests)
@@ -367,9 +396,8 @@ internal sealed class ClockedLssBench : IDisposable
         while (true)
         {
             long before = Version();
-            foreach (var node in Nodes())
+            foreach (var node in Nodes().Where(node => !node.Gone))
             {
-                if (node.Gone) continue;
                 if (!await WaitForAsync(() => node.Gone || Interlocked.Read(ref node.Matched) == Interlocked.Read(ref node.Handled))
                         .ConfigureAwait(false))
                     return null;
@@ -409,9 +437,8 @@ internal sealed class ClockedLssBench : IDisposable
         var master = await AskAsync(_masterTimers).ConfigureAwait(false);
         if (master.Aborted) return null;
         TimeSpan? earliest = master.Delay;
-        foreach (var node in Nodes())
+        foreach (var node in Nodes().Where(node => !node.Gone))
         {
-            if (node.Gone) continue;
             var next = await AskAsync(node.Node!.ActorForTests).ConfigureAwait(false);
             if (next.Aborted) return null;
             if (next.Delay is { } delay && (earliest is null || delay < earliest)) earliest = delay;
@@ -645,11 +672,15 @@ internal sealed class ClockedLssBench : IDisposable
             return _drive ? _bench.RunAsync(operation) : operation;
         }
 
-        private Task Call(Func<Task> start) => Call(async () =>
+        // start() runs inside Call<T>, after the call is counted, so an argument error is still
+        // thrown by the call itself rather than stored in the task.
+        private Task Call(Func<Task> start) => Call(() => AsBool(start()));
+
+        private static async Task<bool> AsBool(Task operation)
         {
-            await start().ConfigureAwait(false);
+            await operation.ConfigureAwait(false);
             return true;
-        });
+        }
 
         public Task SwitchStateGlobalAsync(LssState state, CancellationToken cancellationToken = default)
             => Call(() => _inner.SwitchStateGlobalAsync(state, cancellationToken));
@@ -666,11 +697,7 @@ internal sealed class ClockedLssBench : IDisposable
 
         public Task ActivateBitTimingAsync(ushort switchDelayMilliseconds, int? bitsPerSecond = null,
             bool returnToWaiting = false, CancellationToken cancellationToken = default)
-        {
-            // Argument errors are thrown by the call itself, as the real master throws them.
-            var started = _inner.ActivateBitTimingAsync(switchDelayMilliseconds, bitsPerSecond, returnToWaiting, cancellationToken);
-            return Call(() => started);
-        }
+            => Call(() => _inner.ActivateBitTimingAsync(switchDelayMilliseconds, bitsPerSecond, returnToWaiting, cancellationToken));
 
         public Task<LssServiceResult> StoreConfigurationAsync(CancellationToken cancellationToken = default)
             => Call(() => _inner.StoreConfigurationAsync(cancellationToken));
@@ -701,10 +728,7 @@ internal sealed class ClockedLssBench : IDisposable
 
         public Task<LssFastscanResult> FastscanAsync(LssFastscanRequest? request = null,
             CancellationToken cancellationToken = default)
-        {
-            var started = _inner.FastscanAsync(request, cancellationToken);
-            return Call(() => started);
-        }
+            => Call(() => _inner.FastscanAsync(request, cancellationToken));
 
         public Task<byte[]?> TransceiveManufacturerAsync(byte commandSpecifier, ReadOnlyMemory<byte> parameters,
             CancellationToken cancellationToken = default)
