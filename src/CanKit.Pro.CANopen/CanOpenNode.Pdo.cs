@@ -291,25 +291,20 @@ internal sealed partial class CanOpenNode
         if (_od.ReadUnsigned(index, 0x00) != 0) return OdWriteDecision.Reject(SdoAbortCode.UnsupportedAccess);
         uint entry = ObjectDictionary.DecodeU32(value);
         if (entry == 0) return OdWriteDecision.Accept; // clears the slot
+        // The entry is judged on its own. The total length is checked once, when step 4 enables
+        // the mapping (sub0 = N, above): while it is disabled the other slots may still hold a
+        // previous, wider mapping, and a master may write the new entries in any order, so
+        // counting them here would refuse a mapping whose final form fits (#358, P-4).
         var reason = ValidateMappingEntry(entry, isTpdo);
-        if (reason is { } r) return OdWriteDecision.Reject(r);
-        // "a wrong length for the PDO at all" is a step-3 rejection too: with the entries before
-        // this slot, the mapping would already exceed 8 bytes. Slots after it may still hold a
-        // previous mapping and do not count.
-        int precedingBits = 0;
-        for (byte s = 1; s < subindex; s++)
-        {
-            if (_od.TryReadUnsigned(index, s, out var earlier)) precedingBits += (int)(earlier & 0xFF);
-        }
-        return precedingBits + (int)(entry & 0xFF) > 64
-            ? OdWriteDecision.Reject(SdoAbortCode.PdoMappingLengthExceeded)
-            : OdWriteDecision.Accept;
+        return reason is { } r ? OdWriteDecision.Reject(r) : OdWriteDecision.Accept;
     }
 
     /// <summary>
-    /// Step 3 of the re-mapping procedure: the mapped object must exist (else <c>0602 0000h</c>),
-    /// be mappable, accessible in the PDO's direction and of the mapped width (else
-    /// <c>0604 0041h</c>); the width itself must be a byte multiple of at most 64 bits.
+    /// Step 3 of the re-mapping procedure: the width must be 1..64 bits (else <c>0607 0010h</c>);
+    /// the mapped object must exist (else <c>0602 0000h</c>), be mappable, accessible in the PDO's
+    /// direction and of the mapped width (else <c>0604 0041h</c>). A fixed-width object is mapped
+    /// at its full width, a BOOLEAN also as 1 bit, a variable-length object at any width; a dummy
+    /// entry <c>0001h</c>–<c>0007h</c> must carry the width of its data type.
     /// </summary>
     private SdoAbortCode? ValidateMappingEntry(uint raw, bool isTpdo)
     {
@@ -591,9 +586,12 @@ internal sealed partial class CanOpenNode
             if (rt.MappingKind == (byte)MpdoAddressMode.Source) TriggerSourceMpdo(rt);
             return;
         }
+        // An application trigger is an event (Table 72). Only the types that react to events take
+        // it: 00h latches a transmission for the next SYNC, FEh/FFh transmit subject to the
+        // inhibit time. A cyclic TPDO (01h-F0h) is transmitted by the SYNC and an RTR-only one
+        // (FCh/FDh) by an RTR; a trigger sends neither, so it is a no-op for them (#358, P-3).
         if (rt.TransmissionType == CanOpenTransmissionType.SynchronousAcyclic) rt.SyncAcyclicPending = true;
         else if (CanOpenTransmissionType.IsEventDriven(rt.TransmissionType)) RequestEventDrivenTransmission(rt);
-        else EmitTpdo(rt);
     }
 
     // =========================================================================================

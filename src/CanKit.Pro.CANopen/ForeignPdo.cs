@@ -29,7 +29,7 @@ public enum ForeignPdoMappingOrigin
 /// <summary>
 /// One mapped object taken out of a foreign PDO payload. The bytes are the slice the mapping
 /// assigns to <see cref="Index"/>:<see cref="SubIndex"/>, little-endian, the same order a PDO
-/// carries. A dummy mapping (<c>0001h</c>–<c>0007h</c>) occupies bytes in the payload and is
+/// carries. A dummy mapping (<c>0001h</c>–<c>0007h</c>) occupies its bits in the payload and is
 /// not delivered.
 /// </summary>
 public readonly struct ForeignPdoSignal

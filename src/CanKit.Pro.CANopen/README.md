@@ -209,7 +209,7 @@ download is answered with the CiA 301 abort code; a rejected local write throws
 | `0601 0002h` | Download to a read-only object: the PDO records without `WritableCommunicationParameters`, `1200h`, `1000h`, `1001h`, `1018h`, `1F81h:00`, `1F82h:00`, `1F90h:00` |
 | `0602 0000h` | Mapping entry whose target object does not exist; `sub0` enabling a mapping with an empty slot |
 | `0604 0041h` | Target not PDO-mappable, not accessible in the PDO's direction, or of another width than mapped; dummy entry with the wrong width |
-| `0604 0042h` | Mapping longer than 8 bytes |
+| `0604 0042h` | Mapping longer than 8 bytes — for a PDO, checked when `sub0` enables it, over the entries it names |
 | `0604 0043h` | Second `1016h` entry for a node-id already monitored |
 | `0607 0010h` | Mapping bit length 0 or above 64 |
 | `0607 0012h` / `0607 0013h` | Download of the wrong width for the object — `sub0` of a mapping record is UNSIGNED8 |
@@ -385,7 +385,10 @@ disposed counts as failed.
 written to this node's object dictionary, and a frame that is not one of this node's own RPDOs
 is still not applied when it arrives.
 
-The COB-ID is read live from `1400h:01` / `1800h:01`. A word that comes back is used ahead of the
+The COB-ID is read live from `1400h:01` / `1800h:01` when a peer description bound for that node
+(`BindPeerDeviceDescription`) declares the record. Without a binding the peer-SDO gate refuses
+every PDO record before a frame is sent, and the whole observation — COB-ID and mapping — is
+decoded from the file passed to the call. A word that comes back is used ahead of the
 peer EDS or DCF, including a PDO the device marks invalid (bit 31) and a CAN-ID the file does
 not name. The same entry in the file is used only when that upload aborts, times out, is refused
 by the peer-SDO gate, or does not return a word.
@@ -506,8 +509,9 @@ change while the PDO is valid. RPDO sub-index 6 remains absent as the specificat
 
 **Synchronous window.** `1007h:00` is the window length in microseconds; 0 disables it.
 With a window enabled, synchronous RPDOs outside it are discarded, including before the
-first SYNC. Data accepted inside the window is applied at the next SYNC. Synchronous
-TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
+first SYNC. That discard is a policy this implementation chose (FR-CO-053: "chosen optional
+discard policy"), not a reception rule quoted from CiA 301 §7.5.2.7. Data accepted inside
+the window is applied at the next SYNC. Synchronous TPDOs are checked both when scheduled and at the send hand-off: a queued sample that
 outlived its window or was superseded by another SYNC is discarded. This is software
 scheduling; it cannot withdraw a frame already handed to the CAN driver.
 
@@ -543,10 +547,10 @@ changes. The transmission type byte in `1800h:02` decides how a TPDO fires:
 | `TpdoTransmission` | `1800h:02` | Behaviour |
 | --- | --- | --- |
 | `SynchronousAcyclic` | `00h` | A change of state of a mapped object or `TriggerTpdoAsync` latches one transmission for the next SYNC |
-| `Synchronous` | `01h` | Transmitted at every SYNC |
-| *(write the byte)* | `02h`–`F0h` | Transmitted at every n-th SYNC. `CanOpenTransmissionType.SynchronousEveryNthSync(n)` gives the byte; write it to `1800h:02` through the object dictionary |
-| `RtrOnlySynchronous` | `FCh` | Sampled at every SYNC into a buffer; the buffered sample answers an RTR — nothing answers before the first SYNC |
-| `RtrOnlyEventDriven` | `FDh` | Sampled and transmitted when an RTR arrives |
+| `Synchronous` | `01h` | Transmitted at every SYNC; `TriggerTpdoAsync` sends nothing |
+| *(write the byte)* | `02h`–`F0h` | Transmitted at every n-th SYNC; `TriggerTpdoAsync` sends nothing. `CanOpenTransmissionType.SynchronousEveryNthSync(n)` gives the byte; write it to `1800h:02` through the object dictionary |
+| `RtrOnlySynchronous` | `FCh` | Sampled at every SYNC into a buffer; the buffered sample answers an RTR — nothing answers before the first SYNC; `TriggerTpdoAsync` sends nothing |
+| `RtrOnlyEventDriven` | `FDh` | Sampled and transmitted when an RTR arrives; `TriggerTpdoAsync` sends nothing |
 | `EventDriven`, `EventTimer` | `FEh` | Transmitted on change of state and on `TriggerTpdoAsync`, rate-limited by the inhibit time; `EventTimer` additionally sets `1800h:05` |
 | *(write the byte)* | `FFh` | As `FEh` |
 
@@ -566,7 +570,9 @@ unless bit 30 of `1800h:01` ("no RTR allowed") is set — by the event-driven ty
 RTR-only types (see the table). A synchronous TPDO (`00h`–`F0h`) is transmitted after the SYNC
 and by nothing else, so its RTR is not answered: §7.2.2.3 defines the remote request for
 event-driven PDOs. The record's power-on default carries bit 30; `ConfigureTpdo` without an
-explicit `cobId` clears it.
+explicit `cobId` clears it. On an RPDO (`1400h:01`) bit 30 has no meaning — a consumer answers
+no RTR — so it is accepted, kept in the record and ignored: the RPDO
+matches its CAN-ID whether the bit is set or not.
 
 **PDOs sharing a COB-ID.** Two valid RPDO records may name the same COB-ID, and a frame on it
 actuates each of them; two valid TPDO records may as well, and an RTR on it reads each of them.
@@ -585,7 +591,7 @@ EMCY `8210h` (if `1014h` is valid); a longer one is read up to the mapped length
 `Add*` methods — default `true` for application objects, `false` for the communication
 profile, except entries CiA 301 marks optionally mappable), be readable for a TPDO or writable for an RPDO, and have the mapped width; the total
 must fit 64 bits; entries occupy the payload in sub-index order. A **dummy entry** — index
-`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bytes
+`0001h`–`0007h`, sub-index 0, the bit length of that static data type — occupies its bits
 without touching the dictionary, which pads an RPDO to a peer's layout. `ConfigureTpdo` and
 `ConfigureRpdo` copy the `PdoMapping` into the record; mutating the instance afterwards changes
 nothing. A rejection throws `ArgumentException` naming the abort code and leaves the PDO
@@ -595,7 +601,10 @@ invalid.
 `WritableCommunicationParameters`: destroy the PDO (bit 31 of `1800h:01` to 1) → disable the
 mapping (`1A00h:00` = 0) → write the entries (`1A00h:01`…) → enable the mapping (`1A00h:00` = N)
 → set transmission type, inhibit time, event timer → create the PDO (bit 31 to 0). The engine
-picks the record up at the last step.
+picks the record up at the last step. Each entry is checked on its own when it is written; the
+length of the whole mapping is checked when it is enabled (`0604 0042h` on `1A00h:00` = N), over
+the entries N names. While the mapping is disabled the slots keep what they held, and the entries
+may be written in any order, so a slot not yet overwritten does not count against a new one.
 
 ## Error control
 
