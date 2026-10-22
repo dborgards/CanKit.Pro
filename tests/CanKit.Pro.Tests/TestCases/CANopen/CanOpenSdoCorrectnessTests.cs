@@ -68,12 +68,13 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     // which pins the re-arm — with the re-arm alone missing, the 2 s armed at the initiate expires
     // while segments are still flowing.
     //
-    // Clock analysis, per the working agreement: the quantity the host can perturb is the length
-    // of a gap (Task.Delay overshoot plus actor starvation; #92 records about 250 ms of the
-    // latter on a CI runner). A longer gap can only strengthen "longer than SdoTimeout"; it can
-    // weaken the transfer only by exceeding SdoServerTimeout, and the margin for that is
-    // 2 s - 100 ms = 1.9 s per gap, roughly eight times the recorded perturbation. The delays
-    // are the subject of the test, not a wait for the code to catch up.
+    // The gaps are measured on a clock the test moves (#362). On the wall clock they were real
+    // sleeps, and a runner stalled for longer than SdoServerTimeout inside one of them aborted a
+    // healthy transfer (#240, and again on PR #368). Each gap is now exactly `gap` of the
+    // server's clock, and whether the deadline fired in it is decided before the peer's next
+    // frame is sent: two actor round-trips after the server's frame mean the deadline its
+    // handler (re)armed is armed, two after the advance mean a deadline that came due in the gap
+    // has fired.
     // -----------------------------------------------------------------------------------------
     [Fact]
     public async Task Sdo_BlockUpload_Server_Deadline_Measures_Peer_Idle_Time_Not_The_Whole_Transfer()
@@ -86,38 +87,40 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         var gap = TimeSpan.FromMilliseconds(100);
         var opts = new CanOpenNodeOptions().With(
             sdoTimeout: TimeSpan.FromMilliseconds(50), sdoServerTimeout: serverTimeout);
-        using var server = CanOpen.OpenNode(busB, nodeId: 0x02, opts);
+        var clock = new ManualTimeSource();
+        using var server = new CanOpenNode(new CanBusService(busB), 0x02, opts, ownsService: true, timeSource: clock);
 
         // blksize 1 makes every 7-byte segment its own sub-block, i.e. one ACK gap per segment:
-        // 25 segments -> 25 ACK gaps plus the start gap, 2.6 s nominal, more than serverTimeout.
+        // 25 segments -> 25 ACK gaps plus the start gap, 2.6 s, more than serverTimeout.
         const int segments = 25;
         var payload = Enumerable.Range(0, segments * 7).Select(i => (byte)(i * 13)).ToArray();
         server.ObjectDictionary.AddDomain(0x2B10, 0x00, payload, OdAccess.ReadOnly);
         using var tap = new FrameTap(rawBus, CanOpenCobId.SdoTx(0x02));
+        var elapsed = TimeSpan.Zero;
 
-        // For the failure message below: when the transfer began and when the peer spoke.
-        var transferStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        // One entry per frame the peer sends, taken just *before* the send: a frame's arrival can then
-        // never precede its entry, even if this thread is descheduled after the send returns.
-        var peerFrames = new List<long> { transferStart };
-        static long Ms(long from, long to) => (to - from) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+        // One idle period of the peer: the server's last frame is handled, then `gap` passes.
+        void IdleFor(TimeSpan idle)
+        {
+            _ = server.State;
+            _ = server.State;
+            clock.Advance(idle);
+            elapsed += idle;
+            _ = server.State;
+            _ = server.State;
+        }
 
         Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildBlockUploadInit(
             0x2B10, 0x00, clientCrcSupported: false, blockSize: 1, pst: 0));
         var initResp = tap.Next(ShortTimeout);
         (initResp[0] & 0xE0).Should().Be(SdoBlockFrames.ScsBlockUploadInitResponseBase);
 
-        await Task.Delay(gap); // first idle period: initiate response -> start
-        peerFrames.Add(System.Diagnostics.Stopwatch.GetTimestamp());
+        IdleFor(gap); // first idle period: initiate response -> start
         Send(rawBus, CanOpenCobId.SdoRx(0x02),
             SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart));
 
-        // #240: this assertion failed once on a CI runner without saying where. An abort is
-        // reported with the sub-block it interrupted, its code and how long the peer had really
-        // been idle when it arrived (the frame's own arrival time, not the moment it is dequeued),
-        // so the next occurrence tells a deadline that fires early in the transfer (a re-arm
-        // defect, which would recur at the same index) from one that fires at a random point (a
-        // stalled host).
+        // An abort is reported with the sub-block it interrupted and the clock reading, so a
+        // deadline that fires early in the transfer (a re-arm defect) is told from the option
+        // defect (it fires in the first gap).
         var received = new List<byte>();
         var subBlocks = 0;
         // Every gap can time out, including the one after the final segment, whose abort is then
@@ -127,15 +130,12 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             if (frame[0] != SdoFrames.CsAbort)
                 return;
             var (abortIndex, abortSubindex) = SdoFrames.ReadIndex(frame);
-            // The abort may be dequeued after a later peer frame was sent; idle time is
-            // measured from the last one that preceded its arrival.
-            var lastPeerFrame = peerFrames.Last(t => t <= tap.LastArrival);
             Assert.Fail(
                 "the server must not time out a transfer whose peer keeps answering, but it aborted " +
                 $"0x{abortIndex:X4}:{abortSubindex:X2} with code 0x{SdoFrames.ReadAbortCode(frame):X8} " +
-                $"after {subBlocks} of {segments} sub-blocks, {Ms(lastPeerFrame, tap.LastArrival)} ms " +
-                $"after the last frame the peer sent, {Ms(transferStart, tap.LastArrival)} ms into the " +
-                $"transfer (SdoServerTimeout {serverTimeout.TotalMilliseconds} ms, gap {gap.TotalMilliseconds} ms)");
+                $"after {subBlocks} of {segments} sub-blocks, {elapsed.TotalMilliseconds} ms of the " +
+                $"server's clock into the transfer (SdoServerTimeout {serverTimeout.TotalMilliseconds} ms, " +
+                $"gap {gap.TotalMilliseconds} ms)");
         }
 
         while (true)
@@ -147,13 +147,13 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             subBlocks++;
             bool last = (seg[0] & 0x80) != 0;
 
-            await Task.Delay(gap); // idle period: segment -> our sub-block ACK
-            peerFrames.Add(System.Diagnostics.Stopwatch.GetTimestamp());
+            IdleFor(gap); // idle period: segment -> our sub-block ACK
             Send(rawBus, CanOpenCobId.SdoRx(0x02), SdoBlockFrames.BuildSubBlockAck(
                 SdoBlockFrames.CcsBlockUploadSubBlockAck, lastAckedSeq: 1, nextBlockSize: 1));
             if (last) break;
         }
         subBlocks.Should().Be(segments);
+        elapsed.Should().BeGreaterThan(serverTimeout, "the transfer outlasts one server timeout");
 
         var end = tap.Next(ShortTimeout);
         FailIfAborted(end);
@@ -1730,7 +1730,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
     {
         private readonly ICanBus _bus;
         private readonly uint _cobId;
-        private readonly System.Collections.Concurrent.BlockingCollection<(byte[] Data, long Arrival)> _frames = new();
+        private readonly System.Collections.Concurrent.BlockingCollection<byte[]> _frames = new();
 
         public FrameTap(ICanBus bus, uint cobId)
         {
@@ -1743,7 +1743,7 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
         {
             if ((uint)e.CanFrame.ID == _cobId)
             {
-                _frames.Add((e.CanFrame.Data.ToArray(), System.Diagnostics.Stopwatch.GetTimestamp()));
+                _frames.Add(e.CanFrame.Data.ToArray());
             }
         }
 
@@ -1753,12 +1753,8 @@ public class CanOpenSdoCorrectnessTests : IClassFixture<VirtualAdapterFixture>
             {
                 throw new TimeoutException($"No frame on COB-ID 0x{_cobId:X3} within {timeout}.");
             }
-            LastArrival = frame.Arrival;
-            return frame.Data;
+            return frame;
         }
-
-        /// <summary>Stopwatch timestamp at which the frame last returned by <see cref="Next"/> was observed.</summary>
-        public long LastArrival { get; private set; }
 
         public void Dispose() => _bus.FrameObserved -= OnFrame;
     }
