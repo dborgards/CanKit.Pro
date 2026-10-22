@@ -159,22 +159,51 @@ public class CanOpenSdoClientSendFailureTests
     {
         // The SDO timeout has elapsed with the request unconfirmed. An answer arriving then is
         // not taken: the transfer is waiting only for its send's outcome.
-        using var bus = ControllableBus.DeferredEchoCapable($"canopen-sdo-late-answer-{Guid.NewGuid():N}");
-        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromMilliseconds(50) });
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(1, ShortTimeout); // the boot-up
-        bus.DeferredEchoes.ReleaseAll();
+        //
+        // No wall clock decides anything here (#362). The SDO timeout is measured on a clock the
+        // test moves -- on the wall clock the test assumed a 50 ms timer had fired within a
+        // 200 ms sleep -- and the request's confirmation is the test's to complete, not a held
+        // echo, which CanBusService would have failed after its own one-second confirm timeout.
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-late-answer-{Guid.NewGuid():N}");
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        var clock = new ManualTimeSource();
+        var sdoTimeout = TimeSpan.FromMilliseconds(50);
+        using var client = new CanOpenNode(service, 0x7F,
+            new CanOpenNodeOptions { SdoTimeout = sdoTimeout }, ownsService: false, clock);
+        var requestConfirmation = new TaskCompletionSource<TxConfirmation>();
+        var requestSent = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var probeAnswered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Hold = frame =>
+        {
+            if ((uint)frame.ID == CanOpenCobId.SdoTx(0x7F))
+            {
+                probeAnswered.TrySetResult(true);
+                return null;
+            }
+
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11) || frame.Data.Span[0] != SdoFrames.CcsUploadInit) return null;
+            requestSent.TrySetResult(true);
+            return requestConfirmation.Task;
+        };
 
         var upload = client.SdoUploadAsync(0x11, 0x1000, 0x00);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(2, ShortTimeout);
-        await Task.Delay(TimeSpan.FromMilliseconds(200)); // well past the 50 ms SDO timeout
+        await requestSent.Task.WithTimeoutAsync(ShortTimeout); // the request, unconfirmed
+        _ = client.State; // two actor round-trips: the deadline armed with the request is armed
+        _ = client.State;
+        clock.Advance(sdoTimeout + TimeSpan.FromMilliseconds(1));
+        _ = client.State; // ... and, past it, has fired
+        _ = client.State;
+        upload.IsCompleted.Should().BeFalse("the timeout waits for the unconfirmed request's outcome");
         bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
             new byte[] { 0x43, 0x00, 0x10, 0x00, 0x91, 0x01, 0x0F, 0x00 }), isEcho: false);
-        // A request to the node's own SDO server, raised after the answer: its reply is parked
-        // only once the node has handled the answer, so the answer met the timed-out session.
+        // A request to the node's own SDO server, raised after the answer: it is answered only
+        // once the node has handled the answer, so the answer met the timed-out session.
         bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoRx(0x7F)),
             new byte[] { 0x40, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00 }), isEcho: false);
-        await bus.DeferredEchoes.WaitForEnqueuedAsync(3, ShortTimeout);
-        bus.DeferredEchoes.ReleaseAll();
+        await probeAnswered.Task.WithTimeoutAsync(ShortTimeout);
+        upload.IsCompleted.Should().BeFalse("the answer was not taken");
+        requestConfirmation.SetResult(new TxConfirmation { Confirmed = true, Timestamp = DateTime.UtcNow });
 
         var abort = (await FluentActions.Awaiting(() => upload.WithTimeoutAsync(ShortTimeout))
             .Should().ThrowAsync<SdoAbortException>()).Which;
@@ -763,38 +792,52 @@ public class CanOpenSdoClientSendFailureTests
     [Fact]
     public async Task A_Rejected_Block_Segment_Stops_The_Sub_Block()
     {
+        // The server accepts the block download; the bus then rejects the first segment, so the
+        // transfer fails and no segment after it may be attempted.
+        //
+        // That is a negative about the sending task, which has no event of its own (#362: it
+        // used to be a 500 ms sleep). The test decides each segment's confirmation instead, and
+        // completes the first one's without RunContinuationsAsynchronously, so the sending task
+        // continues inside SetResult: a sender that carries on asks for the next segment before
+        // SetResult returns -- and is then held there, on a confirmation nobody completes. The
+        // SDO timeout is on a clock nobody moves, so it plays no part either.
         using var bus = ControllableBus.EchoCapable($"canopen-sdo-block-seg-fail-{Guid.NewGuid():N}");
-        using var client = CanOpen.OpenNode(bus, 0x7F, new CanOpenNodeOptions { SdoTimeout = TimeSpan.FromSeconds(30) });
-        var attemptsBeforeSegments = -1;
-        bus.OnTransmitting = frame =>
+        using var inner = new CanBusService(bus);
+        var service = new HeldConfirmationService(inner);
+        using var client = new CanOpenNode(service, 0x7F, new CanOpenNodeOptions(), ownsService: false,
+            new ManualTimeSource());
+        var segments = new ConcurrentQueue<TaskCompletionSource<TxConfirmation>>();
+        var firstSegment = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Hold = frame =>
         {
-            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)
-                || (frame.Data.Span[0] & 0xE1) != SdoBlockFrames.CcsBlockDownloadInitBase)
+            if ((uint)frame.ID != CanOpenCobId.SdoRx(0x11)) return null;
+            if ((frame.Data.Span[0] & 0xE1) == SdoBlockFrames.CcsBlockDownloadInitBase)
             {
-                return;
+                Answer(bus, unchecked((int)CanOpenCobId.SdoTx(0x11)),
+                    SdoBlockFrames.BuildBlockDownloadInitResponse(0x1000, 0x00, serverCrcSupported: false, blockSize: 127));
+                return null;
             }
 
-            // The server accepts the block download; from here on every send is rejected, so
-            // the first segment fails and none after it may be attempted.
-            _ = Task.Run(() =>
-            {
-                bus.AcceptTransmit = false;
-                Volatile.Write(ref attemptsBeforeSegments, bus.TransmitCount);
-                bus.RaiseObserved(CanFrame.Classic(unchecked((int)CanOpenCobId.SdoTx(0x11)),
-                    SdoBlockFrames.BuildBlockDownloadInitResponse(0x1000, 0x00, serverCrcSupported: false, blockSize: 127)),
-                    isEcho: false);
-            });
+            var confirmation = new TaskCompletionSource<TxConfirmation>();
+            segments.Enqueue(confirmation);
+            firstSegment.TrySetResult(true);
+            return confirmation.Task;
         };
 
         // 20 bytes are three segments in one sub-block.
-        var payload = new byte[20];
-        await FluentActions.Awaiting(() => client.SdoDownloadAsync(0x11, 0x1000, 0x00, payload, SdoTransferMode.Block)
-                .WithTimeoutAsync(ShortTimeout))
-            .Should().ThrowAsync<CanOpenTransportException>();
+        var download = client.SdoDownloadAsync(0x11, 0x1000, 0x00, new byte[20], SdoTransferMode.Block);
+        await firstSegment.Task.WithTimeoutAsync(ShortTimeout);
+        segments.TryPeek(out var first).Should().BeTrue();
+        first!.SetResult(new TxConfirmation
+        {
+            Confirmed = false,
+            FailureReason = TxConfirmFailureReason.Rejected,
+            Timestamp = DateTime.UtcNow,
+        });
+        segments.Count.Should().Be(1, "the send loop stops at the first segment the bus rejects");
 
-        // No event marks "no further segment": give a sender that kept going the time to show it.
-        await Task.Delay(TimeSpan.FromMilliseconds(500));
-        (bus.TransmitCount - Volatile.Read(ref attemptsBeforeSegments)).Should().Be(1,
-            "the send loop stops at the first segment the bus rejects");
+        await FluentActions.Awaiting(() => download.WithTimeoutAsync(ShortTimeout))
+            .Should().ThrowAsync<CanOpenTransportException>();
+        segments.Count.Should().Be(1, "the failed transfer sent nothing further either");
     }
 }

@@ -13,6 +13,7 @@ using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
 using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
+using CanKit.Pro.RawCan;
 using CanKit.Pro.Tests.Infrastructure;
 using Xunit;
 
@@ -745,7 +746,12 @@ PDOMapping=0
         var session = NewSession();
         using var responder = Open(session, 0);
         using var toolBus = Open(session, 1);
-        using var tool = CanOpen.OpenNode(toolBus, Tool);
+        // The first observation's upload is held on the scripted server below, and on the wall
+        // clock the tool's SDO timeout (1 s by default) ran during the hold: a host stalled past
+        // it turned the first snapshot into the file's (#362). On a clock nobody moves the
+        // timeout cannot elapse, however long the hold takes.
+        using var tool = new CanOpenNode(new CanBusService(toolBus), Tool, new CanOpenNodeOptions(),
+            ownsService: true, timeSource: new ManualTimeSource());
         var file = PeerFile();
         tool.BindPeerDeviceDescription(Peer, file);
         using var entered = new SemaphoreSlim(0, 1);
@@ -768,8 +774,12 @@ PDOMapping=0
         var secondSink = new ListSink();
         var first = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0x5A }, file, firstSink);
         entered.Wait(ShortTimeout).Should().BeTrue();
+        // The call runs synchronously up to its first wait, which is the per-peer queue while the
+        // first observation holds it; without that queue it would take the peer's busy SDO
+        // channel right here, be refused, and complete from the file. So when it returns, the
+        // overlap under test has happened -- no sleep is needed to let it queue.
         var second = tool.ObserveForeignPdoAsync(Peer, Tpdo1, new byte[] { 0xA5 }, file, secondSink);
-        await Task.Delay(50);
+        second.IsCompleted.Should().BeFalse("the second observation waits for the first");
         release.Release();
 
         var firstResult = await first.WithTimeoutAsync(ShortTimeout);
