@@ -15,8 +15,14 @@ namespace CanKit.Pro.RawCan
         Timeout,
 
         /// <summary>
-        /// The bus transitioned to <see cref="CanKit.Abstractions.API.Common.Definitions.BusState.BusOff"/>
-        /// while the confirmation was outstanding (FR-RAW-033).
+        /// The adapter raised <see cref="CanKit.Abstractions.API.Can.ICanBus.FaultOccurred"/> while
+        /// <see cref="CanKit.Abstractions.API.Can.ICanBus.BusState"/> read
+        /// <see cref="CanKit.Abstractions.API.Common.Definitions.BusState.BusOff"/> and the
+        /// confirmation was outstanding (FR-RAW-033). No CanKit 0.5.6 adapter raises
+        /// <c>FaultOccurred</c> for a bus-off -- they surface it through <c>BusState</c> and
+        /// error frames only, and under the default <c>CanExceptionPolicy</c> raise a fault only
+        /// when their receive loop dies -- so on those adapters a send outstanding during a bus-off
+        /// ends as <see cref="Timeout"/> instead (#348).
         /// </summary>
         BusOff,
 

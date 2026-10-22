@@ -87,6 +87,19 @@ namespace CanKit.Pro.RawCan
         /// (delivery to the other subscriptions continues), and the exception is surfaced here
         /// instead of being silently swallowed. Invoked synchronously on the bus's dispatch
         /// thread, so handlers must return quickly and must not call back into the service.
+        /// <para>
+        /// Also raised, with the adapter's own exception, whenever the bus reports a fault through
+        /// <see cref="ICanBus.FaultOccurred"/>. Under the default <c>CanExceptionPolicy</c> (a lower
+        /// <c>FaultThreshold</c> or a custom <c>Classifier</c> can make any reported error one) the
+        /// only fault a CanKit 0.5.6 adapter raises is its receive loop dying, after which no
+        /// further frame arrives on this bus: outstanding
+        /// <see cref="SendConfirmedAsync"/> calls end as <see cref="TxConfirmFailureReason.Timeout"/>
+        /// and <see cref="ISubscription.Frames"/> streams stay open until disposed. A consumer that
+        /// only reads subscriptions learns of it here, not from its stream: an
+        /// <see cref="ISubscription"/> carries no fault signal of its own, so such a consumer keeps
+        /// the service it subscribed on and handles this event (#348). Invoked synchronously on
+        /// whichever thread the adapter raises its fault on.
+        /// </para>
         /// </summary>
         event EventHandler<Exception>? BackgroundExceptionOccurred;
 
@@ -149,8 +162,11 @@ namespace CanKit.Pro.RawCan
         /// a uniform abstraction regardless of whether the underlying bus has hardware TX echo
         /// enabled (arc42 §6.3, ADR-7; FR-RAW-030). When the bus both declares
         /// <see cref="CanFeature.Echo"/> and has <c>WorkMode == ChannelWorkMode.Echo</c> configured,
-        /// confirmation comes from an actually-matched echo frame (FR-RAW-031, including correct
-        /// FIFO matching of multiple concurrent byte-identical sends — no cross-matching or crash);
+        /// confirmation comes from an actually-matched echo frame (FR-RAW-031: byte-identical sends
+        /// pending at the same time are matched FIFO, one echo each, never to each other's — no
+        /// cross-matching or crash). The matching is by content, so an echo of a send that has
+        /// already timed out or been cancelled cannot be told from the next identical send's and
+        /// is matched to that send (#349);
         /// otherwise it is a documented approximation based on driver acceptance
         /// (<see cref="TxConfirmation.IsApproximated"/>, FR-RAW-032). Never hangs: timeout,
         /// bus-off, and outright rejection all resolve the returned task within bounded time

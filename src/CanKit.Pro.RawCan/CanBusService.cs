@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Abstractions.API.Common.Definitions;
+using CanKit.Core.Exceptions;
 
 namespace CanKit.Pro.RawCan
 {
@@ -681,8 +682,53 @@ namespace CanKit.Pro.RawCan
             // Scoped strictly to FR-RAW-033's named "Bus-Off" failure mode: FaultOccurred fires for
             // other fault severities too (see CanBusExceptionDispatcher), which aren't necessarily
             // a reason to fail every outstanding confirmation -- BusState is the authoritative
-            // signal for whether this specific fault means the bus actually went off.
-            if (_bus.BusState != BusState.BusOff) return;
+            // signal for whether this specific fault means the bus actually went off. Pinned by
+            // TxConfirmTests.A_Fault_While_The_Bus_Is_Not_Off_Leaves_The_Send_Pending (#348).
+            //
+            // Read before the relay below runs any listener (Codex on #369): a listener may answer
+            // "the bus is dead" by disposing the bus, after which the PCAN, Kvaser, SocketCAN and
+            // ZLG getters throw CanBusDisposedException (ThrowIfDisposed) and a read placed after the
+            // relay would skip the sweep, leaving the outstanding sends to time out instead of
+            // resolving as BusOff.
+            //
+            // The read can fail by itself, too -- this runs on the poll thread that just died. In
+            // CanKit 0.5.6 the only throw in any adapter's getter is that ThrowIfDisposed (the
+            // driver status calls report failure as Unknown/None instead), so the catch takes
+            // CanKit's own exception family, which is also how an adapter maps a driver error, and
+            // ObjectDisposedException for a bus that follows .NET's own convention (the virtual
+            // adapter's ThrowIfDisposed does). A read that fails so counts as "not off": the sweep
+            // is skipped, exactly as it was while the exception escaped into the adapter's
+            // raiseFault lambda, and the relay still happens. Anything else is not a failed state
+            // read and is not swallowed: it escapes into that lambda as before -- but only after
+            // the fault has been relayed, so the README's "relayed either way" holds for a
+            // third-party getter that throws something else, too (Codex on #369). Pinned by
+            // TxConfirmTests.A_BusState_Read_That_Fails_Skips_The_Sweep_But_Not_The_Relay and
+            // A_BusState_Read_That_Throws_Anything_Else_Still_Relays_The_Fault.
+            bool busOff;
+            try { busOff = _bus.BusState == BusState.BusOff; }
+            catch (Exception readFailure) when (readFailure is CanKitException or ObjectDisposedException)
+            {
+                busOff = false;
+            }
+            catch
+            {
+                RaiseBackgroundException(ex);
+                throw;
+            }
+
+            // Relayed unconditionally, before the bus-off sweep below decides anything. Under the
+            // default CanExceptionPolicy the only fault a CanKit 0.5.6 adapter ever raises is its
+            // receive loop dying (the six `severity: Fault` reports upstream are all poll-loop
+            // catch blocks), after which no frame will ever arrive: pending sends end as Timeout,
+            // and every Frames stream stays open because ISubscription promises completion only on
+            // dispose. A consumer that only reads subscriptions had no way to learn that the bus was
+            // dead (#348); it learns it here, on the service it subscribed on -- an ISubscription
+            // still carries no fault signal of its own. The service already has one fault channel,
+            // so the bus's fault goes through it rather than a second one; the exception is the
+            // adapter's own, unwrapped.
+            RaiseBackgroundException(ex);
+
+            if (!busOff) return;
 
             PendingSend[] pending;
             lock (_pendingGate)

@@ -1813,6 +1813,216 @@ public class UdsClientTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // -----------------------------------------------------------------------------------
+    // #340 — the sibling of the test above, for a late answer that is *not* queued yet when
+    // the next request goes out: request A (DID F190) times out, request B (DID F191) is
+    // sent, and only then does A's answer arrive -- after B's handoff, so the arrival-stamp
+    // rule does not reject it. Its SID is B's positive SID; its DID is not B's. The DID echo
+    // check used to run in ReadDataByIdentifierAsync, after the receive loop had returned
+    // the stray, and threw UdsProtocolException for it -- aborting B, whose own answer was
+    // still due. The check is the receive loop's now: the stray keeps the wait going, and B
+    // returns its own answer.
+    //
+    // On a virtual clock (#171): A's answer is held by the ECU until the test lets it go,
+    // which it does once B's P2 is armed -- so "after B's handoff" is an order of events,
+    // not a sleep landing on the right side of a send.
+    // -----------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Late_Answer_To_The_Previous_Request_For_Another_Did_Is_Not_This_Requests()
+    {
+        var p2 = TimeSpan.FromMilliseconds(300);
+        using var answerFirst = new ManualResetEventSlim();
+        int calls = 0;
+        using var pair = new ClockPair(
+            e => e.On(0x22, req =>
+            {
+                if (Interlocked.Increment(ref calls) == 1)
+                {
+                    // Blocks the ECU's loop: the second request is queued at its channel
+                    // until the first answer has gone out, which orders the two answers.
+                    answerFirst.Wait(ShortTimeout);
+                    return new byte[] { 0xF1, 0x90, 0xAA };
+                }
+                return new byte[] { req[1], req[2], 0xBB };
+            }),
+            options: new UdsClientOptions { P2ClientMax = p2, P2StarClientMax = p2 });
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var first = pair.Client.ReadDataByIdentifierAsync(0xF190, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2);
+        await pair.Clock.AdvanceAsync(p2); // silence: A times out at P2
+        Func<Task> firstAct = () => first;
+        await firstAct.Should().ThrowAsync<UdsTimeoutException>();
+
+        var second = pair.Client.ReadDataByIdentifierAsync(0xF191, cts.Token);
+        await pair.WaitUntilWaitingAsync(p2); // B is on the wire and its P2 armed
+        // A's answer, after B's handoff: 62 F1 90 AA, B's positive SID with A's DID.
+        await pair.DeliverAsync(answerFirst.Set,
+            data => data.Length >= 4 && data[1] == 0x62 && data[2] == 0xF1 && data[3] == 0x90);
+
+        var data = await Within(second);
+        data.Should().Equal(new byte[] { 0xBB }, "A's late answer is a stray; B's own answer followed it");
+        pair.Ecu.RequestsHandled.Should().Be(2);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #340 — per service: a positive response with this service's SID that echoes another
+    // request's parameter bytes -- sub-function, DID, routine identifier, block sequence
+    // counter, periodic identifier, address and size -- is a stray in the receive loop, not a
+    // UdsProtocolException from the service method. The ECU puts the stray on the bus as a
+    // raw Single Frame before it answers, so the stray is read first; the request returns
+    // the answer that follows. Through SendRawAsync so every row of UdsResponseEcho's table
+    // takes the same path the typed methods take. Rows: the stray, then the ECU's answer
+    // (without the response SID, as SimulatedUdsEcu handlers return it).
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(new byte[] { 0x10, 0x03 }, new byte[] { 0x50, 0x02, 0x00, 0x32, 0x01, 0xF4 }, new byte[] { 0x03, 0x00, 0x32, 0x01, 0xF4 })]
+    [InlineData(new byte[] { 0x11, 0x01 }, new byte[] { 0x51, 0x03 }, new byte[] { 0x01 })]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x62, 0xF1, 0x91, 0xBB }, new byte[] { 0xF1, 0x90, 0xAA })]
+    // Multi-DID: the stray names a DID not requested; the answer leaves the first requested
+    // DID out and starts with the second (#252), which is this request's.
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x87 }, new byte[] { 0x62, 0xF1, 0x88, 0x01 }, new byte[] { 0xF1, 0x87, 0x02 })]
+    [InlineData(new byte[] { 0x24, 0xF1, 0x90 }, new byte[] { 0x64, 0xF1, 0x91, 0x00 }, new byte[] { 0xF1, 0x90, 0x00 })]
+    [InlineData(new byte[] { 0x27, 0x01 }, new byte[] { 0x67, 0x03, 0x11, 0x22 }, new byte[] { 0x01, 0x11, 0x22 })]
+    [InlineData(new byte[] { 0x2A, 0x01, 0xE3 }, new byte[] { 0x6A, 0xE4, 0x01 }, new byte[] { 0xE3, 0x01 })]
+    [InlineData(new byte[] { 0x2C, 0x01, 0xF3, 0x00, 0x01, 0xF1, 0x90, 0x01, 0x01 }, new byte[] { 0x6C, 0x01, 0xF3, 0x01 }, new byte[] { 0x01, 0xF3, 0x00 })]
+    [InlineData(new byte[] { 0x2E, 0xF1, 0x90, 0x01 }, new byte[] { 0x6E, 0xF1, 0x91 }, new byte[] { 0xF1, 0x90 })]
+    [InlineData(new byte[] { 0x2F, 0xF1, 0x90, 0x03 }, new byte[] { 0x6F, 0xF1, 0x91, 0x03 }, new byte[] { 0xF1, 0x90, 0x03 })]
+    [InlineData(new byte[] { 0x31, 0x01, 0x02, 0x01 }, new byte[] { 0x71, 0x01, 0x02, 0x02 }, new byte[] { 0x01, 0x02, 0x01, 0x00 })]
+    [InlineData(new byte[] { 0x31, 0x01, 0x02, 0x01 }, new byte[] { 0x71, 0x03, 0x02, 0x01 }, new byte[] { 0x01, 0x02, 0x01, 0x00 })]
+    [InlineData(new byte[] { 0x36, 0x01, 0xAA }, new byte[] { 0x76, 0x02 }, new byte[] { 0x01 })]
+    [InlineData(new byte[] { 0x38, 0x01, 0x00, 0x01, 0x41 }, new byte[] { 0x78, 0x02 }, new byte[] { 0x01 })]
+    [InlineData(new byte[] { 0x3D, 0x12, 0x10, 0x00, 0x01, 0xDD }, new byte[] { 0x7D, 0x12, 0x10, 0x01, 0x01 }, new byte[] { 0x12, 0x10, 0x00, 0x01 })]
+    [InlineData(new byte[] { 0x3E, 0x00 }, new byte[] { 0x7E, 0x01 }, new byte[] { 0x00 })]
+    public async Task A_Positive_Response_Echoing_Another_Request_Is_A_Stray(byte[] request, byte[] stray, byte[] answer)
+    {
+        ClockPair? stack = null;
+        using var pair = stack = new ClockPair(e => e.On(request[0], _ =>
+        {
+            // The stray first, as a raw padded Single Frame on the ECU's bus; the answer
+            // follows through the ECU's channel once the handler has returned.
+            var frame = new byte[8];
+            frame[0] = (byte)stray.Length;
+            Buffer.BlockCopy(stray, 0, frame, 1, stray.Length);
+            for (int i = 1 + stray.Length; i < frame.Length; i++) frame[i] = 0xCC;
+            stack!.EcuBus.Transmit(CanFrame.Classic(0x7E8, frame, isExtendedFrame: false));
+            return answer;
+        }));
+
+        using var cts = new CancellationTokenSource(ShortTimeout);
+        var response = await Within(pair.Client.SendRawAsync(request, cts.Token));
+
+        var expected = new byte[1 + answer.Length];
+        expected[0] = (byte)(request[0] + 0x40);
+        Buffer.BlockCopy(answer, 0, expected, 1, answer.Length);
+        response.Should().Equal(expected, "the stray echoes another request and keeps the wait going");
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #340 — the echo table itself, for the rows the theory above cannot put through the
+    // simulated ECU (it masks the SID with 0x7F, so 0x83 to 0x87 cannot be served) and for
+    // the verdicts it does not exercise: a service with a sub-function and nothing more behind
+    // it (0x19, 0x28, 0x29, 0x83, 0x85, 0x86, 0x87) is correlated on that byte alone; a
+    // service whose positive response echoes nothing (0x14, 0x23, 0x34, 0x35, 0x37, 0x84) is
+    // never a stray on its own SID, whatever follows it -- a wrong rule here would turn every
+    // RequestDownload answer into a stray and the download into a timeout; a response too
+    // short for its echo is Truncated, not Stray, so the service's length check sees it; and
+    // bit 7 is masked on a sub-function only, not on a block sequence counter.
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    // Sub-function only: the byte, with suppressPosRspMsgIndication cleared from the request.
+    [InlineData(new byte[] { 0x19, 0x02, 0xFF }, new byte[] { 0x59, 0x02, 0xFF, 0x01, 0x02, 0x03, 0x04 }, "Mine")]
+    [InlineData(new byte[] { 0x19, 0x82, 0xFF }, new byte[] { 0x59, 0x02, 0xFF }, "Mine")]
+    [InlineData(new byte[] { 0x19, 0x02, 0xFF }, new byte[] { 0x59, 0x01, 0xFF }, "Stray")]
+    [InlineData(new byte[] { 0x28, 0x00, 0x01 }, new byte[] { 0x68, 0x00 }, "Mine")]
+    [InlineData(new byte[] { 0x28, 0x00, 0x01 }, new byte[] { 0x68, 0x01 }, "Stray")]
+    [InlineData(new byte[] { 0x85, 0x02 }, new byte[] { 0xC5, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x85, 0x02 }, new byte[] { 0xC5, 0x01 }, "Stray")]
+    [InlineData(new byte[] { 0x87, 0x01, 0x01 }, new byte[] { 0xC7, 0x01 }, "Mine")]
+    [InlineData(new byte[] { 0x87, 0x01, 0x01 }, new byte[] { 0xC7, 0x02 }, "Stray")]
+    [InlineData(new byte[] { 0x29, 0x08 }, new byte[] { 0x69, 0x08, 0x12 }, "Mine")]
+    [InlineData(new byte[] { 0x29, 0x08 }, new byte[] { 0x69, 0x01, 0x12 }, "Stray")]
+    [InlineData(new byte[] { 0x83, 0x01 }, new byte[] { 0xC3, 0x01, 0x00, 0x32 }, "Mine")]
+    [InlineData(new byte[] { 0x83, 0x01 }, new byte[] { 0xC3, 0x03 }, "Stray")]
+    // ResponseOnEvent: the eventType echoes bits 6..0 (storageState included); the final
+    // answer of an event window set up earlier is not this start request's.
+    [InlineData(new byte[] { 0x86, 0xC5 }, new byte[] { 0xC6, 0x45, 0x00, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x86, 0x05 }, new byte[] { 0xC6, 0x01, 0x01, 0x02 }, "Stray")]
+    // No echo: the SID is the whole correlation; the bytes behind it are the answer's own.
+    [InlineData(new byte[] { 0x14, 0xFF, 0xFF, 0xFF }, new byte[] { 0x54 }, "Mine")]
+    [InlineData(new byte[] { 0x14, 0xFF, 0xFF, 0xFF }, new byte[] { 0x54, 0x01 }, "Mine")]
+    [InlineData(new byte[] { 0x23, 0x12, 0x10, 0x00, 0x02 }, new byte[] { 0x63, 0xAA, 0xBB }, "Mine")]
+    [InlineData(new byte[] { 0x34, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00 }, new byte[] { 0x74, 0x20, 0x0F, 0xFF }, "Mine")]
+    [InlineData(new byte[] { 0x35, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00 }, new byte[] { 0x75, 0x20, 0x0F, 0xFF }, "Mine")]
+    [InlineData(new byte[] { 0x37 }, new byte[] { 0x77 }, "Mine")]
+    [InlineData(new byte[] { 0x37, 0x01 }, new byte[] { 0x77, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x84, 0x01, 0x02 }, new byte[] { 0xC4, 0x03 }, "Mine")]
+    // Too short for the echo: returned to the service's length check, not dropped.
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x62 }, "Truncated")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x62, 0xF1 }, "Truncated")]
+    [InlineData(new byte[] { 0x10, 0x03 }, new byte[] { 0x50 }, "Truncated")]
+    [InlineData(new byte[] { 0x2A, 0x01, 0xE3 }, new byte[] { 0x6A }, "Truncated")]
+    [InlineData(new byte[] { 0x36, 0x01, 0xAA }, new byte[] { 0x76 }, "Truncated")]
+    [InlineData(new byte[] { 0x3D, 0x12, 0x10, 0x00, 0x01, 0xDD }, new byte[] { 0x7D, 0x12, 0x10 }, "Truncated")]
+    // A block sequence counter is not a sub-function: bit 7 is part of it.
+    [InlineData(new byte[] { 0x36, 0x81, 0xAA }, new byte[] { 0x76, 0x81 }, "Mine")]
+    [InlineData(new byte[] { 0x36, 0x81, 0xAA }, new byte[] { 0x76, 0x01 }, "Stray")]
+    // A clear of every dynamically defined DID names none; the echo stops where the request does.
+    [InlineData(new byte[] { 0x2C, 0x03 }, new byte[] { 0x6C, 0x03 }, "Mine")]
+    [InlineData(new byte[] { 0x2C, 0x03 }, new byte[] { 0x6C, 0x01 }, "Stray")]
+    // Any requested identifier, not only the first (#252; 0x2A likewise).
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x87 }, new byte[] { 0x62, 0xF1, 0x87, 0x02 }, "Mine")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90, 0xF1, 0x87 }, new byte[] { 0x62, 0xF1, 0x88, 0x02 }, "Stray")]
+    [InlineData(new byte[] { 0x2A, 0x01, 0xE3, 0xE4 }, new byte[] { 0x6A, 0xE4, 0x01 }, "Mine")]
+    // Another service's SID, and a negative response, are strays to the echo whatever follows.
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x50, 0x03 }, "Stray")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[] { 0x7F, 0x22, 0x31 }, "Stray")]
+    // Nothing to correlate on: an empty request or response is nobody's (the loop never
+    // passes either; the functional client's raw frames could). A bare 0x3D names no
+    // address and size, so nothing is echoed.
+    [InlineData(new byte[0], new byte[] { 0x62, 0xF1, 0x90 }, "Stray")]
+    [InlineData(new byte[] { 0x22, 0xF1, 0x90 }, new byte[0], "Stray")]
+    [InlineData(new byte[] { 0x3D }, new byte[] { 0x7D, 0x12 }, "Mine")]
+    public void The_Echo_Table_Correlates_Per_Service(byte[] request, byte[] response, string expected)
+    {
+        // By name: the enum is internal, and a public test method cannot take it.
+        UdsResponseEcho.Correlate(request, response).Should().Be(Enum.Parse<UdsEchoMatch>(expected));
+    }
+
+    // -----------------------------------------------------------------------------------
+    // #340 — a positive response too short to carry the echo is Truncated to the receive
+    // loop, which returns it; the typed method's own length check then reports it as
+    // malformed. The alternative -- dropping it as a stray -- would turn a malformed answer
+    // into a timeout. One row per typed method whose echo check moved into the loop, two
+    // for SecurityAccess (the seed's answer, then the key's with the seed answered in
+    // full); the ECU answers with the response SID and nothing behind it.
+    // -----------------------------------------------------------------------------------
+    [Theory]
+    [InlineData(0x10, false)]
+    [InlineData(0x11, false)]
+    [InlineData(0x27, false)]
+    [InlineData(0x27, true)]
+    [InlineData(0x31, false)]
+    [InlineData(0x3E, false)]
+    public async Task A_Positive_Response_Too_Short_For_Its_Echo_Is_Malformed_Not_A_Stray(int service, bool seedAnswered)
+    {
+        var (client, _, dispose) = BuildPair(e => e.On((byte)service, req =>
+            seedAnswered && req[1] == 0x01 ? new byte[] { 0x01, 0x11, 0x22 } : Array.Empty<byte>()));
+        using (dispose)
+        {
+            using var cts = new CancellationTokenSource(ShortTimeout);
+            Func<Task> act = service switch
+            {
+                0x10 => () => client.DiagnosticSessionControlAsync(UdsSessionType.Extended, cts.Token),
+                0x11 => () => client.EcuResetAsync(UdsEcuResetType.HardReset, cts.Token),
+                0x27 => () => client.SecurityAccessAsync(0x01, seed => new byte[] { 0x33 }, cts.Token),
+                0x31 => () => client.RoutineControlAsync(UdsRoutineControlType.StartRoutine, 0x0201, default, cts.Token),
+                _ => () => client.TesterPresentAsync(suppressPositiveResponse: false, cts.Token),
+            };
+            await act.Should().ThrowAsync<UdsProtocolException>().WithMessage("*too short*");
+        }
+    }
+
+    // -----------------------------------------------------------------------------------
     // FR-UDS-007 — TesterPresent (0x3E): keep-alive fires periodically without blocking.
     // -----------------------------------------------------------------------------------
     [Fact]

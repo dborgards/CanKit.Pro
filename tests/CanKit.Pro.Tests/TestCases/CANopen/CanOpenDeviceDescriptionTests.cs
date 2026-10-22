@@ -11,6 +11,7 @@ using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Pro.CANopen;
 using CanKit.Pro.CANopen.Nmt;
+using CanKit.Pro.CANopen.Pdo;
 using CanKit.Pro.CANopen.Sdo;
 using CanKit.Pro.Tests.Infrastructure;
 using EdsDcfNet;
@@ -446,6 +447,79 @@ public class CanOpenDeviceDescriptionTests : IClassFixture<VirtualAdapterFixture
         // What the file declares read-only stays read-only: 2002h.
         (await Assert.ThrowsAsync<SdoAbortException>(() => DownloadAsync(master, 0x2002, 0x00, new byte[] { 0x41 })))
             .AbortCode.Should().Be((uint)SdoAbortCode.AttemptWriteReadOnly);
+    }
+
+    /// <summary>
+    /// #342: <c>quirky.eds</c> declares <c>[1801]</c> with sub-indices 0–2 only — CiA 301
+    /// Table 71 makes the inhibit time (03h) and the event timer (05h) optional, and the loader
+    /// removes what the file does not declare. <c>ConfigureTpdo(2)</c> used to write both
+    /// unconditionally and die mid-sequence with a <see cref="KeyNotFoundException"/>, after
+    /// step 1 had destroyed the PDO.
+    /// </summary>
+    [Fact]
+    public void ConfigureTpdo_Tolerates_A_Described_Record_Without_Inhibit_Time_Or_Event_Timer()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var device = CanOpen.OpenNode(busB, Device, CanOpenDeviceDescription.Load(Fixture("quirky.eds")));
+        var od = device.ObjectDictionary;
+        od.TryGet(0x1801, 0x03, out _).Should().BeFalse("the fixture declares no inhibit time");
+        od.TryGet(0x1801, 0x05, out _).Should().BeFalse("the fixture declares no event timer");
+
+        device.ConfigureTpdo(2, new PdoMapping().Add(0x2000, 0, 16));
+
+        od.ReadUnsigned(0x1801, 0x01).Should().Be(CanOpenCobId.TpdoDefault(Device, 2), "the PDO is created again on the default COB-ID");
+        od.ReadUnsigned(0x1801, 0x02).Should().Be(0xFEu);
+        od.ReadUnsigned(0x1A01, 0x00).Should().Be(1u);
+        od.ReadUnsigned(0x1A01, 0x01).Should().Be(0x2000_0010u);
+        od.TryGet(0x1801, 0x03, out _).Should().BeFalse("configuring does not re-create what the file omits");
+        od.TryGet(0x1801, 0x05, out _).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// #342: a value that needs an absent optional sub-index is refused with the documented
+    /// <see cref="ArgumentException"/> before step 1 — the record is left exactly as the file
+    /// shaped it, not destroyed with half a new configuration in it.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ConfigureTpdo_Refuses_A_Value_For_An_Optional_Sub_Index_The_Description_Omits(bool inhibit)
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var device = CanOpen.OpenNode(busB, Device, CanOpenDeviceDescription.Load(Fixture("quirky.eds")));
+        var od = device.ObjectDictionary;
+        uint cobIdBefore = od.ReadUnsigned(0x1801, 0x01);
+        (cobIdBefore & CanOpenCobId.InvalidBit).Should().Be(0u, "the fixture creates TPDO2");
+
+        var mapping = new PdoMapping().Add(0x2000, 0, 16);
+        var ex = Assert.Throws<ArgumentException>(() =>
+        {
+            if (inhibit) device.ConfigureTpdo(2, mapping, inhibitTime: TimeSpan.FromMilliseconds(1));
+            else device.ConfigureTpdo(2, mapping, TpdoTransmission.EventTimer, eventTimerInterval: TimeSpan.FromMilliseconds(10));
+        });
+        ex.Message.Should().Contain(inhibit ? "inhibit time" : "event timer");
+
+        od.ReadUnsigned(0x1801, 0x01).Should().Be(cobIdBefore, "nothing was written: the PDO still exists on its described COB-ID");
+        od.ReadUnsigned(0x1A01, 0x00).Should().Be(0u);
+    }
+
+    /// <summary>
+    /// #342 (related): <c>quirky.eds</c> declares no <c>[1803]</c>, so the loader removes TPDO4's
+    /// records (CiA 301 §7.3.3). Configuring it is the documented <see cref="ArgumentException"/>,
+    /// not a <see cref="KeyNotFoundException"/> from the dictionary.
+    /// </summary>
+    [Fact]
+    public void ConfigureTpdo_On_A_Pdo_The_Description_Does_Not_Declare_Is_An_ArgumentException()
+    {
+        var session = NewSession();
+        using var busB = Open(session, 1);
+        using var device = CanOpen.OpenNode(busB, Device, CanOpenDeviceDescription.Load(Fixture("quirky.eds")));
+        device.ObjectDictionary.ContainsIndex(0x1803).Should().BeFalse("the fixture does not declare TPDO4");
+
+        var ex = Assert.Throws<ArgumentException>(() => device.ConfigureTpdo(4, new PdoMapping().Add(0x2000, 0, 16), cobId: 0x381));
+        ex.Message.Should().Contain("not declared");
     }
 
     // =========================================================================================
