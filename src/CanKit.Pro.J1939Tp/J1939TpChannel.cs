@@ -91,6 +91,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
 
     private int _disposed;
 
+    // Null unless a J1939 node owns the channel; see the constructor.
+    private readonly Func<bool>? _sourceAddressHeld;
+
     /// <inheritdoc />
     public byte SourceAddress => _sourceAddress;
 
@@ -116,9 +119,21 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
     /// actor, and the clock is that actor's time source. The channel does not take one of its
     /// own, so the loop and the timers cannot be given
     /// different clocks -- the same rule <c>J1939NodeImpl</c> follows.
+    /// <para>
+    /// <paramref name="sourceAddressHeld"/> is how a J1939 node that owns the channel tells it,
+    /// on this loop, whether the node still holds <paramref name="sourceAddress"/>. Null -- what
+    /// <see cref="J1939Tp.Open(ICanBusService, byte, J1939TpOptions?, bool)"/> passes -- means
+    /// the address is the caller's for the channel's lifetime. A node loses its address on its own
+    /// loop and retires the channel only after that, so between the two the channel still carries
+    /// the lost address and its own <c>Dispose</c> has not happened yet: a session started there
+    /// would go out under the address of the peer that won it (#347). The predicate is read where
+    /// a session starts, the only point that is ordered with the node's loss: it reads the node's
+    /// address before or after the loss cleared it, and either the session began while the address
+    /// was held, or it is refused.
+    /// </para>
     /// </remarks>
     internal J1939TpChannel(ICanBusService service, byte sourceAddress, J1939TpOptions options, bool ownsService,
-        ProtocolActor? actor = null)
+        ProtocolActor? actor = null, Func<bool>? sourceAddressHeld = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         if (sourceAddress == J1939Pgn.GlobalAddress)
@@ -128,6 +143,7 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _options.Validate();
         _ownsService = ownsService;
+        _sourceAddressHeld = sourceAddressHeld;
 
         var inboxOptions = new BoundedChannelOptions(Math.Max(1, _options.ReceiveBufferCapacity))
         {
@@ -846,6 +862,14 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel)));
             return;
         }
+        // The owning node has lost the address and will retire this channel next: refused as
+        // the retirement would refuse it, before anything is registered or put on the wire.
+        if (!SourceAddressHeld)
+        {
+            tcs.TrySetException(new ObjectDisposedException(nameof(J1939TpChannel),
+                $"The J1939 node no longer holds source address 0x{_sourceAddress:X2}; no TP session is started under it."));
+            return;
+        }
         // Cancel may have completed the TCS (via CancelTxOnLoop) before this work item ran —
         // do not register a session or emit TP.CM/TP.DT for an already-canceled send.
         if (tcs.Task.IsCompleted)
@@ -865,6 +889,9 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
         }
         StartTx(key, pdu, tcs, isCm);
     }
+
+    // Read on this loop where a session starts; see the constructor.
+    private bool SourceAddressHeld => _sourceAddressHeld?.Invoke() ?? true;
 
     private bool HasSessionTo(byte destinationAddress)
     {
@@ -920,7 +947,10 @@ internal sealed class J1939TpChannel : IJ1939TpChannel
             ended.ReleaseSpacingTimer();
             _txSessions.Remove(key);
         }
-        if (_disposed != 0 || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
+        // A send queued behind the session that just ended starts here, as late as any: past a
+        // loss of the address it stays queued, and the retirement that follows fails it.
+        if (_disposed != 0 || !SourceAddressHeld
+            || !_txQueues.TryGetValue(key.DestinationAddress, out var queue)) return;
         PendingTx? start = null;
         while (start is null && queue.Count > 0)
         {
