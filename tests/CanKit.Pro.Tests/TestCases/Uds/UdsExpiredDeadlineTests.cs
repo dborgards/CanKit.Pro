@@ -552,7 +552,10 @@ public class UdsExpiredDeadlineTests
         using var client = NewClient(channel);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        await client.SendRawAsync(new byte[] { 0x22, 0x80 }, cts.Token); // not a sub-function service: sent and answered
+        // Not a sub-function service, so bit 7 of its second byte (0xF1 here) suppresses nothing:
+        // sent and answered. A DID the stub's answer names, since the receive loop correlates
+        // on it (#340).
+        await client.SendRawAsync(new byte[] { 0x22, 0xF1, 0x90 }, cts.Token);
         await client.SendRawAsync(new byte[] { 0x3E, 0x80 }, cts.Token); // suppressed: opens the window
 
         // The next TesterPresent waits the window out; the drain at its end meets the fault.

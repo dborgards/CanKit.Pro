@@ -80,6 +80,15 @@ await uds.DownloadAsync(
   active timing budget (P2 first, then P2* after every 0x78).
 * Stray or mismatched responses received while a request is pending are silently discarded;
   the wait continues inside the *same* budget so a chatty ECU cannot extend a P2 window.
+  "Mismatched" is decided on the positive response SID *and* on the request bytes the
+  service's positive response echoes — the sub-function, the DID, the routine identifier,
+  the block sequence counter — so a late answer to the previous request for the same service
+  (one that timed out or was cancelled) with another DID is a stray, not this request's answer
+  and not a protocol error (#340). What the echo cannot tell apart is the same request
+  repeated: when a polled DID's previous request timed out and its answer arrives after the
+  next request for that DID went out, that answer is taken as the next request's. A
+  conformant server never answers later than the P2Server_max / P2\*Server_max it declares,
+  so keep `P2ClientMax` / `P2StarClientMax` at or above the session's values.
 * P2 and P2* end with the **first frame** of the response (ISO 14229-2), not its last: a
   multi-frame response whose First Frame arrived inside the budget — and whose first byte is
   this request's positive response SID — is waited for beyond it, and the remainder of the

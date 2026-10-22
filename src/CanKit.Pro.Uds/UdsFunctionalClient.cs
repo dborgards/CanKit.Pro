@@ -25,7 +25,6 @@ public sealed class UdsFunctionalClient : IDisposable
     private const byte SuppressPositiveResponseBit = 0x80;
     private const byte NegativeResponseSid = 0x7F;
     private const byte NrcResponsePending = 0x78;
-    private const byte ReadDataByPeriodicIdentifierSid = 0x2A;
 
     private readonly IsoTpFunctionalClient _client;
     private readonly bool _ownsClient;
@@ -222,8 +221,9 @@ public sealed class UdsFunctionalClient : IDisposable
                 "The collection window exceeds what a timer can measure (about 49 days).");
 
         // A read for more than one DID is answered with all of them in one PDU, which a Single
-        // Frame cannot hold with their data; and only the first DID would be correlated here,
-        // so two such reads sharing it could take each other's late answers (Codex on #150).
+        // Frame cannot hold with their data; and an answer is correlated on its first DID alone
+        // (any requested one, UdsResponseEcho), so two such reads sharing a DID could take
+        // each other's late answers (Codex on #150).
         if (sid == (byte)UdsServiceId.ReadDataByIdentifier && request.Length > 3)
             throw new ArgumentException(
                 "A functional ReadDataByIdentifier reads one DID: a Single Frame cannot carry more, and only one is correlated.",
@@ -261,13 +261,12 @@ public sealed class UdsFunctionalClient : IDisposable
             throw;
         }
         var req = request.Span;
-        byte positiveSid = (byte)(sid + 0x40);
         // A positive response echoes the request's leading parameter bytes -- the sub-function
         // (bit 7 cleared), a DID, a routine identifier, a block counter, a mode of operation,
         // an address and size -- so a late answer to an earlier request for another
-        // parameter, arriving in this window, is told apart
-        // (Codex on #150, twice). How many bytes, per service, is in EchoedRequestBytes.
-        int echoed = Math.Min(EchoedRequestBytes(req), req.Length - 1);
+        // parameter, arriving in this window, is told apart (Codex on #150, twice). The
+        // table is UdsResponseEcho's, shared with the physical client (#340); a response too
+        // short to carry the echo is dropped here, as it always was.
         // The window as anchored at the transmission, noted before the 0x78s are read, which
         // ends the send in flight: the listener, kept through it, reads this window from here
         // on and retires once it is over, and a 0x78 inside the ECU's P2 must move it out
@@ -284,8 +283,7 @@ public sealed class UdsFunctionalClient : IDisposable
         foreach (var r in raw)
         {
             var data = r.Data;
-            bool positive = data.Length >= 1 + echoed && data[0] == positiveSid && EchoMatches(req, data, echoed)
-                && (sid != ReadDataByPeriodicIdentifierSid || NamesARequestedPeriodicIdentifier(req, data));
+            bool positive = UdsResponseEcho.Correlate(req, data) == UdsEchoMatch.Mine;
             bool negative = data.Length >= 3 && data[0] == NegativeResponseSid && data[1] == sid;
             // P2* runs from the 0x78's arrival, which the response carries. The listener sees
             // the same frame; the earlier of the two to act moves the window, the later is
@@ -557,53 +555,6 @@ public sealed class UdsFunctionalClient : IDisposable
             window, cancellationToken).ConfigureAwait(false);
     }
 
-    // How many request bytes after the SID a positive response repeats, for the services
-    // whose response layout starts with them (ISO 14229-1, the response tables of each
-    // service): the sub-function where there is one, then a DID (0x22 the first, 0x24, 0x2E,
-    // 0x2F -- Codex on #150), the sub-function and DID (0x2C), the routine identifier (0x31),
-    // the block sequence counter (0x36), the modeOfOperation of RequestFileTransfer (0x38 --
-    // Codex on #150), and for WriteMemoryByAddress (0x3D) the addressAndLengthFormatIdentifier
-    // with the address and size it sizes -- its low nibble the address's bytes, its high
-    // nibble the size's (Codex on #150). The rest echo nothing -- 0x14, 0x23, 0x34, 0x35,
-    // 0x37, 0x84 -- and are correlated on the positive SID alone, which SendRawAsync's
-    // documentation says; refusing them would refuse ClearDiagnosticInformation to everyone,
-    // the functional request there is (Codex on #150).
-    private static int EchoedRequestBytes(ReadOnlySpan<byte> request)
-    {
-        byte sid = request[0];
-        return sid switch
-        {
-            0x22 or 0x24 or 0x2E or 0x2F => 2,
-            0x2C or 0x31 => 3,
-            0x36 or 0x38 => 1,
-            0x3D => request.Length < 2 ? 0 : 1 + (request[1] & 0x0F) + (request[1] >> 4),
-            _ => HasSubFunction(sid) ? 1 : 0,
-        };
-    }
-
-    // 0x2A echoes nothing: its positive response starts with the periodic identifier it carries
-    // data for, which must be one the request asked for (bytes after the transmission mode).
-    private static bool NamesARequestedPeriodicIdentifier(ReadOnlySpan<byte> request, byte[] response)
-    {
-        if (response.Length < 2) return false;
-        for (int i = 2; i < request.Length; i++)
-        {
-            if (request[i] == response[1]) return true;
-        }
-        return false;
-    }
-
-    private static bool EchoMatches(ReadOnlySpan<byte> request, byte[] response, int echoed)
-    {
-        for (int i = 0; i < echoed; i++)
-        {
-            byte expected = request[1 + i];
-            if (i == 0 && HasSubFunction(request[0])) expected &= unchecked((byte)~SuppressPositiveResponseBit);
-            if (response[1 + i] != expected) return false;
-        }
-        return true;
-    }
-
     private long Now() => _time.GetTimestamp();
 
     private TimeSpan RemainingUntil(long until)
@@ -628,14 +579,8 @@ public sealed class UdsFunctionalClient : IDisposable
     private static bool IsResponsePending(byte[] data)
         => data.Length >= 3 && data[0] == NegativeResponseSid && data[2] == NrcResponsePending;
 
-    // Mirrors UdsClientImpl.HasSubFunction (ISO 14229-1 table 2). Not 0x2A: its
-    // transmissionMode is a plain parameter, and its response echoes nothing (Codex on #150).
-    private static bool HasSubFunction(byte sid) => sid switch
-    {
-        0x10 or 0x11 or 0x19 or 0x27 or 0x28 or 0x29 or 0x2C or 0x31 or 0x3E
-            or 0x83 or 0x85 or 0x86 or 0x87 => true,
-        _ => false,
-    };
+    // ISO 14229-1 table 2; the table is UdsResponseEcho's, shared with the physical client.
+    private static bool HasSubFunction(byte sid) => UdsResponseEcho.HasSubFunction(sid);
 
     private void ThrowIfDisposed()
     {
