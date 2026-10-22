@@ -2679,7 +2679,7 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return await _service.SendConfirmedAsync(frame, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return await HandToDriver(_service.SendConfirmedAsync(frame, cancellationToken: cancellationToken)).ConfigureAwait(false);
         }
         finally
         {

@@ -5,7 +5,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using CanKit.Abstractions.API.Can.Definitions;
 using CanKit.Core.Exceptions;
+using CanKit.Pro.Actor;
 using CanKit.Pro.CANopen.Lss;
+using CanKit.Pro.RawCan;
 using EdsDcfNet.Models;
 
 namespace CanKit.Pro.CANopen;
@@ -78,6 +80,82 @@ internal sealed partial class CanOpenNode : ILssSlave
     internal Task LssBitRateSwitchCompletion => _lssBitRateSwitch;
     internal bool IsWaitingForLssTransmits => Volatile.Read(ref _lssWaitingForTransmits) != 0;
     internal TaskScheduler LssCancellationScheduler { get; set; } = TaskScheduler.Default;
+
+    // Adapter switches whose completion has not yet been handed back to the actor, and the
+    // application hook the newest one is waiting on. Bookkeeping for the test seam below only;
+    // nothing in the node reads them (#362).
+    private int _lssSwitchResumesPending;
+    private Task? _lssHookInProgress;
+
+    /// <summary>
+    /// Test seam: the actor the switch delays, the response windows and every other timer of this
+    /// node are measured on. A test that opened the node on a manual time source registers it with
+    /// its clock, so that moving the clock wakes this actor too (#362).
+    /// </summary>
+    internal ProtocolActor ActorForTests => _actor;
+
+    // Reserved sends whose driver call has returned and whose confirmation is still pending.
+    // Test bookkeeping only (#362), see HasTransmitsAwaitingDriverForTests.
+    private int _txInDriver;
+
+    /// <summary>
+    /// Counts <paramref name="pending"/> as handed to the driver from the moment the driver call
+    /// returned it until it completes. Only a test seam reads the count.
+    /// </summary>
+    private Task<TxConfirmation> HandToDriver(Task<TxConfirmation> pending)
+    {
+        // A driver that confirmed synchronously -- the virtual bus, every v0.5.6 adapter -- costs
+        // nothing here: there is no pending confirmation to count.
+        return pending.IsCompleted ? pending : AwaitInDriver(pending);
+    }
+
+    private async Task<TxConfirmation> AwaitInDriver(Task<TxConfirmation> pending)
+    {
+        Interlocked.Increment(ref _txInDriver);
+        try
+        {
+            return await pending.ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _txInDriver);
+        }
+    }
+
+    /// <summary>
+    /// Test seam (#362): a send has passed the transmit gate and its driver call has not returned
+    /// yet -- it is still on its way from the thread pool to the bus. A send the driver holds
+    /// (a test double that confirms later) has returned from that call and does not count.
+    /// </summary>
+    internal bool HasTransmitsAwaitingDriverForTests
+    {
+        get
+        {
+            int inDriver = Volatile.Read(ref _txInDriver);
+            lock (_lssTxGate) return _lssTxInFlight > inDriver;
+        }
+    }
+
+    /// <summary>
+    /// Test seam (#362): no LSS work of this node is in flight that the next instant of a test's
+    /// clock could overtake. False while a send has passed the gate and not come back from the
+    /// driver, while the held queue is being flushed, and while an adapter switch has finished
+    /// without its completion having reached the actor yet -- the end of a silence waits on that,
+    /// and a clock moved past it would end the silence late. A switch still inside the
+    /// application's hook does not count: that wait belongs to whoever completes the hook.
+    /// </summary>
+    internal bool IsLssSettledForTests
+    {
+        get
+        {
+            lock (_lssTxGate)
+            {
+                if (_lssTxInFlight != 0 || _lssFlushing) return false;
+            }
+            if (Volatile.Read(ref _lssSwitchResumesPending) == 0) return true;
+            return Volatile.Read(ref _lssHookInProgress) is { IsCompleted: false };
+        }
+    }
 
     /// <inheritdoc />
     LssState ILssSlave.State
@@ -596,11 +674,21 @@ internal sealed partial class CanOpenNode : ILssSlave
         if (Volatile.Read(ref _disposed) != 0) return;
         _lssDelayElapsed = false;
         var switching = InvokeBitRateSwitch(_activeSelector, _activeIndex, generation);
-        Action resume = () => TryEndLssSilence(generation);
+        Action resume = () =>
+        {
+            try { TryEndLssSilence(generation); }
+            finally { Interlocked.Decrement(ref _lssSwitchResumesPending); }
+        };
+        Interlocked.Increment(ref _lssSwitchResumesPending);
         _ = switching.ContinueWith(
-            _ => RunOnActor(resume),
+            finished =>
+            {
+                // Only a completed switch ends the silence; the count is test bookkeeping.
+                if (finished.Status == TaskStatus.RanToCompletion) RunOnActor(resume);
+                else Interlocked.Decrement(ref _lssSwitchResumesPending);
+            },
             CancellationToken.None,
-            TaskContinuationOptions.OnlyOnRanToCompletion | TaskContinuationOptions.ExecuteSynchronously,
+            TaskContinuationOptions.ExecuteSynchronously,
             TaskScheduler.Default);
         _lssActivation = _actor.Schedule(delay, () => CompleteLssSilence(generation));
     }
@@ -639,7 +727,9 @@ internal sealed partial class CanOpenNode : ILssSlave
             if (Volatile.Read(ref _disposed) != 0 || generation != Volatile.Read(ref _lssActivationGeneration))
                 throw new OperationCanceledException("The LSS bit-rate switch is no longer current.");
             cancellation.ThrowIfCancellationRequested();
-            await hook(rate, cancellationToken).ConfigureAwait(false);
+            var applying = hook(rate, cancellationToken);
+            Volatile.Write(ref _lssHookInProgress, applying);
+            await applying.ConfigureAwait(false);
         });
         _lssBitRateSwitch = switching;
         _ = switching.ContinueWith(
