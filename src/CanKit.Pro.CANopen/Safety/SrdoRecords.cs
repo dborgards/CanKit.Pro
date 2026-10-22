@@ -114,34 +114,17 @@ internal static class SrdoRecords
     /// the plain ones as <see cref="SrdoCrc.Compute"/> does for a configuration being written.
     /// A legitimate record gives the same value, its inverted slots repeat the plain ones (the
     /// validator sees to that); a record changed behind the dictionary's back, in any slot, does
-    /// not (Codex on #329).</summary>
+    /// not (Codex on #329). The byte sequence is <see cref="SrdoCrc"/>'s one serializer, so the
+    /// two sides cannot drift apart in layout or byte order.</summary>
     public static ushort RecordChecksum(ObjectDictionary od, int n)
     {
         var comm = CommIndex(n);
         var map = MapIndex(n);
-        var bytes = new List<byte>(13 + 5 * MappingSubindices);
-        bytes.Add((byte)od.ReadUnsigned(comm, 0x01));
-        uint cycle = od.ReadUnsigned(comm, 0x02);
-        bytes.Add((byte)(cycle >> 8));
-        bytes.Add((byte)cycle);
-        bytes.Add((byte)od.ReadUnsigned(comm, 0x03));
-        AddU32(bytes, od.ReadUnsigned(comm, 0x05));
-        AddU32(bytes, od.ReadUnsigned(comm, 0x06));
         uint count = od.ReadUnsigned(map, 0x00);
-        bytes.Add((byte)count);
-        for (byte s = 1; s <= Math.Min(count, (uint)MappingSubindices); s++)
-        {
-            bytes.Add(s);
-            AddU32(bytes, od.ReadUnsigned(map, s));
-        }
-        return SrdoCrc.Crc16Xmodem(bytes.ToArray());
-    }
-
-    private static void AddU32(List<byte> bytes, uint value)
-    {
-        bytes.Add((byte)(value >> 24));
-        bytes.Add((byte)(value >> 16));
-        bytes.Add((byte)(value >> 8));
-        bytes.Add((byte)value);
+        var slots = new List<(byte Subindex, uint Value)>(MappingSubindices);
+        for (byte s = 1; s <= Math.Min(count, (uint)MappingSubindices); s++) slots.Add((s, od.ReadUnsigned(map, s)));
+        return SrdoCrc.Crc16Xmodem(SrdoCrc.CanonicalBytes(
+            (byte)od.ReadUnsigned(comm, 0x01), (ushort)od.ReadUnsigned(comm, 0x02), (byte)od.ReadUnsigned(comm, 0x03),
+            od.ReadUnsigned(comm, 0x05), od.ReadUnsigned(comm, 0x06), (byte)count, slots));
     }
 }
