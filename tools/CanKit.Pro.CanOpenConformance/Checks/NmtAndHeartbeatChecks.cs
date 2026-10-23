@@ -48,7 +48,7 @@ internal static class NmtAndHeartbeatChecks
     /// </remarks>
     private static async Task<Outcome> NoHeartbeatAsync(
         Session session, uint cobId, Dictionary<string, string> measurements, int bootUps,
-        CancellationToken cancellationToken)
+        int guardPolls, int guardResponses, CancellationToken cancellationToken)
     {
         // HBT-01 has already read 1017h, so this does not have to hedge: a verified zero is the
         // device configured not to produce a heartbeat, which CiA 301 permits and which is not an
@@ -79,6 +79,27 @@ internal static class NmtAndHeartbeatChecks
                 + (bootUps > 0 ? $" (the {bootUps} frame(s) seen are boot-up messages)" : string.Empty)
                 + $". Re-run with --heartbeat-ms at least {tooShort + WindowMarginMs}; nothing is concluded "
                 + "about the device from a window shorter than its own period.", measurements);
+        }
+
+        // Another master's guarding, after the two questions above and before the one below. It is
+        // a reason the observation is unusable rather than a fact about the device, so it must not
+        // reach the device verdict — but a verified 1017h of zero and a window too short to hold a
+        // beat each explain the silence on their own, and naming the neighbour instead would send
+        // the operator after the wrong thing.
+        //
+        // A window holding only an RTR poll or a toggle-one response leaves no heartbeat candidate,
+        // so this helper was reached before the guarding branch at the end of HBT-02 could ever run
+        // and the absence was charged to the device. Moving the two shared questions in here fixed
+        // one bypass and opened this one. Found in review of #388.
+        if (guardPolls > 0 || guardResponses > 0)
+        {
+            return Outcome.Inconclusive(
+                $"Another master is node-guarding this device on the same COB-ID ({guardPolls} RTR poll(s), "
+                + $"{guardResponses} toggle-one response(s)), and no heartbeat candidate is left in the window"
+                + (configured is { } guarded ? $", although 1017h says {guarded} ms" : string.Empty)
+                + ". Nothing about the device's own heartbeat can be concluded from that. Stop the other master's "
+                + "guarding, or read 100Ch/100Dh — see GRD-01.",
+                Attribution.Setup, measurements);
         }
 
         return Outcome.Inconclusive(
@@ -135,7 +156,10 @@ internal static class NmtAndHeartbeatChecks
             };
 
             if (frames.Count == 0)
-                return await NoHeartbeatAsync(session, cobId, measurements, bootUps: 0, cancellationToken).ConfigureAwait(false);
+            {
+                return await NoHeartbeatAsync(session, cobId, measurements, bootUps: 0,
+                    guardPolls: 0, guardResponses: 0, cancellationToken).ConfigureAwait(false);
+            }
 
             // Another master's node-guarding poll uses this same COB-ID as a remote frame
             // (CanOpenNode.NodeGuarding.cs), and its empty payload is not a malformed heartbeat —
@@ -206,7 +230,10 @@ internal static class NmtAndHeartbeatChecks
             }
 
             if (heartbeats <= 0)
-                return await NoHeartbeatAsync(session, cobId, measurements, bootUps, cancellationToken).ConfigureAwait(false);
+            {
+                return await NoHeartbeatAsync(session, cobId, measurements, bootUps,
+                    guardPolls, guardResponses, cancellationToken).ConfigureAwait(false);
+            }
 
             // Only now. A toggle-zero guarding response carries the bare state and is
             // byte-for-byte a heartbeat, so the two cannot be separated — but a multi-byte frame
@@ -253,6 +280,36 @@ internal static class NmtAndHeartbeatChecks
                 if (e.ProducerNodeId == session.Target) Interlocked.Increment(ref timedOut);
             }
 
+            // The wait is the device's period times four, not a constant: the 10-second cap ended
+            // the check before the next beat of any producer slower than 2.5 s, and `received` was
+            // then still zero — so a conforming device was reported as a defect in the stack. A cap
+            // that silently shortens a measurement turns the measurement into a different one.
+            // Found in review of #388.
+            //
+            // Asked before anything is installed, which is the correction that followed: the guard
+            // sat *after* AddHeartbeatConsumer, whose timeout is a UInt16 millisecond value
+            // (CanOpenNode.ToMilliseconds16 rejects more), so a period above about 21.8 s made the
+            // three-period budget exceed 65535 ms and the call threw before the guard could return
+            // the unmeasured verdict — a conforming slow producer reported as a tool exception.
+            // With the guard first, `needed` bounds the period to MaxObservationMs / 4 and the
+            // budget cannot reach that range. Found in review of #388.
+            var needed = (int)Math.Max(500, beat.MedianMs * 4 + 300);
+            if (needed > MaxObservationMs)
+            {
+                return Outcome.Inconclusive(
+                    $"The device's heartbeat period is {IdentityAndSdoChecks.Ms(beat.MedianMs)}, so four of them "
+                    + $"would take {IdentityAndSdoChecks.Ms(needed)} — longer than this check will hold the bus. "
+                    + "Nothing is concluded about the consumer, rather than concluding it from a window that "
+                    + "could not contain a beat.",
+                    Attribution.None,
+                    new Dictionary<string, string>
+                    {
+                        ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
+                        ["wait this check would need"] = IdentityAndSdoChecks.Ms(needed),
+                        ["limit"] = IdentityAndSdoChecks.Ms(MaxObservationMs),
+                    });
+            }
+
             session.Client.HeartbeatReceived += OnBeat;
             session.Client.HeartbeatTimeout += OnTimeout;
             try
@@ -262,28 +319,6 @@ internal static class NmtAndHeartbeatChecks
                 // the stack tracks the clock.
                 var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 3 + 200));
                 session.Client.AddHeartbeatConsumer(session.Target, budget);
-
-                // The wait is the device's period times four, not a constant: the 10-second cap
-                // ended the check before the next beat of any producer slower than 2.5 s, and
-                // `received` was then still zero — so a conforming device was reported as a
-                // defect in the stack. A cap that silently shortens a measurement turns the
-                // measurement into a different one. Found in review of #388.
-                var needed = (int)Math.Max(500, beat.MedianMs * 4 + 300);
-                if (needed > MaxObservationMs)
-                {
-                    return Outcome.Inconclusive(
-                        $"The device's heartbeat period is {IdentityAndSdoChecks.Ms(beat.MedianMs)}, so four of them "
-                        + $"would take {IdentityAndSdoChecks.Ms(needed)} — longer than this check will hold the bus. "
-                        + "Nothing is concluded about the consumer, rather than concluding it from a window that "
-                        + "could not contain a beat.",
-                        Attribution.None,
-                        new Dictionary<string, string>
-                        {
-                            ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
-                            ["wait this check would need"] = IdentityAndSdoChecks.Ms(needed),
-                            ["limit"] = IdentityAndSdoChecks.Ms(MaxObservationMs),
-                        });
-                }
 
                 await Task.Delay(needed, cancellationToken).ConfigureAwait(false);
 

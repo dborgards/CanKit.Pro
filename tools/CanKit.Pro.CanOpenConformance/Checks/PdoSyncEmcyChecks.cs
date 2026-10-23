@@ -372,11 +372,18 @@ internal static class PdoSyncEmcyChecks
                         new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
                 }
 
-                if ((cobIdWord & 0x1FFF_F800) != 0)
+                // Bit 31 is in the mask, not only in the sentence above it. The previous commit's
+                // comment named it as reserved and then tested bits 11..28 and bit 29 only, so
+                // 80000080h passed and SYN-02 went on to send SYNCs on the masked 080h. The
+                // stack's IsUsableCobIdWord does not test it either — it is about whether a word
+                // is usable for communication — but CiA 301 §7.5.2.6 defines bit 31 of this entry
+                // as reserved, and claiming that in a comment while not checking it is how the
+                // last one got through. Found in review of #388.
+                if ((cobIdWord & 0x9FFF_F800) != 0)
                 {
                     return Outcome.Fail(
-                        $"1005h:00 is 0x{cobIdWord:X8}: bits 11..28 are reserved in an 11-bit COB-ID entry and must "
-                        + "be zero.",
+                        $"1005h:00 is 0x{cobIdWord:X8}: bit 31 and bits 11..28 are reserved in this entry and must "
+                        + "be zero (CiA 301 §7.5.2.6).",
                         new Dictionary<string, string> { ["1005h COB-ID SYNC"] = $"0x{cobIdWord:X8}" });
                 }
 
@@ -1090,7 +1097,16 @@ internal static class PdoSyncEmcyChecks
         {
             var raw = await session.Client.SdoUploadAsync(session.Target, 0x1019, 0x00, cancellationToken).ConfigureAwait(false);
             // A wrong length is the device contradicting itself about an UNSIGNED8, not a zero.
-            if (raw.Length != 1) return (null, null);
+            // A wrong length is the device contradicting itself about an UNSIGNED8, which is a
+            // conformance violation with a name — not a value that could not be determined. It
+            // collapsed into "unknown" and SYN-02 reported an inconclusive prerequisite, so the
+            // one concrete thing the device got wrong was the one thing the report did not say.
+            // Found in review of #388.
+            if (raw.Length != 1)
+            {
+                return (null, $"1019h:00 is UNSIGNED8 and the device returned {raw.Length} byte(s) "
+                    + $"({IdentityAndSdoChecks.Hex(raw)}).");
+            }
 
             // Read is not the same as valid, the third instance of that in this file. Treating 1
             // and 241..255 as "no counter" and "a counter rolling 1..250" let a device with a
