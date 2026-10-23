@@ -64,6 +64,7 @@ class VersionRange(unittest.TestCase):
         self.assertLess(key('1.4.0-pr.2'), key('1.4.0-pr.10'))
         self.assertLess(key('1.4.0-pr.17.3'), key('1.4.0'))
         self.assertEqual(key('1.4.0+abc'), key('1.4.0'))
+        self.assertEqual(key('1.0.0-Alpha.Beta'), key('1.0.0-alpha.beta'))
         self.assertEqual(key('1.4'), key('1.4.0.0'))
 
 

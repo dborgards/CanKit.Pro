@@ -78,13 +78,14 @@ def version_floor(range_text: str) -> tuple:
 
 def version_key(version: str) -> tuple:
     """A sort key for SemVer 2 / NuGet versions: numeric parts first, a pre-release below the
-    release it precedes, build metadata ignored."""
+    release it precedes, pre-release labels compared without regard to case (as NuGet does), build
+    metadata ignored."""
     core, _, rest = version.partition('+')[0].partition('-')
     numbers = tuple(int(part) if part.isdigit() else 0 for part in core.split('.'))
     numbers += (0,) * (4 - len(numbers))
     if not rest:
         return numbers, (1,)
-    return numbers, (0,) + tuple((0, int(i), '') if i.isdigit() else (1, 0, i) for i in rest.split('.'))
+    return numbers, (0,) + tuple((0, int(i), '') if i.isdigit() else (1, 0, i.lower()) for i in rest.split('.'))
 
 
 def below_floor(declared: dict, components: list) -> list:
