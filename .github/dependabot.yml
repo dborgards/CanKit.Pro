@@ -126,3 +126,8 @@ updates:
       # eng/docs-requirements.txt. Minor and patch updates of 1.x are fine.
       - dependency-name: "mkdocs"
         update-types: ["version-update:semver-major"]
+      # 0.6.3 declares its MkDocs dependency as `properdocs` and makes pip install a second copy
+      # of MkDocs next to the pinned one; see eng/docs-requirements.txt. Lift this when a release
+      # of the plugin depends on `mkdocs` again.
+      - dependency-name: "mkdocs-literate-nav"
+        versions: ["0.6.3"]
