@@ -1034,6 +1034,17 @@ internal sealed partial class CanOpenNode : ILssSlave
         // 13FEh is created with the SRDO records. This method already returned when there are none.
         bool wasValid = _od.ReadUnsigned(Safety.SrdoRecords.ConfigurationValid, 0)
             == Safety.SrdoRecords.ConfigurationValidValue;
+        // The direction follows the node-id the same way (EN 50325-5:2010 Table 5, #289): one that
+        // still is the old node-id's default becomes the new one's, so a node that LSS gives its
+        // id after power-on (255 has no SRDO 1) or moves across 32/33 holds what a node powered
+        // up with that id holds. A direction the application changed does not match and stays;
+        // so does one of a committed SRDO (13FEh = A5h), which would otherwise change its role
+        // behind a configuration somebody signed.
+        var fromDirection = DefaultDirectionOfSrdo1(from);
+        var toDirection = DefaultDirectionOfSrdo1(to);
+        // The record is always present when this runs (see above).
+        if (!wasValid && fromDirection != toDirection && _od.ReadUnsigned(comm, 0x01) == (byte)fromDirection)
+            _od.WriteRawUnchecked(comm, 0x01, new[] { (byte)toDirection });
         bool changed = RetargetCobId(comm, 0x05, from1, to1);
         changed |= RetargetCobId(comm, 0x06, from2, to2);
         if (!wasValid || !changed) return;
