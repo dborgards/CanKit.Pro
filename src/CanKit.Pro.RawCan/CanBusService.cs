@@ -376,17 +376,22 @@ namespace CanKit.Pro.RawCan
             // still be running -- reading a buffer that has meanwhile been released or reused. The
             // copy is a few bytes; the echo path is unaffected (its Transmit is synchronous).
             //
-            // Built through the memory-owner factories, which take the payload as it is (#352,
-            // R-5). The ReadOnlyMemory overload of CanFrame.Classic refuses a remote frame with a
-            // payload -- the shape a caller gets from the owner overload for "RTR with DLC 8 over
-            // a pooled buffer" -- so this path threw for a frame the echo path, which transmits
-            // the caller's frame itself, sends: two answers to one call, keyed on the bus mode.
-            var copy = new DetachedPayload(frame.Data.ToArray());
+            // A remote frame goes through the memory-owner factory, which takes the payload as it
+            // is (#352, R-5). The ReadOnlyMemory overload of CanFrame.Classic refuses a remote
+            // frame with a payload -- the shape a caller gets from the owner overload for "RTR
+            // with DLC 8 over a pooled buffer" -- so this path threw for a frame the echo path,
+            // which transmits the caller's frame itself, sends: two answers to one call, keyed on
+            // the bus mode. Only that shape needs the owner; every other frame keeps the overload
+            // that wraps the copy without one more object per send.
+            var copy = frame.Data.ToArray();
             var detached = frame.FrameKind == CanFrameType.CanFd
                 ? CanFrame.Fd(frame.ID, copy, BRS: frame.BitRateSwitch, ESI: frame.ErrorStateIndicator,
-                    isExtendedFrame: frame.IsExtendedFrame, ownMemory: false, isErrorFrame: frame.IsErrorFrame)
-                : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
-                    isRemoteFrame: frame.IsRemoteFrame, ownMemory: false, isErrorFrame: frame.IsErrorFrame);
+                    isExtendedFrame: frame.IsExtendedFrame, isErrorFrame: frame.IsErrorFrame)
+                : frame.IsRemoteFrame
+                    ? CanFrame.Classic(frame.ID, new DetachedPayload(copy), isExtendedFrame: frame.IsExtendedFrame,
+                        isRemoteFrame: true, ownMemory: false, isErrorFrame: frame.IsErrorFrame)
+                    : CanFrame.Classic(frame.ID, copy, isExtendedFrame: frame.IsExtendedFrame,
+                        isErrorFrame: frame.IsErrorFrame);
             //
             // The driver's token is ours, linked to the caller's: when the timeout wins it is
             // cancelled, so a driver that honours cancellation stops the abandoned operation
@@ -783,8 +788,8 @@ namespace CanKit.Pro.RawCan
         }
 
         /// <summary>
-        /// The driver's private copy of an approximated send's payload, as the memory owner the
-        /// owner-taking <see cref="CanFrame"/> factories want. Nothing to release: the array is
+        /// The driver's private copy of a remote frame's payload on the approximated path, as the
+        /// memory owner the owner-taking <see cref="CanFrame"/> factory wants. Nothing to release: the array is
         /// the driver's for as long as it holds the frame.
         /// </summary>
         private sealed class DetachedPayload : System.Buffers.IMemoryOwner<byte>
