@@ -89,25 +89,24 @@ internal sealed class BusTap : IDisposable
     /// The second part is not politeness. Frames are stamped at arrival now, so one that reached
     /// the demultiplexer inside the window carries an AtMs inside it — but if the pump has not
     /// delivered it yet, a snapshot taken the instant the delay returns leaves it out of the list
-    /// altogether, and the check concludes over fewer frames than the window actually held. The
-    /// drain waits for the list to stop growing, bounded, so a steady talker cannot hold a check
-    /// open: it is one pump hop for frames already received in this process. Found in review
-    /// of #388.
+    /// altogether, and the check concludes over fewer frames than the window actually held.
+    /// Frames arriving after the window are harmless: every boundary compares AtMs, so a late
+    /// arrival is excluded by its stamp rather than by not being in the list.
+    /// <para>
+    /// A flat wait, deliberately. The first version watched the frame count and treated one
+    /// unchanged 5 ms sample as settled — so it returned after 5 ms unless the list happened to
+    /// be growing, which is the opposite of what it was for: a frame still sitting in the
+    /// subscription channel looks exactly like an idle pump. There is no way to observe the
+    /// pump's queue from here, so there is nothing to be clever with; the wait is bounded, the
+    /// quantity it covers is named, and the behaviour is the same every time. Found in review
+    /// of #388, against the drain added one commit earlier.
+    /// </para>
     /// </remarks>
     public async Task ListenAsync(int milliseconds, CancellationToken cancellationToken = default)
     {
         await Task.Delay(milliseconds, cancellationToken).ConfigureAwait(false);
 
-        var settled = Stopwatch.StartNew();
-        var seen = -1;
-        while (settled.Elapsed.TotalMilliseconds < DrainMs)
-        {
-            int now;
-            lock (_frames) now = _frames.Count;
-            if (now == seen) return;
-            seen = now;
-            await Task.Delay(5, cancellationToken).ConfigureAwait(false);
-        }
+        await Task.Delay(DrainMs, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>How long <see cref="ListenAsync"/> lets the delivery pump catch up. What it covers
