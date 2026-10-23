@@ -92,6 +92,7 @@ internal static class PdoSyncEmcyChecks
             TappedFrame[] inOperational;
             int inStopped;
             int settling;
+            var stoppedConfirmed = false;
             Restoration restoration;
             try
             {
@@ -103,6 +104,16 @@ internal static class PdoSyncEmcyChecks
                 inOperational = Transmitted(tap).ToArray();
 
                 await session.Client.SendNmtCommandAsync(NmtCommand.Stop, session.Target, cancellationToken).ConfigureAwait(false);
+
+                // Confirm it landed before judging the window that follows. SendNmtCommandAsync
+                // hands out a Task and discards the transmit result, so a frame the adapter
+                // rejected completes the await normally — the device then stays Operational, its
+                // TPDOs fall into the stopped window, and PDO-03 reports a device conformance
+                // failure for what is a transport failure. The restore path already verified;
+                // this one did not. Found in review of #388.
+                stoppedConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Stopped, cancellationToken)
+                    .ConfigureAwait(false) == (byte)NmtState.Stopped;
+
                 var atStop = Transmitted(tap).Count;
                 await Task.Delay(SettleMs, cancellationToken).ConfigureAwait(false);
                 settling = Transmitted(tap).Count - atStop;
@@ -157,6 +168,17 @@ internal static class PdoSyncEmcyChecks
                     + restoration.State + ". A write-tier run promises the device is unchanged afterwards, so this "
                     + "fails whatever the measurements say — the device needs looking at before it is trusted again.",
                     measurements);
+            }
+
+            measurements["Stop confirmed by heartbeat"] = stoppedConfirmed.ToString();
+
+            if (!stoppedConfirmed)
+            {
+                return Outcome.Inconclusive(
+                    $"The device did not report Stopped after the NMT Stop command, so the {inStopped} frame(s) in the "
+                    + "window that followed cannot be charged to it — an adapter that drops the command produces "
+                    + "exactly this picture. What was measured in Operational still stands.",
+                    Attribution.Transport, measurements);
             }
 
             if (inStopped > 0)
@@ -770,7 +792,8 @@ internal static class PdoSyncEmcyChecks
     /// <summary>One PDO as its own parameters describe it.</summary>
     private readonly record struct PdoDescriptor(
         int Number, uint CobId, bool Extended, bool Valid, byte TransmissionType, bool TransmissionTypeRead,
-        byte SyncStartValue, bool SyncStartRead, int InhibitMs, int EventTimerMs, int Bytes, int MappedEntries);
+        byte SyncStartValue, bool SyncStartRead, int InhibitMs, int EventTimerMs, int Bytes, bool MappingComplete,
+        int MappedEntries);
 
     private readonly record struct PdoSweep(List<PdoDescriptor> Descriptors, List<string> Blocked, List<string> Absent, List<string> Problems);
 
@@ -822,7 +845,7 @@ internal static class PdoSyncEmcyChecks
             // begins its cycle (CiA 301 §7.5.2.37).
             var syncStart = await ByteOrDefault(session, comm, 0x06, problems, mandatory: false, cancellationToken).ConfigureAwait(false);
 
-            var (bits, entries) = await ReadMappingAsync(session, map, problems, cancellationToken).ConfigureAwait(false);
+            var (bits, entries, mappingComplete) = await ReadMappingAsync(session, map, problems, blocked, cancellationToken).ConfigureAwait(false);
 
             // Bit 29 of the COB-ID word selects the 29-bit frame format (CiA 301 §7.5.2.37).
             // Masking with the 11-bit CanIdMask regardless threw most of an extended identifier
@@ -842,24 +865,27 @@ internal static class PdoSyncEmcyChecks
                 SyncStartRead: syncStart is not null || !session.MayTransfer(comm, 0x06),
                 InhibitMs: inhibit is { } inh ? inh / 10 : 0, // 1800h:03 counts 100 us units
                 EventTimerMs: eventTimer ?? 0,
-                Bytes: (bits + 7) / 8,
+                Bytes: mappingComplete ? (bits + 7) / 8 : 0,
+                MappingComplete: mappingComplete,
                 MappedEntries: entries));
         }
 
         return new PdoSweep(descriptors, blocked, absent, problems);
     }
 
-    private static async Task<(int Bits, int Entries)> ReadMappingAsync(
-        Session session, ushort map, List<string> problems, CancellationToken cancellationToken)
+    private static async Task<(int Bits, int Entries, bool Complete)> ReadMappingAsync(
+        Session session, ushort map, List<string> problems, List<string> blocked, CancellationToken cancellationToken)
     {
+        var anyEntryBlocked = false;
         if (!session.MayTransfer(map, 0x00))
         {
-            // Blocked, not absent. The gate path converted this to an empty mapping without a
-            // word, which is the same false pass as swallowing an abort — one route further out.
-            // Found in review of #388.
-            problems.Add($"0x{map:X4} is the mandatory mapping record of a PDO whose communication record exists, and "
+            // Blocked, not absent, and not the device's fault: it was never asked. This goes to
+            // `blocked`, which Summarise reports as a setup limit, and not to `problems`, which it
+            // attributes to the device — an earlier version put it there and turned a pair the
+            // bound description omits into a device conformance failure. Found in review of #388.
+            blocked.Add($"0x{map:X4} (the mandatory mapping record of a PDO whose communication record exists): "
                 + session.GateReason(map, 0x00));
-            return (0, 0);
+            return (0, 0, false);
         }
 
         try
@@ -868,14 +894,23 @@ internal static class PdoSyncEmcyChecks
             if (count.Length != 1)
             {
                 problems.Add($"0x{map:X4}:00 is UNSIGNED8, got {IdentityAndSdoChecks.Hex(count)}");
-                return (0, 0);
+                return (0, 0, false);
             }
 
 
             var bits = 0;
             for (byte sub = 1; sub <= count[0] && sub <= 64; sub++)
             {
-                if (!session.MayTransfer(map, sub)) continue;
+                if (!session.MayTransfer(map, sub))
+                {
+                    // Silently dropping its bits left a short byte total beside a full entry
+                    // count, and PDO-03 then enforced a payload length nobody had measured.
+                    blocked.Add($"0x{map:X4}:{sub:X2} (one of the {count[0]} mapping entries the device declares): "
+                        + session.GateReason(map, sub));
+                    anyEntryBlocked = true;
+                    continue;
+                }
+
                 byte[] entry;
                 try
                 {
@@ -899,7 +934,7 @@ internal static class PdoSyncEmcyChecks
                 bits += entry[0]; // the low byte of a mapping entry is its bit length
             }
 
-            return (bits, count[0]);
+            return (bits, count[0], !anyEntryBlocked);
         }
         catch (SdoAbortException abort)
         {
@@ -912,7 +947,7 @@ internal static class PdoSyncEmcyChecks
             // Found in review of #388.
             problems.Add($"0x{map:X4} is the mapping record of a PDO whose communication record exists, and it aborted "
                 + IdentityAndSdoChecks.Describe(abort));
-            return (0, 0);
+            return (0, 0, false);
         }
     }
 
@@ -968,9 +1003,19 @@ internal static class PdoSyncEmcyChecks
             problems.Add($"0x{index:X4}:{sub:X2} is UNSIGNED16, got {IdentityAndSdoChecks.Hex(raw)}");
             return null;
         }
-        catch (SdoAbortException)
+        catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                  or (uint)SdoAbortCode.SubIndexDoesNotExist)
         {
             // 1800h:03 and 1800h:05 are optional; their absence is not a problem.
+            return null;
+        }
+        catch (SdoAbortException abort)
+        {
+            // Not absence. Losing 1800h:05 this way erased that a TPDO is event-timed, so the
+            // per-descriptor overdue check could not apply to it. Found in review of #388 — the
+            // same correction the one-byte path got a round earlier, which I had applied to only
+            // half of this pair.
+            problems.Add($"0x{index:X4}:{sub:X2} is declared and aborted {IdentityAndSdoChecks.Describe(abort)}");
             return null;
         }
     }
@@ -994,7 +1039,22 @@ internal static class PdoSyncEmcyChecks
             measurements[$"problem {i + 1}"] = problem;
 
         if (sweep.Problems.Count > 0)
-            return Outcome.Fail($"{sweep.Descriptors.Count} {kind}(s) read; {sweep.Problems.Count} parameter(s) have the wrong length.", measurements);
+        {
+            return Outcome.Fail(
+                $"{sweep.Descriptors.Count} {kind}(s) read; {sweep.Problems.Count} parameter(s) the device would not "
+                + "return as declared.", measurements);
+        }
+
+        // A pair the gate blocked is the run's own input, not a device defect: the device was
+        // never asked. Every other gate block in this runner is NeedsSetup and this one was the
+        // exception, which made it a false device FAIL. Found in review of #388.
+        if (sweep.Blocked.Count > 0 && sweep.Descriptors.Any(d => !d.MappingComplete))
+        {
+            return Outcome.NeedsSetup(
+                $"{sweep.Descriptors.Count} {kind}(s) read, but the peer-SDO gate blocked {sweep.Blocked.Count} pair(s) "
+                + "that belong to their mandatory mapping records, so the mapped payload length is unknown and PDO-03 "
+                + "cannot validate it. Bind a description that declares them.");
+        }
 
         if (sweep.Descriptors.Count == 0)
         {

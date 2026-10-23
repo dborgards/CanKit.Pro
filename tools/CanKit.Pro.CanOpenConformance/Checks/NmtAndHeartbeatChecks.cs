@@ -89,7 +89,7 @@ internal static class NmtAndHeartbeatChecks
             var heartbeats = frames.Count - malformed - bootUps;
             if (bootUps > 0) measurements["boot-up messages (00h, not heartbeats)"] = bootUps.ToString(CultureInfo.InvariantCulture);
 
-            if (BusTap.Summarise(frames) is { } summary)
+            if (BusTap.Summarise(Heartbeats(frames)) is { } summary)
             {
                 measurements["period (host clock)"] = summary.ToString();
                 measurements["note"] = "The period is measured on this host's clock, not the device's; "
@@ -499,10 +499,22 @@ internal static class NmtAndHeartbeatChecks
         // reported as having no heartbeat — right after HBT-02 had passed it on the full
         // --heartbeat-ms window. Found in review of #388. It stops as soon as three frames are in,
         // so a fast producer costs no more than it did.
-        await probe.WaitForAsync(frames => frames.Count >= 3, session.Options.HeartbeatWindowMs, cancellationToken)
+        await probe.WaitForAsync(frames => Heartbeats(frames).Count >= 3, session.Options.HeartbeatWindowMs, cancellationToken)
             .ConfigureAwait(false);
-        return BusTap.Summarise(probe.Frames);
+        // Heartbeats only. Counting every frame on the COB-ID let three boot-up messages produce
+        // a "period", so HBT-03 and HBT-04 ran on it and could blame the stack for not reporting
+        // heartbeats that were never sent — right after HBT-02 had said none were. Found in
+        // review of #388.
+        return BusTap.Summarise(Heartbeats(probe.Frames));
     }
+
+    /// <summary>
+    /// The frames on the heartbeat COB-ID that are heartbeats: one byte of NMT state, and not the
+    /// 00h boot-up, which CiA 301 never reports in one. A period measured over anything else is a
+    /// measurement of a reboot, not of a producer.
+    /// </summary>
+    private static List<TappedFrame> Heartbeats(IReadOnlyList<TappedFrame> frames)
+        => frames.Where(f => f.Data.Length == 1 && f.Data[0] != (byte)NmtState.Initializing).ToList();
 
     private static byte? LatestState(BusTap tap)
     {
