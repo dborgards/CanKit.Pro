@@ -435,6 +435,100 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(0);
     }
 
+    // #355 (J-4): on an Echo-mode bus a confirmed claim's marker waits for the echo the service
+    // has already matched, and had no grace: that echo normally reaches this node's
+    // subscription as well. One dropped there -- a 1024-deep DropOldest buffer, so RX overload
+    // does it -- left the marker live for ever, and the next peer claim with this NAME on that
+    // address was swallowed as the echo. Here the confirmation comes without the frame ever
+    // reaching the bus, which is the node's view of a lost echo; past the grace the peer is a
+    // contest again.
+    [Fact]
+    public async Task An_Echo_Mode_Claim_Marker_Whose_Echo_Never_Arrives_Expires_After_The_Grace()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.ConfirmFirstClaimWithoutTransmit);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var name = Name(1);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(name) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x11, announce);
+
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+        var lost = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.CannotClaim) lost.TrySetResult(e); };
+        bus.RaiseObserved(AddressClaim(sourceAddress: 0x11, name.ToBytes()), isEcho: false);
+
+        (await lost.Task.AsTaskWithTimeout(ShortTimeout)).ContendingSourceAddress.Should().Be((byte)0x11,
+            "the echo the marker waited for is a grace overdue, so this frame is a CA with our NAME");
+    }
+
+    // Codex on #397: the expiry above is judged when the frame arrived, not when the actor got to
+    // it. An echo that arrived inside the grace and then waited on the actor behind a long
+    // handler is the node's own, and taking it for a peer with our NAME would lose the address
+    // to ourselves. The reader seam moves the clock past the grace between the two.
+    [Fact]
+    public async Task A_Claim_Echo_That_Arrived_Inside_The_Grace_Is_Ours_However_Late_The_Actor_Gets_To_It()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.ConfirmFirstClaimWithoutTransmit);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var name = Name(1);
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(name) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x11, announce);
+        var lost = false;
+        node.AddressClaimChanged += (_, e) => { if (e.State != J1939ClaimState.Claimed) lost = true; };
+
+        var echo = AddressClaim(sourceAddress: 0x11, name.ToBytes());
+        node.AfterFrameRead = canId => { if (canId == (uint)echo.ID) clock.Advance(J1939NodeImpl.ClaimEchoGrace); };
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        bus.RaiseObserved(echo, isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        await barrier;
+
+        lost.Should().BeFalse("the echo arrived 80 ms after the confirmation, inside the grace");
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
+    // #355 (J-4), the other consequence: a timed-out claim's marker lingers and, at the end of its
+    // grace, re-arms while an identical marker is still live -- that is a retry whose own echo
+    // has not come back yet. A live marker whose echo was lost never stopped being live, so the
+    // lingering one re-armed every second for ever. The retry's marker now expires a grace after
+    // its confirmation, and the lingering one goes at the next grace after that.
+    [Fact]
+    public async Task A_Lingering_Claim_Marker_Stops_Rearming_Once_The_Live_One_Has_Expired()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.EchoCapable(NewSession());
+        using var raw = new CanBusService(bus);
+        using var scripted = new ScriptedClaimBus(raw, ScriptedClaimBus.Script.TimeoutFirstClaimThenConfirmWithoutTransmit);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var grace = J1939NodeImpl.ClaimEchoGrace;
+        using var node = new J1939NodeImpl(scripted, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+
+        Func<Task> timedOut = () => node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        await timedOut.Should().ThrowAsync<J1939NodeException>(); // its marker lingers, a grace armed
+        await clock.WaitUntilTimerArmedAsync(actor, grace, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromMilliseconds(100));
+        await ClaimOnClockAsync(node, clock, actor, 0x11, announce); // the retry: confirmed at +100 ms, never echoed
+
+        await clock.AdvanceAsync(grace - TimeSpan.FromMilliseconds(180)); // +1000 ms: the retry's marker is live
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(1, "the lingering marker re-armed for the live retry");
+
+        await clock.AdvanceAsync(grace); // +2000 ms: the retry's marker expired at +1100 ms
+        (await actor.PostAsync(() => node.ClaimEchoGraceCount)).Should().Be(0, "nothing live is left to wait for");
+    }
+
     // A bus that declares the echo capability outside Echo mode, but never delivers one (SocketCAN
     // and Kvaser in Normal mode): the claim is recorded in case a flagged echo follows (#249),
     // and that marker may only be spent by a flagged frame. A peer with our NAME is never
@@ -470,14 +564,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     // early return was papering over: each side's claim is the other's peer, and each side's
     // echo — when the bus has one — is its own. Neither NAME wins §4.4.3.3, so both finish
     // Cannot Claim rather than re-announcing.
+    //
+    // #355: on a clock the test holds, so neither window can close before the other side's
+    // claim is heard, and AssertEqualNameContest can insist on the claim faulting. The NAME's
+    // backoff is zero, so the Cannot Claim each owes goes out without the clock moving.
     [Fact]
     public async Task AddressClaim_TwoNodes_SameAddress_EqualName_CannotClaim()
     {
+        using var clock = new VirtualClock();
         var session = NewSession();
         using var busA = Open(session, 0);
         using var busB = Open(session, 1);
+        using var serviceA = new CanBusService(busA);
+        using var serviceB = new CanBusService(busB);
 
-        var name = Name(identity: 0x0000AA);
+        var name = Name(identity: 0x00005F); // backoff 0
         var optsA = new J1939NodeOptions(name)
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
@@ -489,8 +590,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             EnableArbitraryAddressClaiming = true,
         };
 
-        using var nodeA = J1939Node.Open(busA, optsA);
-        using var nodeB = J1939Node.Open(busB, optsB);
+        using var nodeA = new J1939NodeImpl(serviceA, optsA, ownsService: false, clock.NewActor());
+        using var nodeB = new J1939NodeImpl(serviceB, optsB, ownsService: false, clock.NewActor());
 
         var taskA = nodeA.ClaimAddressAsync(0x50);
         var taskB = nodeB.ClaimAddressAsync(0x50);
@@ -506,10 +607,11 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     [Fact]
     public async Task Two_Nodes_Sharing_One_Service_Equal_Name_Cannot_Claim()
     {
+        using var clock = new VirtualClock(); // as above (#355)
         using var bus = ControllableBus.EchoCapable(NewSession());
         using var service = new CanBusService(bus);
 
-        var name = Name(identity: 0x0000AA);
+        var name = Name(identity: 0x00005F); // backoff 0
         var optsA = new J1939NodeOptions(name)
         {
             ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(200),
@@ -521,8 +623,8 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             EnableArbitraryAddressClaiming = true,
         };
 
-        using var nodeA = J1939Node.Open(service, optsA);
-        using var nodeB = J1939Node.Open(service, optsB);
+        using var nodeA = new J1939NodeImpl(service, optsA, ownsService: false, clock.NewActor());
+        using var nodeB = new J1939NodeImpl(service, optsB, ownsService: false, clock.NewActor());
 
         var taskA = nodeA.ClaimAddressAsync(0x50);
         var taskB = nodeB.ClaimAddressAsync(0x50);
@@ -1023,32 +1125,122 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
     // The equal NAME arrived before this claim was pending. It is the same address, so the
     // announce does not finish uncontested: §4.4.3.3 will not make the other CA retransmit.
+    //
+    // #355 (J-7): the observation counts for one announce window. On a clock the test holds,
+    // so a slow host between the barrier and the claim cannot outlast it; the NAME's backoff is
+    // zero, so the loss completes without the clock moving.
     [Fact]
     public async Task An_Equal_Name_Already_Heard_On_That_Address_Cannot_Claim()
     {
-        var session = NewSession();
-        using var busA = Open(session, 0);
-        using var busB = Open(session, 1);
-        var name = Name(1);
-        using var node = J1939Node.Open(busA, new J1939NodeOptions(name)
-        {
-            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
-            EnableArbitraryAddressClaiming = true,
-        });
-
-        const uint barrierPgn = 0xFEF4u;
-        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
-        busB.Transmit(AddressClaim(sourceAddress: 0x11, name.ToBytes()));
-        busB.Transmit(CanFrame.Classic(
-            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
-            new byte[] { 1 }, isExtendedFrame: true));
-        await barrier;
+        var (clock, _, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        await HearOurNameOnAsync(node, busB, name, 0x11);
 
         Func<Task> claim = () => node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
         var thrown = await claim.Should().ThrowAsync<J1939CannotClaimException>();
         thrown.Which.PreferredAddress.Should().Be((byte)0x11);
         node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
         node.Address.Should().BeNull();
+    }
+
+    // #355 (J-7): heard while no claim ran, the observation used to persist until the next claim
+    // of that address, however much later: an hour on, the claim announced and lost at once to
+    // a CA that may long have gone. It belongs to a claim queued behind the frame, which starts
+    // within one announce window; one that starts after it claims normally.
+    [Fact]
+    public async Task An_Equal_Name_Heard_Longer_Ago_Than_The_Announce_Window_Does_Not_Lose_A_Claim()
+    {
+        var (clock, actor, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        await HearOurNameOnAsync(node, busB, name, 0x11);
+
+        await clock.AdvanceAsync(node.Options.ClaimAnnounceTimeout + TimeSpan.FromMilliseconds(1));
+        await ClaimOnClockAsync(node, clock, actor, 0x11, node.Options.ClaimAnnounceTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
+    // Codex on #397: the age of the observation is the time from the frame to the claim's start,
+    // not to its announcement. Between the two the round raises AddressClaimChanged and rebinds
+    // the transport -- application code and thread joins, either of which can outlast the window
+    // by itself -- and a claim queued right behind the frame was then judged stale and claimed
+    // the address of a CA that will not retransmit. Here the Claiming handler costs more than the
+    // window on the clock the test holds.
+    [Fact]
+    public async Task An_Equal_Name_Heard_Just_Before_A_Claim_Loses_It_However_Long_The_Claim_Takes_To_Announce()
+    {
+        var (clock, _, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        await HearOurNameOnAsync(node, busB, name, 0x11);
+        node.AddressClaimChanged += (_, e) =>
+        {
+            if (e.State == J1939ClaimState.Claiming)
+                clock.Advance(node.Options.ClaimAnnounceTimeout + TimeSpan.FromMilliseconds(1));
+        };
+
+        Func<Task> claim = () => node.ClaimAddressAsync(0x11).WithTimeout(ShortTimeout);
+        await claim.Should().ThrowAsync<J1939CannotClaimException>();
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
+    }
+
+    // Codex on #397: the observation's age runs from when its frame arrived, not from when the
+    // actor got to it. A frame that waited on the actor for longer than the window is that old
+    // already, and a claim after it is not lost to a CA that may have gone.
+    [Fact]
+    public async Task An_Equal_Name_Frame_That_Waited_On_The_Actor_Ages_From_Its_Arrival()
+    {
+        var (clock, actor, node, busB) = NodeOnClockWithPeer(out var name, out var disposables);
+        using var _clock = clock;
+        using var _disposables = disposables;
+        var equalName = AddressClaim(sourceAddress: 0x11, name.ToBytes());
+        node.AfterFrameRead = canId =>
+        {
+            if (canId == (uint)equalName.ID) clock.Advance(node.Options.ClaimAnnounceTimeout + TimeSpan.FromMilliseconds(1));
+        };
+        await HearOurNameOnAsync(node, busB, name, 0x11);
+        node.AfterFrameRead = null;
+
+        await ClaimOnClockAsync(node, clock, actor, 0x11, node.Options.ClaimAnnounceTimeout);
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+    }
+
+    private static (VirtualClock Clock, ProtocolActor Actor, J1939NodeImpl Node, ICanBus PeerBus) NodeOnClockWithPeer(
+        out J1939Name name, out CompositeDisposable disposables)
+    {
+        var clock = new VirtualClock();
+        var session = NewSession();
+        var busA = Open(session, 0);
+        var busB = Open(session, 1);
+        var service = new CanBusService(busA);
+        name = Name(0x00005F); // backoff 0: a loss completes without the clock moving
+        var actor = clock.NewActor();
+        var node = new J1939NodeImpl(service, new J1939NodeOptions(name)
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80),
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        disposables = new CompositeDisposable(node, service, busB, busA);
+        return (clock, actor, node, busB);
+    }
+
+    private static async Task HearOurNameOnAsync(IJ1939Node node, ICanBus peerBus, J1939Name name, byte address)
+    {
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        peerBus.Transmit(AddressClaim(sourceAddress: address, name.ToBytes()));
+        peerBus.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true));
+        await barrier;
+    }
+
+    private sealed class CompositeDisposable : IDisposable
+    {
+        private readonly IDisposable[] _items;
+        public CompositeDisposable(params IDisposable[] items) => _items = items;
+        public void Dispose() { foreach (var item in _items) item.Dispose(); }
     }
 
     // Our NAME was remembered on 0x81 while we still hold 0x80. An equal NAME on 0x80 is the
@@ -1165,21 +1357,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // Neither CA wins an equal NAME (§4.4.3.3), so the claim faults and the address is empty.
-    // A scanned fallback (0x80..) would show up as Claimed at some other SA.
+    // A scanned fallback (0x80..) would show up as Claimed at some other SA. Both callers run
+    // their nodes on a clock that never moves, so the window cannot close before the tie is
+    // seen: the outcome is the fault, and "claimed, then unseated" -- which this used to accept
+    // too, unable to tell a tie lost in the window from one lost afterwards -- is a failure
+    // (#355).
     private static void AssertEqualNameContest(IJ1939Node node, Exception? outcome)
     {
-        // The claim task faults when the tie is seen during the window. A CA that already
-        // finished Claimed and is then unseated has nothing left to fault; the state is the
-        // result either way. A scanned fallback would be Claimed at some other SA.
-        if (outcome is not null)
-        {
-            outcome.Should().BeOfType<J1939CannotClaimException>();
-            ((J1939CannotClaimException)outcome).PreferredAddress.Should().Be((byte)0x50);
-        }
-        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim,
-            outcome is null
-                ? "the claim completed, so the tie had to unseat it afterwards"
-                : "the claim lost the tie");
+        outcome.Should().BeOfType<J1939CannotClaimException>("the tie is seen inside a window that cannot close")
+            .Which.PreferredAddress.Should().Be((byte)0x50);
+        node.ClaimState.Should().Be(J1939ClaimState.CannotClaim, "the claim lost the tie");
         node.Address.Should().BeNull();
     }
 
@@ -1340,6 +1527,89 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "the node is Claiming its next candidate from the instant the winning claim was heard, not after the backoff");
         (await claiming.Task).Should().BeNull("the address is the winner's from the instant its claim was heard");
         owner.Address.Should().BeNull();
+    }
+
+    // #355 (J-3): an arbitrary-address node unseated by a conforming peer moves on its own, and
+    // a failure of that unattended round is reported through BackgroundExceptionOccurred. A
+    // `using` scope ending during the move is not such a failure, but the disposal faults every
+    // claim in hand with ObjectDisposedException, and the automatic round's report forwarded it
+    // -- the outcome A_Cannot_Claim_Handoff_That_Arrives_After_Dispose_Is_Dropped rules out.
+    // Held in the backoff on a clock the test owns; the report runs on the pool, so the test
+    // waits for it instead of for a quiet interval.
+    [Fact]
+    public async Task Disposing_During_An_Automatic_Move_Reports_No_Background_Failure()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x40;
+
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        await ClaimOnClockAsync(owner, clock, actor, contended, announce);
+
+        var reported = new List<Exception>();
+        owner.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout); // the automatic round is in hand
+        var report = owner.UnattendedClaimReported;
+        report.Should().NotBeNull();
+
+        owner.Dispose();
+
+        await report!.WithTimeout(ShortTimeout); // ran: the round did fault, with the disposal
+        lock (reported) reported.Should().BeEmpty("disposing the node is not a failure of the move it interrupted");
+    }
+
+    // #355 (J-5): the automatic move after an unseat is registered as the claim in hand, so a
+    // ClaimAddressAsync meanwhile meets the in-flight guard -- whose advice, "await it, or cancel
+    // it", the application cannot follow: the move hands out no task and takes no token. The
+    // fault says what it can do instead, and the move completes undisturbed. The sibling below
+    // pins the user-initiated case, whose advice stands.
+    [Fact]
+    public async Task A_Claim_During_An_Automatic_Move_Faults_With_Advice_The_Caller_Can_Follow()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var backoff = TimeSpan.FromMilliseconds(150);
+        const byte contended = 0x40;
+
+        using var owner = new J1939NodeImpl(service, new J1939NodeOptions(Name(0x000158)) // backoff 150 ms
+        {
+            ClaimAnnounceTimeout = announce,
+            EnableArbitraryAddressClaiming = true,
+        }, ownsService: false, actor);
+        using var winner = J1939Node.Open(busB, new J1939NodeOptions(Name(0x000010)) { ClaimAnnounceTimeout = announce });
+        await ClaimOnClockAsync(owner, clock, actor, contended, announce);
+        var moved = new TaskCompletionSource<J1939ClaimEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        owner.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claimed) moved.TrySetResult(e); };
+
+        await winner.ClaimAddressAsync(contended).WithTimeout(ShortTimeout);
+        await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+
+        Func<Task> claim = () => owner.ClaimAddressAsync(0x90).WithTimeout(ShortTimeout);
+        (await claim.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should()
+            .Contain("AddressClaimChanged").And.NotContain("await it");
+
+        await clock.AdvanceAsync(backoff);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        (await moved.Task.AsTaskWithTimeout(ShortTimeout)).Address.Should().Be((byte)(0x80),
+            "the move scans the arbitrary field from the address it lost, and the refused claim did not disturb it");
     }
 
     // Codex and Bugbot on #153: a ClaimAddressAsync during the backoff before a re-claim meets
@@ -2437,6 +2707,40 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         (await NextClaimAsync()).Should().Be(((byte)0x80, nodeName.Value), "a node with an address answers with its Address Claimed");
     }
 
+    // #355 (the previous review's M4): every Request above is global. SAE J1939-21 lets a Request
+    // be addressed to one CA, and a tool that saw this node's claim asks it by its address; the
+    // node answers that one the same way. Counted rather than read in order, so the arbitration's
+    // own announcement cannot be mistaken for the answer.
+    [Fact]
+    public async Task A_Request_For_Address_Claimed_Directed_At_The_Claimed_Address_Is_Answered()
+    {
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1); // the scanning tool
+        var nodeName = Name(0x0000CC);
+        using var node = J1939Node.Open(busA, new J1939NodeOptions(nodeName) { ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(80) });
+
+        int claimsAt80 = 0;
+        busB.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 8) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == 0x80
+                && BitConverter.ToUInt64(e.CanFrame.Data.ToArray(), 0) == nodeName.Value)
+                Interlocked.Increment(ref claimsAt80);
+        };
+        await node.ClaimAddressAsync(0x80).WithTimeout(ShortTimeout);
+        await WaitForAnnouncesAsync(() => Volatile.Read(ref claimsAt80), 1); // the arbitration's announcement
+
+        var seen = WaitForMessageAsync(node, m => J1939Pgn.IsRequest(m.Pgn), ShortTimeout);
+        busB.Transmit(CanFrame.Classic(
+            (int)J1939Id.ComposePgn(6, J1939Pgn.Request, sourceAddress: 0x20, destinationAddress: 0x80),
+            new byte[] { 0x00, 0xEE, 0x00 }, isExtendedFrame: true));
+
+        await WaitForAnnouncesAsync(() => Volatile.Read(ref claimsAt80), 2);
+        (await seen).DestinationAddress.Should().Be((byte)0x80, "the directed request still reaches the application");
+    }
+
     // ---------------------------------------------------------------------------------------
     // #35 (SAE J1939-81 §4.5): a node that loses its address after a successful claim moves to
     // another address when it is arbitrary-address capable — the same scan a contested first
@@ -2525,6 +2829,47 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "after losing 0x80 the node must retry with the next arbitrary-field candidate (J1939-81 §4.5)");
     }
 
+    // #355 (the previous review's M5): every test above sets EnableArbitraryAddressClaiming. Left
+    // null, the option defers to the NAME's Arbitrary Address Capable bit (J1939-81 §4.5.1), and
+    // a NAME carrying it moves on after a lost contest instead of going Cannot Claim. On a clock
+    // the test holds: the contest is put on the wire once the window is armed, so the window
+    // cannot close first.
+    [Fact]
+    public async Task A_Name_With_The_Arbitrary_Address_Capable_Bit_Scans_Without_The_Option()
+    {
+        using var clock = new VirtualClock();
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var service = new CanBusService(busA);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var nodeName = new J1939Name(identityNumber: 0x0000BB, manufacturerCode: 0x100, ecuInstance: 0,
+            functionInstance: 0, function: 0x81, reserved: false, vehicleSystem: 0, vehicleSystemInstance: 0,
+            industryGroup: 0, arbitraryAddressCapable: true);
+        var backoff = TimeSpan.FromMilliseconds((nodeName.ToBytes().Sum(b => (int)b) & 0xFF) * 0.6);
+        var options = new J1939NodeOptions(nodeName) { ClaimAnnounceTimeout = announce };
+        options.EnableArbitraryAddressClaiming.Should().BeNull("the NAME bit is what is under test");
+        using var node = new J1939NodeImpl(service, options, ownsService: false, actor);
+        var moving = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming && e.Address == 0x81) moving.TrySetResult(true); };
+
+        var claim = node.ClaimAddressAsync(0x80);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        busB.Transmit(AddressClaim(sourceAddress: 0x80, Name(0x000001).ToBytes()));
+        await moving.Task.AsTaskWithTimeout(ShortTimeout);
+
+        if (backoff > TimeSpan.Zero)
+        {
+            await clock.WaitUntilTimerArmedAsync(actor, backoff, ShortTimeout);
+            await clock.AdvanceAsync(backoff);
+        }
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be((byte)0x81, "the NAME is arbitrary-address capable, so the lost contest moves it on");
+    }
+
     // ---------------------------------------------------------------------------------------
     // FR-J1939-004 (SRS verification "all addresses taken"): a peer that contests EVERY
     // candidate drives the arbitrary-address scan to exhaustion — the node must then signal
@@ -2548,7 +2893,7 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var service = new CanBusService(busA);
 
         // A NAME whose §4.4.4.3 backoff is zero (the bytes sum to 256, low byte 0): the scan
-        // pays the backoff before every one of its 240 rounds, and this test's subject is the
+        // pays the backoff before every one of its 120 rounds, and this test's subject is the
         // exhaustion, not the delay -- with a 56 ms backoff it took 13 s more (#153). On the
         // frozen clock a non-zero backoff would never elapse at all.
         var nodeName = Name(0x00005F);
@@ -2561,12 +2906,16 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         using var node = new J1939NodeImpl(service, opts, ownsService: false, clock.NewActor());
 
         var cannotClaimSeen = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var claimsPerAddress = new int[256];
         busC.FrameObserved += (_, e) =>
         {
             if (!e.CanFrame.IsExtendedFrame) return;
             var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
-            if (J1939Pgn.IsAddressClaim(fields.Pgn) && fields.SourceAddress == J1939Pgn.NullAddress)
+            if (!J1939Pgn.IsAddressClaim(fields.Pgn)) return;
+            if (fields.SourceAddress == J1939Pgn.NullAddress)
                 cannotClaimSeen.TrySetResult(null);
+            else if (e.CanFrame.Data.ToArray().SequenceEqual(nodeName.ToBytes()))
+                Interlocked.Increment(ref claimsPerAddress[fields.SourceAddress]);
         };
 
         // Fake peer: contest EVERY address in the arbitrary field the node tries.
@@ -2587,11 +2936,20 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
 
         Func<Task> act = () => node.ClaimAddressAsync(0x80).WithTimeout(TimeSpan.FromSeconds(15));
         var ex = (await act.Should().ThrowAsync<J1939CannotClaimException>()).Which;
+        // The address the caller asked for, not the last candidate the scan tried (0xF7): it
+        // read 0x80 before #355 only because the scan wrapped round and lost 0x80 a second time.
         ex.PreferredAddress.Should().Be((byte)0x80);
         node.ClaimState.Should().Be(J1939ClaimState.CannotClaim);
         node.Address.Should().BeNull();
 
         await cannotClaimSeen.Task.AsTaskWithTimeout(ShortTimeout);
+
+        // #355 (J-6): one claim per address of the field, the lost 0x80 included -- the scan
+        // starts from the address it lost and does not wrap round to claim it a second time.
+        // The spectator saw the Cannot Claim, sent after the last round's claim, so every claim
+        // has been counted.
+        Enumerable.Range(0x80, 0xF7 - 0x80 + 1).Select(sa => Volatile.Read(ref claimsPerAddress[sa]))
+            .Should().OnlyContain(n => n == 1, "the scan tries each of the 120 field addresses exactly once");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -2807,6 +3165,49 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         Volatile.Read(ref rtsToReceiver).Should().BeGreaterThan(0,
             "a directed >8-byte payload opens a TP.CM session addressed to the receiver");
         Volatile.Read(ref bams).Should().Be(0, "a directed payload is not broadcast");
+    }
+
+    // #355: a PDU2 PGN carries no destination in its identifier, and a single frame of one goes
+    // out global whatever DestinationAddress says. The multi-frame path routes on it all the
+    // same: a PDU2 payload over 8 bytes with a specific destination is a TP.CM session to that
+    // address (SAE J1939-21 allows a PDU2 parameter group to be sent with the destination-
+    // specific transport protocol), not a BAM -- which J1939Message used to say it never was.
+    [Fact]
+    public async Task Send_LargePdu2Payload_ToASpecificDestination_UsesJ1939TpCmPath()
+    {
+        const uint pdu2Pgn = 0xFECAu; // PF 0xFE >= 240
+        var session = NewSession();
+        using var busA = Open(session, 0);
+        using var busB = Open(session, 1);
+        using var spectator = Open(session, 2);
+
+        using var sender = J1939Node.Open(busA, new J1939NodeOptions(Name(1)));
+        using var receiver = J1939Node.Open(busB, new J1939NodeOptions(Name(2)));
+        await sender.ClaimAddressAsync(0x93).WithTimeout(ShortTimeout);
+        await receiver.ClaimAddressAsync(0x94).WithTimeout(ShortTimeout);
+
+        int rtsToReceiver = 0, bams = 0;
+        spectator.FrameObserved += (_, e) =>
+        {
+            if (!e.CanFrame.IsExtendedFrame || e.CanFrame.Data.Length < 1) return;
+            var fields = J1939Id.Decompose((uint)e.CanFrame.ID);
+            if (fields.SourceAddress != 0x93 || !J1939Pgn.IsTransportCm(fields.Pgn)) return;
+            if (J1939Pgn.IsBamControlByte(e.CanFrame.Data.Span[0])) Interlocked.Increment(ref bams);
+            else if (fields.DestinationAddress == 0x94) Interlocked.Increment(ref rtsToReceiver);
+        };
+
+        var payload = new byte[20];
+        for (int i = 0; i < payload.Length; i++) payload[i] = (byte)(0x70 + i);
+        var recvTask = WaitForMessageAsync(receiver,
+            m => m.Pgn == pdu2Pgn && m.Payload.Length == 20 && m.SourceAddress == 0x93, ShortTimeout);
+
+        await sender.SendAsync(new J1939Message(pdu2Pgn, payload, destinationAddress: 0x94)).WithTimeout(ShortTimeout);
+
+        var received = await recvTask;
+        received.Payload.ToArray().Should().Equal(payload);
+        received.DestinationAddress.Should().Be(0x94);
+        Volatile.Read(ref rtsToReceiver).Should().BeGreaterThan(0, "the destination routes the session even for a PDU2 PGN");
+        Volatile.Read(ref bams).Should().Be(0);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -3528,6 +3929,433 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         await reclaim.WithTimeout(ShortTimeout);
         await actor.PostAsync(() => { });
         lock (emitted) emitted.Should().BeEmpty("the rebind ran first; the datagram is from the replaced channel");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // #375 (J10): the TP channel is the actor's -- RebindTransportOnLoop replaces it there,
+    // after checking _disposed once. Dispose used to tear the channel down from its own thread:
+    // with a rebind past that check still inside the old channel's Dispose, it disposed the old
+    // channel and never saw the one the rebind then opened, whose subscription, reader and actor
+    // ran on. A `using` scope ending right after a loss is enough.
+    //
+    // Forced, not sampled: the actor is held inside the rebind (BeforeTransportRebind) and let go
+    // only once the disposal has either finished or queued its teardown behind that rebind
+    // (AfterTeardownPosted) -- whichever the build under test does first.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Dispose_During_A_Rebind_Also_Disposes_The_Channel_That_Rebind_Opens()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        using var release = new ManualResetEventSlim();
+        var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
+        node.AfterTeardownPosted = release.Set;
+
+        var reclaim = node.ClaimAddressAsync(0x32); // unbinds to the 0xFE placeholder first: held there
+        await inRebind.Task.AsTaskWithTimeout(ShortTimeout);
+        var dispose = Task.Run(node.Dispose);
+        var released = dispose.ContinueWith(_ => release.Set(), TaskScheduler.Default);
+        await dispose.WithTimeout(ShortTimeout);
+        await released.WithTimeout(ShortTimeout);
+
+        (await ObserveClaim(reclaim)).Should().BeOfType<ObjectDisposedException>();
+        await actor.PostAsync(() => { }); // whatever the rebind queued behind itself has run
+        lock (channels)
+        {
+            channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0xFE },
+                "the held rebind opened a placeholder after the claim's channel");
+            channels.Should().OnlyContain(c => c.Disposed,
+                "a disposed node leaves no channel running, including the one a rebind opened during the disposal");
+        }
+    }
+
+    // The actor does not get to the teardown within its bound -- held here by the test, in
+    // production by a callback that does not return. Dispose does not wait for ever: it disposes
+    // the channel it can see, and the teardown still queued disposes the one the rebind opens.
+    [Fact]
+    public async Task A_Dispose_The_Actor_Cannot_Serve_In_Time_Still_Leaves_No_Channel_Running()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        using var release = new ManualResetEventSlim();
+        var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
+        node.TransportTeardownTimeout = TimeSpan.Zero;
+
+        var reclaim = node.ClaimAddressAsync(0x32);
+        await inRebind.Task.AsTaskWithTimeout(ShortTimeout);
+        node.Dispose(); // the actor is held, so the wait for it gives up at once
+        lock (channels)
+        {
+            channels.Should().HaveCount(2);
+            channels[1].Disposed.Should().BeTrue("the channel the disposing thread can see is disposed from there");
+        }
+
+        release.Set();
+        (await ObserveClaim(reclaim)).Should().BeOfType<ObjectDisposedException>();
+        await actor.PostAsync(() => { });
+        lock (channels)
+        {
+            channels.Should().HaveCount(3);
+            channels.Should().OnlyContain(c => c.Disposed, "the queued teardown disposes what the rebind opened");
+        }
+    }
+
+    // The same late teardown, on a channel that throws when it gets there. The Dispose that
+    // queued it has stopped waiting and returned, so the failure is reported through
+    // BackgroundExceptionOccurred -- it used to stay on the queued task, which nobody observes.
+    [Fact]
+    public async Task A_Teardown_The_Dispose_Stopped_Waiting_For_Reports_A_Channel_That_Throws()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var failure = new InvalidOperationException("the channel the rebind opened would not close");
+        var channels = new List<ScriptedTpChannel>();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false, actor, openTransport: sa =>
+        {
+            var channel = new ScriptedTpChannel(sa);
+            lock (channels)
+            {
+                // The third channel: the placeholder the held rebind opens once it is released.
+                if (channels.Count == 2) channel.DisposeFailure = failure;
+                channels.Add(channel);
+            }
+            return channel;
+        });
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => { if (ReferenceEquals(ex, failure)) reported.TrySetResult(ex); };
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        using var release = new ManualResetEventSlim();
+        var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
+        node.TransportTeardownTimeout = TimeSpan.Zero;
+
+        var reclaim = node.ClaimAddressAsync(0x32);
+        await inRebind.Task.AsTaskWithTimeout(ShortTimeout);
+        node.Dispose(); // gives up on the held actor at once; the teardown stays queued
+        release.Set();
+
+        (await ObserveClaim(reclaim)).Should().BeOfType<ObjectDisposedException>();
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(failure,
+            "the queued teardown's failure reaches the node's background channel");
+        lock (channels) channels.Should().HaveCount(3).And.OnlyContain(c => c.Disposed);
+    }
+
+    // #375, noted in the #368 review: a reopen that fails leaves the channel it just disposed in
+    // place, still carrying its address. A re-claim of that same address then found the
+    // "channel already on this SA" shortcut true, and the node went Claimed on a disposed
+    // channel -- its multi-frame path dead while Address looked valid. The unbind to 0xFE is the
+    // reopen that fails here; the commit back to the address must reopen, not shortcut.
+    [Fact]
+    public async Task A_Reclaim_After_A_Failed_Reopen_Does_Not_Commit_On_The_Disposed_Channel()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var channels = new List<ScriptedTpChannel>();
+        int failNextOpen = 0;
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false, openTransport: sa =>
+        {
+            if (Interlocked.Exchange(ref failNextOpen, 0) != 0)
+                throw new InvalidOperationException("the channel could not be opened");
+            var channel = new ScriptedTpChannel(sa);
+            lock (channels) channels.Add(channel);
+            return channel;
+        });
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+        Volatile.Write(ref failNextOpen, 1);
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        lock (reported) reported.Should().ContainSingle().Which.Message.Should().Be("the channel could not be opened");
+        node.ClaimState.Should().Be(J1939ClaimState.Claimed);
+        lock (channels)
+        {
+            channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0x31 },
+                "the commit reopens the address rather than keeping the channel the failed unbind disposed");
+            channels.Last().Disposed.Should().BeFalse("the node is Claimed on a live channel");
+        }
+    }
+
+    // #375, a consequence of the fix above: the teardown now waits for the node's actor, and the
+    // TP channel raises a transport fault -- a reassembly abort -- on its own actor. Forwarded
+    // from there as it was, a handler that disposed the node made the channel's actor wait for
+    // the node's, which was disposing the channel and so joining the very thread waiting for it:
+    // Dispose stalled for the actors' shutdown bound. The node forwards transport faults from its
+    // own actor, where a Dispose tears down in place and waits on nothing.
+    [Fact]
+    public async Task Disposing_The_Node_From_A_Transport_Fault_Handler_Tears_Down_In_Place()
+    {
+        const byte peerSa = 0x77;
+        var session = NewSession();
+        using var busNode = Open(session, 0);
+        using var busPeer = Open(session, 1);
+        var node = new J1939NodeImpl(new CanBusService(busNode), new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: true);
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        int posted = 0;
+        node.AfterTeardownPosted = () => Interlocked.Increment(ref posted);
+        var disposed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) =>
+        {
+            if (ex is not J1939TpAbortException) return;
+            node.Dispose();
+            disposed.TrySetResult(true);
+        };
+
+        // A BAM whose first TP.DT carries sequence number 2: aborted on the channel's actor.
+        var payload = new byte[12];
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa)),
+            J1939TpFrames.BuildBam(payload.Length, J1939TpFrames.TotalPackets(payload.Length), 0xFED3u), isExtendedFrame: true));
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa)),
+            J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+
+        await disposed.Task.AsTaskWithTimeout(ShortTimeout + ShortTimeout);
+        Volatile.Read(ref posted).Should().Be(0,
+            "the handler ran on the node's actor, so the teardown ran there in place instead of being queued and waited for");
+    }
+
+    // The same forwarding with an injected actor its owner has already disposed: there is no
+    // loop to hand the fault to, and it is still reported, from where it arrived.
+    [Fact]
+    public async Task A_Transport_Fault_Is_Still_Reported_Once_The_Injected_Actor_Is_Gone()
+    {
+        const byte peerSa = 0x77;
+        var session = NewSession();
+        using var busNode = Open(session, 0);
+        using var busPeer = Open(session, 1);
+        using var service = new CanBusService(busNode);
+        using var actor = new ProtocolActor(); // disposed early below, on purpose; Dispose is idempotent
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: false, actor);
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+        actor.Dispose();
+
+        var payload = new byte[12];
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpCm, peerSa)),
+            J1939TpFrames.BuildBam(payload.Length, J1939TpFrames.TotalPackets(payload.Length), 0xFED3u), isExtendedFrame: true));
+        busPeer.Transmit(CanFrame.Classic(unchecked((int)J1939Id.ComposePgn(7, J1939Pgn.TpDt, peerSa)),
+            J1939TpFrames.BuildDt(sn: 2, payload, J1939TpFrames.DtDataBytes), isExtendedFrame: true));
+
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeOfType<J1939TpAbortException>();
+    }
+
+    // A channel that throws when a rebind disposes it: the rebind reports that and goes on to open
+    // the next channel, so the claim it belongs to still completes. (The rebind's own disposal
+    // path, which #375 restructured; a throwing channel at the node's teardown is the next test.)
+    [Fact]
+    public async Task A_Channel_That_Throws_When_A_Rebind_Disposes_It_Is_Reported_And_Replaced()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+        var failure = new InvalidOperationException("the channel would not close");
+        lock (channels) channels.Last().DisposeFailure = failure;
+        var reported = new List<Exception>();
+        node.BackgroundExceptionOccurred += (_, ex) => { lock (reported) reported.Add(ex); };
+
+        await node.ClaimAddressAsync(0x32).WithTimeout(ShortTimeout);
+
+        lock (reported) reported.Should().ContainSingle().Which.Should().BeSameAs(failure);
+        lock (channels) channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0xFE, 0x32 },
+            "the failed disposal did not stop the rebinds the re-claim makes");
+        node.Address.Should().Be((byte)0x32);
+    }
+
+    // Codex on #397: a Dispose from a handler the actor raises in the middle of a transition --
+    // AddressClaimChanged for Claiming, before the round has registered its claim. Run inside
+    // that turn, the teardown found no claim to answer; the turn then registered one and sent its
+    // announcement, the owned actor was gone, and the claim's task never completed. Queued behind
+    // the turn, as the claim cleanup was before #375, the teardown answers it.
+    [Fact]
+    public async Task Disposing_From_A_Claiming_Handler_Still_Answers_The_Claim()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) node.Dispose(); };
+
+        Func<Task> claim = () => node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        await claim.Should().ThrowAsync<ObjectDisposedException>("the claim in hand when the node was disposed is answered");
+    }
+
+    // The same teardown from a callback of the actor runs after that callback's turn, and nobody
+    // is left waiting for it: a channel that throws there is reported as a background failure,
+    // not lost.
+    [Fact]
+    public async Task A_Channel_That_Throws_On_A_Dispose_From_The_Actor_Is_Reported()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        var failure = new InvalidOperationException("the channel would not close");
+        channels.Single().DisposeFailure = failure;
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        await actor.PostAsync(node.Dispose); // returns: the teardown is queued behind this turn
+
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(failure);
+        channels.Single().Disposed.Should().BeTrue();
+        // Bugbot on #397: the failure is the disposal's, also for a caller who asks later.
+        (await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask())).Should().BeSameAs(failure);
+        service.SubscriptionCount.Should().Be(0, "the rest of the queued disposal ran all the same");
+    }
+
+    // A Dispose on the actor of an injected actor its owner has just disposed -- the owner's
+    // Dispose ran inside this turn. Nothing can be queued on it any more, so the disposal runs in
+    // place, and the channel is not left running.
+    [Fact]
+    public async Task A_Dispose_On_An_Actor_Already_Disposed_Runs_In_Place()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+
+        await actor.PostAsync(() =>
+        {
+            actor.Dispose(); // reentrant: the loop ends after this turn
+            node.Dispose();
+        });
+
+        channels.Single().Disposed.Should().BeTrue();
+        await node.DisposeAsync(); // complete, and not failed
+    }
+
+    // Bugbot on #397: with the teardown queued behind the actor's turn, a node that owns its bus
+    // service disposed that service first, in DisposeCore, and the channel still using it lost
+    // its subscription and its sends from under it before its own teardown ran. The owned
+    // service goes after the channel on this path too, as it does off the actor.
+    [Fact]
+    public async Task A_Dispose_From_The_Actor_Disposes_An_Owned_Service_After_The_Channel()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var inner = new CanBusService(bus);
+        var service = new ParkingSendService(inner);
+        service.Release();
+        using var actor = new ProtocolActor();
+        var channels = new List<ScriptedTpChannel>();
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)), ownsService: true, actor,
+            openTransport: sa =>
+            {
+                var channel = new ScriptedTpChannel(sa);
+                lock (channels) channels.Add(channel);
+                return channel;
+            });
+        var channelGoneFirst = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        service.Disposed = () => { lock (channels) channelGoneFirst.TrySetResult(channels.Single().Disposed); };
+
+        await actor.PostAsync(node.Dispose);
+
+        (await channelGoneFirst.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeTrue(
+            "the channel is torn down before the service it uses");
+    }
+
+    // Codex on #397: the disposal started on the actor returns before its queued teardown has
+    // run, but the disposal is not over until it has. A DisposeAsync from elsewhere meanwhile
+    // waits for that teardown -- it used to complete at once, the channel still running.
+    // Forced: the turn that disposed holds the actor, so the teardown cannot run until released.
+    [Fact]
+    public async Task A_DisposeAsync_During_A_Teardown_Queued_On_The_Actor_Waits_For_It()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        using var hold = new ManualResetEventSlim();
+        var disposedOnActor = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        actor.Post(() =>
+        {
+            node.Dispose();
+            disposedOnActor.TrySetResult(true);
+            hold.Wait();
+        });
+        await disposedOnActor.Task.AsTaskWithTimeout(ShortTimeout);
+
+        var later = node.DisposeAsync().AsTask();
+        later.IsCompleted.Should().BeFalse("the teardown is queued behind the turn still holding the actor");
+        channels.Single().Disposed.Should().BeFalse();
+
+        hold.Set();
+        await later.WithTimeout(ShortTimeout);
+        channels.Single().Disposed.Should().BeTrue("the disposal completed once the teardown had run");
+    }
+
+    // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
+    // is the node's own, so it is disposed in place.
+    [Fact]
+    public async Task A_Dispose_After_The_Injected_Actor_Is_Gone_Still_Disposes_The_Channel()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor(); // disposed early below, on purpose; Dispose is idempotent
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node; // likewise
+        var channel = channels.Single();
+        await channel.WaitForRequestAsync(1, ShortTimeout);
+
+        actor.Dispose();
+        node.Dispose();
+
+        channel.Disposed.Should().BeTrue();
+    }
+
+    // A channel whose Dispose throws fails the disposal with that exception, as it did when the
+    // disposing thread called it itself: the teardown's wait does not wrap it.
+    [Fact]
+    public async Task A_Channel_That_Throws_On_Dispose_Fails_The_Disposal_With_That_Exception()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        var failure = new InvalidOperationException("the channel would not close");
+        channels.Single().DisposeFailure = failure;
+        service.SubscriptionCount.Should().Be(1, "the node's own subscription; the scripted channel holds none");
+
+        Action dispose = node.Dispose;
+        dispose.Should().Throw<InvalidOperationException>().Which.Should().BeSameAs(failure);
+        var reported = await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask());
+        reported.Should().BeSameAs(failure);
+        // Codex and Bugbot on #397: the rest of the teardown still ran. The node is marked
+        // disposed either way, so nothing could release the subscription later.
+        service.SubscriptionCount.Should().Be(0, "the failed channel does not keep the node's subscription alive");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -4459,6 +5287,109 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "our own echo of this frame came back long ago and left the ledger; what arrives now is a peer's");
     }
 
+    // #355 (J-1): the ledger on a bus that does not echo at all (SocketCAN or Kvaser in Normal
+    // mode). The entry the send recorded never meets its echo; it used to stay until 64 newer
+    // sends pushed it out, and a conforming peer that later took the vacated address and sent
+    // the same frame -- an all-0xFF "not available" payload is the ordinary case -- was dropped
+    // as this node's echo. The entry now lives ClaimEchoGrace past the send, as a claim marker
+    // does. On a clock the test holds, so "past the grace" is a step, not a sleep.
+    [Fact]
+    public async Task A_Ledger_Entry_On_A_Bus_That_Does_Not_Echo_Expires_After_The_Grace()
+    {
+        const uint pgn = 0xFEF1u;
+        var notAvailable = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        await node.SendAsync(new J1939Message(pgn, notAvailable)).WithTimeout(ShortTimeout);
+        await ClaimOnClockAsync(node, clock, actor, 0x32, announce);
+        await clock.AdvanceAsync(J1939NodeImpl.ClaimEchoGrace);
+
+        var heard = WaitForMessageAsync(node, m => m.Pgn == pgn && m.SourceAddress == 0x31, ShortTimeout);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x31), notAvailable,
+            isExtendedFrame: true), isEcho: false);
+        (await heard).Payload.ToArray().Should().Equal(notAvailable,
+            "nothing echoes on this bus, so past the grace the frame under the vacated address is the peer's");
+    }
+
+    // Codex on #397, the ledger's half: an echo of an application frame that arrived inside the
+    // grace is the node's own even when the actor gets to it after the grace -- here after the
+    // node moved to another address, where the frame would otherwise be raised as a peer's.
+    [Fact]
+    public async Task A_Ledger_Echo_That_Arrived_Inside_The_Grace_Is_Ours_However_Late_The_Actor_Gets_To_It()
+    {
+        const uint pgn = 0xFEF1u;
+        var data = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+        await node.SendAsync(new J1939Message(pgn, data)).WithTimeout(ShortTimeout);
+        await ClaimOnClockAsync(node, clock, actor, 0x32, announce);
+
+        var raised = new List<J1939Message>();
+        node.MessageReceived += (_, m) => { lock (raised) raised.Add(m); };
+        var echo = CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x31), data, isExtendedFrame: true);
+        node.AfterFrameRead = canId => { if (canId == (uint)echo.ID) clock.Advance(J1939NodeImpl.ClaimEchoGrace); };
+        const uint barrierPgn = 0xFEF4u;
+        var barrier = WaitForMessageAsync(node, m => m.Pgn == barrierPgn, ShortTimeout);
+        bus.RaiseObserved(echo, isEcho: true);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, barrierPgn, sourceAddress: 0x33),
+            new byte[] { 1 }, isExtendedFrame: true), isEcho: false);
+        await barrier;
+
+        lock (raised) raised.Should().NotContain(m => m.Pgn == pgn,
+            "the echo arrived 80 ms after the send returned, inside the grace, so it is the node's own");
+    }
+
+    // The same bus, a send the driver refused: nothing was handed over, so no echo can come and
+    // the entry goes at once -- the peer under the vacated address is heard without any grace.
+    [Fact]
+    public async Task A_Rejected_Send_Leaves_No_Ledger_Entry()
+    {
+        const uint pgn = 0xFEF1u;
+        var notAvailable = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        bus.AcceptTransmit = false;
+        Func<Task> send = () => node.SendAsync(new J1939Message(pgn, notAvailable)).WithTimeout(ShortTimeout);
+        (await send.Should().ThrowAsync<J1939NodeException>()).Which.Message.Should().Contain("Rejected");
+        bus.AcceptTransmit = true;
+        await ClaimOnClockAsync(node, clock, actor, 0x32, announce);
+
+        var heard = WaitForMessageAsync(node, m => m.Pgn == pgn && m.SourceAddress == 0x31, ShortTimeout);
+        bus.RaiseObserved(CanFrame.Classic((int)J1939Id.ComposePgn(6, pgn, sourceAddress: 0x31), notAvailable,
+            isExtendedFrame: true), isEcho: false);
+        (await heard).SourceAddress.Should().Be(0x31, "a rejected send never reached the wire and owes no echo");
+    }
+
+    private static async Task ClaimOnClockAsync(J1939NodeImpl node, VirtualClock clock, ProtocolActor actor,
+        byte address, TimeSpan announce)
+    {
+        var claim = node.ClaimAddressAsync(address);
+        await clock.WaitUntilTimerArmedAsync(actor, announce, ShortTimeout);
+        await clock.AdvanceAsync(announce);
+        await claim.WithTimeout(ShortTimeout);
+        node.Address.Should().Be(address);
+    }
+
     // Bugbot on #140: the carve-out that serves a frame directed to this node needs an address to
     // be directed to. While the node holds none (a re-claim in flight), -1 cast to a byte is the
     // global address, and a broadcast echo -- a Request this node sent to everyone -- would read
@@ -4767,6 +5698,116 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         }
     }
 
+    // #355: a periodic handle the application never disposed, on a node it did. With the node's
+    // own actor the tick goes with that actor; with an injected one (the test seam) it outlived
+    // the node, and the schedule ticked for ever -- each emission throwing on the disposed node,
+    // each tick re-arming the next. The node's teardown, on the actor and so after any tick in
+    // progress there, cancels the armed tick (Codex on #397: a check in the tick itself left a
+    // Dispose between that check and the re-arm one period of retention).
+    [Fact]
+    public async Task A_Periodic_Schedule_Stops_Ticking_Once_Its_Node_Is_Disposed()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        node.Dispose();
+
+        (await actor.NextTimerDelayAsync()).Should().BeNull("the node's teardown cancelled the schedule's armed tick");
+        await clock.AdvanceAsync(period);
+        node.PeriodicEmissionsCompleted.Should().Be(0, "no tick fired on the disposed node");
+    }
+
+    // The other order (Codex on #397): a Dispose that lands while StartPeriodicSend is between its
+    // own disposed check and registering the schedule. The teardown's list cannot hold it, so
+    // StartPeriodicSend stops it itself and reports the disposal, as its first check would have.
+    [Fact]
+    public async Task A_Periodic_Schedule_Started_Across_A_Disposal_Is_Stopped()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        node.AfterPeriodicScheduleStarted = node.Dispose;
+        Action start = () => node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), TimeSpan.FromMilliseconds(100));
+
+        start.Should().Throw<ObjectDisposedException>();
+        (await actor.NextTimerDelayAsync()).Should().BeNull("no tick of the refused schedule is left armed");
+    }
+
+    // #355 (the previous review's M1): a tick whose previous emission is still in flight is
+    // dropped, not queued -- a multi-frame PGN holds one TP session per send, and two of the same
+    // schedule must not overlap. The grid tests wait each emission out before the next slot, so
+    // none of them ever had one in flight at a tick. Here the first emission is parked in the
+    // service across the second tick; the third, after it has finished, emits again.
+    [Fact]
+    public async Task A_Periodic_Tick_While_The_Previous_Emission_Is_In_Flight_Is_Dropped()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var inner = new CanBusService(bus);
+        var parking = new ParkingSendService(inner);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(parking, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        await WaitForAnnouncesAsync(() => parking.Parked, 1); // the first emission waits on the service
+
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        node.PeriodicEmissionsStarted.Should().Be(1, "the second tick found the first emission still in flight");
+
+        parking.Release();
+        await WaitForAnnouncesAsync(() => node.PeriodicEmissionsCompleted, 1);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(period);
+        node.PeriodicEmissionsStarted.Should().Be(2, "with the first emission finished, the third tick emits");
+    }
+
+    // #355 (the previous review's M2): ticks that fell behind are coalesced, not burst out -- the
+    // anchor advances by whole periods until it is in the future again. One jump of the clock
+    // over three and a half periods fires one tick, which starts one emission and arms the next
+    // tick at the next point of the grid, half a period away.
+    [Fact]
+    public async Task Periodic_Ticks_That_Fell_Behind_Are_Coalesced_Into_One()
+    {
+        using var clock = new VirtualClock();
+        using var bus = ControllableBus.Plain(NewSession());
+        using var service = new CanBusService(bus);
+        var actor = clock.NewActor();
+        var announce = TimeSpan.FromMilliseconds(80);
+        var period = TimeSpan.FromMilliseconds(100);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1)) { ClaimAnnounceTimeout = announce },
+            ownsService: false, actor);
+        await ClaimOnClockAsync(node, clock, actor, 0x31, announce);
+
+        using var schedule = node.StartPeriodicSend(new J1939Message(0xFEF1u, new byte[] { 1, 2, 3 }), period);
+        await clock.WaitUntilTimerArmedAsync(actor, period, ShortTimeout);
+        await clock.AdvanceAsync(TimeSpan.FromTicks(period.Ticks * 7 / 2));
+
+        node.PeriodicEmissionsStarted.Should().Be(1, "three slots passed in one step, and they are one tick");
+        await clock.WaitUntilTimerArmedAsync(actor, TimeSpan.FromTicks(period.Ticks / 2), ShortTimeout);
+    }
+
     // The single-frame periodic path MUST refuse to start before ClaimAddressAsync completes,
     // mirroring SendAsync's pre-flight gate (Bugbot 3600377725) so no periodic traffic leaks
     // out with an invalid SA.
@@ -5037,6 +6078,58 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
             "to observe the PGN under the new (correct) source address");
     }
     /// <summary>
+    /// A bus service that holds every application send -- anything but an Address Claim --
+    /// until <see cref="Release"/>, so a send can be kept in flight across whatever the test
+    /// does next. Released sends, and every send after the release, go straight through.
+    /// </summary>
+    private sealed class ParkingSendService : ICanBusService
+    {
+        private readonly ICanBusService _inner;
+        private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _parked;
+
+        public ParkingSendService(ICanBusService inner) => _inner = inner;
+
+        /// <summary>How many sends have been held.</summary>
+        public int Parked => Volatile.Read(ref _parked);
+
+        public void Release() => _release.TrySetResult(true);
+
+        public ICanBus Bus => _inner.Bus;
+        public int SubscriptionCount => _inner.SubscriptionCount;
+
+        public event EventHandler<Exception>? BackgroundExceptionOccurred
+        {
+            add => _inner.BackgroundExceptionOccurred += value;
+            remove => _inner.BackgroundExceptionOccurred -= value;
+        }
+
+        public ISubscription Subscribe(Func<CanFrameEvent, bool>? predicate = null, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(predicate, bufferCapacity, includeEcho);
+
+        public ISubscription Subscribe(CanIdFilter filter, int? bufferCapacity = null, bool includeEcho = false)
+            => _inner.Subscribe(filter, bufferCapacity, includeEcho);
+
+        public IReadOnlyList<FilterOverlap> FindOverlappingFilterSubscriptions()
+            => _inner.FindOverlappingFilterSubscriptions();
+
+        public async Task<TxConfirmation> SendConfirmedAsync(CanFrame frame, TimeSpan? timeout = null, CancellationToken cancellationToken = default)
+        {
+            if (!J1939Pgn.IsAddressClaim(J1939Id.Decompose((uint)frame.ID).Pgn) && !_release.Task.IsCompleted)
+            {
+                Interlocked.Increment(ref _parked);
+                await _release.Task.ConfigureAwait(false);
+            }
+            return await _inner.SendConfirmedAsync(frame, timeout, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>Runs when the node disposes this service (it does when it owns it).</summary>
+        public Action? Disposed { get; set; }
+
+        public void Dispose() => Disposed?.Invoke(); // the test owns the inner service
+    }
+
+    /// <summary>
     /// A TP channel the test feeds by hand (#195): what <see cref="ReceiveAllAsync"/> yields,
     /// and when, is the test's to decide. It can be held after an item has arrived and before it
     /// is read -- a datagram queued on a channel -- and it reports each time its reader comes
@@ -5116,8 +6209,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         public event EventHandler<J1939TpDatagram>? DatagramReceived { add { } remove { } }
         public event EventHandler<Exception>? BackgroundExceptionOccurred { add { } remove { } }
 
+        /// <summary>Whether <see cref="Dispose"/> has been called.</summary>
+        public bool Disposed => Volatile.Read(ref _disposed) != 0;
+
+        private int _disposed;
+
+        /// <summary>When set, what <see cref="Dispose"/> throws once it has completed the inbox.</summary>
+        public Exception? DisposeFailure { get; set; }
+
         // As the real channel: the inbox is completed, what is queued in it can still be read.
-        public void Dispose() => _items.Writer.TryComplete();
+        public void Dispose()
+        {
+            Volatile.Write(ref _disposed, 1);
+            _items.Writer.TryComplete();
+            if (DisposeFailure is { } failure) throw failure;
+        }
     }
 }
 
@@ -5142,6 +6248,12 @@ public sealed class ScriptedClaimBus : ICanBusService
         HoldAfterFirstClaim,
         // The first two Address Claims return Timeout without being transmitted.
         TimeoutFirstTwoClaims,
+        // The first Address Claim is confirmed without being transmitted: the service saw its
+        // echo, the node's subscription never does (#355, J-4). Later ones are forwarded.
+        ConfirmFirstClaimWithoutTransmit,
+        // The first Address Claim returns Timeout, every later one is confirmed without being
+        // transmitted. Neither reaches the bus.
+        TimeoutFirstClaimThenConfirmWithoutTransmit,
     }
 
     public enum ReleaseKind
@@ -5269,6 +6381,7 @@ public sealed class ScriptedClaimBus : ICanBusService
                 if (outcome == ClaimOutcome.HoldThenForward)
                     await WaitForCannotHoldAsync().ConfigureAwait(false);
                 if (outcome == ClaimOutcome.Reject) return Rejected();
+                if (outcome == ClaimOutcome.ConfirmUnsent) return Accepted();
                 if (outcome == ClaimOutcome.Timeout) return TimedOut();
                 if (outcome == ClaimOutcome.Throw) throw new InvalidOperationException("address claim transmit failed");
             }
@@ -5304,6 +6417,12 @@ public sealed class ScriptedClaimBus : ICanBusService
             case Script.TimeoutFirstTwoClaims:
                 if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
                 return Interlocked.Increment(ref _claimSends) <= 2 ? ClaimOutcome.Timeout : ClaimOutcome.Forward;
+            case Script.ConfirmFirstClaimWithoutTransmit:
+                if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
+                return Interlocked.Increment(ref _claimSends) == 1 ? ClaimOutcome.ConfirmUnsent : ClaimOutcome.Forward;
+            case Script.TimeoutFirstClaimThenConfirmWithoutTransmit:
+                if (sourceAddress == J1939Pgn.NullAddress) return ClaimOutcome.Forward;
+                return Interlocked.Increment(ref _claimSends) == 1 ? ClaimOutcome.Timeout : ClaimOutcome.ConfirmUnsent;
             default:
                 return ClaimOutcome.Forward;
         }
@@ -5311,7 +6430,7 @@ public sealed class ScriptedClaimBus : ICanBusService
 
     private int _claimSends;
 
-    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw, Timeout }
+    private enum ClaimOutcome { Forward, Hold, HoldThenForward, Reject, Throw, Timeout, ConfirmUnsent }
 
     private static TxConfirmation Accepted() => new TxConfirmation
     {

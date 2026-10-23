@@ -64,7 +64,8 @@ public sealed class J1939NodeOptions
     /// </summary>
     public J1939TpOptions TransportOptions { get; init; } = new J1939TpOptions();
 
-    /// <summary>Validates invariants. Called from <see cref="J1939Node.Open(CanKit.Abstractions.API.Can.ICanBus, J1939NodeOptions)"/>.</summary>
+    /// <summary>Validates invariants. Called from the node's constructor, which both
+    /// <see cref="J1939Node"/>.<c>Open</c> overloads reach.</summary>
     internal void Validate()
     {
         if (ClaimAnnounceTimeout <= TimeSpan.Zero)

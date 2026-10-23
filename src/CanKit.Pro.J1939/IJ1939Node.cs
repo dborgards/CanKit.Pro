@@ -22,9 +22,22 @@ namespace CanKit.Pro.J1939;
 /// touches vendor-specific SDKs directly.
 /// </para>
 /// <para>
-/// <see cref="IDisposable.Dispose"/> is thread-safe and idempotent. Disposal cancels any
-/// in-flight <see cref="ClaimAddressAsync"/> or <see cref="SendAsync"/> call and unwinds the
-/// underlying subscriptions and transport channel.
+/// <see cref="IDisposable.Dispose"/> is thread-safe and idempotent. It unwinds the underlying
+/// subscriptions and transport channel and faults an in-flight <see cref="ClaimAddressAsync"/>
+/// with <see cref="ObjectDisposedException"/> -- or, for a claim that has already lost and
+/// still owes its Cannot Claim, with <see cref="J1939CannotClaimException"/>. It does not cancel
+/// an in-flight <see cref="SendAsync"/>: a single-frame send ends as its confirmation does (a
+/// node that owns its bus service disposes that service last, which cancels a confirmation
+/// still awaited there), and a multi-frame send fails with
+/// <see cref="ObjectDisposedException"/> once the transport channel is torn down.
+/// <see cref="ClaimState"/> and <see cref="Address"/> keep the last values they had.
+/// </para>
+/// <para>
+/// Called from one of this node's handlers, which run on its actor, neither
+/// <see cref="IDisposable.Dispose"/> nor <see cref="IAsyncDisposable.DisposeAsync"/> waits for
+/// the teardown: it runs on the actor once that handler's turn has ended, a failure of it is
+/// reported through <see cref="BackgroundExceptionOccurred"/>, and a
+/// <see cref="IAsyncDisposable.DisposeAsync"/> called from anywhere else completes when it has.
 /// </para>
 /// </remarks>
 public interface IJ1939Node : IDisposable, IAsyncDisposable
@@ -92,7 +105,10 @@ public interface IJ1939Node : IDisposable, IAsyncDisposable
     /// higher-priority NAME and no fallback was available, or to a peer with this node's
     /// own NAME (SAE J1939-81 §4.4.3).</exception>
     /// <exception cref="InvalidOperationException">A claim is still in arbitration: it is
-    /// not silently replaced -- await it, or cancel it, before claiming again (#58).</exception>
+    /// not silently replaced -- await it, or cancel it, before claiming again (#58). The move
+    /// an arbitrary-address node makes on its own after losing a claimed address is such a
+    /// claim too, but nothing awaits it and no token cancels it: wait for
+    /// <see cref="AddressClaimChanged"/> to report its outcome before claiming again.</exception>
     Task ClaimAddressAsync(byte preferredAddress, CancellationToken cancellationToken = default);
 
     /// <summary>
