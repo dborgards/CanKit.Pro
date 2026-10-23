@@ -673,6 +673,8 @@ internal static class PdoSyncEmcyChecks
 
             using var tap = new BusTap(session.Service, (id, extended) => watched.Contains((id, extended)));
             int quiet;
+            double burstFromMs = 0;
+            double burstUntilMs = 0;
             Restoration restoration;
             var rejected = 0;
             var operationalConfirmed = false;
@@ -687,7 +689,16 @@ internal static class PdoSyncEmcyChecks
                 operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, cancellationToken)
                     .ConfigureAwait(false) == (byte)NmtState.Operational;
 
+                // A timestamp, not a count. Skip(quiet) treated "how many frames had been
+                // delivered by now" as the observation boundary — so a TPDO that arrived before
+                // the first SYNC but was delivered after this line was credited as a response to
+                // it, and a response still queued at the snapshot was dropped. That can pass a
+                // target that emitted before the burst and ignored every SYNC, or fail a
+                // conforming one under load. Every other window in this tool was moved onto
+                // arrival stamps two commits ago; this was the one left behind. Found in review
+                // of #388.
                 quiet = Transmitted(tap).Count;
+                burstFromMs = tap.ElapsedMs;
                 for (var i = 0; i < syncs; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -703,8 +714,9 @@ internal static class PdoSyncEmcyChecks
                     await Task.Delay(SyncPeriodMs, cancellationToken).ConfigureAwait(false);
                 }
 
-                // The last SYNC's answer is still in flight when the loop ends.
-                await Task.Delay(200, cancellationToken).ConfigureAwait(false);
+                // The last SYNC's answer is still in flight when the loop ends — and through
+                // ListenAsync, so the pump is drained and the window has an explicit end.
+                burstUntilMs = await tap.ListenAsync(200, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -716,7 +728,9 @@ internal static class PdoSyncEmcyChecks
             // this dictionary and stripped the SYNC count, the COB-ID and the per-TPDO traffic
             // from exactly the verdict that most needs them. Found in review of #388.
             var accepted = syncs - rejected;
-            var after = Transmitted(tap).Skip(quiet).ToArray();
+            var after = Transmitted(tap.Through(burstUntilMs))
+                .Where(f => f.AtMs >= burstFromMs)
+                .ToArray();
             var measurements = new Dictionary<string, string>
             {
                 ["SYNC counter (1019h)"] = counterOverflow >= 2 ? $"overflow {counterOverflow}, one-byte counter sent" : "none, DLC 0",

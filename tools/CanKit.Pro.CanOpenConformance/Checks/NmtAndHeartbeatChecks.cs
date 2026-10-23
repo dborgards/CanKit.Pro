@@ -377,6 +377,27 @@ internal static class NmtAndHeartbeatChecks
                             measurements);
                 }
 
+                // Every raw beat should have surfaced, and when they do not, say so. The contract
+                // is in two halves that qualify each other: README:606 says HeartbeatReceived
+                // "reports every heartbeat and boot-up", i.e. nothing is filtered out by design,
+                // while README:612-616 says "a slow handler can lose a heartbeat or an RPDO; it
+                // cannot lose a timeout or an emergency" — delivery is droppable under
+                // EventQueueCapacity pressure. So a mismatch is worth surfacing and is *not* a
+                // defect I can assert: the loss the record permits and the loss that is a bug
+                // look identical from here. Inconclusive with a tool attribution, both numbers
+                // named. Found in review of #388, whose stronger reading — fail on any mismatch —
+                // would fail a conforming stack under load.
+                if (received < onTheWire)
+                {
+                    return Outcome.Inconclusive(
+                        $"{onTheWire} heartbeat(s) reached the bus in this window and the consumer surfaced "
+                        + $"{received}. Nothing was filtered by design (the stack's README says every heartbeat is "
+                        + "reported), but its event queue is documented as able to drop a heartbeat when a subscriber "
+                        + "falls behind — so a partial loss cannot be told apart from that here. The handler in this "
+                        + "check does almost nothing, which makes the gap worth looking at.",
+                        Attribution.Tool, measurements);
+                }
+
                 return timedOut == 0
                     ? Outcome.Pass($"{received} beat(s) consumed, no spurious timeout.", measurements)
                     : Outcome.Inconclusive(
@@ -585,16 +606,36 @@ internal static class NmtAndHeartbeatChecks
                             // next beat.
                             var resumedId = CanOpenCobId.Heartbeat(session.Target);
                             using var resumed = new BusTap(session.Service, (id, extended) => id == resumedId && !extended);
-                            var budgetMs = BitConverter.ToUInt16(original, 0) + WindowMarginMs;
+                            // Two periods plus the margin, from whichever of the declared and the
+                            // observed period is larger. One period plus the margin was the
+                            // window this very file treats as the smallest that can hold a beat —
+                            // too tight to conclude silence from, as HBT-02's own guard says — so
+                            // a producer that restarted a little slower than its dictionary, or
+                            // whose first beat was still queued, was reported as a failed restore.
+                            // And that verdict outranks every measurement in the check. A false
+                            // FAIL introduced by the previous commit's fix. Found in review
+                            // of #388.
+                            var declaredMs = BitConverter.ToUInt16(original, 0);
+                            var periodMs = Math.Max(declaredMs, beat.MedianMs);
+                            var budgetMs = (int)(periodMs * 2 + WindowMarginMs);
                             var sawBeat = await resumed.WaitForAsync(
                                 frames => Heartbeats(frames).Count > 0, budgetMs, CancellationToken.None)
                                 .ConfigureAwait(false);
                             if (!sawBeat)
                             {
+                                // WaitForAsync returns on its deadline, not on a drained pump, so
+                                // a beat delivered late would be missed by the predicate above.
+                                await Task.Delay(50, CancellationToken.None).ConfigureAwait(false);
+                                sawBeat = Heartbeats(resumed.Frames).Count > 0;
+                            }
+                            if (!sawBeat)
+                            {
                                 restoredOk = false;
-                                restored = $"FAILED — 1017h reads back as {BitConverter.ToUInt16(original, 0)} ms and "
-                                    + $"no heartbeat reached the bus in {budgetMs} ms after the write. The value was "
-                                    + "stored and the producer did not restart, so the device is left silent";
+                                restored = $"FAILED — 1017h reads back as {declaredMs} ms and no heartbeat reached the "
+                                    + $"bus in {budgetMs} ms after the write (two periods of the "
+                                    + $"{IdentityAndSdoChecks.Ms(periodMs)} this run measured or the device declares, "
+                                    + "whichever is longer, plus the pump). The value was stored and the producer did "
+                                    + "not restart, so the device is left silent";
                             }
                         }
                     }
