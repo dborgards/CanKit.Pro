@@ -88,6 +88,83 @@ public class CanOpenSdoServerStrayFrameTests
             "the abort ended the session, so there is none left to supersede");
     }
 
+    public static TheoryData<string> UnknownSpecifiers => new()
+    {
+        "a block sub-block ack", "a block upload start", "a block download end", "ccs 7",
+    };
+
+    // #357 C-2: a frame whose command specifier no session here takes -- a late block control
+    // frame of an earlier transfer, or one no service defines -- used to be answered by the
+    // classic abort path, which also cleared the open classic session, and named a multiplexer
+    // read from bytes 1..3 of a frame that carries none. It is answered with 0504 0001h naming
+    // 0000:00, and the segmented upload that is running goes on.
+    [Theory]
+    [MemberData(nameof(UnknownSpecifiers))]
+    public void An_Unknown_Command_Specifier_Is_Refused_Without_Ending_The_Open_Session(string stray)
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-classic-{Guid.NewGuid():N}");
+        using var toClient = TapResponses(bus);
+        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        var value = Enumerable.Range(0, 20).Select(i => (byte)(0x60 + i)).ToArray();
+        server.ObjectDictionary.AddDomain(Index, 0x00, value, OdAccess.ReadOnly);
+
+        FromClient(bus, SdoFrames.BuildUploadInit(Index, 0x00));
+        Next(toClient)[0].Should().Be(SdoFrames.ScsUploadInitSegmented);
+
+        // Bytes 1..3 spell this very transfer's object, so an abort that read them as a
+        // multiplexer would name it.
+        var frame = stray switch
+        {
+            "a block sub-block ack" => SdoBlockFrames.BuildSubBlockAck(SdoBlockFrames.CcsBlockUploadSubBlockAck, 0x00, 0x21),
+            "a block upload start" => SdoBlockFrames.BuildEndResponse(SdoBlockFrames.CcsBlockUploadStart),
+            "a block download end" => SdoBlockFrames.BuildEnd(SdoBlockFrames.CcsBlockDownloadEndBase, 0, 0),
+            _ => new byte[] { 0xE0, 0, 0, 0, 0, 0, 0, 0 },
+        };
+        frame[1] = (byte)(Index & 0xFF);
+        frame[2] = (byte)(Index >> 8);
+        frame[3] = 0x00;
+        FromClient(bus, frame);
+        var answer = Next(toClient);
+        answer[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(answer).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid);
+        SdoFrames.ReadIndex(answer).Should().Be(((ushort)0, (byte)0), "the frame carries no multiplexer");
+
+        FromClient(bus, SdoFrames.BuildSegment(SdoFrames.CcsUploadSegmentBase, toggle: false, lastSegment: false,
+            ReadOnlySpan<byte>.Empty));
+        var segment = Next(toClient);
+        segment[0].Should().Be(SdoFrames.ScsUploadSegmentBase, "the upload is still open: its first segment, toggle 0");
+        segment.Skip(1).Should().Equal(value.Take(7));
+    }
+
+    // The other half of C-2's rule: a frame that could belong to the open session ends it. A
+    // download segment during a segmented upload is the classic protocol gone wrong, and the
+    // abort names the session's object -- a segment carries no multiplexer of its own.
+    [Fact]
+    public void A_Segment_Of_The_Other_Direction_Aborts_The_Open_Session_By_Its_Object()
+    {
+        using var bus = ControllableBus.EchoCapable($"canopen-sdo-stray-direction-{Guid.NewGuid():N}");
+        using var toClient = TapResponses(bus);
+        using var server = CanOpen.OpenNode(bus, ServerNodeId);
+        server.ObjectDictionary.AddDomain(Index, 0x00, new byte[20], OdAccess.ReadOnly);
+
+        FromClient(bus, SdoFrames.BuildUploadInit(Index, 0x00));
+        Next(toClient)[0].Should().Be(SdoFrames.ScsUploadInitSegmented);
+
+        FromClient(bus, SdoFrames.BuildSegment(SdoFrames.CcsDownloadSegmentBase, toggle: false, lastSegment: false,
+            new byte[] { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77 }));
+        var answer = Next(toClient);
+        answer[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadAbortCode(answer).Should().Be((uint)SdoAbortCode.CommandSpecifierInvalid);
+        SdoFrames.ReadIndex(answer).Should().Be((Index, (byte)0x00), "the abort names the transfer it ends");
+
+        // The session is gone: its segment request now meets no session.
+        FromClient(bus, SdoFrames.BuildSegment(SdoFrames.CcsUploadSegmentBase, toggle: false, lastSegment: false,
+            ReadOnlySpan<byte>.Empty));
+        var after = Next(toClient);
+        after[0].Should().Be(SdoFrames.CsAbort);
+        SdoFrames.ReadIndex(after).Should().Be(((ushort)0, (byte)0));
+    }
+
     private static BlockingCollection<byte[]> TapResponses(ControllableBus bus)
     {
         var toClient = new BlockingCollection<byte[]>();

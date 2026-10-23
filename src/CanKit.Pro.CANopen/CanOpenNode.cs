@@ -1792,8 +1792,30 @@ internal sealed partial class CanOpenNode : ICanOpenNode, IAsyncDisposable
             return;
         }
 
-        // Anything else is a protocol error → abort.
-        SendSdoServerAbort(index, subindex, SdoAbortCode.CommandSpecifierInvalid);
+        // A classic segment the open session cannot take -- a download segment while an upload
+        // is open, or an upload segment request while a download is -- is its own protocol gone
+        // wrong, and it ends that session, named by the session's own object: the frame is a
+        // segment and carries no multiplexer.
+        if ((cs & 0xE0) is SdoFrames.CcsDownloadSegmentBase or SdoFrames.CcsUploadSegmentBase
+            && _sdoServer is { } open)
+        {
+            SendSdoServerAbort(open.Index, open.Subindex, SdoAbortCode.CommandSpecifierInvalid);
+            return;
+        }
+
+        // Anything else is a command specifier no session here could take: an unknown one, a
+        // segment with no session open, or a block follow-up frame with no block session (one
+        // that is open takes its own, HandleSdoServerRequestBlock). It is answered with
+        // 0504 0001h and ends nothing: it used to clear the open classic session, so a late
+        // frame of an earlier block transfer aborted the segmented transfer running now. The
+        // abort names the frame's multiplexer only where the frame has one -- an upload
+        // initiate with reserved bits set (ccs = 2) is the one such frame that reaches here --
+        // and 0000:00 otherwise, rather than reading bytes 1..3 of a frame that carries none
+        // (#357 C-2).
+        bool multiplexed = (cs & 0xE0) == SdoFrames.CcsUploadInit;
+        _ = SendControlFrame(CanOpenCobId.SdoTx(_nodeId), SdoFrames.BuildAbort(
+            multiplexed ? index : (ushort)0, multiplexed ? subindex : (byte)0,
+            (uint)SdoAbortCode.CommandSpecifierInvalid));
     }
 
     private void HandleServerUploadInit(ushort index, byte subindex, OdEntry? entry)
