@@ -10,7 +10,13 @@ using CanKit.Pro.RawCan;
 namespace CanKit.Pro.CanOpenConformance;
 
 /// <summary>One frame as the tap saw it, with the moment it arrived measured on one clock.</summary>
-internal readonly record struct TappedFrame(uint CanId, byte[] Data, bool IsRemote, double AtMs);
+/// <summary>
+/// The format travels with the identifier. A 29-bit PDO and unrelated 11-bit traffic can carry
+/// the same number, and matching on the number alone let one stand in for the other — a silent
+/// extended TPDO looked like it answered, and standard traffic was judged against the TPDO's
+/// mapping. Found in review of #388.
+/// </summary>
+internal readonly record struct TappedFrame(uint CanId, bool IsExtended, byte[] Data, bool IsRemote, double AtMs);
 
 /// <summary>
 /// Records what the bus carried for a window, filtered to the COB-IDs a check cares about.
@@ -24,7 +30,7 @@ internal sealed class BusTap : IDisposable
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly IDisposable _subscription;
 
-    public BusTap(ICanBusService service, Func<uint, bool> wanted)
+    public BusTap(ICanBusService service, Func<uint, bool, bool> wanted)
     {
         _subscription = service.Subscribe(
             onNext: e =>
@@ -33,8 +39,12 @@ internal sealed class BusTap : IDisposable
                 // CanFrameView.ID is signed; a CAN id never is, and the COB-ID arithmetic in
                 // CanOpenCobId is unsigned throughout.
                 var canId = unchecked((uint)frame.ID);
-                if (!wanted(canId)) return;
-                lock (_frames) _frames.Add(new TappedFrame(canId, frame.Data.ToArray(), frame.IsRemoteFrame, _clock.Elapsed.TotalMilliseconds));
+                if (!wanted(canId, frame.IsExtendedFrame)) return;
+                lock (_frames)
+                {
+                    _frames.Add(new TappedFrame(canId, frame.IsExtendedFrame, frame.Data.ToArray(), frame.IsRemoteFrame,
+                        _clock.Elapsed.TotalMilliseconds));
+                }
             },
             // Echoes of this tool's own transmits are not bus traffic from the device, and on an
             // adapter that flags them they would otherwise be counted as the device's answers.
@@ -48,7 +58,8 @@ internal sealed class BusTap : IDisposable
         get { lock (_frames) return _frames.ToArray(); }
     }
 
-    public IReadOnlyList<TappedFrame> WithId(uint canId) => Frames.Where(f => f.CanId == canId).ToArray();
+    public IReadOnlyList<TappedFrame> WithId(uint canId, bool extended)
+        => Frames.Where(f => f.CanId == canId && f.IsExtended == extended).ToArray();
 
     /// <summary>Waits out a window; nothing is polled, the subscription fills in the background.</summary>
     public Task ListenAsync(int milliseconds, CancellationToken cancellationToken = default)

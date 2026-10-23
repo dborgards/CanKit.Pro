@@ -348,6 +348,14 @@ internal static class LssAndStoreChecks
                     "The device accepted 'nope' as the 1010h:01 signature. CiA 301 requires the signature 'save' and "
                     + "nothing else; this device can be made to store its parameters by any write to 1010h:01.");
             }
+            catch (SdoAbortException abort) when (abort.AbortCode is (uint)SdoAbortCode.ObjectDoesNotExist
+                                                      or (uint)SdoAbortCode.SubIndexDoesNotExist)
+            {
+                // Ahead of the peer-origin catch below: an absent 1010h aborts from the peer like
+                // any refusal, so the broad clause matched first and reported the optional feature
+                // as an unexpected signature. Found in review of #388.
+                return Outcome.NotApplicable("The device has no 1010h; storing parameters is optional in CiA 301.");
+            }
             catch (SdoAbortException abort) when (abort.Origin == SdoAbortOrigin.Peer)
             {
                 var measurements = new Dictionary<string, string> { ["abort code"] = $"0x{abort.AbortCode:X8}" };

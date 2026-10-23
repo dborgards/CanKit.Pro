@@ -50,7 +50,7 @@ internal static class NmtAndHeartbeatChecks
         await book.RunAsync("HBT-02", "heartbeat", "Heartbeat observed on 700h+node-id", Tier.Read, "CiA 301 heartbeat", async () =>
         {
             var cobId = CanOpenCobId.Heartbeat(session.Target);
-            using var tap = new BusTap(session.Service, id => id == cobId);
+            using var tap = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
             await tap.ListenAsync(session.Options.HeartbeatWindowMs, cancellationToken).ConfigureAwait(false);
             var frames = tap.Frames;
 
@@ -80,6 +80,14 @@ internal static class NmtAndHeartbeatChecks
             measurements["states seen"] = observed.Length == 0
                 ? "(none)"
                 : string.Join(", ", observed.Select(DescribeState));
+
+            // 00h is the boot-up message, not a heartbeat: CiA 301 never reports Initializing in
+            // one, and the stack's own NmtState documentation says as much. Counting it meant a
+            // device that rebooted with its heartbeat switched off was reported as producing one.
+            // Found in review of #388.
+            var bootUps = states.Count(s => s == (byte)NmtState.Initializing);
+            var heartbeats = frames.Count - malformed - bootUps;
+            if (bootUps > 0) measurements["boot-up messages (00h, not heartbeats)"] = bootUps.ToString(CultureInfo.InvariantCulture);
 
             if (BusTap.Summarise(frames) is { } summary)
             {
@@ -114,7 +122,18 @@ internal static class NmtAndHeartbeatChecks
                     measurements);
             }
 
-            return Outcome.Pass($"{frames.Count} heartbeat(s) observed.", measurements);
+            if (heartbeats <= 0)
+            {
+                return Outcome.Inconclusive(
+                    bootUps > 0
+                        ? $"No heartbeat on 0x{cobId:X3}: the {bootUps} frame(s) seen are boot-up messages (00h), which "
+                          + "CiA 301 does not report in a heartbeat. The device rebooted during the window and is not "
+                          + "producing one."
+                        : $"No heartbeat on 0x{cobId:X3} in {session.Options.HeartbeatWindowMs} ms.",
+                    Attribution.Device, measurements);
+            }
+
+            return Outcome.Pass($"{heartbeats} heartbeat(s) observed.", measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("HBT-03", "heartbeat", "Heartbeat consumer reports the producer's beats", Tier.Read, "FR-CO-008", async () =>
@@ -367,7 +386,7 @@ internal static class NmtAndHeartbeatChecks
         await book.RunAsync("NMT-01", "nmt", "NMT state machine follows the commanded state", Tier.Write, "FR-CO-007", async () =>
         {
             var cobId = CanOpenCobId.Heartbeat(session.Target);
-            using var tap = new BusTap(session.Service, id => id == cobId);
+            using var tap = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
             // The operator's window, returning on the first state frame: a fixed 500 ms missed a
             // slower producer depending on its phase and skipped the check although HBT-02 had
             // just observed it. Found in review of #388.
@@ -473,7 +492,7 @@ internal static class NmtAndHeartbeatChecks
     private static async Task<IntervalSummary?> ObservedPeriodAsync(Session session, CancellationToken cancellationToken)
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
-        using var probe = new BusTap(session.Service, id => id == cobId);
+        using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
 
         // The operator's window, not a cap of its own. An earlier version waited at most 2000 ms
         // and needed the three frames Summarise asks for, so a producer at 1 s or slower was

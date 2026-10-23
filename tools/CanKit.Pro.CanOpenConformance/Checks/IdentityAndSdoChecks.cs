@@ -204,7 +204,7 @@ internal static class IdentityAndSdoChecks
             // Sub-index 0 and the four reserved bytes stay zero.
 
             var responseId = CanOpenCobId.SdoTx(session.Target);
-            using var tap = new BusTap(session.Service, id => id == responseId);
+            using var tap = new BusTap(session.Service, (id, extended) => id == responseId && !extended);
 
             var accepted = session.Bus.Transmit(CanFrame.Classic((int)CanOpenCobId.SdoRx(session.Target), request));
             if (accepted <= 0)

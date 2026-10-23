@@ -71,14 +71,14 @@ internal static class PdoSyncEmcyChecks
                     : Outcome.NotApplicable($"All {tpdos.Count} TPDO(s) the device declares are marked invalid (1800h:01 bit 31).");
             }
 
-            var watched = valid.Select(p => p.CobId).ToHashSet();
+            var watched = valid.Select(p => (p.CobId, p.Extended)).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
             // An RTR frame on a TPDO's COB-ID is another master asking for it, not the target
             // sending it. Counting one as the target's traffic failed a conforming device in the
             // stopped window and made a silent one look busy in the operational one. The tap keeps
             // IsRemote, so the filter is here rather than in the counting below. Found in review
             // of #388.
-            using var tap = new BusTap(session.Service, id => watched.Contains(id));
+            using var tap = new BusTap(session.Service, (id, extended) => watched.Contains((id, extended)));
 
             TappedFrame[] inOperational;
             int inStopped;
@@ -119,7 +119,7 @@ internal static class PdoSyncEmcyChecks
 
             foreach (var pdo in valid)
             {
-                var mine = inOperational.Where(f => f.CanId == pdo.CobId).ToArray();
+                var mine = inOperational.Where(f => f.CanId == pdo.CobId && f.IsExtended == pdo.Extended).ToArray();
                 if (mine.Length == 0)
                 {
                     measurements[$"TPDO{pdo.Number} (0x{pdo.CobId:X3})"] =
@@ -169,7 +169,8 @@ internal static class PdoSyncEmcyChecks
                     + "this window cannot separate the two.", Attribution.Unknown, measurements);
             }
 
-            var mismatched = valid.Any(p => inOperational.Any(f => f.CanId == p.CobId && p.Bytes > 0 && f.Data.Length != p.Bytes));
+            var mismatched = valid.Any(p => inOperational.Any(
+                f => f.CanId == p.CobId && f.IsExtended == p.Extended && p.Bytes > 0 && f.Data.Length != p.Bytes));
             if (mismatched)
             {
                 return Outcome.Fail(
@@ -332,9 +333,9 @@ internal static class PdoSyncEmcyChecks
             }
 
             byte counter = 0;
-            var watched = cyclic.Select(p => p.CobId).ToHashSet();
+            var watched = cyclic.Select(p => (p.CobId, p.Extended)).ToHashSet();
             var initialState = await ObservedNmtStateAsync(session, cancellationToken).ConfigureAwait(false);
-            using var tap = new BusTap(session.Service, id => watched.Contains(id));
+            using var tap = new BusTap(session.Service, (id, extended) => watched.Contains((id, extended)));
             int quiet;
             Restoration restoration;
             var rejected = 0;
@@ -367,7 +368,8 @@ internal static class PdoSyncEmcyChecks
                 restoration = await RestoreNmtStateAsync(session, book, "SYN-02", initialState).ConfigureAwait(false);
             }
 
-            if (rejected == syncs)
+            var accepted = syncs - rejected;
+            if (accepted == 0)
             {
                 return Outcome.TransportFault(
                     $"The driver rejected all {syncs} SYNC frames on 0x{sync.CobId:X3}, so the device was never synchronised.");
@@ -406,8 +408,8 @@ internal static class PdoSyncEmcyChecks
             var unmeasured = new List<string>();
             foreach (var pdo in cyclic)
             {
-                var mine = after.Where(f => f.CanId == pdo.CobId).ToArray();
-                var opportunities = syncs / pdo.TransmissionType;
+                var mine = after.Where(f => f.CanId == pdo.CobId && f.IsExtended == pdo.Extended).ToArray();
+                var opportunities = accepted / pdo.TransmissionType;
                 measurements[$"TPDO{pdo.Number} (0x{pdo.CobId:X3}) type {pdo.TransmissionType}"] =
                     $"{mine.Length} frame(s) for {opportunities} SYNC opportunity/opportunities";
                 if (mine.Length > 0) continue;
@@ -416,7 +418,7 @@ internal static class PdoSyncEmcyChecks
                 // count is capped, and a transmission type above that cap would otherwise be
                 // failed for not transmitting on a SYNC that was never sent — the same false FAIL
                 // the fixed five-SYNC constant produced, re-entered through the bound.
-                var startUnreached = pdo.SyncStartValue > 0 && (counterOverflow < 2 || syncs < counterOverflow);
+                var startUnreached = pdo.SyncStartValue > 0 && (counterOverflow < 2 || accepted < counterOverflow);
                 if (startUnreached)
                 {
                     unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, 1800h:06 start value {pdo.SyncStartValue} "
@@ -428,16 +430,26 @@ internal static class PdoSyncEmcyChecks
                 }
                 else
                 {
-                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {syncs} SYNCs sent)");
+                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {accepted} SYNCs accepted)");
                 }
             }
 
             if (unmeasured.Count > 0) measurements["not measured (fewer SYNCs sent than the type asks for)"] = string.Join(", ", unmeasured);
 
+            // A partial rejection makes the count the device actually saw uncertain, so silence
+            // cannot be charged to it. Found in review of #388.
+            if (silent.Count > 0 && rejected > 0)
+            {
+                return Outcome.Inconclusive(
+                    $"{string.Join(", ", silent)} transmitted nothing, but the driver rejected {rejected} of {syncs} "
+                    + "SYNC frames, so how many the device actually saw is uncertain and its silence cannot be charged "
+                    + "to it. Re-run on an interface that accepts every frame.", Attribution.Transport, measurements);
+            }
+
             if (silent.Count > 0)
             {
                 return Outcome.Fail(
-                    $"{string.Join(", ", silent)} transmitted nothing although {syncs} SYNC object(s) were sent, which is "
+                    $"{string.Join(", ", silent)} transmitted nothing although {accepted} SYNC object(s) reached the bus, which is "
                     + "more than the transmission type asks for. A cyclic synchronous TPDO must transmit on its Nth SYNC.",
                     measurements);
             }
@@ -446,12 +458,12 @@ internal static class PdoSyncEmcyChecks
             if (measured == 0)
             {
                 return Outcome.Inconclusive(
-                    $"Every cyclic synchronous TPDO has a transmission type above the {syncs} SYNCs this check sends, "
+                    $"Every cyclic synchronous TPDO has a transmission type above the {accepted} SYNCs that reached the bus, "
                     + "so none of them was given an opportunity.", Attribution.Setup, measurements);
             }
 
             return Outcome.Pass(
-                $"{measured} of {cyclic.Count} cyclic synchronous TPDO(s) answered: {after.Length} frame(s) for {syncs} SYNC(s)."
+                $"{measured} of {cyclic.Count} cyclic synchronous TPDO(s) answered: {after.Length} frame(s) for {accepted} SYNC(s)."
                 + (unmeasured.Count > 0 ? $" {unmeasured.Count} was/were not measured." : string.Empty),
                 measurements);
         }).ConfigureAwait(false);
@@ -463,9 +475,9 @@ internal static class PdoSyncEmcyChecks
             // reporting silence as a pass.
             var cobId = session.Options.TargetNode is { } target ? CanOpenCobId.Emcy(target) : 0u;
             using var tap = new BusTap(session.Service,
-                id => session.Options.TargetNode is null
+                (id, extended) => !extended && (session.Options.TargetNode is null
                     ? id > CanOpenCobId.EmcyBase && id < CanOpenCobId.EmcyBase + 128
-                    : id == cobId);
+                    : id == cobId));
 
             var decoded = new List<string>();
             void OnEmcy(object? sender, EmcyReceivedEventArgs e)
@@ -606,7 +618,7 @@ internal static class PdoSyncEmcyChecks
     private static async Task<byte?> ObservedNmtStateAsync(Session session, CancellationToken cancellationToken)
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
-        using var probe = new BusTap(session.Service, id => id == cobId);
+        using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
         // The operator's whole window, not half of it: a producer whose period HBT-02 accepted
         // could be missed here, and the state would then be "unknown" and the device put back to
         // pre-operational though it had been Operational — the restore defeating itself. It
@@ -665,7 +677,7 @@ internal static class PdoSyncEmcyChecks
     private static async Task<byte?> LatestNmtStateAsync(Session session, byte expected, CancellationToken cancellationToken)
     {
         var cobId = CanOpenCobId.Heartbeat(session.Target);
-        using var probe = new BusTap(session.Service, id => id == cobId);
+        using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
         await probe.WaitForAsync(
             frames => frames.LastOrDefault(f => f.Data.Length == 1) is { Data.Length: 1 } last && last.Data[0] == expected,
             Math.Max(1000, session.Options.HeartbeatWindowMs), cancellationToken).ConfigureAwait(false);
@@ -788,7 +800,16 @@ internal static class PdoSyncEmcyChecks
     private static async Task<(int Bits, int Entries)> ReadMappingAsync(
         Session session, ushort map, List<string> problems, CancellationToken cancellationToken)
     {
-        if (!session.MayTransfer(map, 0x00)) return (0, 0);
+        if (!session.MayTransfer(map, 0x00))
+        {
+            // Blocked, not absent. The gate path converted this to an empty mapping without a
+            // word, which is the same false pass as swallowing an abort — one route further out.
+            // Found in review of #388.
+            problems.Add($"0x{map:X4} is the mandatory mapping record of a PDO whose communication record exists, and "
+                + session.GateReason(map, 0x00));
+            return (0, 0);
+        }
+
         try
         {
             var count = await session.Client.SdoUploadAsync(session.Target, map, 0x00, cancellationToken).ConfigureAwait(false);
