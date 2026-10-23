@@ -691,6 +691,45 @@ public class TxConfirmTests : IClassFixture<VirtualAdapterFixture>
         await act.Should().ThrowAsync<OperationCanceledException>();
     }
 
+    // #352 (mutation R-M2): Dispose landing between SendConfirmedAsync's eager disposed check and
+    // the pending-send gate. Dispose sets _pendingDisposed under that gate before it sweeps, and the
+    // send checks it there before registering, so it is refused instead of registering an entry
+    // nobody will ever sweep, transmitting, and waiting out its own timeout. The send's read of
+    // WorkMode is the instant between the two checks, and the double disposes the service there.
+    [Fact]
+    public async Task Dispose_Between_The_Disposed_Check_And_The_Gate_Refuses_The_Send()
+    {
+        using var sender = OpenEcho();
+        var service = new CanBusService(sender);
+        sender.OnWorkModeRead = () =>
+        {
+            sender.OnWorkModeRead = null;
+            service.Dispose();
+        };
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x670, new byte[] { 1 }), TimeSpan.FromSeconds(30));
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        sender.TransmitCount.Should().Be(0, "a send refused at the gate never reaches the driver");
+    }
+
+    // #352: after Dispose a send is refused on both paths. On the approximated path the eager check
+    // is the only thing that refuses it; on the echo path the gate check above would as well.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SendConfirmed_After_Dispose_Throws_ObjectDisposedException(bool echoPath)
+    {
+        using var sender = echoPath ? OpenEcho() : ControllableBus.Plain(VirtualAdapterFixture.NewSession("txconfirm"));
+        var service = new CanBusService(sender);
+        service.Dispose();
+
+        var send = service.SendConfirmedAsync(CanFrame.Classic(0x671, new byte[] { 1 }), ShortTimeout);
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => send.WaitAsync(ShortTimeout));
+        sender.TransmitCount.Should().Be(0);
+    }
+
     [Fact]
     public async Task SendConfirmed_Rejects_Non_Positive_Timeout()
     {

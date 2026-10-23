@@ -1,3 +1,4 @@
+using System;
 using CanKit.Abstractions.API.Can;
 using CanKit.Abstractions.API.Common;
 using CanKit.Abstractions.API.Common.Definitions;
@@ -26,7 +27,21 @@ internal sealed class EchoCapableOptions(IBusRTOptionsConfigurator inner, Channe
 {
     public CanFeature Features => inner.Features | CanFeature.Echo;
 
-    public ChannelWorkMode WorkMode => workMode;
+    public ChannelWorkMode WorkMode
+    {
+        get
+        {
+            WorkModeRead?.Invoke();
+            return workMode;
+        }
+    }
+
+    /// <summary>
+    /// Invoked on every read of <see cref="WorkMode"/>, on the reading thread. A test uses it to
+    /// act at the one instant <c>SendConfirmedAsync</c> reads it: after its eager disposed check
+    /// and before it takes the pending-send lock.
+    /// </summary>
+    public Action? WorkModeRead { get; set; }
 
     public Capability Capabilities => inner.Capabilities;
 

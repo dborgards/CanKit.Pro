@@ -215,6 +215,17 @@ public sealed class ControllableBus : ICanBus
 
     // --- ICanBus: configuration, delegated to a real bus -------------------------------------
 
+    /// <summary>
+    /// Invoked whenever the service reads <c>Options.WorkMode</c>; see
+    /// <see cref="EchoCapableOptions.WorkModeRead"/>. Only on a double whose options are its own
+    /// echo-capable ones, i.e. not on <see cref="Plain"/>.
+    /// </summary>
+    public Action? OnWorkModeRead
+    {
+        get => ((EchoCapableOptions)_options).WorkModeRead;
+        set => ((EchoCapableOptions)_options).WorkModeRead = value;
+    }
+
     public IBusRTOptionsConfigurator Options => _options;
 
     private BusState _busState;
