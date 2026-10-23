@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -1721,43 +1722,105 @@ internal sealed class J1939NodeImpl : IJ1939Node
         try { _readerCts.Cancel(); } catch { }
         _rxInbox.Writer.TryComplete();
 
-        try
-        {
-            _actor.Post(() =>
-            {
-                // A loss whose Cannot Claim never got its backoff still answers its caller:
-                // the claim failed, and no dispose makes that less true (Codex on #153).
-                // So does every earlier loss whose send is still in flight: `_lostClaim` only
-                // holds the latest, and tearing the actor down means those handoffs never post.
-                CompleteLostClaim();
-                while (_cannotClaimsAwaitingHandoff.Count > 0)
-                    FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
-                foreach (var grace in _claimEchoGraces)
-                    grace.Dispose();
-                _claimEchoGraces.Clear();
-                _claimEchoes.Clear();
-                var pending = _pendingClaim;
-                if (pending is not null)
-                {
-                    _pendingClaim = null;
-                    pending.Deadline?.Dispose();
-                    pending.CtRegistration.Dispose();
-                    pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939NodeImpl)));
-                }
-            });
-        }
-        catch (ObjectDisposedException) { /* actor already gone */ }
+        var transportReader = TearDownOnActor();
 
         try { _readerTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        try { _transportReaderTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        try { transportReader.Wait(TimeSpan.FromSeconds(2)); } catch { }
 
         _subscription.Dispose();
-        _transport.Dispose();
         // An injected actor is not ours to dispose; the handler is, either way.
         _actor.BackgroundExceptionOccurred -= OnActorBackgroundException;
         if (_ownsActor) _actor.Dispose();
         _readerCts.Dispose();
         if (_ownsService) _service.Dispose();
+    }
+
+    /// <summary>
+    /// How long a Dispose off the actor waits for the actor to run the teardown: the actor's own
+    /// shutdown bound. A seam for tests of the path where the actor does not get there in time.
+    /// </summary>
+    internal TimeSpan TransportTeardownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// A seam for tests, null in production: runs on the disposing thread once the teardown has
+    /// been handed to the actor and before that thread waits for it. A test holding the actor in
+    /// a rebind (<see cref="BeforeTransportRebind"/>) lets go of it here, which is after the
+    /// teardown is queued behind the rebind (#375).
+    /// </summary>
+    internal Action? AfterTeardownPosted;
+
+    // #375 (J10): the transport is the actor's. RebindTransportOnLoop replaces it there, after
+    // checking _disposed once; a Dispose that read _transport on its own thread while a rebind
+    // that passed that check was still inside the old channel's Dispose tore down the old channel
+    // and left the one the rebind then opened -- its subscription, its reader and its actor --
+    // running for ever. Queued on the actor, the teardown runs after any rebind already there,
+    // and every later rebind sees _disposed. Returns the reader of the channel it tore down.
+    private Task TearDownOnActor()
+    {
+        // On the actor nothing else can be rebinding: this is the actor.
+        if (_actor.IsOnCurrentActor) return TearDownOnLoop();
+
+        Task<Task> queued;
+        try
+        {
+            queued = _actor.PostAsync(TearDownOnLoop);
+        }
+        catch (ObjectDisposedException)
+        {
+            // An injected actor its owner already disposed: no rebind can be queued any more. The
+            // claim state went with that actor -- it is actor state, and its loop may still be
+            // draining -- but the channel is the node's own and is not left running.
+            return DisposeVisibleTransport();
+        }
+
+        AfterTeardownPosted?.Invoke();
+        try
+        {
+            if (queued.Wait(TransportTeardownTimeout)) return queued.Result;
+        }
+        catch (AggregateException failed)
+        {
+            // A teardown step that threw on the actor is this disposal's failure, as it was when
+            // it threw on this thread: thrown as itself, not wrapped by the wait.
+            ExceptionDispatchInfo.Capture(failed.GetBaseException()).Throw();
+        }
+
+        // The actor is held by a callback that has not returned within its own shutdown bound.
+        // The channel visible now is disposed from here, as before #375, and the queued teardown
+        // still disposes whichever channel is current once the actor gets to it.
+        return DisposeVisibleTransport();
+    }
+
+    private Task DisposeVisibleTransport()
+    {
+        Volatile.Read(ref _transport).Dispose();
+        return Volatile.Read(ref _transportReaderTask);
+    }
+
+    // Actor loop. The claim half: a loss whose Cannot Claim never got its backoff still answers
+    // its caller -- the claim failed, and no dispose makes that less true (Codex on #153). So
+    // does every earlier loss whose send is still in flight: `_lostClaim` only holds the latest,
+    // and tearing the actor down means those handoffs never post.
+    private Task TearDownOnLoop()
+    {
+        CompleteLostClaim();
+        while (_cannotClaimsAwaitingHandoff.Count > 0)
+            FaultLostClaim(_cannotClaimsAwaitingHandoff[0]);
+        foreach (var grace in _claimEchoGraces)
+            grace.Dispose();
+        _claimEchoGraces.Clear();
+        _claimEchoes.Clear();
+        var pending = _pendingClaim;
+        if (pending is not null)
+        {
+            _pendingClaim = null;
+            pending.Deadline?.Dispose();
+            pending.CtRegistration.Dispose();
+            pending.Tcs.TrySetException(new ObjectDisposedException(nameof(J1939NodeImpl)));
+        }
+
+        _transport.Dispose();
+        return _transportReaderTask;
     }
 
     /// <inheritdoc />

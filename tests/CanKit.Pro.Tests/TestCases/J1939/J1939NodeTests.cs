@@ -3531,6 +3531,124 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
     }
 
     // ---------------------------------------------------------------------------------------
+    // #375 (J10): the TP channel is the actor's -- RebindTransportOnLoop replaces it there,
+    // after checking _disposed once. Dispose used to tear the channel down from its own thread:
+    // with a rebind past that check still inside the old channel's Dispose, it disposed the old
+    // channel and never saw the one the rebind then opened, whose subscription, reader and actor
+    // ran on. A `using` scope ending right after a loss is enough.
+    //
+    // Forced, not sampled: the actor is held inside the rebind (BeforeTransportRebind) and let go
+    // only once the disposal has either finished or queued its teardown behind that rebind
+    // (AfterTeardownPosted) -- whichever the build under test does first.
+    // ---------------------------------------------------------------------------------------
+    [Fact]
+    public async Task A_Dispose_During_A_Rebind_Also_Disposes_The_Channel_That_Rebind_Opens()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        var release = new ManualResetEventSlim();
+        var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
+        node.AfterTeardownPosted = release.Set;
+
+        var reclaim = node.ClaimAddressAsync(0x32); // unbinds to the 0xFE placeholder first: held there
+        await inRebind.Task.AsTaskWithTimeout(ShortTimeout);
+        var dispose = Task.Run(node.Dispose);
+        var released = dispose.ContinueWith(_ => release.Set(), TaskScheduler.Default);
+        await dispose.WithTimeout(ShortTimeout);
+        await released.WithTimeout(ShortTimeout);
+
+        (await ObserveClaim(reclaim)).Should().BeOfType<ObjectDisposedException>();
+        await actor.PostAsync(() => { }); // whatever the rebind queued behind itself has run
+        lock (channels)
+        {
+            channels.Select(c => c.SourceAddress).Should().Equal(new byte[] { 0xFE, 0x31, 0xFE },
+                "the held rebind opened a placeholder after the claim's channel");
+            channels.Should().OnlyContain(c => c.Disposed,
+                "a disposed node leaves no channel running, including the one a rebind opened during the disposal");
+        }
+        release.Dispose();
+    }
+
+    // The actor does not get to the teardown within its bound -- held here by the test, in
+    // production by a callback that does not return. Dispose does not wait for ever: it disposes
+    // the channel it can see, and the teardown still queued disposes the one the rebind opens.
+    [Fact]
+    public async Task A_Dispose_The_Actor_Cannot_Serve_In_Time_Still_Leaves_No_Channel_Running()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        await node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        using var release = new ManualResetEventSlim();
+        var inRebind = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BeforeTransportRebind = () => { inRebind.TrySetResult(true); release.Wait(); };
+        node.TransportTeardownTimeout = TimeSpan.Zero;
+
+        var reclaim = node.ClaimAddressAsync(0x32);
+        await inRebind.Task.AsTaskWithTimeout(ShortTimeout);
+        node.Dispose(); // the actor is held, so the wait for it gives up at once
+        lock (channels)
+        {
+            channels.Should().HaveCount(2);
+            channels[1].Disposed.Should().BeTrue("the channel the disposing thread can see is disposed from there");
+        }
+
+        release.Set();
+        (await ObserveClaim(reclaim)).Should().BeOfType<ObjectDisposedException>();
+        await actor.PostAsync(() => { });
+        lock (channels)
+        {
+            channels.Should().HaveCount(3);
+            channels.Should().OnlyContain(c => c.Disposed, "the queued teardown disposes what the rebind opened");
+        }
+    }
+
+    // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
+    // is the node's own, so it is disposed in place.
+    [Fact]
+    public async Task A_Dispose_After_The_Injected_Actor_Is_Gone_Still_Disposes_The_Channel()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        var channel = channels.Single();
+        await channel.WaitForRequestAsync(1, ShortTimeout);
+
+        actor.Dispose();
+        node.Dispose();
+
+        channel.Disposed.Should().BeTrue();
+    }
+
+    // A channel whose Dispose throws fails the disposal with that exception, as it did when the
+    // disposing thread called it itself: the teardown's wait does not wrap it.
+    [Fact]
+    public async Task A_Channel_That_Throws_On_Dispose_Fails_The_Disposal_With_That_Exception()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        var failure = new InvalidOperationException("the channel would not close");
+        channels.Single().DisposeFailure = failure;
+
+        Action dispose = node.Dispose;
+        dispose.Should().Throw<InvalidOperationException>().Which.Should().BeSameAs(failure);
+        var reported = await Assert.ThrowsAsync<InvalidOperationException>(() => node.DisposeAsync().AsTask());
+        reported.Should().BeSameAs(failure);
+    }
+
+    // ---------------------------------------------------------------------------------------
     // Bugbot 3600591980 regression: SendCoreAsync checks ClaimState/address once before
     // awaiting the wire I/O. A concurrent ClaimAddressAsync running on the actor loop can
     // clear or move the SA mid-flight, and before the fix the send task completed
@@ -5116,8 +5234,21 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         public event EventHandler<J1939TpDatagram>? DatagramReceived { add { } remove { } }
         public event EventHandler<Exception>? BackgroundExceptionOccurred { add { } remove { } }
 
+        /// <summary>Whether <see cref="Dispose"/> has been called.</summary>
+        public bool Disposed => Volatile.Read(ref _disposed) != 0;
+
+        private int _disposed;
+
+        /// <summary>When set, what <see cref="Dispose"/> throws once it has completed the inbox.</summary>
+        public Exception? DisposeFailure { get; set; }
+
         // As the real channel: the inbox is completed, what is queued in it can still be read.
-        public void Dispose() => _items.Writer.TryComplete();
+        public void Dispose()
+        {
+            Volatile.Write(ref _disposed, 1);
+            _items.Writer.TryComplete();
+            if (DisposeFailure is { } failure) throw failure;
+        }
     }
 }
 
