@@ -4122,6 +4122,49 @@ public class J1939NodeTests : IClassFixture<VirtualAdapterFixture>
         node.Address.Should().Be((byte)0x32);
     }
 
+    // Codex on #397: a Dispose from a handler the actor raises in the middle of a transition --
+    // AddressClaimChanged for Claiming, before the round has registered its claim. Run inside
+    // that turn, the teardown found no claim to answer; the turn then registered one and sent its
+    // announcement, the owned actor was gone, and the claim's task never completed. Queued behind
+    // the turn, as the claim cleanup was before #375, the teardown answers it.
+    [Fact]
+    public async Task Disposing_From_A_Claiming_Handler_Still_Answers_The_Claim()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var node = new J1939NodeImpl(service, new J1939NodeOptions(Name(1))
+        {
+            ClaimAnnounceTimeout = TimeSpan.FromMilliseconds(50),
+        }, ownsService: false);
+        node.AddressClaimChanged += (_, e) => { if (e.State == J1939ClaimState.Claiming) node.Dispose(); };
+
+        Func<Task> claim = () => node.ClaimAddressAsync(0x31).WithTimeout(ShortTimeout);
+
+        await claim.Should().ThrowAsync<ObjectDisposedException>("the claim in hand when the node was disposed is answered");
+    }
+
+    // The same teardown from a callback of the actor runs after that callback's turn, and nobody
+    // is left waiting for it: a channel that throws there is reported as a background failure,
+    // not lost.
+    [Fact]
+    public async Task A_Channel_That_Throws_On_A_Dispose_From_The_Actor_Is_Reported()
+    {
+        using var bus = Open(NewSession(), 0);
+        using var service = new CanBusService(bus);
+        using var actor = new ProtocolActor();
+        var (node, channels, _) = NodeOnScriptedTransport(service, actor);
+        using var _node = node;
+        var failure = new InvalidOperationException("the channel would not close");
+        channels.Single().DisposeFailure = failure;
+        var reported = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        node.BackgroundExceptionOccurred += (_, ex) => reported.TrySetResult(ex);
+
+        await actor.PostAsync(node.Dispose); // returns: the teardown is queued behind this turn
+
+        (await reported.Task.AsTaskWithTimeout(ShortTimeout)).Should().BeSameAs(failure);
+        channels.Single().Disposed.Should().BeTrue();
+    }
+
     // An injected actor its owner disposed first: the teardown cannot be queued, and the channel
     // is the node's own, so it is disposed in place.
     [Fact]

@@ -1933,9 +1933,6 @@ internal sealed class J1939NodeImpl : IJ1939Node
     // and every later rebind sees _disposed. Returns the reader of the channel it tore down.
     private Task TearDownOnActor()
     {
-        // On the actor nothing else can be rebinding: this is the actor.
-        if (_actor.IsOnCurrentActor) return TearDownOnLoop();
-
         Task<Task> queued;
         try
         {
@@ -1947,6 +1944,21 @@ internal sealed class J1939NodeImpl : IJ1939Node
             // claim state went with that actor -- it is actor state, and its loop may still be
             // draining -- but the channel is the node's own and is not left running.
             return DisposeVisibleTransport();
+        }
+
+        if (_actor.IsOnCurrentActor)
+        {
+            // Called from a callback of this actor, which cannot wait for its own mailbox. The
+            // teardown is not run in place either: the callback may be a handler raised in the
+            // middle of a transition -- AddressClaimChanged for Claiming, before the round has
+            // registered its claim -- and what the rest of that turn publishes has to be torn
+            // down too, or a claim registered after the teardown is never answered (Codex on
+            // #397). Queued, it runs once the turn is over: on the next turn of an injected
+            // actor, in the final drain of the node's own. Nobody waits for it, so a failure
+            // is reported where background failures go.
+            _ = queued.ContinueWith(failed => RaiseBackgroundException(failed.Exception!.GetBaseException()),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+            return Volatile.Read(ref _transportReaderTask);
         }
 
         AfterTeardownPosted?.Invoke();
