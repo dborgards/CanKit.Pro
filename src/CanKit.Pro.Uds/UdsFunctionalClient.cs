@@ -150,6 +150,14 @@ public sealed class UdsFunctionalClient : IDisposable
     /// window is attributed to this call. A request with suppressPosRspMsgIndication set is
     /// sent and not collected for: an empty list comes back as soon as the frame is confirmed.
     /// </summary>
+    /// <remarks>
+    /// An NRC 0x78 (requestCorrectlyReceived-ResponsePending) names the service and is returned
+    /// as a negative response like any other: <see cref="UdsFunctionalResponse.IsNegative"/> is
+    /// set although that ECU's final answer is still to come -- after the window, where only
+    /// the listener that moves the next call's wait out hears it. A caller counting refusals
+    /// leaves out the entries whose <see cref="UdsFunctionalResponse.NegativeResponseCode"/> is
+    /// 0x78 (#354).
+    /// </remarks>
     public async Task<IReadOnlyList<UdsFunctionalResponse>> SendRawAsync(ReadOnlyMemory<byte> request,
         TimeSpan window, CancellationToken cancellationToken = default)
     {

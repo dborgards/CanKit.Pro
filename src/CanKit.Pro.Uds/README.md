@@ -141,7 +141,9 @@ await uds.DownloadAsync(
   memory address and size), or a negative response naming the service; for a service whose
   positive response echoes nothing of the request (0x14, 0x23, 0x34, 0x35, 0x37, 0x84) the
   service identifier is the whole correlation, and another tester's answer to the same
-  service inside the window is not told apart. Calls run one at a time. Every send starts a listener for its service
+  service inside the window is not told apart. An NRC 0x78 in the window is returned as a
+  negative response like any other, although that ECU's final answer is still to come; filter
+  `NegativeResponseCode == 0x78` out when counting refusals. Calls run one at a time. Every send starts a listener for its service
   that stays up for the ECUs' P2 (`Create`'s `responseWindow`, default P2) and moves the
   window out by P2* (`responsePendingWindow`, default P2*) on each NRC 0x78 it hears, so
   nothing in the window goes unobserved — a suppressed send included — and a call for that
