@@ -62,8 +62,7 @@ internal static class PdoSyncEmcyChecks
         {
             var found = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
             tpdos.AddRange(found.Descriptors);
-            tpdoBeyondLimit.AddRange(found.NotAddressed
-                .Where(n => n.Contains("further communication record", StringComparison.Ordinal)));
+            tpdoBeyondLimit.AddRange(BeyondSweepLimit(found));
             tpdoProblems.AddRange(found.Problems);
             return Summarise("TPDO", found, session);
         }).ConfigureAwait(false);
@@ -390,7 +389,15 @@ internal static class PdoSyncEmcyChecks
             {
                 // Event-driven TPDOs only transmit when their data changes, and a synchronous one
                 // waits for a SYNC this check does not send. Silence is therefore not a fault.
-                var synchronous = separable.Where(p => CanOpenTransmissionType.IsSynchronous(p.TransmissionType)).ToArray();
+                // Over every watched TPDO, not only the separable ones. Silence on an identifier
+                // is silence of every record on it, so this rule needs no record told apart —
+                // and taking the set aside here made `allSynchronous` vacuously true when all of
+                // them shared, which reported event-driven TPDOs as "nothing is claimed" and an
+                // inconclusive with Attribution.None does not fail a run. The set-aside belongs
+                // to the per-descriptor rules above, which cannot attribute a frame; this one
+                // attributes nothing. Found in review of #388, against the sharing fix one
+                // commit earlier.
+                var synchronous = valid.Where(p => CanOpenTransmissionType.IsSynchronous(p.TransmissionType)).ToArray();
 
                 // The attribution follows which case it is, instead of Unknown for both. When
                 // *every* watched TPDO is synchronous the silence is not a fault and nothing is
@@ -400,7 +407,7 @@ internal static class PdoSyncEmcyChecks
                 // event-driven TPDO is genuinely unknown: the overdue rule above has already
                 // cleared the ones that owed a frame, and whether the application had data to
                 // send is not observable from the bus.
-                var allSynchronous = synchronous.Length == separable.Count;
+                var allSynchronous = synchronous.Length == valid.Count;
                 return Outcome.Inconclusive(
                     $"No TPDO was transmitted in {session.Options.PdoWindowMs} ms of Operational. "
                     + (synchronous.Length > 0
@@ -531,11 +538,26 @@ internal static class PdoSyncEmcyChecks
             // sync-only invocation. Found in review of #388.
             var known = tpdos;
             var prerequisiteProblems = new List<string>(tpdoProblems);
+            var beyondLimit = new List<string>(tpdoBeyondLimit);
             if (known.Count == 0)
             {
                 var sweep = await ReadPdosAsync(session, 0x1800, 0x1A00, cancellationToken).ConfigureAwait(false);
                 known = sweep.Descriptors;
                 prerequisiteProblems.AddRange(sweep.Problems);
+                beyondLimit.AddRange(BeyondSweepLimit(sweep));
+            }
+
+            // The same prerequisite PDO-03 has, and for the same reason: "every cyclic
+            // synchronous TPDO answered" is a claim about every one of them, and this runner
+            // reads the first four. The fallback sweep copied Descriptors and Problems and
+            // dropped what it had not reached, so under --groups sync not even PDO-01's report
+            // of the gap was produced. Found in review of #388.
+            if (beyondLimit.Count > 0)
+            {
+                return Outcome.NeedsSetup(
+                    "Not every TPDO this device declares was discovered, so no verdict can be drawn about which of "
+                    + "them answer a SYNC: " + beyondLimit[0] + "."
+                    + (tpdos.Count > 0 ? " The ones that were read are in PDO-01." : string.Empty));
             }
 
             // A descriptor whose transmission type could not be read cannot be classified, so the
@@ -860,19 +882,32 @@ internal static class PdoSyncEmcyChecks
 
             var silent = new List<string>();
             var short_ = new List<string>();
-            var unmeasured = new List<string>();
+            // Two reasons a TPDO cannot be measured, kept apart. They were one list, and the
+            // "none of them had an opportunity" verdict below spoke for all of it: a device whose
+            // every cyclic TPDO shares an identifier was told its transmission types exceeded the
+            // burst, attributed to the setup, and sent to lengthen a burst that would not help.
+            // Found in review of #388, against the sharing fix one commit earlier.
+            var unmeasuredShared = new List<string>();
+            var unmeasuredBurst = new List<string>();
 
             // The same sharing problem as PDO-03's: a response on a shared identifier cannot be
             // credited to one record, so a pair could pass on the traffic of one of them. Set
             // aside and named rather than counted twice. Found in review of #388.
-            var sharedCyclic = cyclic
+            // Against every valid TPDO on the identifier, not the cyclic ones alone. Grouping
+            // inside `cyclic` missed the case the rule exists for: one cyclic record and one
+            // event-driven record on 0x183 form no group there, so the event-driven one's frames
+            // were credited to the cyclic one as its SYNC response. Found while mutating the
+            // fixture for the grouping fix of the previous commit.
+            var sharedIds = known
+                .Where(p => p.Valid)
                 .GroupBy(p => (p.CobId, p.Extended))
                 .Where(g => g.Count() > 1)
-                .SelectMany(g => g)
-                .ToList();
+                .Select(g => g.Key)
+                .ToHashSet();
+            var sharedCyclic = cyclic.Where(p => sharedIds.Contains((p.CobId, p.Extended))).ToList();
             foreach (var pdo in sharedCyclic)
             {
-                unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: shares its COB-ID "
+                unmeasuredShared.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: shares its COB-ID "
                     + "with another record, so a response cannot be credited to one of them)");
             }
 
@@ -915,7 +950,7 @@ internal static class PdoSyncEmcyChecks
                 // passed: a TPDO that was never given a chance has told us nothing.
                 if (opportunities == 0)
                 {
-                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: the burst had no "
+                    unmeasuredBurst.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType}: the burst had no "
                         + "SYNC at or after its start value, so it was never due)");
                     continue;
                 }
@@ -937,7 +972,7 @@ internal static class PdoSyncEmcyChecks
                 var startUnreached = pdo.SyncStartValue > 0 && (counterOverflow < 2 || accepted < counterOverflow);
                 if (startUnreached)
                 {
-                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, 1800h:06 start value {pdo.SyncStartValue} "
+                    unmeasuredBurst.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, 1800h:06 start value {pdo.SyncStartValue} "
                         + "was not reached by this run's counter)");
                 }
                 else if (opportunities >= 1)
@@ -946,11 +981,16 @@ internal static class PdoSyncEmcyChecks
                 }
                 else
                 {
-                    unmeasured.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {accepted} SYNCs accepted)");
+                    unmeasuredBurst.Add($"TPDO{pdo.Number} (0x{pdo.CobId:X3}, type {pdo.TransmissionType} > {accepted} SYNCs accepted)");
                 }
             }
 
-            if (unmeasured.Count > 0) measurements["not measured (fewer SYNCs sent than the type asks for)"] = string.Join(", ", unmeasured);
+            // One row per reason. A single row labelled "fewer SYNCs sent than the type asks for"
+            // described the shared-identifier entries as a burst that was too short.
+            if (unmeasuredBurst.Count > 0)
+                measurements["not measured (fewer SYNCs sent than the type asks for)"] = string.Join(", ", unmeasuredBurst);
+            if (unmeasuredShared.Count > 0)
+                measurements["not measured (shares a COB-ID with another record)"] = string.Join(", ", unmeasuredShared);
 
             // A partial rejection makes the count the device actually saw uncertain, so silence
             // cannot be charged to it. Found in review of #388.
@@ -989,17 +1029,31 @@ internal static class PdoSyncEmcyChecks
                     measurements);
             }
 
-            var measured = cyclic.Count - unmeasured.Count;
+            var unmeasured = unmeasuredShared.Count + unmeasuredBurst.Count;
+            var measured = cyclic.Count - unmeasured;
             if (measured == 0)
             {
-                return Outcome.Inconclusive(
-                    $"Every cyclic synchronous TPDO has a transmission type above the {accepted} SYNCs that reached the bus, "
-                    + "so none of them was given an opportunity.", Attribution.Setup, measurements);
+                // Which of the two reasons it was, and both when it was both. Sharing an
+                // identifier is a device configuration the operator can change; a transmission
+                // type above the burst is this run's SYNC count. Both are the setup's, and they
+                // are different fixes.
+                var reason = unmeasuredBurst.Count == 0
+                    ? "Every cyclic synchronous TPDO shares its COB-ID with another record, so no response can be "
+                      + "credited to one of them: "
+                      + string.Join(", ", sharedCyclic.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3}"))
+                      + ". Give each of them its own COB-ID and re-run."
+                    : unmeasuredShared.Count == 0
+                        ? $"Every cyclic synchronous TPDO has a transmission type above the {accepted} SYNCs that "
+                          + "reached the bus, so none of them was given an opportunity."
+                        : $"No cyclic synchronous TPDO could be measured: {unmeasuredShared.Count} share a COB-ID "
+                          + $"with another record and {unmeasuredBurst.Count} have a transmission type above the "
+                          + $"{accepted} SYNCs that reached the bus.";
+                return Outcome.Inconclusive(reason, Attribution.Setup, measurements);
             }
 
             return Outcome.Pass(
                 $"{measured} of {cyclic.Count} cyclic synchronous TPDO(s) answered: {after.Length} frame(s) for {accepted} SYNC(s)."
-                + (unmeasured.Count > 0 ? $" {unmeasured.Count} was/were not measured." : string.Empty),
+                + (unmeasured > 0 ? $" {unmeasured} was/were not measured." : string.Empty),
                 measurements);
         }).ConfigureAwait(false);
 
@@ -1540,6 +1594,17 @@ internal static class PdoSyncEmcyChecks
         int InhibitMs, int EventTimerMs, int Bytes, bool MappingComplete,
         bool MultiplexedMode, int MappedEntries);
 
+    /// <summary>
+    /// The communication records the sweep never reached because of its own limit, as opposed to
+    /// the gaps a device legitimately has. PDO-01, PDO-03 and SYN-02 all refuse on it, and the
+    /// first round of this fix derived it separately in each of the two places that then had it —
+    /// so SYN-02's own sweep went on discarding it and could report that every cyclic synchronous
+    /// TPDO answered while a declared TPDO5 was never read. Found in review of #388.
+    /// </summary>
+    private static List<string> BeyondSweepLimit(PdoSweep sweep) => sweep.NotAddressed
+        .Where(n => n.Contains("further communication record", StringComparison.Ordinal))
+        .ToList();
+
     private readonly record struct PdoSweep(
         List<PdoDescriptor> Descriptors,
         List<string> Blocked,
@@ -2005,9 +2070,7 @@ internal static class PdoSyncEmcyChecks
         // A PDO the sweep never reached makes the verdict incomplete, whatever the ones it did
         // reach say: "no TPDO was transmitted in Stopped" is a claim about every TPDO. Reported
         // as setup because the limit is the run's, not the device's. Found in review of #388.
-        var beyondLimit = sweep.NotAddressed
-            .Where(n => n.Contains("further communication record", StringComparison.Ordinal))
-            .ToList();
+        var beyondLimit = BeyondSweepLimit(sweep);
         if (beyondLimit.Count > 0)
         {
             return Outcome.NeedsSetup(

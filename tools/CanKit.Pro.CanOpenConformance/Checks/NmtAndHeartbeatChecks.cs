@@ -371,6 +371,15 @@ internal static class NmtAndHeartbeatChecks
                 // frame's event has landed by then. Found in review of #388.
                 var windowUntilUtc = windowFromUtc.AddMilliseconds(wireUntilMs + BusTap.DrainAllowanceMs);
                 var onTheWire = Heartbeats(wire.Through(wireUntilMs)).Count;
+
+                // What arrived inside the drain allowance but outside the compared window. The
+                // decoded bound is a processing instant and the raw one an arrival, so an event
+                // for one of these frames lands inside the decoded window while the frame itself
+                // is excluded from the raw count — and it then offsets a beat that really was
+                // lost, or lifts `received` off zero. The band is countable, so it is counted
+                // rather than assumed empty. Found in review of #388, against the drain
+                // allowance one commit earlier.
+                var inDrainBand = Heartbeats(wire.Frames).Count - onTheWire;
                 int received;
                 lock (beats) received = beats.Count(t => t >= windowFromUtc && t <= windowUntilUtc);
                 var measurements = new Dictionary<string, string>
@@ -381,6 +390,35 @@ internal static class NmtAndHeartbeatChecks
                     ["HeartbeatReceived events"] = received.ToString(CultureInfo.InvariantCulture),
                     ["HeartbeatTimeout events"] = timedOut.ToString(CultureInfo.InvariantCulture),
                 };
+                if (inDrainBand > 0)
+                {
+                    measurements["heartbeats arriving inside the drain allowance"] =
+                        inDrainBand.ToString(CultureInfo.InvariantCulture);
+                }
+
+                // Every frame that arrived inside the window has been processed by the end of the
+                // drain, so `received` is at least `onTheWire` unless a beat was lost, and at most
+                // `onTheWire + inDrainBand` unless an event arrived without a frame. Between those
+                // bounds, with a band to draw on, a lost in-window beat and an unprocessed band
+                // frame produce the same two numbers: the comparison has no sensitivity left and
+                // the verdict would be a coin toss dressed as a pass. `received` reaching the
+                // upper bound accounts for every in-window frame and is exact; an empty band makes
+                // it exact as well, which is the ordinary case.
+                //
+                // The mirror case at the leading edge — a frame arriving just before the tap
+                // exists, processed just after the decoded window opens — is not measurable from
+                // here at all, because the tap never saw that frame. It inflates `received` by at
+                // most the pump's lag and is left stated rather than silently assumed away.
+                if (inDrainBand > 0 && received >= onTheWire && received < onTheWire + inDrainBand)
+                {
+                    return Outcome.Inconclusive(
+                        $"{inDrainBand} heartbeat(s) arrived inside the {BusTap.DrainAllowanceMs} ms drain that "
+                        + "follows this check's window, so the two counts cover different sets of frames: "
+                        + $"{received} event(s) against {onTheWire} frame(s) in the window is as consistent with a "
+                        + "beat the consumer lost as with a frame of the band it has not processed yet. Nothing is "
+                        + "concluded about the consumer rather than concluded from counts that cannot be compared.",
+                        Attribution.None, measurements);
+                }
 
                 if (received == 0)
                 {

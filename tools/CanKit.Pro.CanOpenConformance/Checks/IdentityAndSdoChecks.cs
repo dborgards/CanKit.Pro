@@ -300,6 +300,21 @@ internal static class IdentityAndSdoChecks
                     + "whatever its first eight bytes say.");
             }
 
+            // One request, one response (CiA 301 §7.2.4.3): a second frame of any length is a
+            // protocol violation, and the oversized rule above only catches the longer ones. Two
+            // well-formed eight-byte responses to one upload request passed, with the first taken
+            // as the answer and the second ignored — a client cannot tell which of them answers
+            // it, which is the defect. Found in review of #388, against the settle this rule is
+            // measured through.
+            if (responses.Count > 1)
+            {
+                return Outcome.Fail(
+                    $"The device sent {responses.Count} frames on 0x{responseId:X3} "
+                    + $"({string.Join(" / ", responses.Select(f => Hex(f.Data)))}) for one upload request. CiA 301 "
+                    + "§7.2.4.3 has exactly one server response per client request, and a client has no way to "
+                    + "tell which of them answers it.");
+            }
+
             var measurements = new Dictionary<string, string>
             {
                 ["request"] = $"0x{CanOpenCobId.SdoRx(session.Target):X3} {Hex(request)}",
