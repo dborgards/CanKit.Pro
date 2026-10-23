@@ -129,10 +129,14 @@ Each unresolved finding carries an attribution, which is the column the report e
 
 Two distinctions it keeps that are easy to get wrong, and both were wrong here first:
 
-- An SDO abort the peer sent is the device refusing; one the client raised never reached the bus.
-  But a *local* abort of `SdoProtocolTimedOut` means the server said nothing — that is the device,
-  not the runner, and an empty-bus run blamed the runner for it until the classification looked at
-  the abort code instead of just the origin.
+- An SDO abort is attributed by its **abort code**, not by who raised it. One the peer sent is the
+  device refusing. A *local* `SdoProtocolTimedOut` means the server said nothing, and the toggle,
+  command-specifier, block-size, sequence-number and CRC codes mean the client caught the server
+  breaking the protocol: the request reached the bus in all of those and the client is the
+  detector, so they are the device's. Only what a client raises about itself — out of room, or
+  refusing the transfer of its own accord — is the runner's. An empty-bus run blamed the runner
+  for a timeout until the classification looked at the code instead of just the origin, and this
+  paragraph went on generalising from the origin after the code was being read correctly.
 - Every period is measured on **this host's** clock, not the device's. A loaded host widens the
   range without the device changing, so periods are reported with their spread (median and
   inter-quartile range, which one descheduled thread does not move) and never gated on.

@@ -101,10 +101,34 @@ internal sealed class Session : IDisposable
         }
         catch (Exception ex)
         {
-            service?.Dispose();
-            bus?.Dispose();
-            error = $"{options.Endpoint}: {ex.GetType().Name}: {ex.Message}";
+            // Both layers, and neither of them allowed to replace the failure being reported. A
+            // throwing service disposal skipped the bus disposal and left its own exception in
+            // place of the OpenFailedException below — and Program has no general catch around
+            // this path, so the run ended with the reserved report unwritten and its reason
+            // replaced by a teardown detail. Dispose() already treats the two layers this way,
+            // and puts what went wrong on the list rather than swallowing it; the session does
+            // not exist here, so the only channel is the message. Found in review of #388.
+            var teardown = new List<string>();
+            CloseQuietly(service, "bus service", teardown);
+            CloseQuietly(bus, "bus", teardown);
+            error = $"{options.Endpoint}: {ex.GetType().Name}: {ex.Message}"
+                + (teardown.Count > 0 ? $" (and the cleanup failed: {string.Join("; ", teardown)})" : string.Empty);
             throw new OpenFailedException(error, ex);
+        }
+    }
+
+    /// <summary>Disposes one layer of a half-open session, keeping what went wrong for the
+    /// message rather than letting it replace the failure that is being reported.</summary>
+    private static void CloseQuietly(IDisposable? layer, string what, List<string> problems)
+    {
+        if (layer is null) return;
+        try
+        {
+            layer.Dispose();
+        }
+        catch (Exception ex)
+        {
+            problems.Add($"{what}: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

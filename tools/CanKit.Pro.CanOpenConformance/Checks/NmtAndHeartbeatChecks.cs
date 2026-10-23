@@ -350,7 +350,21 @@ internal static class NmtAndHeartbeatChecks
                 // from it. Found in review of #388.
                 var heartbeatId = CanOpenCobId.Heartbeat(session.Target);
                 using var wire = new BusTap(session.Service, (id, extended) => id == heartbeatId && !extended);
+
+                // The pump gets the same allowance at the leading edge as at the trailing one,
+                // before the window opens. A heartbeat that arrived just before this tap existed
+                // appears in no count the tap can make, and its event lands after the window
+                // opens — so it inflated `received` without appearing in `onTheWire` or
+                // `inDrainBand`, where it could offset a beat the consumer really lost and leave
+                // the two counts equal. Waiting a drain first puts such an event before the
+                // window rather than inside it, and the window's own start is then the tap's
+                // clock at that moment, on both sides. Found in review of #388, against the
+                // trailing-edge accounting of the commit before it.
+                await Task.Delay(BusTap.DrainAllowanceMs, cancellationToken).ConfigureAwait(false);
+                var windowFromMs = wire.ElapsedMs;
                 var windowFromUtc = DateTime.UtcNow;
+                List<TappedFrame> SinceWindowOpened(IReadOnlyList<TappedFrame> frames)
+                    => frames.Where(f => f.AtMs > windowFromMs).ToList();
 
                 // Through the tap's own window, so the pump is drained and the boundary is the one
                 // the verdict names. Swept for after the same defect was reported against HBT-04:
@@ -369,8 +383,9 @@ internal static class NmtAndHeartbeatChecks
                 // loss that did not happen. A false [tool] verdict, from the fix that aligned the
                 // two counts one commit earlier. The drain exists precisely so an in-window
                 // frame's event has landed by then. Found in review of #388.
-                var windowUntilUtc = windowFromUtc.AddMilliseconds(wireUntilMs + BusTap.DrainAllowanceMs);
-                var onTheWire = Heartbeats(wire.Through(wireUntilMs)).Count;
+                var windowUntilUtc = windowFromUtc.AddMilliseconds(
+                    wireUntilMs - windowFromMs + BusTap.DrainAllowanceMs);
+                var onTheWire = Heartbeats(SinceWindowOpened(wire.Through(wireUntilMs))).Count;
 
                 // What arrived inside the drain allowance but outside the compared window. The
                 // decoded bound is a processing instant and the raw one an arrival, so an event
@@ -379,7 +394,7 @@ internal static class NmtAndHeartbeatChecks
                 // lost, or lifts `received` off zero. The band is countable, so it is counted
                 // rather than assumed empty. Found in review of #388, against the drain
                 // allowance one commit earlier.
-                var inDrainBand = Heartbeats(wire.Frames).Count - onTheWire;
+                var inDrainBand = Heartbeats(SinceWindowOpened(wire.Frames)).Count - onTheWire;
                 int received;
                 lock (beats) received = beats.Count(t => t >= windowFromUtc && t <= windowUntilUtc);
                 var measurements = new Dictionary<string, string>
@@ -405,10 +420,23 @@ internal static class NmtAndHeartbeatChecks
                 // upper bound accounts for every in-window frame and is exact; an empty band makes
                 // it exact as well, which is the ordinary case.
                 //
-                // The mirror case at the leading edge — a frame arriving just before the tap
-                // exists, processed just after the decoded window opens — is not measurable from
-                // here at all, because the tap never saw that frame. It inflates `received` by at
-                // most the pump's lag and is left stated rather than silently assumed away.
+                // The mirror case at the leading edge is closed by the allowance the window now
+                // opens after, rather than stated as unmeasurable: a frame the tap never saw has
+                // had its drain before the window's first instant, so its event is outside it.
+                // More events than the tap can account for at all. With the leading allowance
+                // above this should not happen; if it does, something was surfaced for a frame
+                // this tap never saw, and the counts are once again over different sets of
+                // frames — said so, rather than resolved in the stack's favour by a comparison
+                // that no longer means anything.
+                if (received > onTheWire + inDrainBand)
+                {
+                    return Outcome.Inconclusive(
+                        $"The consumer surfaced {received} heartbeat(s) where this check saw {onTheWire} on the wire in "
+                        + $"its window and {inDrainBand} in the drain that follows it. More events than frames means the "
+                        + "two counts cover different sets, so nothing is concluded from comparing them.",
+                        Attribution.None, measurements);
+                }
+
                 if (inDrainBand > 0 && received >= onTheWire && received < onTheWire + inDrainBand)
                 {
                     return Outcome.Inconclusive(
@@ -1008,6 +1036,36 @@ internal static class NmtAndHeartbeatChecks
         for (var i = frames.Count - 1; i >= 0; i--)
             if (IsDefinedRunState(frames[i].Data[0])) return frames[i].Data[0];
         return null;
+    }
+
+    /// <summary>
+    /// The producer's heartbeat period as this host sees it, in milliseconds, for sizing a
+    /// confirmation wait when 1017h could not be read. That is every check which finds the target
+    /// already Stopped, since CiA 301 Table 37 gives Stopped no SDO server — and the fallback it
+    /// replaces was <c>--heartbeat-ms</c>, the operator's observation window rather than the
+    /// device's period: shorter than the producer's interval, it fails the restore of a device
+    /// that was restoring correctly.
+    /// </summary>
+    /// <returns>
+    /// The interval between the last two beats, or the window when fewer than two arrived — a
+    /// producer slower than the window is one whose period is <em>at least</em> that long, which
+    /// is the bound a confirmation needs, and returning zero there would send the caller straight
+    /// back to the window it already has. Zero when no beat arrived at all, where there is
+    /// nothing to confirm against anyway. Guarding traffic on the COB-ID is byte-for-byte a
+    /// heartbeat, so an interval measured through it would be measured over a mixture; the window
+    /// stands in for it instead. Found in review of #388.
+    /// </returns>
+    internal static async Task<double> ObservedPeriodForConfirmationAsync(Session session, CancellationToken cancellationToken)
+    {
+        var cobId = CanOpenCobId.Heartbeat(session.Target);
+        using var probe = new BusTap(session.Service, (id, extended) => id == cobId && !extended);
+        var window = Math.Max(500, session.Options.HeartbeatWindowMs);
+        await probe.WaitForAsync(frames => Heartbeats(frames).Count >= 2, window, cancellationToken)
+            .ConfigureAwait(false);
+        var frames = probe.Frames;
+        if (HasGuardingTraffic(frames)) return window;
+        var beats = Heartbeats(frames);
+        return beats.Count >= 2 ? beats[^1].AtMs - beats[^2].AtMs : beats.Count == 1 ? window : 0;
     }
 
     /// <summary>The producer heartbeat time for a confirmation budget; null when it cannot be

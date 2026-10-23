@@ -1553,8 +1553,22 @@ internal static class PdoSyncEmcyChecks
     {
         var declared = await NmtAndHeartbeatChecks.ProducerHeartbeatTimeForConfirmationAsync(session, cancellationToken)
             .ConfigureAwait(false);
-        var fromPeriod = declared is { } ms && ms > 0 ? ms * 2 + 200 : 0;
-        return Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), fromPeriod);
+
+        // A target found already Stopped has no SDO server (CiA 301 Table 37), so the read above
+        // times out and says nothing about the period — and the fallback was --heartbeat-ms, the
+        // operator's observation window rather than the device's interval. Shorter than that
+        // interval it reports a device that restored correctly as one that did not, which is the
+        // false FAIL this budget exists to prevent, re-entered through the one state these checks
+        // are most likely to find a device in. Reading the budget before the state is touched,
+        // the fix of one commit earlier, does nothing for a device that was already there. The
+        // heartbeat is produced in every state these checks run in, so the period is observable
+        // without asking for it. Found in review of #388.
+        var periodMs = declared is { } ms && ms > 0
+            ? ms
+            : await NmtAndHeartbeatChecks.ObservedPeriodForConfirmationAsync(session, cancellationToken)
+                .ConfigureAwait(false);
+        var fromPeriod = periodMs > 0 ? periodMs * 2 + 200 : 0;
+        return (int)Math.Max(Math.Max(1000, session.Options.HeartbeatWindowMs), fromPeriod);
     }
 
     /// <summary>
