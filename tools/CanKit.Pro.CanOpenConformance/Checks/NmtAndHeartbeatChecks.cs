@@ -448,6 +448,7 @@ internal static class NmtAndHeartbeatChecks
             // the one answer that proves nothing was written. Found in review of #388.
             var mayHaveStopped = true;
             var stillBeating = 0;
+            var inFlight = 0;
             session.Client.HeartbeatTimeout += OnTimeout;
             try
             {
@@ -492,7 +493,20 @@ internal static class NmtAndHeartbeatChecks
                 using (var afterStop = new BusTap(session.Service, (id, extended) => id == stoppedId && !extended))
                 {
                     await Task.Delay(waitForTimeout, cancellationToken).ConfigureAwait(false);
-                    stillBeating = Heartbeats(afterStop.Frames).Count;
+
+                    // Classified by arrival time, not merely counted. The tap opens immediately
+                    // after the write returns, so a beat already on the wire when the write landed
+                    // shows up within about one period — which is expected, and is the reason the
+                    // wait is two budgets in the first place. Counting it as "the device did not
+                    // stop" made a leftover frame beside a silent consumer a device defect, when
+                    // it is the stack's missed timeout. Only beats after that allowance say the
+                    // producer is still running. Found in review of #388, from both reviewers at
+                    // once: one for the Pass that bypassed this evidence, one for the in-flight
+                    // frame that should not be charged to the device.
+                    var inFlightAllowanceMs = beat.MedianMs + WindowMarginMs;
+                    var after = Heartbeats(afterStop.Frames);
+                    inFlight = after.Count(f => f.AtMs < inFlightAllowanceMs);
+                    stillBeating = after.Count - inFlight;
                 }
             }
             finally
@@ -553,23 +567,36 @@ internal static class NmtAndHeartbeatChecks
                     + "regardless, which is the part that matters.", Attribution.Device, measurements);
             }
 
-            measurements["heartbeats on the wire after the stop"] = stillBeating.ToString(CultureInfo.InvariantCulture);
+            measurements["heartbeats within one period of the stop (in flight)"] =
+                inFlight.ToString(CultureInfo.InvariantCulture);
+            measurements["heartbeats later than that (producer still running)"] =
+                stillBeating.ToString(CultureInfo.InvariantCulture);
+
+            // The device's own evidence first, before any verdict about the consumer. A timeout
+            // *and* continued traffic happen together on a device that beats intermittently: a gap
+            // longer than the budget raises the timeout, and the beats around it prove the
+            // producer never stopped. Returning Pass on the timeout alone reported that device as
+            // conforming while the run's own measurement said otherwise. Found in review of #388.
+            if (stillBeating > 0)
+            {
+                return Outcome.Fail(
+                    $"The device acknowledged the write of 1017h = 0 and then put {stillBeating} heartbeat(s) on the "
+                    + $"bus more than one period after it, so it has not applied its own configuration"
+                    + (timedOut > 0
+                        ? $". The consumer did raise {timedOut} timeout(s), which a gap in that continuing traffic "
+                          + "explains and which says nothing in the device's favour"
+                        : ". The consumer raised no timeout because there was no missed beat to raise one about — "
+                          + "that part is correct")
+                    + ".", measurements);
+            }
 
             if (timedOut > 0)
                 return Outcome.Pass($"The producer was stopped and the consumer raised {timedOut} timeout(s).", measurements);
 
-            // Whose silence it is, decided by the wire rather than assumed. A device still
-            // producing after acknowledging 1017h = 0 has not applied its own configuration, and
-            // the consumer raising no timeout is then the correct behaviour.
-            return stillBeating > 0
-                ? Outcome.Fail(
-                    $"The device acknowledged the write of 1017h = 0 and then put {stillBeating} more heartbeat(s) on "
-                    + "the bus, so it has not applied its own configuration. The consumer raised no timeout because "
-                    + "there was no missed beat to raise one about — that part is correct.", measurements)
-                : Outcome.ToolFault(
-                    "The producer was stopped by writing 1017h = 0, nothing further reached the bus, and the consumer "
-                    + "raised no HeartbeatTimeout within two budgets. The missed heartbeat is not being detected — a "
-                    + "defect in the stack, not in the device.", measurements);
+            return Outcome.ToolFault(
+                "The producer was stopped by writing 1017h = 0, nothing reached the bus beyond the beat already in "
+                + "flight, and the consumer raised no HeartbeatTimeout within two budgets. The missed heartbeat is "
+                + "not being detected — a defect in the stack, not in the device.", measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("GRD-01", "guarding", "100Ch/100Dh node guarding parameters", Tier.Read, "FR-CO-009", async () =>

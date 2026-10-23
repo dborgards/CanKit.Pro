@@ -361,11 +361,20 @@ internal static class LssAndStoreChecks
                 new Dictionary<string, string> { ["signature written"] = "73 61 76 65 ('save')" });
         }).ConfigureAwait(false);
 
-        await book.RunAsync("STO-03", "store", "A wrong signature on 1010h:01 is refused", Tier.Write, "CiA 301 1010h", async () =>
+        await book.RunAsync("STO-03", "store", "A wrong signature on 1010h:01 is refused", Tier.Commission, "CiA 301 1010h", async () =>
         {
-            // Write tier, not commission: a correctly implemented device stores nothing here. The
-            // signature is deliberately not "save", so a device that accepts it has a defect that
-            // is worth finding before a stray write finds it.
+            // Commission tier, and the reasoning that put it at write was circular: "a correctly
+            // implemented device stores nothing here". The whole point of the check is the device
+            // that is *not* correctly implemented — and on that device this write executes a store
+            // and persists whatever its volatile parameters happen to be, which outlives a power
+            // cycle. So the probe can do exactly the thing the write tier promises it will not,
+            // precisely when it is about to find a defect. The tier has to assume the failure it
+            // is looking for. Found in review of #388 (P1).
+            //
+            // The cost of this is that STO-03 no longer runs at --tier write, which is the tier a
+            // cautious operator picks. That is the right way round: a check that may change a
+            // device's power-cycle configuration belongs behind the tier that says so, and the
+            // report lists it as not run with the reason.
             if (!session.MayTransfer(0x1010, 0x01))
                 return Outcome.NeedsSetup(session.GateReason(0x1010, 0x01));
 

@@ -58,6 +58,14 @@ internal static class Program
         try
         {
             Directory.CreateDirectory(options.OutputDirectory);
+
+            // Reserved, not just named. The stamp has one-second resolution, so two runs with the
+            // same label starting in the same second — parallel hardware jobs, or a quick retry
+            // after an open failure — computed the same pair of names and silently overwrote each
+            // other, which can lose a whole run or leave a report whose markdown and JSON come
+            // from different ones. CreateNew fails rather than truncates, so the first writer owns
+            // the name and the second takes the next suffix. Found in review of #388.
+            baseName = ReserveReportPath(baseName);
             File.WriteAllText(baseName + ".md", "The run did not finish.");
             File.WriteAllText(baseName + ".json", "{}");
         }
@@ -188,6 +196,36 @@ internal static class Program
         }
 
         return book.AnyFailure ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Takes both report names for this run, or the next free suffix. The markdown file is the
+    /// token: it is created with <see cref="FileMode.CreateNew"/>, which fails if it exists, so
+    /// two processes cannot both believe they own the same name. The JSON beside it then belongs
+    /// to the same run by construction.
+    /// </summary>
+    private static string ReserveReportPath(string baseName)
+    {
+        for (var suffix = 0; suffix < 1000; suffix++)
+        {
+            var candidate = suffix == 0 ? baseName : $"{baseName}-{suffix}";
+            try
+            {
+                using (new FileStream(candidate + ".md", FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                }
+
+                return candidate;
+            }
+            catch (IOException) when (File.Exists(candidate + ".md"))
+            {
+                // Taken, by this run's twin or by an earlier one with the same label and second.
+            }
+        }
+
+        // A thousand runs of one label in one second is not a case worth a cleverer scheme, and
+        // failing here is better than overwriting the thousandth.
+        throw new IOException($"{baseName}.md and 999 suffixed variants of it already exist.");
     }
 
     /// <summary>
