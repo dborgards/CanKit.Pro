@@ -114,10 +114,10 @@ public interface IIsoTpChannel : IDisposable
     /// was lost, is still returned afterwards. Throws the recorded reassembly-abort exception
     /// when the queued item is a fault, exactly as
     /// <see cref="ReceiveWithArrivalAsync"/> would; neither end of the inbox is reported here.
-    /// A <see cref="DiscardPendingPdus(long)"/> running concurrently does not make a PDU it
-    /// retains look absent: an empty read that overlapped one is made again. The read itself is
-    /// not serialised with the discard, though -- one made while the discard drains the inbox
-    /// can still take a PDU the discard would have dropped (#383).
+    /// A <see cref="DiscardPendingPdus(long)"/> running concurrently is waited for: the read is
+    /// made either before the discard or after it, never while it has the inbox, so a PDU the
+    /// discard retains is not reported absent, and one it drops is not returned (#383). Every
+    /// receive of this channel reads the inbox the same way.
     /// </summary>
     /// <remarks>
     /// The companion to <see cref="ReceiveWithArrivalAsync"/> for a caller whose deadline has
@@ -170,7 +170,8 @@ public interface IIsoTpChannel : IDisposable
     /// cannot finish and enqueue a stale PDU after a higher-layer timeout/cancel
     ///. Higher layers (e.g. UDS) call this after a cancelled/timed-out wait
     /// so a late peer PDU or a leftover abort fault cannot be consumed as the answer to a later
-    /// request.
+    /// request. A receive on another thread meanwhile reads the inbox before the discard or after
+    /// it, never in between, so it neither takes an item the discard drops nor misses one it keeps.
     /// </summary>
     int DiscardPendingPdus();
 

@@ -1183,120 +1183,66 @@ public class IsoTpChannelIntegrationTests : IClassFixture<VirtualAdapterFixture>
         (await discard.WaitAsync(ShortTimeout)).Should().Be(0);
     }
 
-    // Bugbot on #376, the other half of I-3: the empty read is made inside the discard's gap, and
-    // the discard puts the PDU back and ends before that read is judged. Judging the read by
-    // whether a discard is running *now* then says "no discard, so empty" about a PDU that is back
-    // in the inbox. The observer on the calling thread lets the discard finish exactly there, after
-    // the first empty read and before its judgement; it acts once, so a re-read finds the PDU.
-    [Fact]
-    public async Task A_TryReceive_Whose_Empty_Read_Overlapped_A_Discard_Reads_Again()
+    // #383 (Codex on #376): a receive was not serialised with a discard's drain. One made while
+    // the discard was reading the inbox took the PDU the discard was about to drop -- a stale
+    // response reached the caller, and the discard's count was one short. The observer starts the
+    // receive on its own thread from the actor, once the discard holds the inbox and before it
+    // reads anything, and gives it a moment to finish there. Serialised, the receive cannot read
+    // until the discard is done, and then finds only what the discard kept; the moment is a
+    // negative window -- on a slow host the unserialised receive might not run within it, so it
+    // can only pass falsely, never fail falsely.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_Receive_Concurrent_With_A_Discard_Takes_Nothing_The_Discard_Drops(bool awaiting)
     {
-        var session = NewSession();
-        using var busA = OpenClassic(session, 0);
-        using var busB = OpenClassic(session, 1);
-        using var service = new CanBusService(busA);
-        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
-        var concrete = (IsoTpChannel)channel;
+        var ep = IsoTpEndpoint.Normal(txCanId: 0x7E0, rxCanId: 0x7E8);
+        using var service = new StarvedReaderBusService();
+        using var actor = new ProtocolActor();
+        using var channel = new IsoTpChannel(service, ep, FastOptions(), ownsService: false, actor);
 
-        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
-        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
-        await arrived.Task.WaitAsync(ShortTimeout);
+        // Stamped either side of the discard's own stamp, 200: the first is what it drops.
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x02, 0xAA, 0x01, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None), 100);
+        service.Deliver(new CanFrameView(CanFrameType.Can20, 0x7E8,
+            new byte[] { 0x02, 0xBB, 0x02, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }, FrameFlags.None), 300);
+        await channel.SettleAsync().WaitAsync(ShortTimeout);
 
-        using var inGap = new ManualResetEventSlim();
-        using var release = new ManualResetEventSlim();
-        using var discardDone = new ManualResetEventSlim();
-        concrete.DiscardGapObserver = () =>
+        byte[]? received = null;
+        Exception? readerFault = null;
+        using var readerDone = new ManualResetEventSlim();
+        channel.DiscardDrainStartingObserver = () =>
         {
-            inGap.Set();
-            release.Wait(ShortTimeout);
-        };
-        var discard = Task.Run(() =>
-        {
-            var discarded = channel.DiscardPendingPdus(arrivedBefore: 1);
-            discardDone.Set();
-            return discarded;
-        });
-        inGap.Wait(ShortTimeout).Should().BeTrue("the discard reached its gap");
-
-        var emptyReads = 0;
-        var discardEndedInBetween = false;
-        concrete.EmptyInboxReadObserver = () =>
-        {
-            if (Interlocked.Increment(ref emptyReads) != 1) return;
-            release.Set();
-            discardEndedInBetween = discardDone.Wait(ShortTimeout);
-        };
-
-        bool taken = channel.TryReceiveWithArrival(out var pdu);
-
-        emptyReads.Should().BeGreaterThan(0, "the first read was made inside the gap, on an empty inbox");
-        discardEndedInBetween.Should().BeTrue("the discard ended between the empty read and its judgement");
-        taken.Should().BeTrue("the PDU the discard retained was back in the inbox before the read was judged");
-        pdu.Pdu.Should().Equal(0x0A, 0x0B);
-        (await discard.WaitAsync(ShortTimeout)).Should().Be(0);
-    }
-
-    // The same, with the discard beginning after the call looked and found none running: the PDU
-    // is in the inbox when the call starts, the discard takes it out just before the read, and
-    // puts it back and ends before the read is judged. "No discard running" holds at both ends of
-    // the read and still says nothing about the read itself; only a discard that neither began
-    // nor ended around it does.
-    [Fact]
-    public async Task A_TryReceive_Whose_Read_A_Whole_Discard_Overlapped_Reads_Again()
-    {
-        var session = NewSession();
-        using var busA = OpenClassic(session, 0);
-        using var busB = OpenClassic(session, 1);
-        using var service = new CanBusService(busA);
-        using var channel = IsoTpFactory.Open(service, IsoTpEndpoint.Normal(0x123, 0x321), FastOptions(), leaveOpen: true);
-        var concrete = (IsoTpChannel)channel;
-
-        var arrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        channel.DatagramReceived += (_, _) => arrived.TrySetResult(true);
-        busB.Transmit(CanFrame.Classic(0x321, new byte[] { 0x02, 0x0A, 0x0B, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC }));
-        await arrived.Task.WaitAsync(ShortTimeout);
-
-        using var inGap = new ManualResetEventSlim();
-        using var release = new ManualResetEventSlim();
-        using var discardDone = new ManualResetEventSlim();
-        concrete.DiscardGapObserver = () =>
-        {
-            inGap.Set();
-            release.Wait(ShortTimeout);
-        };
-
-        Task<int>? discard = null;
-        var reads = 0;
-        var discardInGapAtTheRead = false;
-        concrete.InboxReadStartingObserver = () =>
-        {
-            if (Interlocked.Increment(ref reads) != 1) return;
-            discard = Task.Run(() =>
+            var reader = new Thread(() =>
             {
-                var discarded = channel.DiscardPendingPdus(arrivedBefore: 1);
-                discardDone.Set();
-                return discarded;
+                try
+                {
+                    if (awaiting)
+                        received = channel.ReceiveWithArrivalAsync().GetAwaiter().GetResult().Pdu;
+                    else if (channel.TryReceiveWithArrival(out var pdu))
+                        received = pdu.Pdu;
+                }
+                catch (Exception ex)
+                {
+                    readerFault = ex;
+                }
+                finally
+                {
+                    readerDone.Set();
+                }
             });
-            discardInGapAtTheRead = inGap.Wait(ShortTimeout);
-        };
-        var emptyReads = 0;
-        var discardEndedInBetween = false;
-        concrete.EmptyInboxReadObserver = () =>
-        {
-            if (Interlocked.Increment(ref emptyReads) != 1) return;
-            release.Set();
-            discardEndedInBetween = discardDone.Wait(ShortTimeout);
+            reader.IsBackground = true;
+            reader.Start();
+            readerDone.Wait(TimeSpan.FromMilliseconds(500));
         };
 
-        bool taken = channel.TryReceiveWithArrival(out var pdu);
+        channel.DiscardPendingPdus(arrivedBefore: 200).Should().Be(1, "the PDU stamped before the discard is dropped by it");
+        channel.DiscardDrainStartingObserver = null;
 
-        discardInGapAtTheRead.Should().BeTrue("the discard began after the count was taken and before the read");
-        emptyReads.Should().BeGreaterThan(0, "the first read was made inside the gap, on an empty inbox");
-        discardEndedInBetween.Should().BeTrue("the discard ended between the empty read and its judgement");
-        taken.Should().BeTrue("the PDU was in the inbox before the call and after the read");
-        pdu.Pdu.Should().Equal(0x0A, 0x0B);
-        (await discard!.WaitAsync(ShortTimeout)).Should().Be(0);
+        readerDone.Wait(ShortTimeout).Should().BeTrue("the receive ends once the discard is done");
+        readerFault.Should().BeNull();
+        received.Should().Equal(new byte[] { 0xBB, 0x02 }, "a receive concurrent with the discard reads after it, and finds what it kept");
+        channel.TryReceiveWithArrival(out _).Should().BeFalse("nothing else was kept");
     }
 
     // #262: a Dispose that arrives while a discard has the retained PDU out of the inbox must not
