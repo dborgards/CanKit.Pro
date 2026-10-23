@@ -320,21 +320,43 @@ internal static class NmtAndHeartbeatChecks
                 var budget = TimeSpan.FromMilliseconds(Math.Max(100, beat.MedianMs * 3 + 200));
                 session.Client.AddHeartbeatConsumer(session.Target, budget);
 
+                // A tap over the same interval the consumer is watching. HBT-02 and the period
+                // probe are earlier observations: they say the device *was* producing, not that it
+                // was producing while this handler was installed. A producer that stops, or a
+                // device that is unplugged, between the probe and this window leaves `received` at
+                // zero with nothing for the consumer to have missed — and that was reported as a
+                // defect in the stack. The claim is about this window, so the evidence has to come
+                // from it. Found in review of #388.
+                var heartbeatId = CanOpenCobId.Heartbeat(session.Target);
+                using var wire = new BusTap(session.Service, (id, extended) => id == heartbeatId && !extended);
+
                 await Task.Delay(needed, cancellationToken).ConfigureAwait(false);
 
+                var onTheWire = Heartbeats(wire.Frames).Count;
                 var measurements = new Dictionary<string, string>
                 {
                     ["observed period (median)"] = IdentityAndSdoChecks.Ms(beat.MedianMs),
                     ["consumer budget used"] = IdentityAndSdoChecks.Ms(budget.TotalMilliseconds),
+                    ["heartbeats on the wire in this window"] = onTheWire.ToString(CultureInfo.InvariantCulture),
                     ["HeartbeatReceived events"] = received.ToString(CultureInfo.InvariantCulture),
                     ["HeartbeatTimeout events"] = timedOut.ToString(CultureInfo.InvariantCulture),
                 };
 
                 if (received == 0)
                 {
-                    return Outcome.ToolFault(
-                        "The device's heartbeat is on the bus (HBT-02 saw it) but the consumer raised no "
-                        + "HeartbeatReceived event. That is a defect in the stack, not in the device.", measurements);
+                    // Which of the two it is, decided by the tap rather than assumed. No beat on
+                    // the wire means there was nothing to surface, and the device stopping between
+                    // the period probe and this window is the device's business, not the stack's.
+                    return onTheWire == 0
+                        ? Outcome.Inconclusive(
+                            "No heartbeat reached the bus during this check's own window, although the period probe "
+                            + "had just measured one, so there was nothing for the consumer to report and nothing is "
+                            + "concluded about it. The device stopped producing between the two observations.",
+                            Attribution.Device, measurements)
+                        : Outcome.ToolFault(
+                            $"{onTheWire} heartbeat(s) reached the bus during this window and the consumer raised no "
+                            + "HeartbeatReceived event. That is a defect in the stack, not in the device.",
+                            measurements);
                 }
 
                 return timedOut == 0
@@ -425,6 +447,7 @@ internal static class NmtAndHeartbeatChecks
             // heartbeat switched off, which is exactly the guarantee this check makes. An abort is
             // the one answer that proves nothing was written. Found in review of #388.
             var mayHaveStopped = true;
+            var stillBeating = 0;
             session.Client.HeartbeatTimeout += OnTimeout;
             try
             {
@@ -458,7 +481,19 @@ internal static class NmtAndHeartbeatChecks
                 // Two budgets, so a beat already in flight when the write landed cannot be
                 // mistaken for the producer still running. Not capped: the guard above decided
                 // whether this wait is affordable, and it did so before the producer was stopped.
-                await Task.Delay(waitForTimeout, cancellationToken).ConfigureAwait(false);
+                //
+                // Watched on the wire as well, because "no timeout was raised" has two causes and
+                // only one of them is the stack's. A device that acknowledges 1017h = 0 and then
+                // keeps producing gives the consumer nothing to time out about — correctly — and
+                // that was reported as a defect in this repository, which sends the operator to
+                // the wrong place and hides the device failing to apply its own configuration.
+                // Found in review of #388.
+                var stoppedId = CanOpenCobId.Heartbeat(session.Target);
+                using (var afterStop = new BusTap(session.Service, (id, extended) => id == stoppedId && !extended))
+                {
+                    await Task.Delay(waitForTimeout, cancellationToken).ConfigureAwait(false);
+                    stillBeating = Heartbeats(afterStop.Frames).Count;
+                }
             }
             finally
             {
@@ -518,12 +553,23 @@ internal static class NmtAndHeartbeatChecks
                     + "regardless, which is the part that matters.", Attribution.Device, measurements);
             }
 
-            return timedOut > 0
-                ? Outcome.Pass($"The producer was stopped and the consumer raised {timedOut} timeout(s).", measurements)
+            measurements["heartbeats on the wire after the stop"] = stillBeating.ToString(CultureInfo.InvariantCulture);
+
+            if (timedOut > 0)
+                return Outcome.Pass($"The producer was stopped and the consumer raised {timedOut} timeout(s).", measurements);
+
+            // Whose silence it is, decided by the wire rather than assumed. A device still
+            // producing after acknowledging 1017h = 0 has not applied its own configuration, and
+            // the consumer raising no timeout is then the correct behaviour.
+            return stillBeating > 0
+                ? Outcome.Fail(
+                    $"The device acknowledged the write of 1017h = 0 and then put {stillBeating} more heartbeat(s) on "
+                    + "the bus, so it has not applied its own configuration. The consumer raised no timeout because "
+                    + "there was no missed beat to raise one about — that part is correct.", measurements)
                 : Outcome.ToolFault(
-                    "The producer was stopped by writing 1017h = 0 and the consumer raised no HeartbeatTimeout within "
-                    + "two budgets. The missed heartbeat is not being detected — a defect in the stack, not in the device.",
-                    measurements);
+                    "The producer was stopped by writing 1017h = 0, nothing further reached the bus, and the consumer "
+                    + "raised no HeartbeatTimeout within two budgets. The missed heartbeat is not being detected — a "
+                    + "defect in the stack, not in the device.", measurements);
         }).ConfigureAwait(false);
 
         await book.RunAsync("GRD-01", "guarding", "100Ch/100Dh node guarding parameters", Tier.Read, "FR-CO-009", async () =>

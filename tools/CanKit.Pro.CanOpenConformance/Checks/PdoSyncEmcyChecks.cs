@@ -110,6 +110,7 @@ internal static class PdoSyncEmcyChecks
             int settling;
             var multiplexedInOperational = 0;
             var multiplexedInStopped = 0;
+            var beforeOperational = 0;
             var stoppedConfirmed = false;
             var operationalConfirmed = false;
             double stopSentAtMs = 0;
@@ -128,13 +129,24 @@ internal static class PdoSyncEmcyChecks
                 operationalConfirmed = await LatestNmtStateAsync(session, (byte)NmtState.Operational, cancellationToken)
                     .ConfigureAwait(false) == (byte)NmtState.Operational;
 
+                // The boundary, recorded. Everything the tap collected before this instant was
+                // emitted in whatever state the device was in when the check found it — and the
+                // tap has been open since before the Start went out. Counting those frames as
+                // Operational traffic let a device that wrongly emits an event-timed TPDO in
+                // pre-operational and then goes silent in Operational satisfy the overdue rule
+                // below and pass. Found in review of #388.
+                var operationalFromMs = tap.ElapsedMs;
+
                 await tap.ListenAsync(session.Options.PdoWindowMs, cancellationToken).ConfigureAwait(false);
 
                 // The Operational verdict is drawn from ordinary TPDOs alone, so that a pass is
-                // never derived from traffic of a descriptor the report says it did not check.
-                var everything = Transmitted(tap);
+                // never derived from traffic of a descriptor the report says it did not check —
+                // and only from frames that arrived after Operational was confirmed, so that it
+                // is drawn from the state it names.
+                var everything = Transmitted(tap).Where(f => f.AtMs >= operationalFromMs).ToList();
                 inOperational = everything.Where(f => ordinaryIds.Contains((f.CanId, f.IsExtended))).ToArray();
                 multiplexedInOperational = everything.Count - inOperational.Length;
+                beforeOperational = Transmitted(tap).Count(f => f.AtMs < operationalFromMs);
 
                 // Before the await, not after it: that task completes on the transmit confirmation
                 // and not at the instant the frame is handed off, so anything the device emitted
@@ -178,6 +190,7 @@ internal static class PdoSyncEmcyChecks
             {
                 ["TPDOs watched"] = string.Join(", ", valid.Select(p => $"TPDO{p.Number} 0x{p.CobId:X3}")),
                 ["frames in Operational"] = $"{inOperational.Length} in {session.Options.PdoWindowMs} ms",
+                ["frames before Operational was confirmed"] = beforeOperational.ToString(CultureInfo.InvariantCulture),
                 ["frames in Stopped"] = inStopped.ToString(CultureInfo.InvariantCulture),
                 ["frames within the first " + SettleMs + " ms of Stop"] = settling.ToString(CultureInfo.InvariantCulture),
                 ["left in state"] = restoration.State,
