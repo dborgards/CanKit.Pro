@@ -697,12 +697,14 @@ public class LssMasterBoundaryTests
             await rig.ArmedAsync(TimeSpan.FromMilliseconds(100 - activationLatency));
             waiting.Should().BeEmpty("nothing is sent during the first period");
             await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(100 - activationLatency));
-            retuned.Should().BeTrue();
         }
         int remaining = 200 - Math.Max(100, activationLatency);
         if (remaining > 0)
         {
+            // The switch callback runs on the master's continuation, before it arms the second
+            // period, so it has run once that timer is armed.
             await rig.ArmedAsync(TimeSpan.FromMilliseconds(remaining));
+            retuned.Should().BeTrue();
             waiting.Should().BeEmpty("nothing is sent during the second period");
             await rig.Clock.AdvanceAsync(TimeSpan.FromMilliseconds(remaining));
         }

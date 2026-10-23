@@ -472,10 +472,12 @@ public class LssSlaveTests : IClassFixture<VirtualAdapterFixture>
         retunedAt.Should().BeNull();
         await bench.AdvanceAsync(TimeSpan.FromTicks(1));
         await bench.WaitUntilAsync(() => Volatile.Read(ref slaveSwitches) == 1);
+
+        // The bench moves the clock only once the master has armed its next timer, which it does
+        // after the switch callback; so the callback has run, at the instant the first period ended.
+        await bench.AdvanceAsync(delay - TimeSpan.FromTicks(1));
         retunedAt.Should().Be(start + delay);
         masterFramesAtRetune.Should().Be(1);
-
-        await bench.AdvanceAsync(delay - TimeSpan.FromTicks(1));
         MasterFrames(heard).Should().Be(1, "the master is silent during the second period");
         slave.LssState().Should().Be(LssState.Configuration);
 
